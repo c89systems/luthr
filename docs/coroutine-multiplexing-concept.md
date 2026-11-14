@@ -359,6 +359,8 @@ mechanism, not certification of arbitrary third-party bindings.
   fairness, observability and host event integration.
 
 The next commitment should be the smallest runtime experiment that can falsify
-this concept: shared-VM coroutine multiplexing, unchanged blocking native work,
-and continued execution of another task. The broader design should follow the
-evidence from that experiment.
+this concept: parallel shared-VM execution with real shared mutable objects,
+coroutine multiplexing, unchanged blocking native work, and continued execution
+of another task. The [parallel-state investigation](parallel-state-design.md)
+records the initial candidate and the evidence required before committing the
+scheduler API. The broader design should follow those experiments.

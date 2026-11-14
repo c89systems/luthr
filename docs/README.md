@@ -40,6 +40,10 @@ source changes. The parallel scheduler and release packaging remain unfinished.
 See [building and testing](building.md), [embedding policy](embedding-policy.md)
 and [C89 facade provenance](cpkt-source.md).
 
+The [parallel-state investigation](parallel-state-design.md) compares
+free-threaded CPython and Go and records the first shared-VM candidate and its
+required evidence. Parallel execution is not implemented yet.
+
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under
 `docs/`; the root README is a navigation entrypoint.
