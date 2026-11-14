@@ -61,6 +61,7 @@ for those processes, including child applications. Musl uses its defaults.
 Native recursion reserves 32 KiB for error handling, including unoptimized
 traceback frames, and preserves the last 8 KiB for emergency unwinding. This
 guards Lua-owned recursion; arbitrary native modules still own their stack use.
+Debug builds also enable Lua's internal invariants and C API argument assertions.
 
 Only non-shipped test programs contain private loader and sysroot search paths.
 Their loaded libc comes from the selected collection. Installed payload uses

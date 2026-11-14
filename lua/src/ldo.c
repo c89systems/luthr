@@ -63,6 +63,7 @@ typedef struct lua_longjmp {
   jmp_buf b;
   volatile TStatus status;  /* error code */
   lu_byte luthrum_stack_overflow;
+  LuaNativeRoot *native_roots;
 } lua_longjmp;
 
 
@@ -131,6 +132,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
   else {  /* thread has no error handler */
     global_State *g = G(L);
     lua_State *mainth = mainthread(g);
+    L->native_roots = NULL;  /* every native scope on this thread is abandoned */
     errcode = luaE_resetthread(L, errcode);  /* close all upvalues */
     L->status = errcode;
     if (mainth->errorJmp) {  /* main thread has a handler? */
@@ -154,6 +156,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
     while (L->errorJmp->previous != NULL)
       L->errorJmp = L->errorJmp->previous;
     L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
+    L->native_roots = L->errorJmp->native_roots;
   }
   luaD_throw(L, errcode);
 }
@@ -167,9 +170,12 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
     luaE_refreshnativestack(L);
   lj.status = LUA_OK;
   lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
+  lj.native_roots = L->native_roots;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
+  if (lj.status != LUA_OK)
+    L->native_roots = lj.native_roots;  /* native scopes have unwound */
   L->errorJmp = lj.previous;  /* restore old error handler */
   L->nCcalls = oldnCcalls;
   status = lj.status;

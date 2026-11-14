@@ -296,6 +296,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->nCcalls = 0;
   L->luthrum_stack_limit = 0;
   L->luthrum_stack_context = NULL;
+  L->native_roots = NULL;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;

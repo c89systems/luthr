@@ -286,6 +286,13 @@ typedef struct NativeStackContext {
   lu_byte overflow;
 } NativeStackContext;
 
+/* Temporary values owned by a native scope, independently of Lua stack slots.
+** Nodes do not move and must be removed before their native storage expires. */
+typedef struct LuaNativeRoot {
+  struct LuaNativeRoot *previous;
+  TValue value;
+} LuaNativeRoot;
+
 /*
 ** 'per thread' state
 */
@@ -318,6 +325,7 @@ struct lua_State {
   } transferinfo;
   uintptr_t luthrum_stack_limit;
   NativeStackContext *luthrum_stack_context;
+  LuaNativeRoot *native_roots;
 };
 
 

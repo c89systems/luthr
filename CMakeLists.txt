@@ -48,7 +48,7 @@ add_custom_target(luthrum_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
   lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes
-  lparser lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib
+  lparser lroots lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")
 list(TRANSFORM lua_sources APPEND ".c")
@@ -57,6 +57,8 @@ set_target_properties(luthrum_lua_objects PROPERTIES
   C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
 target_compile_options(luthrum_lua_objects PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
 target_compile_definitions(luthrum_lua_objects PRIVATE LUA_USE_LINUX)
+target_compile_definitions(luthrum_lua_objects PRIVATE
+  "$<$<CONFIG:Debug>:LUAI_ASSERT;LUA_USE_APICHECK>")
 target_link_libraries(luthrum_lua_objects PRIVATE Threads::Threads)
 
 add_library(luthrum_facade_objects OBJECT "${facade_source}" src/lua_runtime.c)

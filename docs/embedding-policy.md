@@ -24,6 +24,17 @@ per-protected-call allocation or VM instruction hook. Linux x86_64 builds use TL
 the cache, including when Lua is loaded dynamically. Upstream public declarations
 are unchanged; callers do not need larger thread stacks or private Lua headers.
 Compatibility with unchanged binary modules is not established by these tests.
+
+The owned core has a private temporary-root chain for values held outside Lua
+stack slots. These scopes allocate no storage themselves and retain complete
+object graphs during collection. Successful protected calls preserve roots in
+their caller's live storage; errors and yields restore the enclosing boundary,
+and successful self-close also discards unwound scopes. An unprotected throw
+abandons that state's scopes before error forwarding or panic. Callers must
+remove roots in LIFO order before their storage expires. This is an internal
+snapshot mechanism, not a public binding API, object lock or parallel scheduler.
+The owning coroutine must remain strongly reachable independently; its private
+root-chain field does not itself make that coroutine a collector root.
 Trusted native callbacks remain responsible for their own stack consumption.
 If OS stack bounds cannot be discovered, protected execution fails without
 invoking its error handler; discovery is retried on the next outer entry.

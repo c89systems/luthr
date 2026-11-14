@@ -12,6 +12,17 @@ function(luthrum_test_program name source)
   endif()
 endfunction()
 
+luthrum_test_program(native_roots_test native_roots_test.c)
+set_target_properties(native_roots_test PROPERTIES C_STANDARD 99)
+target_compile_options(native_roots_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(native_roots_test PRIVATE luthrum_static)
+foreach(case IN ITEMS retain_incremental retain_generational nested_error yield
+    self_close allocation_failure many_roots many_roots_generational
+    forwarded_error panic replace graph publish)
+  add_test(NAME native_roots_${case} COMMAND native_roots_test ${case})
+  set_tests_properties(native_roots_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
+endforeach()
+
 foreach(linkage IN ITEMS static shared)
   luthrum_test_program(lua_facade_${linkage} lua_facade_test.c)
   luthrum_c89(lua_facade_${linkage})

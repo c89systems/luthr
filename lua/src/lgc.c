@@ -695,6 +695,8 @@ static l_mem traverseLclosure (global_State *g, LClosure *cl) {
 */
 static l_mem traversethread (global_State *g, lua_State *th) {
   UpVal *uv;
+  LuaNativeRoot *root;
+  l_mem native_work = 0;
   StkId o = th->stack.p;
   if (isold(th) || g->gcstate == GCSpropagate)
     linkgclist(th, g->grayagain);  /* insert into 'grayagain' list */
@@ -704,6 +706,10 @@ static l_mem traversethread (global_State *g, lua_State *th) {
              th->openupval == NULL || isintwups(th));
   for (; o < th->top.p; o++)  /* mark live elements in the stack */
     markvalue(g, s2v(o));
+  for (root = th->native_roots; root != NULL; root = root->previous) {
+    markvalue(g, &root->value);
+    native_work++;
+  }
   for (uv = th->openupval; uv != NULL; uv = uv->u.open.next)
     markobject(g, uv);  /* open upvalues cannot be collected */
   if (g->gcstate == GCSatomic) {  /* final traversal? */
@@ -717,7 +723,7 @@ static l_mem traversethread (global_State *g, lua_State *th) {
       g->twups = th;
     }
   }
-  return 1 + (th->top.p - th->stack.p);
+  return 1 + (th->top.p - th->stack.p) + native_work;
 }
 
 

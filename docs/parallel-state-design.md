@@ -87,6 +87,29 @@ recommendation, not a claim of optimal measured performance. Start with a
 correct implementation; introduce optimistic reads, sharding or concurrent
 collection only for demonstrated bottlenecks.
 
+For live captured variables, first investigate preserving Lua's existing
+register/stack representation with independently gated coroutine stacks.
+Owner-local writes and foreign upvalue reads/writes must use the same gate. A
+foreign access must relinquish its own stack gate before waiting on the owner's,
+copy a complete value into a GC-visible snapshot, then resume under its own gate.
+No thread may hold two coroutine stack gates in opposite orders. Periodic VM
+safepoints must allow an owner running a tight loop to service foreign access.
+Upvalue closing, stack relocation, closure mutation and GC still need their own
+coherent protocol. This is the next experiment, not an implemented guarantee.
+
+The alternative is to replace stack-backed captures with heap cells and change
+all owner-register accesses to use them. That also needs synchronized value
+transfers and roots, while adding compiler/interpreter representation work.
+The gated-stack experiment tests whether that additional machinery is necessary
+before choosing it. Different coroutines must remain able to execute in parallel
+regardless of which capture representation is selected.
+
+The private temporary-root mechanism in `lua/src/lroots.h` supplies snapshot
+lifetime support. Its storage is caller-owned; collection scans those values,
+and protected unwinding retires abandoned scopes. It introduces no execution
+lock. Its sequential GC/unwinding tests establish this mechanism only; they do
+not prove concurrent VM mutation or the proposed gates.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:
