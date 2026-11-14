@@ -13,9 +13,9 @@ migration, bounded carrier growth, and reserved progress capacity are required.
 
 ## Source baseline
 
-The complete Lua 5.5.1 release is checked in at [`vendor/lua/`](vendor/lua/).
+The complete Lua 5.5.1 release is checked in at [`lua/`](lua/).
 Its source, headers, documentation, license notice, and upstream Makefiles are
-unmodified in the initial import. [Provenance and ownership](vendor/README.md)
+unmodified in the initial import. [Provenance and ownership](docs/lua-source.md)
 record the source archive and verified checksum.
 
 Lua source changes belong directly in this repository; there is no patch series
