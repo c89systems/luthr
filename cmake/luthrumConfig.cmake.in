@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+set(luthrum_TARGET "@LUTHRUM_TARGET@")
+set(luthrum_LUA_VERSION "5.5.1")
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/luthrumTargets.cmake")
+check_required_components(luthrum)

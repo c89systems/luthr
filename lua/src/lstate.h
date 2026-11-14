@@ -7,6 +7,7 @@
 #ifndef lstate_h
 #define lstate_h
 
+#include <stdint.h>
 #include "lua.h"
 
 
@@ -279,6 +280,12 @@ struct CallInfo {
 #define getoah(ci)  (((ci)->callstatus & CIST_OAH) ? 1 : 0)
 
 
+/* Error-unwind headroom belongs to the physical OS thread stack. */
+typedef struct NativeStackContext {
+  uintptr_t limit;
+  lu_byte overflow;
+} NativeStackContext;
+
 /*
 ** 'per thread' state
 */
@@ -309,6 +316,8 @@ struct lua_State {
     int ftransfer;  /* offset of first value transferred */
     int ntransfer;  /* number of values transferred */
   } transferinfo;
+  uintptr_t luthrum_stack_limit;
+  NativeStackContext *luthrum_stack_context;
 };
 
 
@@ -441,6 +450,9 @@ LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
+LUAI_DDEC(__thread NativeStackContext luaE_native_stack_context;)
+LUAI_FUNC uintptr_t luaE_initnativestack (void);
+LUAI_FUNC void luaE_nativestackerror (lua_State *L, uintptr_t position);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);

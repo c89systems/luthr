@@ -62,6 +62,7 @@ typedef struct lua_longjmp {
   struct lua_longjmp *previous;
   jmp_buf b;
   volatile TStatus status;  /* error code */
+  lu_byte luthrum_stack_overflow;
 } lua_longjmp;
 
 
@@ -152,6 +153,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
     /* unroll error entries up to the first level */
     while (L->errorJmp->previous != NULL)
       L->errorJmp = L->errorJmp->previous;
+    L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
   }
   luaD_throw(L, errcode);
 }
@@ -160,13 +162,20 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
 TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   l_uint32 oldnCcalls = L->nCcalls;
   lua_longjmp lj;
+  TStatus status;
+  if (L->errorJmp == NULL)
+    luaE_refreshnativestack(L);
   lj.status = LUA_OK;
+  lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
   L->errorJmp = lj.previous;  /* restore old error handler */
   L->nCcalls = oldnCcalls;
-  return lj.status;
+  status = lj.status;
+  if (l_unlikely(status != LUA_OK))
+    L->luthrum_stack_context->overflow = lj.luthrum_stack_overflow;
+  return status;
 }
 
 /* }====================================================== */
@@ -226,6 +235,10 @@ l_noret luaD_errerr (lua_State *L) {
 ** available CallInfos, and two "slots" in the C stack.
 */
 int luaD_checkminstack (lua_State *L) {
+  if (L->errorJmp == NULL)
+    luaE_refreshnativestack(L);
+  if (luaD_nativeposition() <= L->luthrum_stack_limit)
+    return 0;
   if (getCcalls(L) >= LUAI_MAXCCALLS - 2)
     return 0;  /* not enough C-stack slots */
   if (L->ci->next == NULL && luaE_extendCI(L, 0) == NULL)
@@ -758,6 +771,9 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
 */
 l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
   CallInfo *ci;
+  if (L->errorJmp == NULL)
+    luaE_refreshnativestack(L);
+  luaD_checknativestack(L);
   L->nCcalls += inc;
   if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS)) {
     checkstackp(L, 0, func);  /* free any use of EXTRA_STACK */
@@ -924,6 +940,7 @@ static void resume (lua_State *L, void *ud) {
   else {  /* resuming from previous yield */
     lua_assert(L->status == LUA_YIELD);
     L->status = LUA_OK;  /* mark that it is running (again) */
+    luaD_checknativestack(L);
     if (isLua(ci)) {  /* yielded inside a hook? */
       /* undo increment made by 'luaG_traceexec': instruction was not
          executed yet */
@@ -978,6 +995,8 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   else if (L->status != LUA_YIELD)  /* ended with errors? */
     return resume_error(L, "cannot resume dead coroutine", nargs);
   L->nCcalls = (from) ? getCcalls(from) : 0;
+  if (l_unlikely(L->errorJmp != NULL))
+    luaE_refreshnativestack(L);
   if (getCcalls(L) >= LUAI_MAXCCALLS)
     return resume_error(L, "C stack overflow", nargs);
   L->nCcalls++;
@@ -1133,6 +1152,7 @@ static void f_parser (lua_State *L, void *ud) {
   int c;
   Table *anchor;
   ptrdiff_t otop = savestack(L, L->top.p);  /* original top */
+  luaD_checknativestack(L);
   luaD_checkstack(L, 2);
   anchor = luaH_new(L);  /* create the anchor table */
   sethvalue2s(L, L->top.p++, anchor);  /* anchor the anchor table */

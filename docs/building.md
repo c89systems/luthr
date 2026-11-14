@@ -1,0 +1,69 @@
+# Building and testing
+
+Initial development supports `x86_64-linux-gnu` and `x86_64-linux-musl` on an
+x86_64 Linux host. Each uses the complete pinned Bootlin collection selected by
+the `pkt-systems-cmake-lifecycle` skill. There is no host compiler/libc fallback,
+source download or patch application during configure and build.
+
+Required workstation tools are Bash 4.4 or later, Make, CMake 3.25 or later,
+Ninja, Python 3 for the declared C89 source generator, pkg-config, rg, and
+clang-format. Valgrind is required for `make memcheck`; clangd is used for editor
+verification. The activated lifecycle skill supplies its toolchain resolver.
+Run operations serially against a stable checkout and stable prepared tools.
+
+```sh
+make prepare                         # explicit pinned toolchain preparation
+make test                            # GNU Debug, one build worker
+make test TARGET=x86_64-linux-musl    # native musl, default worker stacks
+make memcheck                        # GNU Debug behavioral memory checks
+make format-check
+make install                         # local SDK under build/sdk/<target>/<config>
+```
+
+`TARGET`, `CONFIG` (`Debug` or `Release`), and `JOBS` select the build. The
+`LIFECYCLE_SCRIPTS_DIR` override points to the activated skill's actual `scripts/`
+directory; its default is `~/.codex/skills/pkt-systems-cmake-lifecycle/scripts`.
+Configure only discovers prepared tools. `make prepare` is the explicit
+acquisition entrypoint; missing prerequisites fail instead of falling back.
+
+The native build publishes `build/x86_64-linux-gnu/Debug/compile_commands.json`,
+which `.clangd` discovers normally. Run `make build` once before using the editor
+to prepare generated facade headers. The database uses the real selected
+compiler, sysroot, language and defines from this checkout.
+
+The products are `libluthrum.a`, `libluthrum.so.0`, `luthrum`, and `luthrumc`.
+Both libraries contain the native Lua API, strict C89 Lua API and embedding
+policy. The interpreter links the shared runtime. The compiler links the static
+runtime so it can use Lua's private bytecode-writing implementation.
+
+Installed CMake consumers use `find_package(luthrum CONFIG REQUIRED)` and link
+`luthrum::static` or `luthrum::shared`. Strict C89 headers are
+`<luthrum/lua.h>` and `<luthrum/lua_runtime.h>`. Upstream headers are also
+installed for native bindings built as C99 or newer. pkg-config metadata is
+`luthrum.pc`; `--static` supplies the static system/thread closure. Metadata
+records the selected target and Lua baseline.
+
+When using the project toolchain for an installed consumer, put the SDK prefix
+in both `CMAKE_PREFIX_PATH` and `CMAKE_FIND_ROOT_PATH`. Package lookup remains
+restricted to target roots. Dynamic consumers need their ordinary deployment
+library-search configuration; pkg-config intentionally adds no absolute rpath.
+
+CTest covers both library variants, instruction limits, tracing, errors,
+allocation failure, coroutine cleanup, finalizers, native-stack exhaustion and
+migration, interpreter/compiler behavior, public symbols and relocated CMake and
+pkg-config consumers. The shared consumer loads a native binding linked to the
+same shared runtime. These are synchronous baseline tests; they do not establish
+parallel scheduler behavior.
+
+Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
+explicit stack-size requests and main-thread limits. The stack cache is disabled
+for those processes, including child applications. Musl uses its defaults.
+Native recursion reserves 32 KiB for error handling, including unoptimized
+traceback frames, and preserves the last 8 KiB for emergency unwinding. This
+guards Lua-owned recursion; arbitrary native modules still own their stack use.
+
+Only non-shipped test programs contain private loader and sysroot search paths.
+Their loaded libc comes from the selected collection. Installed payload uses
+relative runtime paths. Build logs, fixtures and local SDKs belong under `build/`;
+`make clean` removes all of `build/`, `dist/` and local `.cache/`, including hidden
+entries, while preserving the declared global cpkt caches and workstation tools.

@@ -22,6 +22,11 @@ patch series or regenerate the source during builds.
 Upstream updates are deliberate source changes that retain the license notice
 and update this provenance record. Builds must use this checked-in source.
 
+The current tree includes direct native-stack protection and opt-in finalizer
+instruction-accounting changes extracted from cpkt. See the
+[facade provenance](cpkt-source.md) and [embedding policy](embedding-policy.md).
+It is no longer byte-for-byte upstream source.
+
 Keep generated objects, binaries, and scratch installations outside the source
 tree, under the repository's ignored `build/` directory. Dependency acquisition
 scratch belongs under the ignored `.cache/` directory.

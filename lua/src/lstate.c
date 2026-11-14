@@ -7,11 +7,18 @@
 #define lstate_c
 #define LUA_CORE
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
 #include "lprefix.h"
 
 
 #include <stddef.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "lua.h"
 
@@ -126,6 +133,58 @@ void luaE_shrinkCI (lua_State *L) {
 }
 
 
+/* Cache native bounds per physical thread; refresh on outer VM entry. */
+LUAI_DDEF __thread NativeStackContext luaE_native_stack_context;
+
+uintptr_t luaE_initnativestack (void) {
+  uintptr_t low = 0;
+  size_t size = 0;
+#if defined(__linux__)
+  pthread_attr_t attributes;
+  void *base = NULL;
+  if (pthread_getattr_np(pthread_self(), &attributes) == 0) {
+    int status = pthread_attr_getstack(&attributes, &base, &size);
+    pthread_attr_destroy(&attributes);
+    if (status == 0)
+      low = cast(uintptr_t, base);
+    else
+      size = 0;
+  }
+#elif defined(__APPLE__)
+  uintptr_t high = cast(uintptr_t, pthread_get_stackaddr_np(pthread_self()));
+  size = pthread_get_stacksize_np(pthread_self());
+  if (high >= size)
+    low = high - size;
+  else
+    size = 0;
+#else
+#error Unsupported Luthrum Lua native stack platform
+#endif
+  if (size > 32768 && low <= UINTPTR_MAX - size)
+    return low + 32768;
+  return UINTPTR_MAX;  /* retry failed discovery on the next outer entry */
+}
+
+void luaE_nativestackerror (lua_State *L, uintptr_t position) {
+  if (L->luthrum_stack_limit == UINTPTR_MAX) {
+    if (!completestate(G(L)))
+      luaD_throw(L, LUA_ERRMEM);
+    luaD_checkstack(L, LUA_MINSTACK);
+    setsvalue2s(L, L->top.p, luaS_newliteral(L, "native stack bounds unavailable"));
+    L->top.p++;
+    luaD_throw(L, LUA_ERRRUN);
+  }
+  if (position <= L->luthrum_stack_limit - 24576) {
+    luaD_checkstack(L, LUA_MINSTACK);
+    luaD_errerr(L);
+  }
+  if (!L->luthrum_stack_context->overflow) {
+    L->luthrum_stack_context->overflow = 1;
+    luaD_checkstack(L, LUA_MINSTACK);
+    luaG_runerror(L, "C stack overflow");
+  }
+}
+
 /*
 ** Called when 'getCcalls(L)' larger or equal to LUAI_MAXCCALLS.
 ** If equal, raises an overflow error. If value is larger than
@@ -143,6 +202,7 @@ void luaE_checkcstack (lua_State *L) {
 
 LUAI_FUNC void luaE_incCstack (lua_State *L) {
   L->nCcalls++;
+  luaD_checknativestack(L);
   if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS))
     luaE_checkcstack(L);
 }
@@ -234,6 +294,8 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->nci = 0;
   L->twups = L;  /* thread has no upvalues */
   L->nCcalls = 0;
+  L->luthrum_stack_limit = 0;
+  L->luthrum_stack_context = NULL;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;

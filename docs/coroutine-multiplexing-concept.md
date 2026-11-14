@@ -9,16 +9,24 @@ specification, an approved API, or a claim of implemented behavior.
 
 - Lua 5.5.1 source lives directly under the repository's top-level `lua/` and is
   modified in place under Git ownership, without a patch series.
-- Serialized Lua bytecode is acceptable provided runtime-managed scheduling
-  keeps runnable tasks progressing during native waits. Automatic parking,
-  safe migration, carrier handoff, CPU fairness and bounded replacement-thread
-  behavior are acceptance requirements.
+- Parallel Lua bytecode execution across CPU cores within the shared VM is
+  required. A VM-wide execution lock that serializes Lua is excluded. The
+  earlier conditional acceptance of serialized bytecode has been superseded.
+  Automatic parking, safe migration, carrier handoff, CPU fairness and bounded
+  replacement-thread behavior remain acceptance requirements.
 - Implementation follows the C/CMake lifecycle, with documentation under `docs/`.
   Work initially targets x86_64; other architectures remain deferred.
 - Initial products are static/shared runtime libraries, a strict C89 SDK, an
   interpreter and a bytecode compiler.
 - The current phase modifies only Luthrum and verifies installed SDK consumers.
   Coordinated cutover in cpkt, Vectis and libknurl is a later phase.
+- Automatic carrier sizing should start from usable logical CPUs, including HT,
+  account for process affinity and Linux CPU quotas, and allow an explicit
+  override. The ordinary worker budget, maximum carrier count and compensation
+  for blocked native calls are distinct limits. Benchmark pure Lua, native waits
+  and mixed workloads before fixing the automatic cap for large vCPU counts.
+  Managed execution permits limit parallelism and are distinct from object
+  synchronization and carriers occupied by native work.
 
 These decisions supersede the corresponding open questions below. Remaining
 runtime mechanisms and public scheduling operations require feasibility evidence.
@@ -81,9 +89,10 @@ Three runtime objects are useful, without adopting another language's names:
   same VM; spawning does not copy an application's world into another state.
 - **Carrier:** an OS thread temporarily executing a task or a native call.
   Carriers are reused and managed within an explicit resource budget.
-- **Execution permit:** authority to execute Lua and access protected VM state.
-  It is distinct from owning a carrier. A carrier blocked in foreign code must
-  not monopolize the permit needed by unrelated runnable tasks.
+- **Execution permit:** one of the runtime's available managed-execution slots.
+  Multiple permits allow simultaneous Lua execution. Permits limit parallelism;
+  they do not replace synchronization for shared VM objects. A carrier blocked
+  in foreign code must not monopolize a permit needed by runnable tasks.
 
 A task moves conceptually between runnable, running, waiting, in-native and
 terminal states. A native result can be ready before its task is scheduled
@@ -99,12 +108,12 @@ native C frame remains attached until that frame unwinds. Libraries with stronge
 thread affinity may require a resource or an entire task to stay on a particular
 thread for longer.
 
-The initial candidate is a shared-VM execution lock with fair handoff points.
-This would serialize Lua bytecode while allowing native calls and waits to
-overlap. Multiplexing, shared-memory correctness and simultaneous multicore Lua
-execution are separate problems. The last is not established by this draft;
-it is not required in the first product provided the scheduling requirements
-above hold.
+A shared-VM execution lock would serialize Lua bytecode and is no longer an
+acceptable candidate. Multiplexing, shared-memory correctness and simultaneous
+multicore Lua execution must all be proved. Synchronization must protect shared
+tables, captured variables, registry/module state, allocation and collection
+without retaining a global execution lock across Lua code or native waits.
+The synchronization and collection mechanisms are not selected or proven yet.
 
 ## What to borrow from Go
 
@@ -289,7 +298,7 @@ substitute. Callback yield permission remains an explicit boundary decision.
   uninterruptible C call cannot be safely killed by a coroutine operation.
   Forced process termination, if needed, is an embedding policy.
 - **Host integration:** provide a way to submit tasks and observe completions
-  without making a host control thread wait on Lua's execution lock or join a
+  without making a host control thread wait on managed execution or join a
   running native call. Timers, I/O readiness and completion wakes need an
   explicit integration seam; application-specific transports remain outside
   Luthrum's scope.
@@ -308,20 +317,24 @@ to establish ordering.
 1. Multiplex many Lua-only tasks over fewer carriers; record carrier identity
    and prove safe migration and fairness without application-authored yields.
    This distinguishes the design from a thread permanently assigned per task.
-2. Block an unchanged Lua/C binding behind a native fixture gate. After native
+2. Run Lua tasks simultaneously on separate cores in the same VM. Prove actual
+   overlap without serializing the interpreter, including independent mutable
+   tables and shared captured variables. Verify shared-state correctness and
+   GC coordination; arithmetic-only overlap does not establish the full model.
+3. Block an unchanged Lua/C binding behind a native fixture gate. After native
    entry is acknowledged, require another task to finish before opening the
    gate. Verify shared VM identity and bounded replacement-thread behavior.
-3. Keep a pure-Lua task CPU-busy while another runs. Prove scheduling fairness
+4. Keep a pure-Lua task CPU-busy while another runs. Prove scheduling fairness
    while preserving instruction limits, errors and protected-call behavior.
-4. Exercise same-thread callbacks, nested native calls and callbacks from a
+5. Exercise same-thread callbacks, nested native calls and callbacks from a
    foreign thread, including errors and callback reentry at capacity.
-5. Force GC and allocation failure while tasks are native, waiting or receiving
+6. Force GC and allocation failure while tasks are native, waiting or receiving
    callbacks. Check exactly-once resource cleanup and explicit close/use races.
-6. Verify thread-affine resource create/use/close and rejection of unsupported
+7. Verify thread-affine resource create/use/close and rejection of unsupported
    sharing. Include task cancellation, shutdown and a deliberately stuck call.
-7. Withhold the end of a streaming input until downstream progress is observed.
+8. Withhold the end of a streaming input until downstream progress is observed.
    Prove bounded retained memory and backpressure in both directions.
-8. Run behavioral compatibility tests for the C89-stack Lua modules on the
+9. Run behavioral compatibility tests for the C89-stack Lua modules on the
    selected Lua 5.5 baseline. Include curl transfers and callbacks; MDF and
    Softline output/input and owner-thread behavior; LoneJSON incremental
    parsing/serialization and callback ownership; and liblockdc transactions,

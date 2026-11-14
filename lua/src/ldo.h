@@ -63,6 +63,34 @@
 #define LUAI_MAXCCALLS		200
 #endif
 
+/* Supported native stacks grow downwards. Reserve 32 KiB for error handling,
+** including unoptimized traceback frames, and stop before the final 8 KiB. */
+l_sinline uintptr_t luaD_nativeposition (void) {
+  uintptr_t position;
+#if defined(__x86_64__)
+  __asm__ volatile ("mov %%rsp, %0" : "=r" (position));
+#elif defined(__aarch64__) || defined(__arm__)
+  __asm__ volatile ("mov %0, sp" : "=r" (position));
+#else
+#error Unsupported Luthrum Lua native stack architecture
+#endif
+  return position;
+}
+
+#define luaE_refreshnativestack(L) \
+  { NativeStackContext *context = &luaE_native_stack_context; \
+    __asm__ ("" : "+r" (context)); \
+    uintptr_t limit = context->limit; \
+    if (l_unlikely(limit == 0 || limit == UINTPTR_MAX)) \
+      context->limit = limit = luaE_initnativestack(); \
+    (L)->luthrum_stack_limit = limit; \
+    (L)->luthrum_stack_context = context; }
+
+#define luaD_checknativestack(L) \
+  { uintptr_t position = luaD_nativeposition(); \
+    if (l_unlikely(position <= (L)->luthrum_stack_limit)) \
+      luaE_nativestackerror((L), position); }
+
 
 /* type of protected functions, to be ran by 'runprotected' */
 typedef void (*Pfunc) (lua_State *L, void *ud);

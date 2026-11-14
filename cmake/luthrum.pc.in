@@ -1,0 +1,13 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+target=@LUTHRUM_TARGET@
+lua_version=5.5.1
+
+Name: luthrum
+Description: Lua runtime and strict C89 embedding interfaces
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lluthrum
+Libs.private: -lm -ldl -pthread
+Cflags: -I${includedir}

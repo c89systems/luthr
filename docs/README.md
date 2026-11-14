@@ -15,11 +15,14 @@ verifies consumers against its installed SDK. Cutover changes in cpkt, Vectis,
 and libknurl follow later.
 
 The execution model separates a task, its carrier OS thread, and permission to
-execute Lua. Lua bytecode may execute serially while native calls overlap.
-Blocking native work must release the execution permit so other runnable tasks
-can progress on another carrier. Runtime-managed waits park tasks, and CPU-bound
-Lua tasks must hand off execution without application-authored yields. Safe
-migration, bounded carrier growth, and reserved progress capacity are required.
+execute Lua. Lua bytecode must execute in parallel across cores within one
+shared VM, without a global interpreter lock. Blocking native work must release
+managed execution capacity so runnable tasks can progress on another carrier.
+Runtime-managed waits park tasks, and CPU-bound Lua tasks must hand off execution
+without application-authored yields. Safe migration, bounded carrier growth,
+and reserved progress capacity are required. Automatic carrier sizing starts
+from usable logical CPUs; the cap and native compensation policy require
+workload measurements.
 
 ## Source baseline
 
@@ -29,8 +32,13 @@ unmodified in the initial import. [Provenance and ownership](lua-source.md)
 record the source archive and verified checksum.
 
 Lua source changes belong directly in this repository; there is no patch series
-or build-time source download. The C89 facade extraction, scheduler, project
-build and test entrypoints, and release packaging are not implemented yet.
+or build-time source download. The current build includes the native runtime,
+the extracted C89 interfaces, interpreter, compiler and installed-SDK tests.
+Native-stack protection and finalizer instruction accounting are direct Lua
+source changes. The parallel scheduler and release packaging remain unfinished.
+
+See [building and testing](building.md), [embedding policy](embedding-policy.md)
+and [C89 facade provenance](cpkt-source.md).
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

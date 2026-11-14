@@ -1,0 +1,9 @@
+CompileFlags:
+  CompilationDatabase: build/x86_64-linux-gnu/Debug
+Documentation:
+  CommentFormat: Markdown
+---
+If:
+  PathMatch: (dist|build|\.cache)/.*
+Index:
+  Background: Skip
