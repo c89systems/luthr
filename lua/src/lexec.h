@@ -52,6 +52,10 @@ LUAI_FUNC void luaQ_endnative (lua_State *L);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,
                                   unsigned depth);
 LUAI_FUNC void luaQ_poll (lua_State *L);
+/* Bounded CPU work in trusted C helpers. Call outside state/object ownership;
+** all borrowed Lua values must remain rooted across this migration point.
+** Initialize the caller-local counter to zero. Does not charge bytecode fuel. */
+LUAI_FUNC void luaQ_work (lua_State *L, unsigned *work);
 LUAI_FUNC void luaQ_setmanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC int luaQ_ismanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC void luaQ_setowner (LuaOwner *owner);

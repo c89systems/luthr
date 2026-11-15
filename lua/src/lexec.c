@@ -64,6 +64,15 @@ void luaQ_poll (lua_State *L) {
     execution->poll(execution, L);
 }
 
+void luaQ_work (lua_State *L, unsigned *work) {
+  if (++*work == 1024u) {
+    *work = 0;
+    lua_lock(L);
+    luaX_poll(L);
+    lua_unlock(L);
+  }
+}
+
 void luaQ_setmanagedhook (lua_State *L, lua_Hook hook) {
   lua_lock(L);
   __atomic_store_n(&G(L)->managed_hook, hook, __ATOMIC_SEQ_CST);

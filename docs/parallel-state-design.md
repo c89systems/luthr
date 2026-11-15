@@ -1152,6 +1152,59 @@ Those six negative edits are restored for final verification. Other libraries,
 module compatibility, cancellation/shutdown, affinity, sizing and the public
 scheduler still require their own acceptance work.
 
+## Owned UTF-8 helpers
+
+UTF-8 functions and their strict/lax iterators use canonical managed closures.
+The iterators carry no mutable shared cursor: the source and position are call
+arguments. Decoding is bounded to six bytes and retains no foreign TLS. Long
+length, offset, encoding, decoding and continuation-skip loops call the private
+`luaQ_work` checkpoint after 1,024 work units. The counter belongs to the C
+activation. Checkpoints enter stack ownership only for the existing VM poll;
+they hold no object lock and do not charge the Lua bytecode instruction budget.
+The interval is an initial fairness bound, not a measured performance policy.
+
+String readers snapshot and root their immutable input independently of stack
+slots. Conversion and the protected snapshot are separate steps, so the latter
+rechecks the slot before borrowing bytes. Roots are retired on normal return
+or by protected unwinding on errors. This protects a scan when native debug
+access replaces its argument during a checkpoint. It does not establish a
+general contract for arbitrary mutation of C-frame temporaries or auxiliary
+buffer internals through debug access; that remains part of the API audit.
+
+Twenty `utf8_library_*` cases cover raw/C89 hosts, both collectors, Unicode
+boundaries, strict/lax behavior, Lua 5.5 start/end offsets, errors, reopening
+identity and allocation denial/recovery. Snapshot cases remove the only normal
+reference to an external input string at a scan checkpoint, force collection
+twice, and require its release exactly once after completion or error cleanup.
+Twenty `native_scheduler_task_*utf8*` cases exercise every long-scan branch with
+two blocked native slots and two managed permits. Each operation must reach a
+C-work checkpoint; migration cases must switch carriers inside every helper.
+Both producers first park inside length scanning. While their retained C
+contexts are saved, collection and an unrelated allocating task must complete
+before either scan resumes, with both native bindings still blocked.
+Collection occurs with retained arguments, partial results and encoding buffers.
+Nested foreign callbacks must remain pinned throughout these same operations.
+Errors after migrated partial decoding/encoding exercise protected unwinding
+and buffer cleanup. Moving-allocator callback variants relocate every resized
+block and require balanced storage at shutdown.
+Negative controls fail after removing the source root, disabling work polls,
+omitting only the final offset continuation-skip checkpoint, or registering
+either the helpers or iterators as foreign. All five edits are restored before
+normal verification.
+
+The extended callback stress exposed a stale VM stack base after an allocation
+handoff. Another carrier's collection could relocate the stack after the local
+GC/trap check, before dispatch resumed. Allocation handoffs now always publish
+the saved PC and live stack extent, then reload the base and hook/trap state
+after reacquiring ownership. Six `api_ownership_vm_*` regressions collect at the
+real unlocked boundary after table creation, concatenation or closure creation,
+in both GC modes. A moving allocator poisons the retired stack. All six fail
+without the repair and pass with it; this makes the rare stress failure
+deterministic without depending on scheduling luck.
+
+Other libraries, required modules and the remaining scheduler acceptance gates
+are still unfinished.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

@@ -167,6 +167,16 @@ The `native_scheduler_task_*library*` variants run math/table helpers and large
 buffer cleanup while both native slots are occupied, including a sort comparator
 that awaits through math comparison callbacks, migration, GC and error unwinding.
 
+`utf8_library_*` covers Unicode boundaries, strict/lax errors, start/end offsets,
+canonical function identity, allocation failure and rooted inputs after debug
+argument replacement. `native_scheduler_task_*utf8*` requires checkpoints in
+every long-scan branch, migration within each helper and collection with live
+buffers/results while both native slots are occupied. Foreign callback variants
+verify carrier pinning through the same operations.
+Moving-allocator callbacks also exercise relocation and errors after partial
+encoding/decoding. `api_ownership_vm_*` forces stack relocation at unlocked VM
+allocation handoffs and verifies subsequent table, string and closure results.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

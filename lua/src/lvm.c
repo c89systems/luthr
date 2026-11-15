@@ -1183,11 +1183,13 @@ void luaV_finishOp (lua_State *L) {
 #define luai_threadyield(L)	{lua_unlock(L); lua_lock(L);}
 #endif
 
-/* 'c' is the limit of live values in the stack */
+/* 'c' is the limit of live values in the stack. Publish before every handoff,
+** even if this carrier does not collect. Another collector can move the stack
+** while ownership is released, so reload dispatch state after reacquiring it. */
 #define checkGC(L,c)  \
-	{ luaC_condGC(L, (savepc(ci), L->top.p = (c)), \
-                         updatetrap(ci)); \
-           luai_threadyield(L); }
+	{ savepc(ci); L->top.p = (c); \
+	  luaC_condGC(L, (void)0, (void)0); \
+	  luai_threadyield(L); updatebase(ci); updatetrap(ci); }
 
 
 /* fetch an instruction and prepare its execution */

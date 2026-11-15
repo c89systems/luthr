@@ -22,6 +22,8 @@ struct fixture {
   int entry_case;
   int rawset_case;
   int selfcopy_case;
+  int vm_case;
+  const char *mode;
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   int snapshot_ready;
@@ -60,10 +62,10 @@ void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
 static void collect_at_boundary(struct fixture *fixture) {
   uintptr_t original = (uintptr_t)fixture->old_stack;
   fixture->armed = 0;
-  /* A real collection shrinks the pinned native frame's unused stack. The
+  /* A real collection shrinks the parked VM or native frame's unused stack. The
    * retired mapping stays allocated but is cleared, making stale slot reads
    * deterministic without depending on the host realloc implementation. */
-  if (fixture->worker->native_depth == 0)
+  if (!fixture->vm_case && fixture->worker->native_depth == 0)
     abort();
   (void)lua_gc(fixture->main, LUA_GCCOLLECT);
   fixture->collections++;
@@ -84,7 +86,7 @@ void __wrap_luaX_unlockstate(lua_State *state) {
   struct fixture *fixture = active_fixture;
   __real_luaX_unlockstate(state);
   if (fixture != NULL && fixture->armed && !fixture->entry_case &&
-      state == fixture->worker)
+      state == fixture->worker && (!fixture->vm_case || isLua(state->ci)))
     collect_at_boundary(fixture);
 }
 
@@ -152,6 +154,8 @@ static int exercise(lua_State *state) {
     lua_pushinteger(state, 42);
   }
   fixture->armed = 1;
+  if (fixture->vm_case)
+    return 0; /* The next VM allocation handoff is the collection boundary. */
   if (fixture->rawset_case) {
     lua_rawset(state, 1);
     lua_getfield(state, 1, "answer");
@@ -193,15 +197,34 @@ static void *run(void *user) {
   if (fixture->main == NULL)
     abort();
   fixture->worker = lua_newthread(fixture->main);
-  if (fixture->selfcopy_case) {
+  if (fixture->vm_case) {
+    const char *source =
+        strstr(fixture->mode, "newtable") != NULL
+            ? "grow(); local t={42}; local flag=false; "
+              "return flag==false and t[1]==42"
+        : strstr(fixture->mode, "concat") != NULL
+            ? "local a,b=...; grow(); local s=a..b; local flag=false; "
+              "return flag==false and s=='leftright'"
+            : "grow(); local function f() return 42 end; local flag=false; "
+              "return flag==false and f()==42";
+    lua_pushcfunction(fixture->main, exercise);
+    lua_setglobal(fixture->main, "grow");
+    if (strstr(fixture->mode, "generational") != NULL)
+      (void)lua_gc(fixture->main, LUA_GCGEN);
+    (void)lua_gc(fixture->main, LUA_GCSTOP);
+    if (luaL_loadstring(fixture->worker, source) != LUA_OK)
+      abort();
+    lua_pushliteral(fixture->worker, "left");
+    lua_pushliteral(fixture->worker, "right");
+  } else if (fixture->selfcopy_case) {
     lua_pushinteger(fixture->main, 7);
     lua_pushcclosure(fixture->main, exercise, 1);
     lua_pushvalue(fixture->main, -1);
     lua_xmove(fixture->main, fixture->worker, 1);
   } else
     lua_pushcfunction(fixture->worker, exercise);
-  if (fixture->selfcopy_case) {
-    /* no arguments; the controller retains the shared closure at index 2 */
+  if (fixture->vm_case || fixture->selfcopy_case) {
+    /* Arguments were prepared above; self-copy retains its closure on main. */
   } else if (fixture->rawset_case)
     lua_newtable(fixture->worker);
   else if (fixture->entry_case) {
@@ -209,10 +232,18 @@ static void *run(void *user) {
       abort();
   } else
     lua_pushliteral(fixture->worker, "retained string");
-  status = lua_resume(fixture->worker, NULL, fixture->selfcopy_case ? 0 : 1,
+  status = lua_resume(fixture->worker, NULL,
+                      fixture->vm_case         ? 2
+                      : fixture->selfcopy_case ? 0
+                                               : 1,
                       &results);
   fixture->failed =
       status != LUA_OK || results != 1 || !lua_toboolean(fixture->worker, -1);
+  if (fixture->vm_case) {
+    fixture->failed |= fixture->armed || fixture->collections != 1;
+    free(fixture->retired_stack);
+    fixture->retired_stack = fixture->old_stack = NULL;
+  }
   lua_close(fixture->main);
   fixture->failed |= fixture->live_allocations != 0;
   return NULL;
@@ -224,13 +255,15 @@ int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
   memset(&fixture, 0, sizeof(fixture));
+  fixture.mode = argv[1];
+  fixture.vm_case = strncmp(argv[1], "vm_", 3) == 0;
   fixture.rawset_case = strcmp(argv[1], "rawset_entry") == 0;
   fixture.selfcopy_case = strcmp(argv[1], "capture_selfcopy") == 0;
   fixture.entry_case =
       fixture.rawset_case || strcmp(argv[1], "dump_entry") == 0;
   fixture.length_case = strcmp(argv[1], "string_length") == 0;
-  if (!fixture.entry_case && !fixture.length_case && !fixture.selfcopy_case &&
-      strcmp(argv[1], "string_pointer") != 0)
+  if (!fixture.vm_case && !fixture.entry_case && !fixture.length_case &&
+      !fixture.selfcopy_case && strcmp(argv[1], "string_pointer") != 0)
     return 2;
   active_fixture = &fixture;
   check(pthread_mutex_init(&fixture.mutex, NULL));

@@ -16,6 +16,20 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(utf8_library_test utf8_library_test.c)
+set_target_properties(utf8_library_test PROPERTIES C_STANDARD 99)
+target_compile_options(utf8_library_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(utf8_library_test PRIVATE luthrum_static)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS semantics errors bindings oom snapshot)
+      add_test(NAME utf8_library_${backend}_${case}_${gc}
+        COMMAND utf8_library_test ${backend}_${case}_${gc})
+      set_tests_properties(utf8_library_${backend}_${case}_${gc}
+        PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(math_library_test math_library_test.c)
 set_target_properties(math_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(math_library_test PRIVATE -Wall -Wextra -Werror)
@@ -125,11 +139,17 @@ target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS normal migrate early error callback callback_migrate callback_error
-        driver driver_migrate library library_migrate library_callback library_error)
+        driver driver_migrate library library_migrate library_callback library_error
+        utf8 utf8_migrate utf8_callback utf8_movealloc_callback utf8_error)
       add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
         COMMAND native_scheduler_test task_${backend}_${case}_${gc})
       set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
         PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
+      if(case MATCHES "^utf8")
+        # Forced carrier switches and large result sets under Valgrind.
+        set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
+          PROPERTIES TIMEOUT 180)
+      endif()
     endforeach()
   endforeach()
 endforeach()
@@ -258,7 +278,9 @@ target_compile_options(api_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(api_ownership_test PRIVATE luthrum_static)
 target_link_options(api_ownership_test PRIVATE
   -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate -Wl,--wrap=luaA_end)
-foreach(case IN ITEMS string_pointer string_length dump_entry rawset_entry capture_selfcopy)
+foreach(case IN ITEMS string_pointer string_length dump_entry rawset_entry capture_selfcopy
+    vm_newtable_incremental vm_newtable_generational vm_concat_incremental
+    vm_concat_generational vm_closure_incremental vm_closure_generational)
   add_test(NAME api_ownership_${case} COMMAND api_ownership_test ${case})
   set_tests_properties(api_ownership_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()
