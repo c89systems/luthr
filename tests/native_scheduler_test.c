@@ -24,7 +24,8 @@ enum {
   WORKERS = MANAGED + NATIVE,
   TASKS = 6,
   MAX_WORKERS = 4,
-  MAX_TASKS = 8
+  MAX_TASKS = 8,
+  MAX_HELPERS = 11
 };
 enum reason { READY, NATIVE_WAIT, RESOURCE_WAIT, DONE };
 enum wait_kind { OBJECT_WAIT, GATE_WAIT, GC_WAIT, EARLY_WAIT };
@@ -44,7 +45,8 @@ struct task {
   int notified, published, wait_pinned;
   unsigned resource_waits, pinned_resource_waits, early_wakes;
   unsigned parallel_seen, await_waits;
-  unsigned helper_polls[6], helper_migrations[6], helper_pinned[6];
+  unsigned helper_polls[MAX_HELPERS], helper_migrations[MAX_HELPERS],
+      helper_pinned[MAX_HELPERS];
   int helper_hold, helper_held;
   int parallel_cpu;
   void (*run)(struct task *);
@@ -71,7 +73,7 @@ struct pool {
   unsigned await_closed, await_ready[2];
   void *await_payloads[2];
   int awaiting;
-  lua_CFunction helper_work[6];
+  lua_CFunction helper_work[MAX_HELPERS];
   int helper_count;
   unsigned done, entered, callback_done, release[2], finalized;
   int callback_request, stop, budget, trace;
@@ -450,6 +452,7 @@ static int block_binding(lua_State *state) {
               pool->awaiting
                   ? "if audit_utf8 then audit_utf8() end; "
                     "if audit_patterns then audit_patterns(0) end; "
+                    "if audit_strings then audit_strings(0) end; "
                     "return await_checked(2)"
                   : "local n=0; for i=1,4000 do n=n+i end; "
                     "local bytes=string.dump(function() return 42 end); "
@@ -1737,7 +1740,7 @@ static int helper_ticks(lua_State *state) {
   lua_pushinteger(state, task->helper_polls[helper - 1]);
   return 1;
 }
-static int pattern_managed(lua_State *state) {
+static int helper_managed(lua_State *state) {
   LuaExecution *execution = luaQ_current();
   struct task *task;
   (void)state;
@@ -1855,7 +1858,7 @@ static void install_pattern_audit(struct pool *pool) {
   pool->helper_count = 4;
   luaQ_pushmanaged(state, helper_ticks, 0);
   lua_setglobal(state, "helper_ticks");
-  luaQ_pushmanaged(state, pattern_managed, 0);
+  luaQ_pushmanaged(state, helper_managed, 0);
   lua_setglobal(state, "check_managed");
   lua_getglobal(state, "string");
   for (index = 0; index < 3; ++index) {
@@ -1874,6 +1877,73 @@ static void install_pattern_audit(struct pool *pool) {
   require(luaL_loadstring(state, source) == LUA_OK);
   require(lua_pcall(state, 0, 0, 0) == LUA_OK);
 }
+static void install_string_audit(struct pool *pool) {
+  static const char *const names[] = {"sub",  "reverse",  "lower", "upper",
+                                      "rep",  "byte",     "char",  "format",
+                                      "pack", "packsize", "unpack"};
+  static const char source[] =
+      "string_a=string.rep('a',4096); string_A=string.rep('A',4096); "
+      "string_R=string.rep('R',4096); string_z=string_a..'z'; "
+      "string_pad=string.pack('c4096','a'); string_numbers={}; "
+      "for i=1,4096 do string_numbers[i]=97 end; "
+      "string_fmt=string.rep('x',4096); string_spaces=string.rep(' ',4096); "
+      "function audit_strings(id) check_managed(); "
+      "local function work(k,f,...) local before=helper_ticks(k); "
+      "local t=table.pack(f(...)); assert(helper_ticks(k)>before); "
+      "return table.unpack(t,1,t.n) end; "
+      "assert(string.len(string_a)==4096); "
+      "assert(work(1,string.sub,string_a,1)==string_a); "
+      "assert(work(2,string.reverse,string_z)=='z'..string_a); "
+      "assert(work(3,string.lower,string_A)==string_a); "
+      "assert(work(4,string.upper,string_a)==string_A); "
+      "assert(work(5,string.rep,string_a,2)==string_a..string_a); "
+      "assert(work(5,string.rep,'',3,string_a)==string_a..string_a); "
+      "local t=table.pack(work(6,string.byte,string_a,1,-1)); "
+      "assert(t.n==4096); for i=1,t.n do assert(t[i]==97) end; "
+      "assert(work(7,string.char,table.unpack(string_numbers))==string_a); "
+      "assert(work(8,string.format,string_R)==string_R); "
+      "assert(work(8,string.format,'%q',string_a)=='\"'..string_a..'\"'); "
+      "assert(work(8,string.format,'%.2s',string_a)=='aa'); "
+      "local obj=setmetatable({}, {__tostring=function() check_managed(); "
+      "if id==2 then assert(await_checked(3)==42) end; "
+      "collectgarbage('collect'); return string_a end}); "
+      "assert(work(8,string.format,'%s',obj)==string_a); "
+      "assert(work(9,string.pack,'c4096','a')==string_pad); "
+      "assert(work(9,string.pack,'c4096',string_a)==string_a); "
+      "assert(work(9,string.pack,'z',string_a)==string_a..string.char(0)); "
+      "assert(work(9,string.pack,'s4',string_a)==string.pack('<I4',4096).."
+      "string_a); "
+      "assert(work(9,string.pack,string_spaces)==''); "
+      "assert(work(10,string.packsize,string_fmt)==4096); "
+      "local a,b=work(11,string.unpack,'c4096',string_a); "
+      "assert(a==string_a and b==4097); "
+      "a,b=work(11,string.unpack,'z',string_a..string.char(0)); "
+      "assert(a==string_a and b==4098); "
+      "assert(work(11,string.unpack,string_spaces,'')==1); "
+      "assert(not pcall(string.format,'%s',setmetatable({}, { "
+      "__tostring=function() check_managed(); string.reverse(string_a); "
+      "error('format expected') end}))); "
+      "assert(not pcall(string.pack,'z',string_a..string.char(0))); "
+      "assert(not pcall(string.unpack,'z',string_a)); check_managed() end";
+  lua_State *state = pool->main;
+  unsigned index;
+  pool->helper_count = sizeof(names) / sizeof(names[0]);
+  require(pool->helper_count <= MAX_HELPERS);
+  luaQ_pushmanaged(state, helper_ticks, 0);
+  lua_setglobal(state, "helper_ticks");
+  luaQ_pushmanaged(state, helper_managed, 0);
+  lua_setglobal(state, "check_managed");
+  lua_getglobal(state, "string");
+  for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index) {
+    lua_getfield(state, -1, names[index]);
+    pool->helper_work[index] = lua_tocfunction(state, -1);
+    require(pool->helper_work[index] != NULL);
+    lua_pop(state, 1);
+  }
+  lua_pop(state, 1);
+  require(luaL_loadstring(state, source) == LUA_OK);
+  require(lua_pcall(state, 0, 0, 0) == LUA_OK);
+}
 static int exercise_task_wait(const char *name) {
   struct pool *pool = calloc(1, sizeof(*pool));
   pthread_t workers[MAX_WORKERS];
@@ -1887,7 +1957,8 @@ static int exercise_task_wait(const char *name) {
   int library = strstr(name, "library") != NULL;
   int utf8 = strstr(name, "utf8") != NULL;
   int pattern = strstr(name, "pattern") != NULL;
-  int helpers = utf8 || pattern;
+  int strings = strstr(name, "strings") != NULL;
+  int helpers = utf8 || pattern || strings;
   int movealloc = strstr(name, "movealloc") != NULL;
   static const char producer[] =
       "local token,id=...; return function() "
@@ -1898,6 +1969,7 @@ static int exercise_task_wait(const char *name) {
       "if audit_libraries then audit_libraries(id) end; "
       "if audit_utf8 then audit_utf8() end; "
       "if audit_patterns then audit_patterns(id) end; "
+      "if audit_strings then audit_strings(id) end; "
       "if id==2 then gate2:recv() else gate3:recv() end; "
       "if id==3 and failing then error(token) end; "
       "return token,function() return shared end,42 end";
@@ -1985,6 +2057,8 @@ static int exercise_task_wait(const char *name) {
     install_utf8_audit(pool);
   if (pattern)
     install_pattern_audit(pool);
+  if (strings)
+    install_string_audit(pool);
   if (strstr(name, "generational") != NULL)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < MAX_TASKS; ++id) {
@@ -2077,7 +2151,7 @@ static int exercise_task_wait(const char *name) {
   }
   while (!pool->await_ready[0] || !pool->await_ready[1] ||
          !pool->tasks[2].published || !pool->tasks[3].published ||
-         ((library || pattern) && !pool->tasks[2].await_waits)) {
+         ((library || pattern || strings) && !pool->tasks[2].await_waits)) {
     require(!pool->tasks[2].finished && !pool->tasks[3].finished);
     wait_change(pool);
   }
@@ -2131,7 +2205,7 @@ static int exercise_task_wait(const char *name) {
   require(pool->native == 2 && pool->await_closed == 2);
   require(pool->await_winners[0] == 1 && pool->await_winners[1] == 1);
   require(pool->await_losers[0] == (callback ? 2U : 1U) &&
-          pool->await_losers[1] == ((library || pattern) ? 1U : 0U));
+          pool->await_losers[1] == ((library || pattern || strings) ? 1U : 0U));
   pool->release[0] = pool->release[1] = 1;
   signal_change(pool);
   while (pool->done != MAX_TASKS)
@@ -2161,7 +2235,7 @@ static int exercise_task_wait(const char *name) {
       if (pool->force_migrate)
         require(task->migrations != 0);
     }
-    if ((library || pattern) && id == 2) {
+    if ((library || pattern || strings) && id == 2) {
       require(task->await_waits != 0 && task->pinned_resource_waits == 0);
       if (pool->force_migrate)
         require(task->migrations != 0);

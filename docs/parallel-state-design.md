@@ -1227,8 +1227,35 @@ and native-stack recovery. `native_scheduler_task_*pattern*` runs the helpers
 with two managed permits and two blocked native slots over four carriers. It
 requires unrelated progress while both matching frames are saved, collection,
 migration inside each helper, callback result waiting, pinned native reentry,
-moving allocators and error cleanup. Other string helpers, other libraries,
-required modules and the remaining scheduler acceptance gates are unfinished.
+moving allocators and error cleanup.
+
+## Managed string buffers, formatting and packing
+
+The remaining string-table functions except `dump` now use managed closures.
+Slicing, reversal, case conversion, repetition and byte conversion checkpoint
+bounded byte/result work. Pack/unpack retains the format and each selected
+string field, including padding and zero-terminated scans; long format-only
+loops also checkpoint. Formatting retains its format, selected objects and
+`__tostring` results, and checkpoints literal/quoted output and large copies.
+Unpacking and slicing construct their ordinary string results through bounded
+copies. These APIs still return complete strings, as their Lua contract requires.
+
+Libc character classification completes inside bounded leaves before the
+activation can migrate, keeping locale TLS from crossing a checkpoint. Numeric
+format specifications are bounded before copying; numeric conversion uses its
+ordinary bounded libc call. Normal, error and allocation-denial paths retire
+temporary roots and auxiliary buffers through the existing protected boundaries.
+
+`string_library_*` exercises semantics, invalid inputs, function identity, moving
+allocation denial and external-input lifetimes after debug argument replacement.
+A formatting callback replaces its caller's arguments and forces collection
+before returning an external string; another collection during copying must
+retain both the owner and result. `native_scheduler_task_*strings*` requires
+migration in each of eleven long helpers, collection with saved contexts,
+unrelated progress at native saturation and an `__tostring` callback that awaits
+a task result. Native reentry remains carrier-pinned. Dump writers, string
+arithmetic metamethods, other libraries, required modules and the remaining
+scheduler acceptance gates are still unfinished.
 
 ## Lua-specific proof obligations
 

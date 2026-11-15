@@ -71,6 +71,8 @@ UTF-8 helpers also support managed execution, with bounded work checkpoints
 and private roots for input strings across parking and debug argument changes.
 String pattern helpers also support managed execution, with invocation-local
 matching scratch, rooted inputs/replacements and synchronized shared iterators.
+String slicing, case conversion, repetition, byte conversion, formatting and
+packing helpers now also support managed execution and bounded work checkpoints.
 Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.

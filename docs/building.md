@@ -188,8 +188,19 @@ search, class parsing, balanced matches, repetition/backtracking, backreferences
 replacement copying and iterator scans while both native slots are occupied.
 Cases require migration inside each matching helper, GC with saved C contexts,
 unrelated-task progress, callbacks that await a scheduled result, pinned nested
-native callbacks, moving allocators and error cleanup. Other string helpers
-still use native-call admission.
+native callbacks, moving allocators and error cleanup.
+
+`string_library_*` checks slicing, reversal, case/byte conversion, repetition,
+formatting and pack/unpack behavior, invalid conversions, canonical functions,
+and allocation-failure cleanup with moving storage. Snapshot cases remove
+debug arguments during each long operation and force collection; formats,
+input strings, separators, `__tostring` owners and returned external strings
+must remain alive. `native_scheduler_task_*strings*` requires checkpoints and
+migration inside eleven long helpers with two occupied native slots. Cases
+include collection with saved buffers, literal and quoted formatting,
+zero-terminated scans, padding, format-only loops, an `__tostring` callback
+awaiting another task's result, pinned native reentry and error cleanup.
+String dumping and arithmetic metamethods still use native-call admission.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
