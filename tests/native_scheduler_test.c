@@ -2,6 +2,7 @@
 #include "private/context.h"
 #include <laccess.h>
 #include <lauxlib.h>
+#include <lcallback.h>
 #include <ldo.h>
 #include <lgc.h>
 #include <ltable.h>
@@ -441,13 +442,7 @@ static void submit(struct pool *pool, int id) {
   grant(pool);
   unlock(pool);
 }
-static void init_task(struct pool *pool, struct task *task, int id,
-                      void (*run)(struct task *)) {
-  task->pool = pool;
-  task->id = id;
-  task->target = -1;
-  task->run = run;
-  check(test_fiber_create(&task->fiber, task_entry, task));
+static void init_execution(struct task *task) {
   task->fiber.execution.context = task;
   task->fiber.execution.managed_enter = managed_enter;
   task->fiber.execution.managed_leave = managed_leave;
@@ -457,6 +452,15 @@ static void init_task(struct pool *pool, struct task *task, int id,
   task->fiber.execution.poll = poll;
   task->fiber.execution.wait = resource_wait;
   task->fiber.execution.wake = resource_wake;
+}
+static void init_task(struct pool *pool, struct task *task, int id,
+                      void (*run)(struct task *)) {
+  task->pool = pool;
+  task->id = id;
+  task->target = -1;
+  task->run = run;
+  check(test_fiber_create(&task->fiber, task_entry, task));
+  init_execution(task);
 }
 static void resource_body(lua_State *state, void *argument) {
   struct task *task = argument;
@@ -674,6 +678,339 @@ static int exercise_resource_wait(const char *name) {
   free(pool);
   return 0;
 }
+struct foreign_actor {
+  struct task task;
+  LuaCallback *registration;
+  int argument, result, status, done;
+  char error[256];
+};
+struct callback_fixture {
+  struct pool pool;
+  LuaCallback registration, nested;
+  struct foreign_actor actors[2];
+  int entered, release;
+};
+static struct callback_fixture *callback_fixture;
+static int callback_self_close(lua_State *state) {
+  return lua_closethread(state, state);
+}
+static int bind_callback_capture(lua_State *state) {
+  int index;
+  luaX_lockstate(state);
+  luaD_checkstack(state, 1);
+  setobj2s(state, state->top.p++, &callback_fixture->registration.function);
+  luaX_unlockstate(state);
+  for (index = 1;; ++index) {
+    const char *name = lua_getupvalue(state, -1, index);
+    require(name != NULL);
+    lua_pop(state, 1);
+    if (strcmp(name, "cell") == 0)
+      break;
+  }
+  lua_upvaluejoin(state, -1, index, 1, 1);
+  lua_pop(state, 1);
+  return 0;
+}
+
+static void callback_marshal(lua_State *state, void *context) {
+  struct foreign_actor *actor = context;
+  lua_pushinteger(state, actor->argument);
+  lua_call(state, 1, 1);
+  actor->result = (int)lua_tointeger(state, -1);
+}
+static void init_foreign(struct foreign_actor *actor, struct pool *pool,
+                         LuaCallback *registration, int argument) {
+  memset(actor, 0, sizeof(*actor));
+  actor->task.pool = pool;
+  actor->task.native = 1; /* Provider already owns this native carrier. */
+  actor->task.target = -1;
+  actor->argument = argument;
+  actor->registration = registration;
+  init_execution(&actor->task);
+}
+static void *foreign_entry(void *context) {
+  struct foreign_actor *actor = context;
+  struct pool *pool = actor->task.pool;
+  long carrier = syscall(SYS_gettid);
+  native_marker = actor->argument + 100;
+  actor->status =
+      luaCB_call(actor->registration, &actor->task.fiber.execution,
+                 callback_marshal, actor, actor->error, sizeof(actor->error));
+  require(carrier == syscall(SYS_gettid));
+  require(native_marker == actor->argument + 100);
+  require(luaQ_current() == NULL);
+  require(actor->task.fiber.execution.managed_depth == 0 &&
+          actor->task.fiber.execution.native_depth == 0 &&
+          actor->task.fiber.execution.protected == NULL);
+  require(!actor->task.permit && actor->task.next == NULL);
+  if (actor->status == LUA_OK)
+    require(actor->task.pinned_waits != 0);
+  lock(pool);
+  actor->done = 1;
+  signal_change(pool);
+  unlock(pool);
+  return NULL;
+}
+static int callback_gate(lua_State *state) {
+  struct callback_fixture *test = callback_fixture;
+  struct pool *pool = &test->pool;
+  unsigned *payload = lua_touserdata(state, 1);
+  int id = (int)lua_tointeger(state, 2);
+  long carrier = syscall(SYS_gettid);
+  int marker = native_marker;
+  require(payload != NULL && *payload == 12345U);
+  if (id == 0) {
+    lock(pool);
+    test->entered++;
+    signal_change(pool);
+    while (!test->release)
+      wait_change(pool);
+    unlock(pool);
+  }
+  require(carrier == syscall(SYS_gettid) && marker == native_marker);
+  require(*payload == 12345U);
+  return 0;
+}
+static int nested_callback(lua_State *state) {
+  struct foreign_actor actor;
+  struct pool *pool = &callback_fixture->pool;
+  init_foreign(&actor, pool, &callback_fixture->registration, 6);
+  require(luaCB_call(actor.registration, NULL, callback_marshal, &actor,
+                     actor.error, sizeof(actor.error)) == LUA_OK);
+  lua_pushinteger(state, actor.result);
+  return 1;
+}
+static int nested_foreign_callback(lua_State *state) {
+  struct foreign_actor actor;
+  pthread_t provider;
+  struct pool *pool = &callback_fixture->pool;
+  init_foreign(&actor, pool, &callback_fixture->nested, 6);
+  require(pthread_create(&provider, NULL, foreign_entry, &actor) == 0);
+  require(pthread_join(provider, NULL) == 0);
+  require(actor.status == LUA_OK);
+  lua_pushinteger(state, actor.result);
+  return 1;
+}
+static int exercise_callback(const char *name) {
+  static const unsigned char capture[] = "require('fixture')";
+  static const char function[] =
+      "local token=...; local shared=shared; local cell=0; return function(id) "
+      "cell=cell+1; "
+      "local child=coroutine.create(function() return 17 end); "
+      "assert(coroutine.resume(child)); shared.child=child; "
+      "local n=0; for i=1,1000 do n=n+i end; shared[id]=n; "
+      "callback_gate(token,id); "
+      "if shared.finished then shared.observed=shared.finished end; "
+      "if id==2 then return nested_callback() end; "
+      "if id==7 then return nested_foreign_callback() end; return n+id end";
+  struct callback_fixture *test = calloc(1, sizeof(*test));
+  struct pool *pool;
+  pthread_t providers[2], workers[WORKERS];
+  struct foreign_actor probe;
+  int id, revoke = strstr(name, "revoke") != NULL;
+  int open_capture = strstr(name, "open") != NULL;
+  require(test != NULL);
+  callback_fixture = test;
+  fixture = pool = &test->pool;
+  check(pthread_mutex_init(&pool->mutex, NULL));
+  check(pthread_cond_init(&pool->changed, NULL));
+  require(luthrum_lua_runtime_new(&pool->runtime) == LUTHRUM_LUA_RUNTIME_OK);
+  require(luthrum_lua_runtime_openlibs(pool->runtime) ==
+          LUTHRUM_LUA_RUNTIME_OK);
+  require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                open_fixture) ==
+          LUTHRUM_LUA_RUNTIME_OK);
+  require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "capture", 0,
+                                         NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  if (strstr(name, "budget") != NULL) {
+    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 100000) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
+                                           sizeof(capture) - 1, "budget", 0,
+                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  }
+  lua_pushcfunction(pool->main, block_binding);
+  lua_setglobal(pool->main, "block");
+  lua_pushcfunction(pool->main, warmup);
+  lua_setglobal(pool->main, "warm");
+  lua_pushcfunction(pool->main, callback_gate);
+  lua_setglobal(pool->main, "callback_gate");
+  lua_pushcfunction(pool->main, nested_callback);
+  lua_setglobal(pool->main, "nested_callback");
+  lua_pushcfunction(pool->main, nested_foreign_callback);
+  lua_setglobal(pool->main, "nested_foreign_callback");
+  lua_pushcfunction(pool->main, callback_self_close);
+  lua_setglobal(pool->main, "self_close");
+  lua_pushcfunction(pool->main, bind_callback_capture);
+  lua_setglobal(pool->main, "bind_capture");
+  lua_newtable(pool->main);
+  lua_setglobal(pool->main, "shared");
+  {
+    unsigned *payload = lua_newuserdatauv(pool->main, sizeof(*payload), 0);
+    *payload = 12345U;
+    lua_newtable(pool->main);
+    lua_pushcfunction(pool->main, finalize);
+    lua_setfield(pool->main, -2, "__gc");
+    lua_setmetatable(pool->main, -2);
+    require(luaL_loadstring(pool->main, function) == LUA_OK);
+    lua_pushvalue(pool->main, -2);
+    require(lua_pcall(pool->main, 1, 1, 0) == LUA_OK);
+    require(luaCB_init(pool->main, &test->registration, 2) == LUA_OK);
+    require(luaCB_init(pool->main, &test->nested, 0) == LUA_OK);
+    lua_settop(pool->main,
+               0); /* Only registered roots retain the closure/token. */
+  }
+  if (strstr(name, "generational") != NULL)
+    (void)lua_gc(pool->main, LUA_GCGEN);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized == 0);
+  for (id = 0; id < 4; ++id) {
+    struct task *task = &pool->tasks[id];
+    task->state = lua_newthread(pool->main);
+    require(luaL_loadstring(
+                task->state,
+                id == 0 && open_capture
+                    ? "local cell=0; bind_capture(function() return cell end); "
+                      "local result=block(...); return result,cell"
+                : id < 2  ? "return block(...)"
+                : id == 3 ? "self_close()"
+                          : "warm(); local n=0; for i=1,1000 do n=n+i end; "
+                            "shared.finished=n; return n") == LUA_OK);
+    if (id < 2) {
+      unsigned *payload;
+      lua_pushinteger(task->state, id);
+      payload = lua_newuserdatauv(task->state, sizeof(*payload), 0);
+      *payload = 12345U;
+      lua_newtable(task->state);
+      lua_pushcfunction(task->state, finalize);
+      lua_setfield(task->state, -2, "__gc");
+      lua_setmetatable(task->state, -2);
+    } else if (id == 2)
+      require(lua_resume(task->state, NULL, 0, &task->results) == LUA_YIELD);
+    init_task(pool, task, id, NULL);
+  }
+  for (id = 0; id < WORKERS; ++id) {
+    pool->workers[id].pool = pool;
+    check(pthread_create(&workers[id], NULL, worker_entry, &pool->workers[id]));
+  }
+  submit(pool, 0);
+  submit(pool, 1);
+  lock(pool);
+  while (pool->entered != 2)
+    wait_change(pool);
+  require(pool->native == NATIVE);
+  unlock(pool);
+  for (id = 0; id < 2; ++id)
+    init_foreign(&test->actors[id], pool, &test->registration, id);
+  check(pthread_create(&providers[0], NULL, foreign_entry, &test->actors[0]));
+  lock(pool);
+  while (!test->entered)
+    wait_change(pool);
+  unlock(pool);
+  check(pthread_create(&providers[1], NULL, foreign_entry, &test->actors[1]));
+  check(pthread_mutex_lock(&test->registration.mutex));
+  while (test->registration.waiters == 0)
+    check(pthread_cond_wait(&test->registration.changed,
+                            &test->registration.mutex));
+  require(test->registration.entries == 2 && test->registration.depth == 1);
+  check(pthread_mutex_unlock(&test->registration.mutex));
+  init_foreign(&probe, pool, &test->registration, 8);
+  require(luaCB_call(probe.registration, &probe.task.fiber.execution,
+                     callback_marshal, &probe, probe.error,
+                     sizeof(probe.error)) == LUA_CB_CAPACITY);
+  submit(pool, 2);
+  lock(pool);
+  while (!pool->tasks[2].finished)
+    wait_change(pool);
+  require(!test->actors[0].done && !test->actors[1].done &&
+          pool->native == NATIVE);
+  unlock(pool);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized == 0);
+  if (revoke) {
+    luaCB_revoke(&test->registration);
+    require(luaCB_destroy(pool->main, &test->registration) == LUA_CB_PENDING);
+    check(pthread_join(providers[1], NULL));
+    require(test->actors[1].status == LUA_CB_REVOKED);
+    require(luaCB_call(probe.registration, &probe.task.fiber.execution,
+                       callback_marshal, &probe, probe.error,
+                       sizeof(probe.error)) == LUA_CB_REVOKED);
+    (void)lua_gc(pool->main, LUA_GCCOLLECT);
+    require(pool->finalized == 0);
+  }
+  lock(pool);
+  test->release = 1;
+  signal_change(pool);
+  unlock(pool);
+  check(pthread_join(providers[0], NULL));
+  require(test->actors[0].status == LUA_OK && test->actors[0].result == 500500);
+  if (!revoke) {
+    check(pthread_join(providers[1], NULL));
+    require(test->actors[1].status == LUA_OK &&
+            test->actors[1].result == 500501);
+    for (id = 0; id < 2; ++id) {
+      init_foreign(&probe, pool, &test->registration, id == 0 ? 2 : 7);
+      (void)foreign_entry(
+          &probe); /* Host thread is also a provider-owned caller. */
+      require(probe.status == LUA_OK && probe.result == 500506);
+    }
+    luaCB_revoke(&test->registration);
+  }
+  require(test->registration.thread->luthrum_stack_context == NULL);
+  require(luaCB_destroy(pool->main, &test->registration) == LUA_OK);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized ==
+          0); /* The second registration still retains token. */
+  luaCB_revoke(&test->nested);
+  require(luaCB_destroy(pool->main, &test->nested) == LUA_OK);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized == 1);
+  lua_getglobal(pool->main, "shared");
+  lua_getfield(pool->main, -1, "child");
+  require(lua_tothread(pool->main, -1)->luthrum_stack_context == NULL);
+  lua_pop(pool->main, 1);
+  lua_getfield(pool->main, -1, "observed");
+  require(lua_tointeger(pool->main, -1) == 500500);
+  lua_pop(pool->main, 2);
+  lock(pool);
+  require(pool->native == NATIVE && pool->managed == 0);
+  pool->release[0] = pool->release[1] = 1;
+  signal_change(pool);
+  while (pool->done != 3)
+    wait_change(pool);
+  unlock(pool);
+  submit(pool, 3); /* A successful self-close must retire its native lease. */
+  lock(pool);
+  while (pool->done != 4)
+    wait_change(pool);
+  pool->stop = 1;
+  signal_change(pool);
+  unlock(pool);
+  for (id = 0; id < WORKERS; ++id)
+    check(pthread_join(workers[id], NULL));
+  require(pool->native == 0 && pool->managed == 0);
+  for (id = 0; id < 4; ++id) {
+    require(pool->tasks[id].status == LUA_OK);
+    if (id == 0 && open_capture)
+      require(pool->tasks[id].results == 2 &&
+              lua_tointeger(pool->tasks[id].state, -1) == 6);
+    (void)lua_closethread(pool->tasks[id].state, NULL);
+    lua_settop(pool->tasks[id].state, 0);
+    test_fiber_destroy(&pool->tasks[id].fiber);
+  }
+  lua_settop(pool->main, 0);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized == 3);
+  luthrum_lua_runtime_free(pool->runtime);
+  check(pthread_cond_destroy(&pool->changed));
+  check(pthread_mutex_destroy(&pool->mutex));
+  printf("registered foreign callbacks %s: bounded admission and protected "
+         "nested entry\n",
+         name);
+  free(test);
+  return 0;
+}
 int main(int argc, char **argv) {
   struct pool *pool;
   pthread_t workers[WORKERS];
@@ -682,6 +1019,8 @@ int main(int argc, char **argv) {
   require(argc == 2);
   if (strncmp(argv[1], "wait_", 5) == 0)
     return exercise_resource_wait(argv[1]);
+  if (strncmp(argv[1], "foreign_", 8) == 0)
+    return exercise_callback(argv[1]);
   pool = calloc(1, sizeof(*pool));
   require(pool != NULL);
   generational = strstr(argv[1], "generational") != NULL;

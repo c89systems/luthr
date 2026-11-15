@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "lgate.h"
+#include "ldo.h"
 #include "lstate.h"
 
 void luaX_checksync (int status) {
@@ -81,9 +82,17 @@ void luaX_lockstate (lua_State *L) {
   luaQ_entermanaged(L);
   reserve(L);
   luaW_enter(L);
+  if (L->errorJmp == NULL && luaQ_current() != NULL)
+    luaE_refreshnativestack(L);
 }
 
 void luaX_unlockstate (lua_State *L) {
+  /* Runtime stack descriptors can be temporary callback storage. Ordinary
+  ** embedding callers retain lazy per-thread discovery at their VM boundary. */
+  if (L->errorJmp == NULL && luaQ_current() != NULL) {
+    L->luthrum_stack_context = NULL;
+    L->luthrum_stack_limit = 0;
+  }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L);
@@ -104,6 +113,10 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
   reserve(first);
   if (second != first) reserve(second);
   luaW_enter(first);
+  if (first->errorJmp == NULL && luaQ_current() != NULL)
+    luaE_refreshnativestack(first);
+  if (second != first && second->errorJmp == NULL && luaQ_current() != NULL)
+    luaE_refreshnativestack(second);
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {
@@ -111,6 +124,14 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
     lua_State *swap = first;
     first = second;
     second = swap;
+  }
+  if (first->errorJmp == NULL && luaQ_current() != NULL) {
+    first->luthrum_stack_context = NULL;
+    first->luthrum_stack_limit = 0;
+  }
+  if (second != first && second->errorJmp == NULL && luaQ_current() != NULL) {
+    second->luthrum_stack_context = NULL;
+    second->luthrum_stack_limit = 0;
   }
   if (second != first) release(second);
   release(first);

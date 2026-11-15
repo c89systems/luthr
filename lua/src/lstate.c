@@ -23,6 +23,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "lcallback.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -309,6 +310,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthrum_stack_limit = 0;
   L->luthrum_stack_context = NULL;
   L->native_roots = NULL;
+  L->callback_owner = NULL;
+  L->callback_active = 0;
   L->state_poll = NULL;
   L->state_poll_context = NULL;
   L->poll_remaining = 1024;
@@ -424,6 +427,13 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
   TStatus status;
   l_uint32 calls = luaX_parentcalls(from);
   lua_lock(L);
+  if (L->callback_active != 0) {
+    setsvalue2s(L, L->top.p++, L->callback_owner->close_error);
+    if (L->ci->top.p < L->top.p)
+      L->ci->top.p = L->top.p;
+    lua_unlock(L);
+    return LUA_ERRRUN;
+  }
   L->nCcalls = calls;
   status = luaE_resetthread(L, L->status);
   if (L == from)  /* closing itself? */
@@ -466,6 +476,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   setnilvalue(&g->l_registry);
   g->panic = NULL;
   g->managed_hook = NULL;
+  g->callbacks = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;
   g->gcstopem = 0;

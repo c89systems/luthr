@@ -330,6 +330,8 @@ struct lua_State {
   uintptr_t luthrum_stack_limit;
   NativeStackContext *luthrum_stack_context;
   LuaNativeRoot *native_roots;
+  struct LuaCallback *callback_owner;
+  unsigned callback_active;
   LuaStackGate stack_gate;
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
@@ -358,6 +360,7 @@ typedef struct global_State {
   LuaWorld world;
   lua_Alloc frealloc;  /* function to reallocate memory */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
+  struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */

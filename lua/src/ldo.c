@@ -242,8 +242,12 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   /* Retire the jump buffer before any cleanup callback can park this stack. */
   if (lj.execution != NULL)
     lj.execution->protected = lj.execution_previous;
-  if (lj.status != LUA_OK) {
+  /* Self-close can abandon native frames while reporting LUA_OK. */
+  if (lj.status != LUA_OK ||
+      (lj.execution != NULL &&
+       lj.execution->native_depth != lj.execution_native_depth))
     luaQ_restorenative(lj.execution, L, lj.execution_native_depth);
+  if (lj.status != LUA_OK) {
     L->native_roots = lj.native_roots;  /* native scopes have unwound */
     luaW_restore(L, lj.world_scope, lj.native_depth);
   }

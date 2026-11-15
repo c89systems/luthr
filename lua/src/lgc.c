@@ -15,6 +15,7 @@
 #include "lua.h"
 
 #include "laccess.h"
+#include "lcallback.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -480,9 +481,15 @@ static void cleargraylists (global_State *g) {
 */
 static void marknativeframes (global_State *g) {
   GCObject *object;
+  LuaCallback *callback;
   for (object = g->allgc; object != NULL; object = object->next) {
     if (object->tt == LUA_VTHREAD && gco2th(object)->native_depth != 0)
       markobject(g, gco2th(object));
+  }
+  for (callback = g->callbacks; callback != NULL; callback = callback->next) {
+    markvalue(g, &callback->function);
+    markobject(g, callback->thread);
+    markobject(g, callback->close_error);
   }
 }
 

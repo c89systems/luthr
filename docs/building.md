@@ -106,7 +106,15 @@ carrier must remain reusable, and two-carrier variants force ownership migration
 Early notifications precede outgoing context publication and collection.
 `native_scheduler_resource_*` keeps native callbacks pinned while their runtime
 waits release execution capacity. These are private experiments; foreign-thread
-routing, native resource affinity and the installed scheduler remain open.
+routing now has focused registered-entry coverage, while general admission,
+native resource affinity and the installed scheduler remain open.
+
+`callback_entry_*` tests protected registration/invocation, GC roots, constructor
+and allocation failures, close/revocation, errors, native-stack exhaustion and
+bounded diagnostics on default worker stacks. `native_scheduler_foreign_*`
+keeps owned native slots saturated while provider threads invoke registered Lua
+callbacks, including nested calls, C89 budgets, live captures and queued/late
+revocation. Provider threads are distinct from the bounded owned carrier pool.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

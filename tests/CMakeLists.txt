@@ -16,6 +16,17 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(callback_entry_test callback_entry_test.c)
+set_target_properties(callback_entry_test PROPERTIES C_STANDARD 99)
+target_compile_options(callback_entry_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(callback_entry_test PRIVATE luthrum_static)
+target_link_options(callback_entry_test PRIVATE
+  -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init)
+foreach(case IN ITEMS mutex condition create_oom create_oom_stack create_oom_message invoke_oom
+    roots_incremental roots_generational errors reserve)
+  add_test(NAME callback_entry_${case} COMMAND callback_entry_test ${case})
+  set_tests_properties(callback_entry_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
+endforeach()
 luthrum_test_program(fiber_vm_test fiber_vm_test.c)
 target_sources(fiber_vm_test PRIVATE private/context.c private/context_x86_64.S)
 set_target_properties(fiber_vm_test PROPERTIES C_STANDARD 99)
@@ -44,7 +55,10 @@ foreach(case IN ITEMS incremental generational budget_incremental budget_generat
     wait_gate_incremental wait_gate_generational wait_gc_incremental wait_gc_generational
     wait_early_incremental wait_early_generational wait_migrate_object_incremental
     wait_migrate_object_generational wait_migrate_gc_incremental wait_migrate_gc_generational
-    resource_incremental resource_generational)
+    resource_incremental resource_generational foreign_incremental foreign_generational
+    foreign_revoke_incremental foreign_revoke_generational
+    foreign_budget_incremental foreign_budget_generational
+    foreign_open_incremental foreign_open_generational)
   add_test(NAME native_scheduler_${case} COMMAND native_scheduler_test ${case})
   set_tests_properties(native_scheduler_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
 endforeach()

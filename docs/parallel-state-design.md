@@ -683,8 +683,8 @@ foreign hook, and a yielded C continuation must leave no native slots, managed
 permits or protected buffers behind. Limits and required parking are asserted.
 
 This is private feasibility support, not an installed scheduler or a measured
-default policy. The experiment below adds runtime resource waits. Routing
-callbacks arriving on foreign threads, external-thread admission and arbitrary
+default policy. The experiments below add runtime waits and registered callbacks
+on provider-owned threads. General external-thread admission and arbitrary
 native resource affinity remain open. Allocator callbacks keep their existing
 short, nonblocking metadata contract. Cancellation, shutdown, streaming and
 backpressure, module acceptance and performance/sizing gates remain.
@@ -736,8 +736,85 @@ Both negative controls fail the fixture as intended.
 
 The waiter and driver interfaces remain private. Registered waits cannot yet be
 abandoned by cancellation; task and VM lifetimes must retain all queued storage.
-External callback routing, application/resource synchronization, streaming,
-shutdown, compatibility, performance and installed-API gates remain required.
+The callback experiment below adds a registered entry path. Application and
+resource synchronization, streaming, shutdown, compatibility, performance and
+installed-API gates remain required.
+
+## Registered foreign-callback experiment
+
+`lua/src/lcallback.*` supplies a private registered boundary for a binding
+adapter. A registration retains a Lua function and a dedicated coroutine in
+the same VM. It shares tables, closures, captures and globals; it does not copy
+the application world. The collector marks registered native roots at cycle
+start and atomic remark. Registration storage is caller-owned and must remain
+valid until provider acknowledgment and destruction. Creation is protected,
+including partial thread/stack allocation and synchronization initialization.
+
+An incoming provider thread attaches a fresh logical execution and uses its
+existing native stack. Its supplied scheduler hooks acquire managed permits at
+Lua entry; native callbacks and resource waits stay on that thread. It does not
+consume another owned carrier or wait for a free owned native-call slot. The
+existing native call and provider-owned callback stacks are different resource
+categories. This proof does not provide a general external-thread pool or make
+unregistered foreign Lua API access supported.
+
+A registration serializes independent invocations. Zero configuration permits
+one outer entrant and returns an explicit capacity result for a competitor;
+an explicit higher limit permits bounded queuing on provider threads. Nested
+entry on the active execution's own carrier shares its outer admission and
+uses a nested protected receiver. Foreign nesting through another registration
+has its own admission. A provider must not create a dependency cycle through
+queued entries on the same registration; a larger queue does not resolve that
+cycle. Affinity routing and the final public admission policy remain open.
+
+Argument/result marshalling and Lua invocation run inside a protected boundary
+on the executing thread. Errors, allocation failures, native-stack overflow and
+to-be-closed failures return a Lua status plus a bounded diagnostic copy. A
+synchronous callback cannot yield. Closing its registered coroutine while it
+is active returns a runtime error using a preallocated message; it cannot
+abandon the registration's lease. Ordinary child-coroutine self-close remains
+supported. Successful self-close now restores native execution depth even when
+the protected jump reports `LUA_OK`.
+
+Runtime stack descriptors are bound at task-aware gate entry and forgotten on
+the final unprotected leave, including for child coroutines used by a callback.
+Nested protected frames retain their descriptor. This prevents state from
+keeping pointers to temporary foreign-entry storage. Unmanaged embedding retains
+lazy physical-thread stack discovery at the existing VM boundary.
+
+Revocation stops new admission and wakes queued callers with a revoked result.
+An active invocation may finish; roots remain until it acknowledges completion.
+Destruction returns pending without waiting for active or queued calls. Final
+retirement enters normal VM synchronization. Before destruction, the native
+provider must acknowledge that
+no future callback can begin. A revoked registration remains valid for late
+calls until that acknowledgment. Destruction is not provider acknowledgment.
+The VM must remain alive until every registration has been retired.
+
+Ten `callback_entry_*` cases exercise constructor mutex/condition errors,
+allocation failure at thread, stack, message and invocation setup, both GC modes,
+arbitrary registration retirement order, protected errors, yield rejection,
+nested entry at the default limit, close failures, native-stack exhaustion,
+bounded diagnostics, cross-VM rejection and self-revocation. These run on default
+worker stacks with an allocator that always moves successful reallocations.
+An overflow-handler entry must inherit its caller's reserved stack headroom.
+
+Eight `native_scheduler_foreign_*` cases keep two unchanged bindings blocked at
+the native limit while registered foreign callbacks and queued Lua work finish.
+They check serialization, overflow admission, same-carrier and foreign nesting,
+revocation of queued/late callers, retained roots through collection and exactly
+once finalization after acknowledgment. C89 budget variants exercise instruction
+accounting during attachment. Open-capture variants update a local on the
+blocked task's live Lua stack; it must observe six updates before completion.
+All actual foreign invocations preserve OS thread/TLS and acquire managed rights.
+Removing registration marking, execution attachment or successful-self-close
+depth restoration makes the corresponding negative control fail.
+
+This remains a private binding-author prototype. It does not freeze a public
+callback API, promise automatic adaptation of arbitrary modules, or satisfy
+cancellation/shutdown, affinity, streaming, compatibility, sizing and installed
+scheduler gates. Providers still own their threads and must synchronize their
+native payloads and acknowledge unregistration.
 
 ## Lua-specific proof obligations
 
