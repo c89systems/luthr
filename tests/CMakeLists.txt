@@ -20,7 +20,10 @@ foreach(case IN ITEMS closed open api cycle blocked allocate_stopped allocate_in
     allocate_generational allocate_failure allocate_open allocate_open_generational allocate_blocked
     table_stopped table_incremental table_generational table_meta_incremental table_meta_generational
     table_blocked table_error table_failure table_handler_blocked table_yield
-    join_stopped join_incremental join_generational join_open_incremental join_open_generational)
+    join_stopped join_incremental join_generational join_open_incremental join_open_generational
+    capi_stopped capi_incremental capi_generational capi_failure capi_blocked
+    capi_registry_incremental capi_registry_generational capi_conversion_incremental
+    capi_conversion_generational capi_borrowed)
   add_test(NAME parallel_vm_${case} COMMAND parallel_vm_test ${case})
   set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
@@ -63,11 +66,12 @@ set_target_properties(api_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(api_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(api_ownership_test PRIVATE luthrum_static)
 target_link_options(api_ownership_test PRIVATE
-  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate)
-foreach(case IN ITEMS string_pointer string_length dump_entry)
+  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate -Wl,--wrap=luaA_end)
+foreach(case IN ITEMS string_pointer string_length dump_entry rawset_entry capture_selfcopy)
   add_test(NAME api_ownership_${case} COMMAND api_ownership_test ${case})
   set_tests_properties(api_ownership_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()
+set_tests_properties(api_ownership_capture_selfcopy PROPERTIES LABELS "parallel;runtime;memcheck")
 
 luthrum_test_program(native_roots_test native_roots_test.c)
 set_target_properties(native_roots_test PROPERTIES C_STANDARD 99)

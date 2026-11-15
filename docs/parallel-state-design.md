@@ -374,11 +374,61 @@ return correct bytes/length, and dumped bytecode must reload and return 42.
 The tests run on a default-stack worker and verify allocation balance.
 
 This closes the exercised Lua closure-array and API boundary gaps, not the full
-native API audit. C closure pseudo-index access and borrowed-pointer lifetimes,
-registry replacement, cross-coroutine stack moves/resume, signal/debug-hook
-settings, and native resources/module globals remain outstanding. General
-embedding access still requires serialization until these boundaries and the
-scheduler are complete.
+native API audit. The next experiment covers C capture and registry access.
+Cross-coroutine stack moves/resume, signal/debug-hook settings, and native
+resources/module globals remain outstanding. General embedding access still
+requires serialization until these boundaries and the scheduler are complete.
+
+## C capture and registry experiment
+
+C closures now use object ownership for their mutable capture values. Each API
+index read copies a complete value into a caller-owned native root and retains
+that snapshot through its last use. Scalar getters, comparisons, table/userdata
+operations and function inspection use these snapshots; helpers retire roots
+before leaving managed access. Comparing an index with itself reuses the same
+snapshot. Copy/setupvalue writes and their barriers run under capture ownership.
+Self-copy validates the index without restoring an earlier snapshot over another
+mutator's write. `api_ownership_capture_selfcopy` coordinates two carriers so a
+replacement occurs between source selection and copy completion; the new value
+must survive. Removing the self-copy guard makes this regression fail.
+Registry-value snapshots/replacement use heap metadata ownership, and global
+table discovery retains the selected registry while following its globals entry.
+
+Number-to-string conversion rechecks a shared capture under ownership, creates
+the string and commits its value/barrier before releasing ownership. Emergency
+collection can rendezvous with waiters, as for table resize. Ordinary GC steps
+and finalizers execute afterward. Borrowed capture-slot addresses are confined
+to the scopes that protect them; no capture lock survives an arbitrary callback
+or a complete native invocation. Raw-set key discovery also occurs after API
+entry, so it cannot retain a pre-entry stack address.
+The `api_ownership_rawset_entry` case forces collection and clears the retired
+stack between caller entry and key discovery, then checks the assigned value.
+
+This keeps Lua's existing pointer-lifetime contract: an upvalue string pointer
+depends on the active call and unchanged upvalue; retaining a value on the
+caller's own stack provides an independent root. This does not promise that a
+borrowed pointer survives concurrent removal of its last reference. No new API
+or per-call frozen capture view is introduced.
+[Lua 5.5 string pointer guarantees](https://www.lua.org/manual/5.5/manual.html#4.1.3)
+
+Ten `parallel_vm_capi_*` cases exercise concurrent C capture copy/setupvalue,
+typed scalar getters, same-index comparisons, numeric conversion, raw/ordinary
+table operations, userdata headers, Lua capture APIs through pseudo-indices,
+and replacing the shared registry during global reads/writes. A conversion OOM
+case first proves that another mutator is waiting on the same C closure, then
+requires emergency collection, error recovery and subsequent use. A blocked
+metamethod must allow replacement of its original capture and collection before
+release. A native pointer-retention case roots its copied long string with
+ordinary `lua_pushvalue`, then verifies its bytes after capture replacement and
+two full collections on the other carrier. Conversion cases drop temporary
+references and step collection before reading the string back from its capture.
+Stopped automatic, incremental and generational collection are covered.
+
+These tests do not establish the remaining cross-coroutine move/resume and
+signal/debug-hook boundaries, shared native callback/configuration state, or
+native payload/module-global safety. Scheduling, affinity, carrier limits,
+performance, streaming and module compatibility gates remain required before a
+public concurrent embedding contract.
 
 ## Lua-specific proof obligations
 

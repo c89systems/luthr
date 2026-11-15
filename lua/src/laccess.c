@@ -18,6 +18,8 @@ static LuaObjectLock *objectlock (GCObject *object) {
     return &gco2t(object)->access;
   if (object->tt == LUA_VLCL)
     return &gco2lcl(object)->access;
+  if (object->tt == LUA_VCCL)
+    return &gco2ccl(object)->access;
   lua_assert(object->tt == LUA_VUSERDATA);
   return &gco2u(object)->access;
 }

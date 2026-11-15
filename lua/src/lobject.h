@@ -710,6 +710,7 @@ typedef struct UpVal {
 typedef struct CClosure {
   ClosureHeader;
   lua_CFunction f;
+  LuaObjectLock access;
   TValue upvalue[1];  /* list of upvalues */
 } CClosure;
 

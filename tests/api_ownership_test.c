@@ -1,3 +1,4 @@
+#include <laccess.h>
 #include <lauxlib.h>
 #include <ldo.h>
 #include <lstate.h>
@@ -19,6 +20,12 @@ struct fixture {
   unsigned collections;
   unsigned live_allocations;
   int entry_case;
+  int rawset_case;
+  int selfcopy_case;
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  int snapshot_ready;
+  int replacement_ready;
   int length_case;
   int armed;
   int failed;
@@ -28,6 +35,27 @@ static struct fixture *active_fixture;
 
 void __real_luaX_lockstate(lua_State *state);
 void __real_luaX_unlockstate(lua_State *state);
+void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
+
+static void check(int status) {
+  if (status != 0)
+    abort();
+}
+
+void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
+  struct fixture *fixture = active_fixture;
+  __real_luaA_end(state, scope);
+  if (fixture != NULL && fixture->selfcopy_case && fixture->armed &&
+      state == fixture->worker) {
+    fixture->armed = 0;
+    check(pthread_mutex_lock(&fixture->mutex));
+    fixture->snapshot_ready = 1;
+    check(pthread_cond_broadcast(&fixture->changed));
+    while (!fixture->replacement_ready)
+      check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
+    check(pthread_mutex_unlock(&fixture->mutex));
+  }
+}
 
 static void collect_at_boundary(struct fixture *fixture) {
   uintptr_t original = (uintptr_t)fixture->old_stack;
@@ -104,6 +132,14 @@ static int write_bytecode(lua_State *state, const void *data, size_t size,
 
 static int exercise(lua_State *state) {
   struct fixture *fixture = active_fixture;
+  if (fixture->selfcopy_case) {
+    fixture->armed = 1;
+    lua_copy(state, lua_upvalueindex(1), lua_upvalueindex(1));
+    if (fixture->armed || lua_tointeger(state, lua_upvalueindex(1)) != 42)
+      abort();
+    lua_pushboolean(state, 1);
+    return 1;
+  }
   luaX_lockstate(state);
   /* Grow spare capacity without making it part of the current frame's
    * declared live extent, so ordinary GC is allowed to shrink it again. */
@@ -111,8 +147,18 @@ static int exercise(lua_State *state) {
     abort();
   fixture->old_stack = state->stack.p;
   luaX_unlockstate(state);
+  if (fixture->rawset_case) {
+    lua_pushliteral(state, "answer");
+    lua_pushinteger(state, 42);
+  }
   fixture->armed = 1;
-  if (fixture->entry_case) {
+  if (fixture->rawset_case) {
+    lua_rawset(state, 1);
+    lua_getfield(state, 1, "answer");
+    if (lua_tointeger(state, -1) != 42)
+      abort();
+    lua_pop(state, 1);
+  } else if (fixture->entry_case) {
     if (lua_dump(state, write_bytecode, fixture, 0) != 0 ||
         fixture->bytecode_size == 0)
       abort();
@@ -147,13 +193,24 @@ static void *run(void *user) {
   if (fixture->main == NULL)
     abort();
   fixture->worker = lua_newthread(fixture->main);
-  lua_pushcfunction(fixture->worker, exercise);
-  if (fixture->entry_case) {
+  if (fixture->selfcopy_case) {
+    lua_pushinteger(fixture->main, 7);
+    lua_pushcclosure(fixture->main, exercise, 1);
+    lua_pushvalue(fixture->main, -1);
+    lua_xmove(fixture->main, fixture->worker, 1);
+  } else
+    lua_pushcfunction(fixture->worker, exercise);
+  if (fixture->selfcopy_case) {
+    /* no arguments; the controller retains the shared closure at index 2 */
+  } else if (fixture->rawset_case)
+    lua_newtable(fixture->worker);
+  else if (fixture->entry_case) {
     if (luaL_loadstring(fixture->worker, "return 42") != LUA_OK)
       abort();
   } else
     lua_pushliteral(fixture->worker, "retained string");
-  status = lua_resume(fixture->worker, NULL, 1, &results);
+  status = lua_resume(fixture->worker, NULL, fixture->selfcopy_case ? 0 : 1,
+                      &results);
   fixture->failed =
       status != LUA_OK || results != 1 || !lua_toboolean(fixture->worker, -1);
   lua_close(fixture->main);
@@ -167,17 +224,37 @@ int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
   memset(&fixture, 0, sizeof(fixture));
-  fixture.entry_case = strcmp(argv[1], "dump_entry") == 0;
+  fixture.rawset_case = strcmp(argv[1], "rawset_entry") == 0;
+  fixture.selfcopy_case = strcmp(argv[1], "capture_selfcopy") == 0;
+  fixture.entry_case =
+      fixture.rawset_case || strcmp(argv[1], "dump_entry") == 0;
   fixture.length_case = strcmp(argv[1], "string_length") == 0;
-  if (!fixture.entry_case && !fixture.length_case &&
+  if (!fixture.entry_case && !fixture.length_case && !fixture.selfcopy_case &&
       strcmp(argv[1], "string_pointer") != 0)
     return 2;
   active_fixture = &fixture;
-  if (pthread_create(&carrier, NULL, run, &fixture) != 0 ||
-      pthread_join(carrier, NULL) != 0)
+  check(pthread_mutex_init(&fixture.mutex, NULL));
+  check(pthread_cond_init(&fixture.changed, NULL));
+  if (pthread_create(&carrier, NULL, run, &fixture) != 0)
     abort();
+  if (fixture.selfcopy_case) {
+    check(pthread_mutex_lock(&fixture.mutex));
+    while (!fixture.snapshot_ready)
+      check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
+    check(pthread_mutex_unlock(&fixture.mutex));
+    lua_pushinteger(fixture.main, 42);
+    if (lua_setupvalue(fixture.main, 2, 1) == NULL)
+      abort();
+    check(pthread_mutex_lock(&fixture.mutex));
+    fixture.replacement_ready = 1;
+    check(pthread_cond_broadcast(&fixture.changed));
+    check(pthread_mutex_unlock(&fixture.mutex));
+  }
+  check(pthread_join(carrier, NULL));
+  check(pthread_cond_destroy(&fixture.changed));
+  check(pthread_mutex_destroy(&fixture.mutex));
   free(fixture.bytecode);
   if (!fixture.failed)
-    printf("API ownership %s: real GC moved native frame stack\n", argv[1]);
+    printf("API ownership %s: protected observable result\n", argv[1]);
   return fixture.failed;
 }

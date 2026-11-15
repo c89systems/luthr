@@ -269,6 +269,71 @@ static const char join_reader_source[] =
     "if i%50==0 then collectgarbage('collect') end "
     "end; return true,sum end";
 
+static const char capi_source[] =
+    "local function cell(x) return function() return x end end; "
+    "local t1,t2={7,token=17},{7,token=17}; "
+    "local u1,u2=fixture_udnew(),fixture_udnew(); local f1,f2=cell(7),cell(7); "
+    "local values={7,'word','7',true,false,t1,u1,f1,print,fixture_lighttoken, "
+    "coroutine.create(function() end)}; "
+    "local shared=fixture_cclosure(7,t1,u1,f1); return "
+    "function() coroutine.yield(); local sum=0; for i=1,300 do "
+    "local v=values[(i%#values)+1]; if i%13==0 then v=nil end; "
+    "shared(1,v,(i%2==0) and t1 or t2,(i%2==0) and u1 or u2, "
+    "(i%2==0) and f1 or f2); debug.setupvalue(shared,1,v); shared(0); "
+    "sum=sum+i end; return true,sum end, "
+    "function() coroutine.yield(); local sum=0; for i=1,300 do "
+    "shared(0); shared(2); shared(3); shared(4,f2); sum=sum+i; "
+    "if i%50==0 then collectgarbage('collect') end "
+    "end; return true,sum end";
+
+static const char capi_failure_source[] =
+    "local shared=fixture_cclosure(867214391); return "
+    "function() coroutine.yield(); fixture_allocate_ready(1); "
+    "local ok,msg=pcall(shared,5); assert(not ok and msg:match('memory')); "
+    "shared(1,7); collectgarbage('restart'); return true,45150 end, "
+    "function() coroutine.yield(); fixture_allocate_ready(2); "
+    "local v=shared(8); assert(v==867214391 or v==7); local sum=0; "
+    "for i=1,300 do local t={i}; sum=sum+t[1] end; return true,sum end";
+
+static const char capi_blocked_source[] =
+    "local shared=fixture_cclosure(setmetatable({token=17, "
+    "resource=fixture_resource()}, {__index=function(t) "
+    "fixture_wait(); return t.token end})); return "
+    "function() coroutine.yield(); assert(shared(6)==17); "
+    "return true,45150 end, function() coroutine.yield(); fixture_entered(); "
+    "shared(1,{token=29}); for i=1,300 do "
+    "local value={i}; debug.setupvalue(shared,1,value) end; "
+    "collectgarbage('collect'); return true,45150 end";
+
+static const char registry_source[] =
+    "local r=debug.getregistry(); local g=fixture_registry_globals; "
+    "r[g].registry_token=7; local a,b={},{}; "
+    "for k,v in pairs(r) do a[k]=v; b[k]=v end; "
+    "a[g]={registry_token=7}; b[g]={registry_token='word'}; "
+    "local shared=fixture_cclosure(7); return "
+    "function() coroutine.yield(); local sum=0; for i=1,300 do "
+    "shared(9,(i%2==0) and a or b); sum=sum+i; "
+    "if i%30==0 then collectgarbage('collect') end "
+    "end; return true,sum end, function() coroutine.yield(); "
+    "local sum=0; for i=1,300 do shared(10); sum=sum+i end; "
+    "return true,sum end";
+
+static const char capi_conversion_source[] =
+    "local function actor(id) return function() "
+    "local convert=fixture_cclosure(0); coroutine.yield(); local sum=0; "
+    "for i=1,300 do local value=id*1000000+i; convert(1,value); "
+    "convert(11,value); for j=1,8 do collectgarbage('step') end; "
+    "assert(convert(8)==tostring(value)); sum=sum+i "
+    "end; return true,sum end end; return actor(1),actor(2)";
+
+static const char capi_borrowed_source[] =
+    "local shared=fixture_cclosure(string.rep('borrowed',32)); return "
+    "function() coroutine.yield(); shared(12); return true,45150 end, "
+    "function() coroutine.yield(); fixture_entered(); "
+    "debug.setupvalue(shared,1,'replacement'); collectgarbage('collect'); "
+    "for i=1,300 do local t={string.rep('other',32)..i} end; "
+    "collectgarbage('collect'); return true,45150 end";
+
 static void check(int status) {
   if (status != 0) {
     fprintf(stderr, "parallel fixture synchronization failed: %d\n", status);
@@ -332,8 +397,7 @@ static struct fixture *native_context(lua_State *state) {
   return lua_touserdata(state, lua_upvalueindex(1));
 }
 
-static int native_wait(lua_State *state) {
-  struct fixture *fixture = native_context(state);
+static void wait_fixture(lua_State *state, struct fixture *fixture) {
   LuaObjectScope *scope;
   for (scope = state->object_scopes; scope != NULL; scope = scope->previous)
     if (scope->held)
@@ -344,6 +408,10 @@ static int native_wait(lua_State *state) {
   while (!fixture->release_native)
     check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
   check(pthread_mutex_unlock(&fixture->mutex));
+}
+
+static int native_wait(lua_State *state) {
+  wait_fixture(state, native_context(state));
   return 0;
 }
 
@@ -439,6 +507,211 @@ static int native_join_api(lua_State *state) {
     abort();
   lua_pop(state, 1);
   return 0;
+}
+
+static char pointer_key;
+
+static int native_shared(lua_State *state) {
+  int mode = (int)lua_tointeger(state, 1);
+  int slot = lua_upvalueindex(1);
+  if (mode == 1) {
+    int top = lua_gettop(state);
+    int i;
+    for (i = 2; i <= top; ++i) {
+      if (i == 3) {
+        lua_pushinteger(state, 17);
+        lua_rawsetp(state, i, &pointer_key);
+      }
+      lua_copy(state, i, lua_upvalueindex(i - 1));
+    }
+  } else if (mode == 0) {
+    char buffer[64];
+    size_t length;
+    unsigned digits;
+    int numeric;
+    lua_Number number;
+    lua_Integer integer;
+    const char *text;
+    int type = lua_type(state, slot);
+    if (type < LUA_TNIL || type > LUA_TTHREAD ||
+        lua_type(state, lua_upvalueindex(256)) != LUA_TNONE)
+      abort();
+    (void)lua_iscfunction(state, slot);
+    (void)lua_isinteger(state, slot);
+    (void)lua_isnumber(state, slot);
+    (void)lua_isstring(state, slot);
+    (void)lua_isuserdata(state, slot);
+    (void)lua_toboolean(state, slot);
+    (void)lua_tocfunction(state, slot);
+    (void)lua_touserdata(state, slot);
+    (void)lua_tothread(state, slot);
+    (void)lua_topointer(state, slot);
+    (void)lua_rawlen(state, slot);
+    number = lua_tonumberx(state, slot, &numeric);
+    if ((numeric && number != 7) || (!numeric && number != 0))
+      abort();
+    integer = lua_tointegerx(state, slot, &numeric);
+    if ((numeric && integer != 7) || (!numeric && integer != 0))
+      abort();
+    digits = lua_numbertocstring(state, slot, buffer);
+    if (digits != 0 && (digits != 2 || strcmp(buffer, "7") != 0))
+      abort();
+    /* These two strings also have independent roots in the Lua fixture. */
+    text = lua_tolstring(state, slot, &length);
+    if (text != NULL && (length != strlen(text) ||
+                         (strcmp(text, "7") != 0 && strcmp(text, "word") != 0)))
+      abort();
+    if (!lua_rawequal(state, slot, slot) ||
+        !lua_compare(state, slot, slot, LUA_OPEQ))
+      abort();
+    lua_pushvalue(state, slot);
+    if (lua_type(state, -1) == LUA_TNONE)
+      abort();
+    lua_pop(state, 1);
+  } else if (mode == 2) {
+    int table = lua_upvalueindex(2);
+    lua_pushliteral(state, "token");
+    lua_gettable(state, table);
+    lua_getfield(state, table, "token");
+    lua_geti(state, table, 1);
+    lua_pushliteral(state, "token");
+    lua_rawget(state, table);
+    lua_rawgeti(state, table, 1);
+    lua_rawgetp(state, table, &pointer_key);
+    if (lua_tointeger(state, -6) != 17 || lua_tointeger(state, -5) != 17 ||
+        lua_tointeger(state, -4) != 7 || lua_tointeger(state, -3) != 17 ||
+        lua_tointeger(state, -2) != 7 || lua_tointeger(state, -1) != 17)
+      abort();
+    lua_pop(state, 6);
+    lua_pushliteral(state, "hot");
+    lua_pushinteger(state, 17);
+    lua_settable(state, table);
+    lua_pushinteger(state, 17);
+    lua_setfield(state, table, "hot");
+    lua_pushinteger(state, 7);
+    lua_seti(state, table, 1);
+    lua_pushliteral(state, "hot");
+    lua_pushinteger(state, 17);
+    lua_rawset(state, table);
+    lua_pushinteger(state, 7);
+    lua_rawseti(state, table, 1);
+    lua_pushinteger(state, 17);
+    lua_rawsetp(state, table, &pointer_key);
+    lua_pushnil(state);
+    if (!lua_next(state, table))
+      abort();
+    lua_pop(state, 2);
+    if (lua_getmetatable(state, table))
+      lua_pop(state, 1);
+    lua_pushnil(state);
+    lua_setmetatable(state, table);
+    lua_len(state, table);
+    if (lua_tointeger(state, -1) != 1)
+      abort();
+    lua_pop(state, 1);
+  } else if (mode == 3) {
+    int userdata = lua_upvalueindex(3);
+    lua_pushinteger(state, 7);
+    if (!lua_setiuservalue(state, userdata, 1) ||
+        lua_getiuservalue(state, userdata, 1) != LUA_TNUMBER ||
+        lua_tointeger(state, -1) != 7 || lua_rawlen(state, userdata) != 1 ||
+        *(unsigned char *)lua_touserdata(state, userdata) != 42)
+      abort();
+    lua_pop(state, 1);
+    lua_pushnil(state);
+    lua_setmetatable(state, userdata);
+  } else if (mode == 4) {
+    int function = lua_upvalueindex(4);
+    lua_upvaluejoin(state, function, 1, 2, 1);
+    lua_pushinteger(state, 7);
+    if (lua_setupvalue(state, function, 1) == NULL ||
+        lua_getupvalue(state, function, 1) == NULL ||
+        lua_tointeger(state, -1) != 7 ||
+        lua_upvalueid(state, function, 1) == NULL)
+      abort();
+    lua_pop(state, 1);
+  } else if (mode == 5) {
+    struct fixture *fixture;
+    void *user;
+    (void)lua_getallocf(state, &user);
+    fixture = user;
+    check(pthread_mutex_lock(&fixture->mutex));
+    fixture->failure_carrier = pthread_self();
+    fixture->failures_left = 2;
+    check(pthread_mutex_unlock(&fixture->mutex));
+    (void)lua_tolstring(state, slot, NULL);
+    abort();
+  } else if (mode == 6) {
+    lua_getfield(state, slot, "missing");
+    return 1;
+  } else if (mode == 8) {
+    lua_pushvalue(state, slot);
+    return 1;
+  } else if (mode == 9) {
+    lua_copy(state, 2, LUA_REGISTRYINDEX);
+  } else if (mode == 10) {
+    lua_getglobal(state, "registry_token");
+    if (lua_isinteger(state, -1)) {
+      if (lua_tointeger(state, -1) != 7)
+        abort();
+    } else if (strcmp(lua_tostring(state, -1), "word") != 0)
+      abort();
+    lua_pop(state, 1);
+    lua_pushinteger(state, 7);
+    lua_setglobal(state, "registry_aux");
+    lua_getglobal(state, "registry_aux");
+    if (!lua_isnil(state, -1) && lua_tointeger(state, -1) != 7)
+      abort();
+    lua_pop(state, 1);
+  } else if (mode == 11) {
+    char expected[64];
+    const char *text;
+    size_t length;
+    lua_Integer number = lua_tointeger(state, 2);
+    int count = snprintf(expected, sizeof(expected), "%lld", (long long)number);
+    if (count < 0 || (size_t)count >= sizeof(expected))
+      abort();
+    text = lua_tolstring(state, slot, &length);
+    if (text == NULL || length != (size_t)count || strcmp(text, expected) != 0)
+      abort();
+  } else if (mode == 12) {
+    const char *text;
+    size_t length, i;
+    void *user;
+    lua_pushvalue(state, slot); /* ordinary API root, independent of capture */
+    text = lua_tolstring(state, -1, &length);
+    if (text == NULL || length != 256)
+      abort();
+    (void)lua_getallocf(state, &user);
+    wait_fixture(state, user);
+    for (i = 0; i < length; i += 8)
+      if (memcmp(text + i, "borrowed", 8) != 0)
+        abort();
+    lua_pop(state, 1);
+  } else
+    abort();
+  return 0;
+}
+
+static int native_cclosure(lua_State *state) {
+  int n = lua_gettop(state);
+  int i;
+  if (n > 1) {
+    lua_pushinteger(state, 17);
+    lua_rawsetp(state, 2, &pointer_key);
+  }
+  for (i = 1; i <= n; ++i)
+    lua_pushvalue(state, i);
+  lua_pushcclosure(state, native_shared, n);
+  return 1;
+}
+
+static int native_udnew(lua_State *state) {
+  unsigned char *payload = lua_newuserdatauv(state, 1, 2);
+  *payload = 42;
+  lua_pushinteger(state, 7);
+  (void)lua_setiuservalue(state, -2, 1);
+  return 1;
 }
 
 static int fail_allocation(lua_State *state) {
@@ -568,6 +841,18 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
     source = join_open_source;
   else if (strncmp(name, "join_", 5) == 0)
     source = join_source;
+  else if (strcmp(name, "capi_failure") == 0)
+    source = capi_failure_source;
+  else if (strcmp(name, "capi_blocked") == 0)
+    source = capi_blocked_source;
+  else if (strcmp(name, "capi_borrowed") == 0)
+    source = capi_borrowed_source;
+  else if (strncmp(name, "capi_conversion", 15) == 0)
+    source = capi_conversion_source;
+  else if (strncmp(name, "capi_registry", 13) == 0)
+    source = registry_source;
+  else if (strncmp(name, "capi_", 5) == 0)
+    source = capi_source;
   else if (strncmp(name, "table_", 6) == 0)
     source = table_source;
   else
@@ -580,6 +865,14 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
   lua_setglobal(main, "fixture_userdata_api");
   lua_pushcfunction(main, native_join_api);
   lua_setglobal(main, "fixture_join_api");
+  lua_pushcfunction(main, native_cclosure);
+  lua_setglobal(main, "fixture_cclosure");
+  lua_pushcfunction(main, native_udnew);
+  lua_setglobal(main, "fixture_udnew");
+  lua_pushinteger(main, LUA_RIDX_GLOBALS);
+  lua_setglobal(main, "fixture_registry_globals");
+  lua_pushlightuserdata(main, &pointer_key);
+  lua_setglobal(main, "fixture_lighttoken");
   (void)lua_newuserdatauv(main, 1, 2);
   lua_setglobal(main, "fixture_userdata");
   lua_pushcfunction(main, native_setcapture);
@@ -719,7 +1012,7 @@ static int verify_results(struct fixture *fixture, const char *name) {
     }
   }
   if ((strncmp(name, "table_", 6) == 0 && strstr(name, "blocked") == NULL) ||
-      strncmp(name, "join_", 5) == 0)
+      strncmp(name, "join_", 5) == 0 || strncmp(name, "capi_", 5) == 0)
     return first->results != 2 || !lua_toboolean(first->state, -2) ||
            lua_tointeger(first->state, -1) != 45150 || second->results != 2 ||
            !lua_toboolean(second->state, -2) ||
@@ -754,17 +1047,19 @@ int main(int argc, char **argv) {
   lua_State *main_state;
   int cpus[2] = {-1, -1};
   int cpu, i, created = 0, failed = 0;
-  int allocation_case, table_case, join_case;
+  int allocation_case, table_case, join_case, capi_case;
   unsigned before_allocations;
   if (argc != 2)
     return 2;
   memset(&fixture, 0, sizeof(fixture));
   table_case = strncmp(argv[1], "table_", 6) == 0;
   join_case = strncmp(argv[1], "join_", 5) == 0;
-  allocation_case =
-      strncmp(argv[1], "allocate", 8) == 0 || table_case || join_case;
+  capi_case = strncmp(argv[1], "capi_", 5) == 0;
+  allocation_case = strncmp(argv[1], "allocate", 8) == 0 || table_case ||
+                    join_case || capi_case;
   fixture.inject_failure = strcmp(argv[1], "allocate_failure") == 0 ||
-                           strcmp(argv[1], "table_failure") == 0;
+                           strcmp(argv[1], "table_failure") == 0 ||
+                           strcmp(argv[1], "capi_failure") == 0;
   fixture.resume_yields = strcmp(argv[1], "table_yield") == 0;
   if (sched_getaffinity(0, sizeof(available), &available) != 0)
     return 1;
@@ -808,7 +1103,8 @@ int main(int argc, char **argv) {
       (void)lua_gc(main_state, LUA_GCGEN);
     if (strcmp(argv[1], "allocate_stopped") != 0 &&
         strcmp(argv[1], "table_stopped") != 0 &&
-        strcmp(argv[1], "join_stopped") != 0 && !fixture.inject_failure)
+        strcmp(argv[1], "join_stopped") != 0 &&
+        strcmp(argv[1], "capi_stopped") != 0 && !fixture.inject_failure)
       (void)lua_gc(main_state, LUA_GCRESTART);
   }
   before_allocations = fixture.allocations;
@@ -841,6 +1137,8 @@ int main(int argc, char **argv) {
                   strcmp(argv[1], "allocate_blocked") == 0 ||
                   strcmp(argv[1], "table_blocked") == 0 ||
                   strcmp(argv[1], "table_handler_blocked") == 0 ||
+                  strcmp(argv[1], "capi_blocked") == 0 ||
+                  strcmp(argv[1], "capi_borrowed") == 0 ||
                   strncmp(argv[1], "join_open", 9) == 0)) {
     check(pthread_mutex_lock(&fixture.mutex));
     while (!fixture.native_entered)
@@ -861,8 +1159,9 @@ int main(int argc, char **argv) {
         check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
       check(pthread_mutex_unlock(&fixture.mutex));
       check(pthread_mutex_lock(&world->mutex));
-      while ((table_case ? fixture.actors[1].state->object_waiting
-                         : fixture.actors[1].state->heap_waiting) == 0)
+      while (((table_case || capi_case)
+                  ? fixture.actors[1].state->object_waiting
+                  : fixture.actors[1].state->heap_waiting) == 0)
         check(pthread_cond_wait(&world->changed, &world->mutex));
       failed |= world->active != 1 || world->heap_depth == 0 ||
                 fixture.actors[1].state->native_depth == 0 ||
@@ -883,9 +1182,9 @@ int main(int argc, char **argv) {
   if (fixture.resume_yields)
     failed |= fixture.actors[0].yields != 6;
   if (allocation_case && strcmp(argv[1], "table_handler_blocked") != 0)
-    failed |=
-        fixture.allocations - before_allocations < (table_case ? 1U : 1000U);
-  if (allocation_case && !table_case && !join_case) {
+    failed |= fixture.allocations - before_allocations <
+              ((table_case || capi_case) ? 1U : 1000U);
+  if (allocation_case && !table_case && !join_case && !capi_case) {
     failed |= fixture.resources_created !=
               (strcmp(argv[1], "allocate_blocked") == 0 ? 500U : 1000U);
     if (strcmp(argv[1], "allocate_stopped") == 0)
