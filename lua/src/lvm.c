@@ -828,21 +828,32 @@ lua_Integer luaV_shiftl (lua_Integer x, lua_Integer y) {
 ** create a new Lua closure, push it in the stack, and initialize
 ** its upvalues.
 */
-static void pushclosure (lua_State *L, Proto *p, UpVal **encup, StkId base,
+static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base,
                          StkId ra) {
   int nup = p->sizeupvalues;
   Upvaldesc *uv = p->upvalues;
+  LuaNativeRoot closure, capture;
+  ptrdiff_t base_offset = savestack(L, base);
+  ptrdiff_t target_offset = savestack(L, ra);
   int i;
-  LClosure *ncl = luaF_newLclosure(L, nup);
+  LClosure *ncl;
+  luaR_pushroot(L, &closure);
+  luaR_pushroot(L, &capture);
+  ncl = luaF_newLclosure(L, nup);
   ncl->p = p;
-  setclLvalue2s(L, ra, ncl);  /* anchor new closure in stack */
+  setclLvalue(L, &closure.value, ncl);
   for (i = 0; i < nup; i++) {  /* fill in its upvalues */
     if (uv[i].instack)  /* upvalue refers to local variable? */
-      ncl->upvals[i] = luaF_findupval(L, base + uv[i].idx);
-    else  /* get upvalue from enclosing function */
-      ncl->upvals[i] = encup[uv[i].idx];
+      ncl->upvals[i] = luaF_findupval(L, restorestack(L, base_offset) + uv[i].idx);
+    else {  /* snapshot the enclosing capture before publishing the child */
+      luaF_getcapture(L, enclosing, uv[i].idx, &capture);
+      ncl->upvals[i] = gco2upv(gcvalue(&capture.value));
+    }
     luaC_objbarrier(L, ncl, ncl->upvals[i]);
   }
+  setclLvalue2s(L, restorestack(L, target_offset), ncl);
+  luaR_poproot(L, &capture);
+  luaR_poproot(L, &closure);
 }
 
 
@@ -1296,7 +1307,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         int b = GETARG_B(i);
         savestate(L, ci);
         luaR_pushroot(L, &value);
-        luaF_readupval(L, cl->upvals[b], &value);
+        luaF_readcapture(L, cl, b, &value);
         updatebase(ci);
         setobj2s(L, RA(i), &value.value);
         luaR_poproot(L, &value);
@@ -1304,9 +1315,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       }
       vmcase(OP_SETUPVAL) {
         StkId ra = RA(i);
-        UpVal *uv = cl->upvals[GETARG_B(i)];
         savestate(L, ci);
-        luaF_writeupval(L, uv, s2v(ra));
+        luaF_writecapture(L, cl, GETARG_B(i), s2v(ra));
         updatebase(ci);
         vmbreak;
       }
@@ -1319,7 +1329,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         lu_byte tag;
         savestate(L, ci);
         luaR_pushroot(L, &snapshot);
-        luaF_readupval(L, cl->upvals[GETARG_B(i)], &snapshot);
+        luaF_readcapture(L, cl, GETARG_B(i), &snapshot);
         updatebase(ci);
         ra = RA(i);
         luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
@@ -1375,7 +1385,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         TString *key = tsvalue(rb);  /* key must be a short string */
         savestate(L, ci);
         luaR_pushroot(L, &snapshot);
-        luaF_readupval(L, cl->upvals[GETARG_A(i)], &snapshot);
+        luaF_readcapture(L, cl, GETARG_A(i), &snapshot);
         updatebase(ci);
         rc = RKC(i);
         luaV_fastset(upval, key, rc, hres, luaH_psetshortstr);
@@ -1951,7 +1961,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       vmcase(OP_CLOSURE) {
         StkId ra = RA(i);
         Proto *p = cl->p->p[GETARG_Bx(i)];
-        halfProtect(pushclosure(L, p, cl->upvals, base, ra));
+        halfProtect(pushclosure(L, p, cl, base, ra));
         checkGC(L, ra + 1);
         vmbreak;
       }

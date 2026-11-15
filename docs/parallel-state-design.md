@@ -1,7 +1,7 @@
 # Parallel shared-VM design investigation
 
-Status: candidate with private execution, GC, allocation and shared-container
-experiments, 2026-11-15. The public API audit and scheduler remain unfinished;
+Status: candidate with private shared-VM experiments, 2026-11-15.
+The public API audit and scheduler remain unfinished;
 no public scheduler API is frozen.
 
 ## Required result
@@ -331,10 +331,54 @@ forces emergency collection and failed retry, then requires correct recovery
 and continued use. The yield case collects between each of six metamethod
 continuations. Stopped, incremental and generational collection are covered.
 
-These fixtures extend the private feasibility evidence. Closure-array/C-capture
-mutation, debug and hook boundaries, native/module globals and resource affinity
-still need their full audit. Automatic scheduling, migration, carrier reuse,
-admission limits, compatibility and performance gates remain required.
+These fixtures extend the private feasibility evidence. The closure experiment
+below addresses Lua closure arrays. C captures, debug/hook boundaries,
+native/module globals and resource affinity still need their full audit.
+Automatic scheduling, migration, carrier reuse, admission limits, compatibility
+and performance gates remain required.
+
+## Lua closure and API ownership experiment
+
+Lua closures now have object ownership for their mutable capture arrays.
+Selecting a cell copies its identity into a native root while the closure is
+protected. The closure scope ends before reading or writing that cell through
+its existing value/stack-gate protocol. This avoids retaining a closure lock
+while waiting for a foreign coroutine. A concurrent join can change the slot
+after selection; an operation already using the selected cell retains that
+cell until its own transfer finishes.
+
+VM capture reads/writes, child-closure inheritance and Lua get/setupvalue use
+this selection protocol. Joining two closures acquires them in address order,
+copies the source cell identity and performs the barrier before releasing
+ownership. Self-joins use one scope. The collector continues to read arrays
+under quiescence. Partially initialized child closures live in native roots and
+are published to their destination register only after their captures are
+filled. Debug error-description lookup also snapshots cells and avoids reading
+a foreign open stack address while that owner can relocate it.
+
+Five `parallel_vm_join_*` cases repeatedly replace cells using fresh donors,
+join in opposite directions, inherit child captures, read/write typed values
+through Lua and native APIs, and collect. Error-producing shared closures run
+while another coroutine joins their captures. Live-owner cases also require
+completion while the owning frame remains open inside an unchanged blocked
+native call. Cases cover stopped automatic collection and incremental and
+generational modes; explicit collection is still requested by the fixture.
+
+The API audit also removed stack reads after ownership release in
+`lua_tolstring`, moved `lua_dump`'s initial stack reads after entry, and copies
+the remaining pointer/scalar results in the touched API tails before unlock.
+`tests/api_ownership_test.c` injects real collection at the exact native entry
+or exit boundary. The collector must move the coroutine's excess stack, and a
+fixture allocator clears the retained old allocation. String getters must
+return correct bytes/length, and dumped bytecode must reload and return 42.
+The tests run on a default-stack worker and verify allocation balance.
+
+This closes the exercised Lua closure-array and API boundary gaps, not the full
+native API audit. C closure pseudo-index access and borrowed-pointer lifetimes,
+registry replacement, cross-coroutine stack moves/resume, signal/debug-hook
+settings, and native resources/module globals remain outstanding. General
+embedding access still requires serialization until these boundaries and the
+scheduler are complete.
 
 ## Lua-specific proof obligations
 

@@ -218,6 +218,57 @@ static const char table_yield_source[] =
     "function() coroutine.yield(); for i=1,300 do rawset(t,i,i); "
     "mt['key'..i]={i}; assert(t[i]==i) end; return true,45150 end";
 
+static const char join_source[] =
+    "local left,right=7,'word'; local function self() return left,right end; "
+    "debug.upvaluejoin(self,1,self,2); local v,w=self(); "
+    "assert(v=='word' and w=='word'); "
+    "local function cell(x) return function(v) if v~=nil then x=v end; "
+    "return x end,function() return function() return x end end, "
+    "function() return x+1 end end; "
+    "local a,makea,bad=cell(7); local b,makeb=cell('word'); "
+    "local function valid(v) return v==7 or v=='word' or "
+    "(type(v)=='table' and v.n==7) end; "
+    "local function actor(to,other,factory,otherfactory) return function() "
+    "coroutine.yield(); local sum=0; for i=1,300 do "
+    "local v=(i%3==0) and {n=7} or ((i%2==0) and 7 or 'word'); "
+    "local donor=cell(v); debug.upvaluejoin(to,1,donor,1); "
+    "assert(valid(to(v))); debug.upvaluejoin(factory,1,to,1); "
+    "assert(valid(factory()()) and valid(otherfactory()())); "
+    "debug.upvaluejoin(to,1,other,1); fixture_join_api(to,other,v); "
+    "debug.upvaluejoin(bad,1,to,1); local ok,result=pcall(bad); "
+    "assert((ok and result==8) or (not ok and type(result)=='string' "
+    "and (result:match('arithmetic') or result:match('attempt to "
+    "add'))),result); "
+    "assert(debug.upvalueid(to,1)~=nil); sum=sum+i; "
+    "if i%50==0 then collectgarbage('collect') end "
+    "end; return true,sum end end; "
+    "return actor(a,b,makea,makeb),actor(b,a,makeb,makea)";
+
+static const char join_open_source[] =
+    "return function() local x=7; local function anchor(v) "
+    "if v~=nil then x=v end; return x end; "
+    "local function active(v) if v~=nil then x=v end; return x end; "
+    "local function make() return function() return x end end; "
+    "coroutine.yield(anchor,active,make); local sum=0; "
+    "for i=1,300 do local v=x; assert(v==7 or v=='word' or "
+    "(type(v)=='table' and v.n==7)); local f=make(); v=f(); "
+    "assert(v==7 or v=='word' or (type(v)=='table' and v.n==7)); "
+    "sum=sum+i end; fixture_wait(); return true,sum end";
+
+static const char join_reader_source[] =
+    "local anchor,active,make=...; local function cell(x) "
+    "return function() return x end end; "
+    "return function() coroutine.yield(); local sum=0; for i=1,300 do "
+    "if i==150 then fixture_entered() end; "
+    "local v=(i%3==0) and {n=7} or ((i%2==0) and 7 or 'word'); "
+    "local donor=cell(v); debug.upvaluejoin(active,1,donor,1); "
+    "debug.upvaluejoin(make,1,active,1); local f=make(); local value=f(); "
+    "assert(value==7 or value=='word' or "
+    "(type(value)=='table' and value.n==7)); "
+    "fixture_join_api(active,anchor,v); sum=sum+i; "
+    "if i%50==0 then collectgarbage('collect') end "
+    "end; return true,sum end";
+
 static void check(int status) {
   if (status != 0) {
     fprintf(stderr, "parallel fixture synchronization failed: %d\n", status);
@@ -360,6 +411,36 @@ static int native_userdata_api(lua_State *state) {
   return 0;
 }
 
+static int native_join_api(lua_State *state) {
+  int top;
+  lua_upvaluejoin(state, 1, 1, 1, 1);
+  lua_upvaluejoin(state, 1, 1, 2, 1);
+  lua_pushvalue(state, 3);
+  if (lua_setupvalue(state, 1, 1) == NULL ||
+      lua_getupvalue(state, 1, 1) == NULL || lua_upvalueid(state, 1, 1) == NULL)
+    abort();
+  if (lua_istable(state, -1)) {
+    lua_getfield(state, -1, "n");
+    if (lua_tointeger(state, -1) != 7)
+      abort();
+  } else if (lua_isinteger(state, -1)) {
+    if (lua_tointeger(state, -1) != 7)
+      abort();
+  } else if (!lua_isstring(state, -1) ||
+             strcmp(lua_tostring(state, -1), "word") != 0)
+    abort();
+  top = lua_gettop(state);
+  if (lua_getupvalue(state, 1, 0) != NULL ||
+      lua_upvalueid(state, 1, 0) != NULL ||
+      lua_upvalueid(state, 1, 256) != NULL || lua_gettop(state) != top)
+    abort();
+  lua_pushvalue(state, 3);
+  if (lua_setupvalue(state, 1, 0) != NULL || lua_gettop(state) != top + 1)
+    abort();
+  lua_pop(state, 1);
+  return 0;
+}
+
 static int fail_allocation(lua_State *state) {
   struct fixture *fixture;
   void *user;
@@ -483,6 +564,10 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
     source = table_handler_source;
   else if (strcmp(name, "table_yield") == 0)
     source = table_yield_source;
+  else if (strncmp(name, "join_open", 9) == 0)
+    source = join_open_source;
+  else if (strncmp(name, "join_", 5) == 0)
+    source = join_source;
   else if (strncmp(name, "table_", 6) == 0)
     source = table_source;
   else
@@ -493,6 +578,8 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
   lua_setglobal(main, "fixture_table_api");
   lua_pushcfunction(main, native_userdata_api);
   lua_setglobal(main, "fixture_userdata_api");
+  lua_pushcfunction(main, native_join_api);
+  lua_setglobal(main, "fixture_join_api");
   (void)lua_newuserdatauv(main, 1, 2);
   lua_setglobal(main, "fixture_userdata");
   lua_pushcfunction(main, native_setcapture);
@@ -524,8 +611,23 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
       return 1;
     lua_replace(main, 1);
   }
-  if (strcmp(name, "open") == 0 || strcmp(name, "api") == 0 ||
-      strncmp(name, "allocate_open", 13) == 0) {
+  if (strncmp(name, "join_open", 9) == 0) {
+    lua_State *owner = prepare_actor(main, 1, &fixture->actors[0], 3);
+    int first_argument;
+    if (owner == NULL)
+      return 1;
+    lua_xmove(owner, main, 3);
+    first_argument = lua_gettop(main) - 2;
+    if (luaL_loadstring(main, join_reader_source) != LUA_OK)
+      return 1;
+    lua_pushvalue(main, first_argument);
+    lua_pushvalue(main, first_argument + 1);
+    lua_pushvalue(main, first_argument + 2);
+    if (lua_pcall(main, 3, 1, 0) != LUA_OK ||
+        prepare_actor(main, lua_gettop(main), &fixture->actors[1], 0) == NULL)
+      return 1;
+  } else if (strcmp(name, "open") == 0 || strcmp(name, "api") == 0 ||
+             strncmp(name, "allocate_open", 13) == 0) {
     lua_State *owner = prepare_actor(main, 1, &fixture->actors[0], 1);
     int reader_index;
     if (owner == NULL)
@@ -616,7 +718,8 @@ static int verify_results(struct fixture *fixture, const char *name) {
       return 1;
     }
   }
-  if (strncmp(name, "table_", 6) == 0 && strstr(name, "blocked") == NULL)
+  if ((strncmp(name, "table_", 6) == 0 && strstr(name, "blocked") == NULL) ||
+      strncmp(name, "join_", 5) == 0)
     return first->results != 2 || !lua_toboolean(first->state, -2) ||
            lua_tointeger(first->state, -1) != 45150 || second->results != 2 ||
            !lua_toboolean(second->state, -2) ||
@@ -651,13 +754,15 @@ int main(int argc, char **argv) {
   lua_State *main_state;
   int cpus[2] = {-1, -1};
   int cpu, i, created = 0, failed = 0;
-  int allocation_case, table_case;
+  int allocation_case, table_case, join_case;
   unsigned before_allocations;
   if (argc != 2)
     return 2;
   memset(&fixture, 0, sizeof(fixture));
   table_case = strncmp(argv[1], "table_", 6) == 0;
-  allocation_case = strncmp(argv[1], "allocate", 8) == 0 || table_case;
+  join_case = strncmp(argv[1], "join_", 5) == 0;
+  allocation_case =
+      strncmp(argv[1], "allocate", 8) == 0 || table_case || join_case;
   fixture.inject_failure = strcmp(argv[1], "allocate_failure") == 0 ||
                            strcmp(argv[1], "table_failure") == 0;
   fixture.resume_yields = strcmp(argv[1], "table_yield") == 0;
@@ -702,7 +807,8 @@ int main(int argc, char **argv) {
     if (strstr(argv[1], "generational") != NULL)
       (void)lua_gc(main_state, LUA_GCGEN);
     if (strcmp(argv[1], "allocate_stopped") != 0 &&
-        strcmp(argv[1], "table_stopped") != 0 && !fixture.inject_failure)
+        strcmp(argv[1], "table_stopped") != 0 &&
+        strcmp(argv[1], "join_stopped") != 0 && !fixture.inject_failure)
       (void)lua_gc(main_state, LUA_GCRESTART);
   }
   before_allocations = fixture.allocations;
@@ -734,7 +840,8 @@ int main(int argc, char **argv) {
   if (!failed && (strcmp(argv[1], "blocked") == 0 ||
                   strcmp(argv[1], "allocate_blocked") == 0 ||
                   strcmp(argv[1], "table_blocked") == 0 ||
-                  strcmp(argv[1], "table_handler_blocked") == 0)) {
+                  strcmp(argv[1], "table_handler_blocked") == 0 ||
+                  strncmp(argv[1], "join_open", 9) == 0)) {
     check(pthread_mutex_lock(&fixture.mutex));
     while (!fixture.native_entered)
       check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
@@ -778,7 +885,7 @@ int main(int argc, char **argv) {
   if (allocation_case && strcmp(argv[1], "table_handler_blocked") != 0)
     failed |=
         fixture.allocations - before_allocations < (table_case ? 1U : 1000U);
-  if (allocation_case && !table_case) {
+  if (allocation_case && !table_case && !join_case) {
     failed |= fixture.resources_created !=
               (strcmp(argv[1], "allocate_blocked") == 0 ? 500U : 1000U);
     if (strcmp(argv[1], "allocate_stopped") == 0)

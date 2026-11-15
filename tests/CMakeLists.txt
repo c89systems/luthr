@@ -19,7 +19,8 @@ target_link_libraries(parallel_vm_test PRIVATE luthrum_static)
 foreach(case IN ITEMS closed open api cycle blocked allocate_stopped allocate_incremental
     allocate_generational allocate_failure allocate_open allocate_open_generational allocate_blocked
     table_stopped table_incremental table_generational table_meta_incremental table_meta_generational
-    table_blocked table_error table_failure table_handler_blocked table_yield)
+    table_blocked table_error table_failure table_handler_blocked table_yield
+    join_stopped join_incremental join_generational join_open_incremental join_open_generational)
   add_test(NAME parallel_vm_${case} COMMAND parallel_vm_test ${case})
   set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
@@ -55,6 +56,17 @@ target_link_options(world_unwind_test PRIVATE -Wl,--wrap=luaX_lockstate)
 foreach(case IN ITEMS warning_error warning_oom forwarded_gc)
   add_test(NAME world_unwind_${case} COMMAND world_unwind_test ${case})
   set_tests_properties(world_unwind_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
+endforeach()
+
+luthrum_test_program(api_ownership_test api_ownership_test.c)
+set_target_properties(api_ownership_test PROPERTIES C_STANDARD 99)
+target_compile_options(api_ownership_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(api_ownership_test PRIVATE luthrum_static)
+target_link_options(api_ownership_test PRIVATE
+  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate)
+foreach(case IN ITEMS string_pointer string_length dump_entry)
+  add_test(NAME api_ownership_${case} COMMAND api_ownership_test ${case})
+  set_tests_properties(api_ownership_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()
 
 luthrum_test_program(native_roots_test native_roots_test.c)

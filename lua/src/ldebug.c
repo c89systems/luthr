@@ -700,17 +700,31 @@ static int instack (CallInfo *ci, const TValue *o) {
 ** with instructions OP_GETTABUP/OP_SETTABUP, which operate directly on
 ** upvalues.)
 */
-static const char *getupvalname (CallInfo *ci, const TValue *o,
+static const char *getupvalname (lua_State *L, CallInfo *ci, const TValue *o,
                                  const char **name) {
   LClosure *c = ci_func(ci);
+  LuaNativeRoot capture;
+  const char *kind = NULL;
   int i;
+  luaR_pushroot(L, &capture);
   for (i = 0; i < c->nupvalues; i++) {
-    if (c->upvals[i]->v.p == o) {
+    UpVal *uv;
+    int matches;
+    luaF_getcapture(L, c, i, &capture);
+    uv = gco2upv(gcvalue(&capture.value));
+    luaX_checksync(pthread_mutex_lock(&uv->mutex));
+    /* A foreign open capture cannot alias this coroutine's register/root.
+    ** Its owner can relocate that stack without acquiring this gate. */
+    matches = (uv->owner == NULL || uv->owner == L) && uv->v.p == o;
+    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    if (matches) {
       *name = upvalname(c->p, i);
-      return strupval;
+      kind = strupval;
+      break;
     }
   }
-  return NULL;
+  luaR_poproot(L, &capture);
+  return kind;
 }
 
 
@@ -731,7 +745,7 @@ static const char *varinfo (lua_State *L, const TValue *o) {
   const char *name = NULL;  /* to avoid warnings */
   const char *kind = NULL;
   if (isLua(ci)) {
-    kind = getupvalname(ci, o, &name);  /* check whether 'o' is an upvalue */
+    kind = getupvalname(L, ci, o, &name);  /* check whether 'o' is an upvalue */
     if (!kind) {  /* not an upvalue? */
       int reg = instack(ci, o);  /* try a register */
       if (reg >= 0)  /* is 'o' a register? */

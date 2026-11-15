@@ -902,6 +902,7 @@ static void freeobj (lua_State *L, GCObject *o) {
       break;
     case LUA_VLCL: {
       LClosure *cl = gco2lcl(o);
+      lua_assert(cl->access.depth == 0);
       luaM_freemem(L, cl, sizeLclosure(cl->nupvalues));
       break;
     }

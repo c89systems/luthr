@@ -717,6 +717,7 @@ typedef struct CClosure {
 typedef struct LClosure {
   ClosureHeader;
   struct Proto *p;
+  LuaObjectLock access;
   UpVal *upvals[1];  /* list of upvalues */
 } LClosure;
 

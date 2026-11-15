@@ -43,8 +43,9 @@ and [C89 facade provenance](cpkt-source.md).
 The [parallel-state investigation](parallel-state-design.md) compares
 free-threaded CPython and Go and records the first shared-VM candidate and its
 required evidence. Private shared-VM execution and collection experiments are
-implemented with explicit limits, including allocating coroutines, live captures
-and concurrent shared-table/metatable operations. The complete public API audit
+implemented with explicit limits, including allocating coroutines, live and
+joined captures, shared-table/metatable operations, and forced GC at API ownership
+boundaries. The complete public API audit
 and scheduler remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records

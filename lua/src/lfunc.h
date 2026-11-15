@@ -56,6 +56,14 @@ LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
                              struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
+LUAI_FUNC void luaF_getcapture (lua_State *L, LClosure *closure, int n,
+                               struct LuaNativeRoot *capture);
+LUAI_FUNC void luaF_readcapture (lua_State *L, LClosure *closure, int n,
+                                struct LuaNativeRoot *value);
+LUAI_FUNC void luaF_writecapture (lua_State *L, LClosure *closure, int n,
+                                 const TValue *value);
+LUAI_FUNC void luaF_joincaptures (lua_State *L, LClosure *to, int target,
+                                 LClosure *from, int source);
 LUAI_FUNC void luaF_newtbcupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_closeupval (lua_State *L, StkId level);
 LUAI_FUNC StkId luaF_close (lua_State *L, StkId level, TStatus status, int yy);

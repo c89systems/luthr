@@ -14,6 +14,7 @@
 
 #include "lua.h"
 
+#include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -36,6 +37,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
 LClosure *luaF_newLclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VLCL, sizeLclosure(nupvals));
   LClosure *c = gco2lcl(o);
+  c->access.depth = 0;
   c->p = NULL;
   c->nupvalues = cast_byte(nupvals);
   while (nupvals--) c->upvals[nupvals] = NULL;
@@ -144,6 +146,61 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   luaR_setroot(L, &transfer, value);
   transferupval(L, uv, &transfer, 1);
   luaR_poproot(L, &transfer);
+}
+
+/* Select a capture while its closure slot is stable, and retain that cell
+** before giving up ownership. Value transfers never retain a closure lock
+** across a foreign coroutine's stack-gate handoff. */
+void luaF_getcapture (lua_State *L, LClosure *closure, int n,
+                      LuaNativeRoot *capture) {
+  LuaObjectScope scope;
+  luaA_begin(L, obj2gco(closure), &scope);
+  lua_assert(0 <= n && n < closure->nupvalues && closure->upvals[n] != NULL);
+  setgcovalue(L, &capture->value, obj2gco(closure->upvals[n]));
+  luaA_end(L, &scope);
+}
+
+void luaF_readcapture (lua_State *L, LClosure *closure, int n,
+                       LuaNativeRoot *value) {
+  LuaNativeRoot capture;
+  luaR_pushroot(L, &capture);
+  luaF_getcapture(L, closure, n, &capture);
+  luaF_readupval(L, gco2upv(gcvalue(&capture.value)), value);
+  luaR_poproot(L, &capture);
+}
+
+void luaF_writecapture (lua_State *L, LClosure *closure, int n,
+                        const TValue *value) {
+  LuaNativeRoot transfer, capture;
+  luaR_pushroot(L, &transfer);
+  luaR_setroot(L, &transfer, value);
+  luaR_pushroot(L, &capture);
+  luaF_getcapture(L, closure, n, &capture);
+  luaF_writeupval(L, gco2upv(gcvalue(&capture.value)), &transfer.value);
+  luaR_poproot(L, &capture);
+  luaR_poproot(L, &transfer);
+}
+
+void luaF_joincaptures (lua_State *L, LClosure *to, int target,
+                        LClosure *from, int source) {
+  LuaObjectScope first, second;
+  LuaNativeRoot target_root, source_root;
+  int pair = to != from;
+  int targetfirst = cast(uintptr_t, to) < cast(uintptr_t, from);
+  luaR_pushroot(L, &target_root);
+  setclLvalue(L, &target_root.value, to);
+  luaR_pushroot(L, &source_root);
+  setclLvalue(L, &source_root.value, from);
+  luaA_begin(L, obj2gco(targetfirst ? to : from), &first);
+  if (pair)
+    luaA_begin(L, obj2gco(targetfirst ? from : to), &second);
+  lua_assert(to->upvals[target] != NULL && from->upvals[source] != NULL);
+  to->upvals[target] = from->upvals[source];
+  luaC_objbarrier(L, to, to->upvals[target]);
+  if (pair) luaA_end(L, &second);
+  luaA_end(L, &first);
+  luaR_poproot(L, &source_root);
+  luaR_poproot(L, &target_root);
 }
 
 
