@@ -1,6 +1,6 @@
 # Parallel shared-VM design investigation
 
-Status: candidate with an initial private execution experiment, 2026-11-15.
+Status: candidate with private execution and GC experiments, 2026-11-15.
 The full concurrent heap and scheduler remain unimplemented; no public scheduler
 API is frozen.
 
@@ -159,6 +159,62 @@ check memory/resource balance and continued VM use where construction survived.
 The tests run on native GNU and musl workers with the normal stack constraints.
 These gates narrow implementation uncertainty without satisfying the remaining
 acceptance requirements below.
+
+## Collection rendezvous experiment
+
+`lua/src/lworld.c` tracks managed participation. A coroutine reserves its stack
+gate before entering managed execution; waiting for that gate does not count as
+an active mutator. Entry waits for an existing collection pause to end. Exit
+releases the physical stack gate before dropping participation, so collection
+cannot reclaim a state while its final gate access is still in progress. The
+world mutex is released during ordinary bytecode execution.
+
+A collection request prevents new managed entries and waits for current ones
+to reach a VM poll, detach for native work, or finish their API entry. Competing
+collectors park as pinned inactive mutators before retrying. GC steps, full
+collections and explicit GC options use this rendezvous. Finalizers suspend the
+pause before executing Lua, then reacquire exclusive collection access before
+continuing collector work. Native callback boundaries also suspend an enclosing
+pause when necessary.
+
+Native calls, continuations, debug hooks, reader/writer callbacks, warnings and
+temporary stack handoffs retain a coroutine pin while detached. Collection
+marks these pinned coroutines independently of their ordinary Lua references,
+including their stack and private snapshot roots. Protected unwinding restores
+the enclosing native and collection depths, including successful self-close;
+unprotected error forwarding and panic abandon the affected state's scopes.
+Ordinary stack/conversion getters now enter managed execution too. Public
+handles still need ordinary Lua roots between host calls.
+
+`tests/gc_rendezvous_test.c` removes the ordinary reference to an entered
+coroutine and requests collection from another carrier. Explicit acknowledgments
+hold a pure-Lua worker inside dispatch until a collection request is pending.
+The tests require the worker and its userdata to survive four collections, and
+verify exactly-once finalization during cleanup. Native-wait cases require
+collection to complete before releasing the unchanged blocking binding.
+Competing-request cases initiate a second real collection from the managed
+worker while the first request is pending. Both incremental and generational
+modes are exercised.
+
+An unrelated Lua finalizer must run outside the collection pause. In managed
+cases its native continuation withholds completion until another VM poll proves
+worker progress. `tests/world_unwind_test.c` raises an error from a finalizer's
+warning callback, abandoning the collector/native chain; an allocation-failure
+variant first forces emergency collection inside the finalizer. Both require
+retired pins/pauses, exactly-once cleanup and subsequent VM use.
+An error-forwarding case injects two real collections between a child's detach
+and its parent's entry, with no ordinary reference to the child. Its userdata
+error must stay alive until copied to the parent and be finalized exactly once
+after the parent releases it.
+
+These remain constrained experiments. Ordinary workers cannot allocate during
+overlap; allocation belongs to the collector carrier, or to the competing worker
+while it exclusively collects. Finalizer execution is allowed on the collector
+carrier. This does not yet establish concurrent allocation, shared-container
+mutation, barrier/metadata synchronization or arbitrary native module safety.
+Debug-hook signal behavior, closure mutation and the remaining public API paths
+still require their parallel-safety audit. General embedding access remains
+serialized until these boundaries and the scheduler are complete.
 
 ## Lua-specific proof obligations
 

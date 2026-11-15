@@ -98,6 +98,7 @@ static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
                           int writing) {
   LuaNativeRoot upvalue_root, owner_root;
   lua_State *owner;
+  unsigned depth = 0;
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
   luaR_pushroot(L, &owner_root);
@@ -106,7 +107,7 @@ static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
   if (owner != NULL && owner != L) {
     setthvalue(L, &owner_root.value, owner);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
-    luaX_unlockstate(L);
+    depth = luaW_detach(L);
     luaX_lockstate(owner);
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
   }
@@ -119,7 +120,7 @@ static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   if (owner != NULL && owner != L) {
     luaX_unlockstate(owner);
-    luaX_lockstate(L);
+    luaW_attach(L, depth);
   }
   luaR_poproot(L, &owner_root);
   luaR_poproot(L, &upvalue_root);

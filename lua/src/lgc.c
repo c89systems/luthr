@@ -438,10 +438,19 @@ static void cleargraylists (global_State *g) {
 ** 'GCmarked' is initialized to count the total number of live bytes
 ** during a cycle.
 */
+static void marknativeframes (global_State *g) {
+  GCObject *object;
+  for (object = g->allgc; object != NULL; object = object->next) {
+    if (object->tt == LUA_VTHREAD && gco2th(object)->native_depth != 0)
+      markobject(g, gco2th(object));
+  }
+}
+
 static void restartcollection (global_State *g) {
   cleargraylists(g);
   g->GCmarked = 0;
   markobject(g, mainthread(g));
+  marknativeframes(g);
   markvalue(g, &g->l_registry);
   markmt(g);
   markbeingfnz(g);  /* mark any finalizing object left from previous cycle */
@@ -985,13 +994,16 @@ static void GCTM (lua_State *L) {
     TStatus status;
     lu_byte oldah = L->allowhook;
     lu_byte oldgcstp  = g->gcstp;
+    unsigned depth;
     g->gcstp |= GCSTPGC;  /* avoid GC steps */
     /* Embedding limits also account for Lua finalizer instructions. */
     L->allowhook = (L->hookmask & LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
+    depth = luaW_suspend(L);
     status = luaD_pcall(L, dothecall, NULL, savestack(L, L->top.p - 2), 0);
+    luaW_restore(L, depth, L->native_depth);
     L->ci->callstatus &= ~CIST_FIN;  /* not running a finalizer anymore */
     L->allowhook = oldah;  /* restore hooks */
     g->gcstp = oldgcstp;  /* restore state */
@@ -1559,6 +1571,7 @@ static void atomic (lua_State *L) {
   lua_assert(!iswhite(mainthread(g)));
   g->gcstate = GCSatomic;
   markobject(g, L);  /* mark running thread */
+  marknativeframes(g);
   /* registry and global metatables may be changed by API */
   markvalue(g, &g->l_registry);
   markmt(g);  /* mark global metatables */
@@ -1749,6 +1762,7 @@ static void incstep (lua_State *L, global_State *g) {
 */
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
+  luaW_stop(L);
   lua_assert(!g->gcemergency);
   if (!gcrunning(g)) {  /* not running? */
     if (g->gcstp & GCSTPUSR)  /* stopped by the user? */
@@ -1767,6 +1781,7 @@ void luaC_step (lua_State *L) {
     }
     luai_tracegc(L, 0);  /* for internal debugging */
   }
+  luaW_start(L);
 }
 
 
@@ -1795,6 +1810,7 @@ static void fullinc (lua_State *L, global_State *g) {
 */
 void luaC_fullgc (lua_State *L, int isemergency) {
   global_State *g = G(L);
+  luaW_stop(L);
   lua_assert(!g->gcemergency);
   g->gcemergency = cast_byte(isemergency);  /* set flag */
   switch (g->gckind) {
@@ -1807,6 +1823,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
       break;
   }
   g->gcemergency = 0;
+  luaW_start(L);
 }
 
 /* }====================================================== */

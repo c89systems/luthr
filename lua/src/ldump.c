@@ -51,9 +51,9 @@ typedef struct {
 */
 static void dumpBlock (DumpState *D, const void *b, size_t size) {
   if (D->status == 0) {  /* do not write anything after an error */
-    lua_unlock(D->L);
+    unsigned depth = luaW_detach(D->L);
     D->status = (*D->writer)(D->L, b, size, D->data);
-    lua_lock(D->L);
+    luaW_attach(D->L, depth);
     D->offset += size;
   }
 }

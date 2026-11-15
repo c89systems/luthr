@@ -300,6 +300,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->state_poll = NULL;
   L->state_poll_context = NULL;
   L->poll_remaining = 1024;
+  L->native_depth = L->world_depth = 0;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;
@@ -326,11 +327,16 @@ lu_mem luaE_threadsize (lua_State *L) {
 
 static void close_state (lua_State *L, int owns_gate) {
   global_State *g = G(L);
+  if (owns_gate)
+    luaW_stop(L);
   if (!completestate(g))  /* closing a partially built state? */
     luaC_freeallobjects(L);  /* just collect its objects */
   else {  /* closing a fully built state */
+    unsigned depth;
     resetCI(L);
+    depth = luaW_suspend(L);
     luaD_closeprotected(L, 1, LUA_OK);  /* close all upvalues */
+    luaW_restore(L, depth, L->native_depth);
     L->top.p = L->stack.p + 1;  /* empty the stack to run finalizers */
     luaC_freeallobjects(L);  /* collect all objects */
     luai_userstateclose(L);
@@ -338,9 +344,12 @@ static void close_state (lua_State *L, int owns_gate) {
   luaM_freearray(L, G(L)->strt.hash, cast_sizet(G(L)->strt.size));
   freestack(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
-  if (owns_gate)
+  if (owns_gate) {
+    luaW_start(L);
     lua_unlock(L);
+  }
   luaX_destroygate(&L->stack_gate);
+  luaW_destroy(&g->world);
   (*g->frealloc)(g->ud, g, sizeof(global_State), 0);  /* free main block */
 }
 
@@ -375,6 +384,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
 
 void luaE_freethread (lua_State *L, lua_State *L1) {
   LX *l = fromstate(L1);
+  lua_assert(L1->native_depth == 0 && L1->world_depth == 0);
   luaF_closeupval(L1, L1->stack.p);  /* close all upvalues */
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
@@ -421,6 +431,11 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->currentwhite = bitmask(WHITE0BIT);
   L->marked = luaC_white(g);
   if (preinit_thread(L, g) != 0) {
+    (*f)(ud, g, sizeof(global_State), 0);
+    return NULL;
+  }
+  if (luaW_init(&g->world) != 0) {
+    luaX_destroygate(&L->stack_gate);
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
@@ -479,9 +494,9 @@ void luaE_warning (lua_State *L, const char *msg, int tocont) {
   lua_WarnFunction wf = G(L)->warnf;
   void *context = G(L)->ud_warn;
   if (wf != NULL) {
-    lua_unlock(L);
+    unsigned depth = luaW_detach(L);
     wf(context, msg, tocont);
-    lua_lock(L);
+    luaW_attach(L, depth);
   }
 }
 

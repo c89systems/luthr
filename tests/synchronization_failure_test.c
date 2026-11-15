@@ -84,11 +84,12 @@ static int run_case(const char *name) {
   lua_State *state;
   int status = LUA_OK;
   int failed = 0;
-  int main_case = strncmp(name, "main_", 5) == 0;
+  int world_case = strncmp(name, "world_", 6) == 0;
+  int main_case = strncmp(name, "main_", 5) == 0 || world_case;
   int condition_case = strstr(name, "condition") != NULL;
   if (main_case) {
-    fail_mutex = !condition_case;
-    fail_condition = condition_case;
+    fail_mutex = condition_case ? 0 : (world_case ? 2 : 1);
+    fail_condition = condition_case ? (world_case ? 2 : 1) : 0;
   }
   state = lua_newstate(allocate, NULL, 0);
   if (main_case) {

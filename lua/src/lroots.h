@@ -11,6 +11,8 @@
 /* These private operations do not allocate. The caller owns the Lua state and
 ** supplies stable native storage in LIFO order. The source of a snapshot must
 ** be protected while copied. A root does not synchronize its mutable referent.
+** Parallel callers hold managed participation and appropriate stack ownership;
+** a detached native callback must reenter before modifying these private roots.
 ** Protected unwinding removes scopes abandoned by errors, yields or self-close;
 ** normal return preserves roots backed by the caller's still-live storage.
 ** An unprotected throw abandons this state's scopes before forwarding/panic.

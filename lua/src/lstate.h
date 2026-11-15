@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include "lua.h"
 #include "lgate.h"
+#include "lworld.h"
 
 
 /* Some header files included here need this definition */
@@ -331,6 +332,8 @@ struct lua_State {
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
   unsigned poll_remaining;
+  unsigned native_depth;
+  unsigned world_depth;
 };
 
 
@@ -347,6 +350,7 @@ typedef struct LX {
 ** 'global state', shared by all threads of this state
 */
 typedef struct global_State {
+  LuaWorld world;
   lua_Alloc frealloc;  /* function to reallocate memory */
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */

@@ -61,6 +61,13 @@ tests check cleanup after native mutex/condition initialization errors. See the
 [experiment's boundaries](parallel-state-design.md#initial-gated-stack-experiment);
 these checks do not establish parallel scheduler behavior.
 
+The private `gc_rendezvous_*` cases exercise coordinated collection while a
+coroutine runs or remains blocked in native code, including competing requests
+and finalizers outside collection pauses. `world_unwind_*` verifies cleanup when
+errors abandon collector/native scopes, also after forced allocation failure.
+Ordinary workers still cannot allocate concurrently in these fixtures. Both
+Valgrind commands select its fair thread scheduler for concurrent test progress.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

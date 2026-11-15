@@ -59,10 +59,12 @@ void luaX_lockstate (lua_State *L) {
   gate->owner = pthread_self();
   gate->owned = 1;
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+  luaW_enter(L);
 }
 
 void luaX_unlockstate (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
+  lua_assert(L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
   if (!gate->owned || !pthread_equal(gate->owner, pthread_self())) {
     fputs("Luthrum coroutine stack gate released by a non-owner\n", stderr);
@@ -72,13 +74,17 @@ void luaX_unlockstate (lua_State *L) {
   gate->serving++;
   luaX_checksync(pthread_cond_broadcast(&gate->changed));
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+  /* Keep participation until all physical gate accesses have finished. A
+  ** collector may reclaim this state after the final leave; do not touch it. */
+  luaW_leave(L);
 }
 
 void luaX_poll (lua_State *L) {
+  unsigned depth;
   /* Internal poll handlers execute as managed VM code, with stack ownership.
   ** They are not ordinary C bindings and do not detach automatically. */
   if (L->state_poll != NULL)
     L->state_poll(L, L->state_poll_context);
-  luaX_unlockstate(L);
-  luaX_lockstate(L);
+  depth = luaW_detach(L);
+  luaW_attach(L, depth);
 }

@@ -25,9 +25,9 @@ int luaZ_fill (ZIO *z) {
   size_t size;
   lua_State *L = z->L;
   const char *buff;
-  lua_unlock(L);
+  unsigned depth = luaW_detach(L);
   buff = z->reader(L, z->data, &size);
-  lua_lock(L);
+  luaW_attach(L, depth);
   if (buff == NULL || size == 0)
     return EOZ;
   z->n = size - 1;  /* discount char being returned */

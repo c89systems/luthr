@@ -28,7 +28,8 @@ instruction-accounting changes extracted from cpkt. See the
 It is no longer byte-for-byte upstream source.
 
 Private temporary roots, per-coroutine stack gates, VM poll points and
-synchronized Lua capture transfers are also maintained directly in this tree.
+synchronized Lua capture transfers, managed/native pins and collection rendezvous
+are also maintained directly in this tree.
 The [parallel-state investigation](parallel-state-design.md) records the limited
 execution evidence and remaining shared-heap requirements.
 

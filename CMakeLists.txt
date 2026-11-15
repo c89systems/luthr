@@ -13,7 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_INSTALL_LIBDIR lib CACHE STRING "Library directory")
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-set(MEMORYCHECK_COMMAND_OPTIONS "--error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite,indirect --show-leak-kinds=definite,indirect")
+set(MEMORYCHECK_COMMAND_OPTIONS "--error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite,indirect --show-leak-kinds=definite,indirect --fair-sched=yes")
 find_package(Threads REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(CTest)
@@ -48,7 +48,7 @@ add_custom_target(luthrum_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
   lapi lcode lctype ldebug ldo ldump lfunc lgate lgc llex lmem lobject lopcodes
-  lparser lroots lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib
+  lparser lroots lstate lstring ltable ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")
 list(TRANSFORM lua_sources APPEND ".c")

@@ -21,6 +21,16 @@ foreach(case IN ITEMS closed open api cycle blocked)
   set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthrum_test_program(gc_rendezvous_test gc_rendezvous_test.c)
+set_target_properties(gc_rendezvous_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_rendezvous_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_rendezvous_test PRIVATE luthrum_static)
+foreach(case IN ITEMS managed_incremental managed_generational native_incremental native_generational
+    contended_incremental contended_generational)
+  add_test(NAME gc_rendezvous_${case} COMMAND gc_rendezvous_test ${case})
+  set_tests_properties(gc_rendezvous_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthrum_test_program(synchronization_failure_test synchronization_failure_test.c)
 set_target_properties(synchronization_failure_test PROPERTIES C_STANDARD 99)
 target_compile_options(synchronization_failure_test PRIVATE -Wall -Wextra -Werror)
@@ -28,10 +38,20 @@ target_link_libraries(synchronization_failure_test PRIVATE luthrum_static)
 target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
-foreach(case IN ITEMS main_mutex main_condition thread_mutex thread_condition
+foreach(case IN ITEMS main_mutex main_condition world_mutex world_condition thread_mutex thread_condition
     closed_capture open_capture)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
+endforeach()
+
+luthrum_test_program(world_unwind_test world_unwind_test.c)
+set_target_properties(world_unwind_test PROPERTIES C_STANDARD 99)
+target_compile_options(world_unwind_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(world_unwind_test PRIVATE luthrum_static)
+target_link_options(world_unwind_test PRIVATE -Wl,--wrap=luaX_lockstate)
+foreach(case IN ITEMS warning_error warning_oom forwarded_gc)
+  add_test(NAME world_unwind_${case} COMMAND world_unwind_test ${case})
+  set_tests_properties(world_unwind_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()
 
 luthrum_test_program(native_roots_test native_roots_test.c)

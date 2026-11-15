@@ -166,14 +166,22 @@ LUA_API lua_Number lua_version (lua_State *L) {
 ** convert an acceptable stack index into an absolute index
 */
 LUA_API int lua_absindex (lua_State *L, int idx) {
-  return (idx > 0 || ispseudo(idx))
-         ? idx
-         : cast_int(L->top.p - L->ci->func.p) + idx;
+  int result;
+  if (idx > 0 || ispseudo(idx))
+    return idx;
+  lua_lock(L);
+  result = cast_int(L->top.p - L->ci->func.p) + idx;
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_gettop (lua_State *L) {
-  return cast_int(L->top.p - (L->ci->func.p + 1));
+  int result;
+  lua_lock(L);
+  result = cast_int(L->top.p - (L->ci->func.p + 1));
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -281,8 +289,13 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
 
 
 LUA_API int lua_type (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return (isvalid(L, o) ? ttype(o) : LUA_TNONE);
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = isvalid(L, o) ? ttype(o) : LUA_TNONE;
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -294,40 +307,70 @@ LUA_API const char *lua_typename (lua_State *L, int t) {
 
 
 LUA_API int lua_iscfunction (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return (ttislcf(o) || (ttisCclosure(o)));
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = ttislcf(o) || ttisCclosure(o);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_isinteger (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return ttisinteger(o);
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = ttisinteger(o);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_isnumber (lua_State *L, int idx) {
   lua_Number n;
-  const TValue *o = index2value(L, idx);
-  return tonumber(o, &n);
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = tonumber(o, &n);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_isstring (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return (ttisstring(o) || cvt2str(o));
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = ttisstring(o) || cvt2str(o);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_isuserdata (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return (ttisfulluserdata(o) || ttislightuserdata(o));
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = ttisfulluserdata(o) || ttislightuserdata(o);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
-  const TValue *o1 = index2value(L, index1);
-  const TValue *o2 = index2value(L, index2);
-  return (isvalid(L, o1) && isvalid(L, o2)) ? luaV_rawequalobj(o1, o2) : 0;
+  const TValue *o1, *o2;
+  int result;
+  lua_lock(L);
+  o1 = index2value(L, index1);
+  o2 = index2value(L, index2);
+  result = (isvalid(L, o1) && isvalid(L, o2)) ? luaV_rawequalobj(o1, o2) : 0;
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -368,48 +411,66 @@ LUA_API int lua_compare (lua_State *L, int index1, int index2, int op) {
 
 
 LUA_API unsigned lua_numbertocstring (lua_State *L, int idx, char *buff) {
-  const TValue *o = index2value(L, idx);
+  const TValue *o;
+  unsigned len = 0;
+  lua_lock(L);
+  o = index2value(L, idx);
   if (ttisnumber(o)) {
-    unsigned len = luaO_tostringbuff(o, buff);
+    len = luaO_tostringbuff(o, buff);
     buff[len++] = '\0';  /* add final zero */
-    return len;
   }
-  else
-    return 0;
+  lua_unlock(L);
+  return len;
 }
 
 
 LUA_API size_t lua_stringtonumber (lua_State *L, const char *s) {
-  size_t sz = luaO_str2num(s, s2v(L->top.p));
+  size_t sz;
+  lua_lock(L);
+  sz = luaO_str2num(s, s2v(L->top.p));
   if (sz != 0)
     api_incr_top(L);
+  lua_unlock(L);
   return sz;
 }
 
 
 LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
   lua_Number n = 0;
-  const TValue *o = index2value(L, idx);
-  int isnum = tonumber(o, &n);
+  const TValue *o;
+  int isnum;
+  lua_lock(L);
+  o = index2value(L, idx);
+  isnum = tonumber(o, &n);
   if (pisnum)
     *pisnum = isnum;
+  lua_unlock(L);
   return n;
 }
 
 
 LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
   lua_Integer res = 0;
-  const TValue *o = index2value(L, idx);
-  int isnum = tointeger(o, &res);
+  const TValue *o;
+  int isnum;
+  lua_lock(L);
+  o = index2value(L, idx);
+  isnum = tointeger(o, &res);
   if (pisnum)
     *pisnum = isnum;
+  lua_unlock(L);
   return res;
 }
 
 
 LUA_API int lua_toboolean (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return !l_isfalse(o);
+  const TValue *o;
+  int result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = !l_isfalse(o);
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -436,29 +497,35 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
 
 
 LUA_API lua_Unsigned lua_rawlen (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
+  const TValue *o;
+  lua_Unsigned result = 0;
+  lua_lock(L);
+  o = index2value(L, idx);
   switch (ttypetag(o)) {
-    case LUA_VSHRSTR: return cast(lua_Unsigned, tsvalue(o)->shrlen);
-    case LUA_VLNGSTR: return cast(lua_Unsigned, tsvalue(o)->u.lnglen);
-    case LUA_VUSERDATA: return cast(lua_Unsigned, uvalue(o)->len);
+    case LUA_VSHRSTR: result = cast(lua_Unsigned, tsvalue(o)->shrlen); break;
+    case LUA_VLNGSTR: result = cast(lua_Unsigned, tsvalue(o)->u.lnglen); break;
+    case LUA_VUSERDATA: result = cast(lua_Unsigned, uvalue(o)->len); break;
     case LUA_VTABLE: {
-      lua_Unsigned res;
-      lua_lock(L);
-      res = luaH_getn(L, hvalue(o));
-      lua_unlock(L);
-      return res;
+      result = luaH_getn(L, hvalue(o));
+      break;
     }
-    default: return 0;
+    default: break;
   }
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API lua_CFunction lua_tocfunction (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  if (ttislcf(o)) return fvalue(o);
+  const TValue *o;
+  lua_CFunction result = NULL;
+  lua_lock(L);
+  o = index2value(L, idx);
+  if (ttislcf(o)) result = fvalue(o);
   else if (ttisCclosure(o))
-    return clCvalue(o)->f;
-  else return NULL;  /* not a C function */
+    result = clCvalue(o)->f;
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -472,14 +539,24 @@ l_sinline void *touserdata (const TValue *o) {
 
 
 LUA_API void *lua_touserdata (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return touserdata(o);
+  const TValue *o;
+  void *result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = touserdata(o);
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API lua_State *lua_tothread (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
-  return (!ttisthread(o)) ? NULL : thvalue(o);
+  const TValue *o;
+  lua_State *result;
+  lua_lock(L);
+  o = index2value(L, idx);
+  result = (!ttisthread(o)) ? NULL : thvalue(o);
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -491,18 +568,22 @@ LUA_API lua_State *lua_tothread (lua_State *L, int idx) {
 ** conversion should not be a problem.)
 */
 LUA_API const void *lua_topointer (lua_State *L, int idx) {
-  const TValue *o = index2value(L, idx);
+  const TValue *o;
+  const void *result = NULL;
+  lua_lock(L);
+  o = index2value(L, idx);
   switch (ttypetag(o)) {
-    case LUA_VLCF: return cast_voidp(cast_sizet(fvalue(o)));
+    case LUA_VLCF: result = cast_voidp(cast_sizet(fvalue(o))); break;
     case LUA_VUSERDATA: case LUA_VLIGHTUSERDATA:
-      return touserdata(o);
+      result = touserdata(o); break;
     default: {
       if (iscollectable(o))
-        return gcvalue(o);
-      else
-        return NULL;
+        result = gcvalue(o);
+      break;
     }
   }
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -1162,7 +1243,11 @@ LUA_API int lua_dump (lua_State *L, lua_Writer writer, void *data, int strip) {
 
 
 LUA_API int lua_status (lua_State *L) {
-  return APIstatus(L->status);
+  int result;
+  lua_lock(L);
+  result = APIstatus(L->status);
+  lua_unlock(L);
+  return result;
 }
 
 
@@ -1173,9 +1258,13 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
   va_list argp;
   int res = 0;
   global_State *g = G(L);
-  if (g->gcstp & (GCSTPGC | GCSTPCLS))  /* internal stop? */
-    return -1;  /* all options are invalid when stopped */
   lua_lock(L);
+  luaW_stop(L);
+  if (g->gcstp & (GCSTPGC | GCSTPCLS)) {  /* internal stop? */
+    luaW_start(L);
+    lua_unlock(L);
+    return -1;  /* all options are invalid when stopped */
+  }
   va_start(argp, what);
   switch (what) {
     case LUA_GCSTOP: {
@@ -1245,6 +1334,7 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
     default: res = -1;  /* invalid option */
   }
   va_end(argp);
+  luaW_start(L);
   lua_unlock(L);
   return res;
 }
@@ -1459,35 +1549,44 @@ static UpVal **getupvalref (lua_State *L, int fidx, int n, LClosure **pf) {
 
 
 LUA_API void *lua_upvalueid (lua_State *L, int fidx, int n) {
-  TValue *fi = index2value(L, fidx);
+  TValue *fi;
+  void *result = NULL;
+  lua_lock(L);
+  fi = index2value(L, fidx);
   switch (ttypetag(fi)) {
     case LUA_VLCL: {  /* lua closure */
-      return *getupvalref(L, fidx, n, NULL);
+      result = *getupvalref(L, fidx, n, NULL);
+      break;
     }
     case LUA_VCCL: {  /* C closure */
       CClosure *f = clCvalue(fi);
       if (1 <= n && n <= f->nupvalues)
-        return &f->upvalue[n - 1];
-      /* else */
-    }  /* FALLTHROUGH */
+        result = &f->upvalue[n - 1];
+      break;
+    }
     case LUA_VLCF:
-      return NULL;  /* light C functions have no upvalues */
+      break;  /* light C functions have no upvalues */
     default: {
       api_check(L, 0, "function expected");
-      return NULL;
+      break;
     }
   }
+  lua_unlock(L);
+  return result;
 }
 
 
 LUA_API void lua_upvaluejoin (lua_State *L, int fidx1, int n1,
                                             int fidx2, int n2) {
   LClosure *f1;
-  UpVal **up1 = getupvalref(L, fidx1, n1, &f1);
-  UpVal **up2 = getupvalref(L, fidx2, n2, NULL);
+  UpVal **up1, **up2;
+  lua_lock(L);
+  up1 = getupvalref(L, fidx1, n1, &f1);
+  up2 = getupvalref(L, fidx2, n2, NULL);
   api_check(L, *up1 != NULL && *up2 != NULL, "invalid upvalue index");
   *up1 = *up2;
   luaC_objbarrier(L, f1, *up1);
+  lua_unlock(L);
 }
 
 

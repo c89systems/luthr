@@ -4,8 +4,9 @@ This describes the extracted synchronous baseline. It has no task scheduler or
 internal global execution lock; callers serialize host operations on a handle.
 Parallel Lua execution within one shared VM remains required. A private
 [gated-stack experiment](parallel-state-design.md#initial-gated-stack-experiment)
-exercises limited concurrent execution with allocation and collection disabled;
-it does not change this public embedding contract.
+and [collection rendezvous](parallel-state-design.md#collection-rendezvous-experiment)
+exercise constrained concurrent execution. General concurrent allocation and
+heap mutation remain unfinished; this does not change the public embedding contract.
 
 The full `<luthrum/lua.h>` facade preserves Lua's public C API. The separate
 `<luthrum/lua_runtime.h>` facade owns a VM and adds embedding policy, including
@@ -38,6 +39,9 @@ remove roots in LIFO order before their storage expires. This is an internal
 snapshot mechanism, not a public binding API, object lock or parallel scheduler.
 The owning coroutine must remain strongly reachable independently; its private
 root-chain field does not itself make that coroutine a collector root.
+Separately, native boundaries and temporary handoffs pin their owning coroutine
+until reattachment or protected unwind. This protects an entered activation;
+host code must still retain ordinary Lua references between operations.
 Trusted native callbacks remain responsible for their own stack consumption.
 If OS stack bounds cannot be discovered, protected execution fails without
 invoking its error handler; discovery is retried on the next outer entry.
