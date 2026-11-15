@@ -315,6 +315,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->callback_owner = NULL;
   L->callback_active = 0;
   L->operation = NULL;
+  L->task_owner = NULL;
   L->owned_operations = L->resume_active = L->close_active = 0;
   L->state_poll = NULL;
   L->state_poll_context = NULL;
@@ -497,6 +498,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->pipe_meta = NULL;
   g->managed_functions = NULL;
   g->coroutine_scopes = NULL;
+  g->tasks = NULL;
   g->operation_error = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;

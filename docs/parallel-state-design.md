@@ -971,10 +971,63 @@ guard makes its negative control fail; those edits are restored for normal
 verification. The callback-chain regression also fails without the self-close
 boundary check.
 
-This is ownership for the tested synchronous adapters. Raw host API sequences
-still require caller serialization. Persistent scheduled-task ownership must
-extend through result collection, with cancellation, affinity, module acceptance
-and public scheduler lifecycle gates still outstanding.
+This is ownership for the tested synchronous adapters. The task records below
+extend reservation through result collection. Raw host API sequences still
+require caller serialization. Cancellation, affinity, module acceptance and
+public scheduler lifecycle gates remain outstanding.
+
+## Persistent scheduled-coroutine ownership
+
+`lua/src/ltask.c` adds private task records with lifetimes independent of their
+retained call stacks. Admission reserves a fresh/yielded child and binds it to
+one logical execution. A world-mutex-protected list roots the coroutine and its
+pending outcome until collection. The caller supplies zeroed record/execution
+storage, retains a Lua reference until admission and keeps the VM and record
+alive through every entered call. Registration needs no Lua allocation.
+
+Only the owning driver can enter the task. It must return from the previous
+entry before resuming a yield or finishing a terminal outcome. A task cannot
+finish before it has returned, finish a yield or resume its terminal result.
+Uncaught errors close the coroutine before publishing completion, retaining the
+resulting error/status and running to-be-closed handlers once. Cleanup can park,
+enter native code or fail while the record keeps its roots and reservation.
+Self-close remains supported within the existing protected-boundary rules.
+
+Standard Lua resume/wrap/close calls reject the reserved coroutine through the
+queued, executing, returned, finishing, completed and collecting phases.
+Queries from other coroutines report normal while that reservation remains.
+The reservation also prevents a foreign callback from borrowing the task's execution descriptor;
+registered nested callbacks on the owning carrier retain their normal path.
+An atomic execution binding prevents a second task from taking the same identity
+before collection. Collection releases that binding for later reuse once all
+entered calls have returned and the driver is quiescent. Collection does not
+authorize destroying storage still in use by an entered call.
+
+One collector reserves a transfer attempt under the metadata mutex, releases it
+before stack growth or value movement and withdraws the roots only after the
+outcome reaches the receiving stack. A failed receiving-stack growth restores
+the completed phase and leaves the outcome available for retry. Other collectors
+receive pending during that attempt and collected after success. Collection
+does not wait for an executing task and cannot move values across VMs or into
+the task's own stack. Pending/invalid results leave the caller's output fields
+unchanged. Raw embedding API sequences still require owner serialization.
+
+Forty `task_ownership_*` cases use raw/C89 entrypoints, both collectors and
+default worker stacks. They force collection with application references dropped
+before execution and after the owner pthread exits, preserve target values under
+competing Lua calls, cover native and cleanup waits, errors and memory denial,
+retry failed collection, serialize competing collectors, reject wrong owners/VMs
+and reuse an execution after collection. The scheduler's native/callback and
+streaming cases now carry records for their Lua tasks, including migration and
+native saturation. Low-level resource probes keep their separate raw-API
+contract. The tests fail when ownership, root marking, collector
+reservation, error cleanup, retry rollback, return-state validation or foreign
+entry exclusion is removed. Those negative edits are restored for final checks.
+
+These interfaces remain private. Task waiting, cancellation (including tasks
+that never started), shutdown, affinity, module acceptance and the public task
+API still require their own lifecycle gates. Hosts must collect all admitted
+records before destroying their storage or closing the VM.
 
 ## Lua-specific proof obligations
 

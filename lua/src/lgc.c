@@ -17,6 +17,7 @@
 #include "laccess.h"
 #include "lcallback.h"
 #include "lcoroscope.h"
+#include "ltask.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -416,7 +417,10 @@ static void markmt (global_State *g) {
   int i;
   CClosure *function;
   LuaCoroutineScope *scope;
+  LuaTaskRoot *task;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  for (task = g->tasks; task != NULL; task = task->next)
+    markobject(g, task->thread);
   for (scope = g->coroutine_scopes; scope != NULL; scope = scope->next) {
     markobject(g, scope->source);
     markobject(g, scope->target);

@@ -334,6 +334,7 @@ struct lua_State {
   struct LuaCallback *callback_owner;
   unsigned callback_active;
   struct LuaCoroutineScope *operation;  /* world mutex protects operation metadata */
+  struct LuaTaskRoot *task_owner;  /* persistent scheduled-task reservation */
   unsigned owned_operations;
   unsigned resume_active;
   unsigned close_active;
@@ -369,6 +370,7 @@ typedef struct global_State {
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */
   CClosure *managed_functions;  /* stable identities for zero-capture code */
   struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
+  struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
   TString *operation_error;
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */

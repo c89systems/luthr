@@ -8,6 +8,7 @@
 
 struct lua_longjmp;
 struct LuaWaiter;
+struct LuaTaskRoot;
 typedef struct LuaExecution {
   void *context;
   void (*managed_enter)(struct LuaExecution *, lua_State *);
@@ -23,6 +24,7 @@ typedef struct LuaExecution {
   void (*wait)(struct LuaExecution *, pthread_mutex_t *, struct LuaWaiter *);
   void (*wake)(struct LuaExecution *, struct LuaWaiter *);
   struct lua_longjmp *protected;
+  struct LuaTaskRoot *task;  /* atomic binding, cleared at result collection */
   unsigned managed_depth;
   unsigned native_depth;
 } LuaExecution;

@@ -142,6 +142,14 @@ on default workers. Reentrant callback chains must reject self-close across
 another state's operation. Migrated control pipelines also assert scope retirement
 before their retained stacks can be destroyed.
 
+`task_ownership_*` checks persistent task admission and roots before execution,
+during native/cleanup waits and after the owner thread has exited. Lua attempts
+to resume, wrap or close an owned coroutine must preserve its stack. Other cases
+cover driver identity, yields, self-close, exactly-once cleanup, memory errors,
+competing collectors, stack-growth retry, cross-VM rejection and execution reuse.
+The scheduler's Lua tasks use the same records through migration, native-call
+saturation, callbacks and streaming. Public task lifecycle remains unfinished.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

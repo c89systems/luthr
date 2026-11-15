@@ -7,6 +7,7 @@
 #include <lgc.h>
 #include <lpipe.h>
 #include <ltable.h>
+#include <ltask.h>
 #include <lualib.h>
 #include <luthrum/lua_runtime.h>
 #include <pthread.h>
@@ -23,6 +24,7 @@ struct pool;
 struct task {
   struct pool *pool;
   struct test_fiber fiber;
+  LuaTaskRoot root;
   lua_State *state;
   struct task *next;
   enum reason reason;
@@ -284,10 +286,12 @@ static void task_entry(void *argument) {
     task->run(task);
   else {
     task->status =
-        lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
+        luaTK_resume(&task->root, task->id < 2 ? 2 : 0, &task->results);
     if (task->id == 4 && task->status == LUA_YIELD)
-      task->status = lua_resume(task->state, NULL, 0, &task->results);
+      task->status = luaTK_resume(&task->root, 0, &task->results);
   }
+  if (task->root.global != NULL)
+    require(luaTK_finish(&task->root, &task->status, &task->results) == LUA_OK);
   require(task->fiber.execution.managed_depth == 0);
   require(task->fiber.execution.native_depth == 0);
   require(task->fiber.execution.protected == NULL);
@@ -470,6 +474,18 @@ static void init_task(struct pool *pool, struct task *task, int id,
   task->run = run;
   check(test_fiber_create(&task->fiber, task_entry, task));
   init_execution(task);
+  if (run == NULL)
+    require(luaTK_admit(task->state, &task->root, &task->fiber.execution) ==
+            LUA_OK);
+}
+static void collect_task(struct task *task) {
+  if (task->root.global != NULL) {
+    int status, results;
+    require(luaTK_collect(task->pool->main, &task->root, &status, &results) ==
+            LUA_OK);
+    require(status == task->status && results == task->results);
+    lua_pop(task->pool->main, results);
+  }
 }
 static void resource_body(lua_State *state, void *argument) {
   struct task *task = argument;
@@ -672,6 +688,7 @@ static int exercise_resource_wait(const char *name) {
       require(task->results == 1);
     if (pool->wait_kind != GC_WAIT && id == count - 1)
       require(task->results == 1 && lua_tointeger(task->state, -1) == 500500);
+    collect_task(task);
     (void)lua_closethread(task->state, NULL);
     lua_settop(task->state, 0);
     test_fiber_destroy(&task->fiber);
@@ -1004,6 +1021,7 @@ static int exercise_callback(const char *name) {
     if (id == 0 && open_capture)
       require(pool->tasks[id].results == 2 &&
               lua_tointeger(pool->tasks[id].state, -1) == 6);
+    collect_task(&pool->tasks[id]);
     (void)lua_closethread(pool->tasks[id].state, NULL);
     lua_settop(pool->tasks[id].state, 0);
     test_fiber_destroy(&pool->tasks[id].fiber);
@@ -1122,7 +1140,7 @@ static const char *control_script(lua_State *state, const char *body,
 }
 static void run_stream_task(struct task *task) {
   task->status =
-      lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
+      luaTK_resume(&task->root, task->id < 2 ? 2 : 0, &task->results);
 }
 static void *stream_foreign_entry(void *context) {
   struct foreign_actor *actor = context;
@@ -1284,6 +1302,8 @@ static int exercise_stream(const char *name) {
       *payload = 12345U;
     }
     init_task(pool, task, id, run_stream_task);
+    require(luaTK_admit(task->state, &task->root, &task->fiber.execution) ==
+            LUA_OK);
   }
   if (foreign) {
     char script[256];
@@ -1404,6 +1424,7 @@ static int exercise_stream(const char *name) {
       if (pool->force_migrate)
         require(task->migrations != 0);
     }
+    collect_task(task);
     (void)lua_closethread(task->state, NULL);
     test_fiber_destroy(&task->fiber);
   }
@@ -1614,6 +1635,7 @@ int main(int argc, char **argv) {
     if (id == 5 && !pool->budget)
       require(strstr(lua_tostring(task->state, -1), "hook expected") != NULL);
     require(task->fiber.execution.protected == NULL);
+    collect_task(task);
     (void)lua_closethread(task->state, NULL);
     lua_settop(task->state, 0);
     test_fiber_destroy(&task->fiber);

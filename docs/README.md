@@ -68,7 +68,9 @@ parking/migration paths, with stable function identity on reopening and rooted
 wrapped-coroutine snapshots. The remaining libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.
-Persistent task admission and ownership through result collection remain open.
+Private scheduled-task records now reserve coroutines and retain their results
+through collection, including allocation-failure retry and error cleanup.
+The public task API, cancellation and shutdown remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

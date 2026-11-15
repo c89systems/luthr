@@ -1,0 +1,150 @@
+/* Persistent scheduled-coroutine roots and admission. See lua.h for license. */
+#define ltask_c
+#define LUA_CORE
+#include "lprefix.h"
+
+#include "lapi.h"
+#include "ltask.h"
+
+static int driver (LuaTaskRoot *task) {
+  LuaExecution *execution = luaQ_current();
+  return execution == task->execution && execution != NULL &&
+         __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE) == task &&
+         execution->managed_depth == 0 && execution->native_depth == 0 &&
+         execution->protected == NULL &&
+         luaE_getnativestackcontext()->coroutine_scopes == NULL;
+}
+
+int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
+  LuaWorld *world = &G(L)->world;
+  int status = LUA_TK_INVALID;
+  if (task->phase != LUA_TASK_UNUSED || execution == NULL ||
+      execution->managed_depth != 0 || execution->native_depth != 0 ||
+      execution->protected != NULL)
+    return status;
+  lua_lock(L);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (L != mainthread(G(L)) && L->task_owner == NULL &&
+      L->callback_owner == NULL && L->operation == NULL &&
+      L->owned_operations == 0 && L->resume_active == 0 && L->close_active == 0 &&
+      (L->status == LUA_YIELD ||
+       (L->status == LUA_OK && L->ci == &L->base_ci &&
+        L->top.p > L->ci->func.p + 1 &&
+        ttisfunction(s2v(L->ci->func.p + 1))))) {
+    LuaTaskRoot *expected = NULL;
+    if (!__atomic_compare_exchange_n(&execution->task, &expected, task, 0,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
+      lua_unlock(L);
+      return LUA_TK_INVALID;
+    }
+    task->global = G(L);
+    task->thread = L;
+    task->execution = execution;
+    task->phase = LUA_TASK_ADMITTED;
+    task->next = G(L)->tasks;
+    task->link = &G(L)->tasks;
+    if (task->next != NULL) task->next->link = &task->next;
+    G(L)->tasks = task;
+    L->task_owner = task;
+    status = LUA_OK;
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  lua_unlock(L);
+  return status;
+}
+
+int luaTK_resume (LuaTaskRoot *task, int nargs, int *results) {
+  LuaWorld *world;
+  int status;
+  if (task->global == NULL || results == NULL || nargs < 0 || !driver(task))
+    return LUA_TK_INVALID;
+  world = &task->global->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  status = task->phase == LUA_TASK_ADMITTED ? LUA_OK : LUA_TK_INVALID;
+  if (status == LUA_OK) task->phase = LUA_TASK_RUNNING;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (status != LUA_OK) return status;
+  status = lua_resume(task->thread, NULL, nargs, results);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  task->status = status;
+  task->results = *results;
+  task->phase = status == LUA_YIELD ? LUA_TASK_ADMITTED : LUA_TASK_RETURNED;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  return status;
+}
+
+int luaTK_finish (LuaTaskRoot *task, int *status, int *results) {
+  lua_State *L;
+  LuaWorld *world;
+  int valid;
+  if (task->global == NULL || status == NULL || results == NULL ||
+      *status < LUA_OK || *status > LUA_ERRERR || *status == LUA_YIELD ||
+      *results < 0 || !driver(task))
+    return LUA_TK_INVALID;
+  world = &task->global->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  valid = task->phase == LUA_TASK_RETURNED && task->status == *status &&
+          task->results == *results;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (!valid) return LUA_TK_INVALID;
+  L = task->thread;
+  lua_lock(L);
+  valid = L->status == *status && L->resume_active == 0 && L->close_active == 0 &&
+          L->errorJmp == NULL && L->native_depth == 0 &&
+          L->top.p - (L->ci->func.p + 1) >= *results;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  valid = valid && L->owned_operations == 0;
+  if (valid) task->phase = LUA_TASK_FINISHING;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  lua_unlock(L);
+  if (!valid) return LUA_TK_INVALID;
+  if (*status != LUA_OK) {
+    *status = lua_closethread(L, NULL);
+    *results = *status == LUA_OK ? 0 : 1;
+  }
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  task->status = *status;
+  task->results = *results;
+  task->phase = LUA_TASK_FINISHED;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  return LUA_OK;
+}
+
+int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+  LuaWorld *world = &G(L)->world;
+  int outcome, count, result;
+  if (task->global != G(L) || task->thread == L ||
+      status == NULL || results == NULL)
+    return LUA_TK_INVALID;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (task->phase == LUA_TASK_COLLECTED) result = LUA_TK_COLLECTED;
+  else if (task->phase != LUA_TASK_FINISHED) result = LUA_TK_PENDING;
+  else {
+    task->phase = LUA_TASK_COLLECTING;
+    outcome = task->status;
+    count = task->results;
+    result = LUA_OK;
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (result != LUA_OK) return result;
+  if (!lua_checkstack(L, count)) {
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    task->phase = LUA_TASK_FINISHED;
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    return LUA_TK_STACK;
+  }
+  lua_xmove(task->thread, L, count);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  task->thread->task_owner = NULL;
+  *task->link = task->next;
+  if (task->next != NULL) task->next->link = task->link;
+  task->next = NULL;
+  task->link = NULL;
+  task->phase = LUA_TASK_COLLECTED;
+  __atomic_store_n(&task->execution->task, NULL, __ATOMIC_RELEASE);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  *status = outcome;
+  *results = count;
+  return LUA_OK;
+}

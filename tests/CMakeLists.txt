@@ -16,6 +16,21 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(task_ownership_test task_ownership_test.c)
+set_target_properties(task_ownership_test PROPERTIES C_STANDARD 99)
+target_compile_options(task_ownership_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(task_ownership_test PRIVATE luthrum_static)
+target_link_options(task_ownership_test PRIVATE -Wl,--wrap=lua_checkstack)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS normal active yield error finish_error cleanup_error selfclose oom retry race)
+      add_test(NAME task_ownership_${backend}_${case}_${gc}
+        COMMAND task_ownership_test ${backend}_${case}_${gc})
+      set_tests_properties(task_ownership_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(coroutine_operation_test coroutine_operation_test.c)
 set_target_properties(coroutine_operation_test PROPERTIES C_STANDARD 99)
 target_compile_options(coroutine_operation_test PRIVATE -Wall -Wextra -Werror)

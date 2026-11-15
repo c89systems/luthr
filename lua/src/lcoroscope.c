@@ -13,8 +13,9 @@ int luaO_begin (lua_State *L, lua_State *co, LuaCoroutineScope *scope) {
   luaX_lockpair(L, co);
   lua_assert(L->native_depth != 0);  /* caller's C activation */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  available = co->operation == NULL && co->resume_active == 0 &&
-              co->close_active == 0 && co->callback_active == 0 &&
+  available = co->task_owner == NULL && co->operation == NULL &&
+              co->resume_active == 0 && co->close_active == 0 &&
+              co->callback_active == 0 &&
               !(co->status == LUA_OK && co->ci != &co->base_ci);
   if (available) {
     scope->context = luaE_getnativestackcontext();
@@ -84,8 +85,8 @@ int luaO_status (lua_State *L, lua_State *co) {
   if (L == co) return LUA_CO_RUNNING;
   lua_lock(co);
   luaX_checksync(pthread_mutex_lock(&G(co)->world.mutex));
-  if (co->operation != NULL || co->resume_active || co->close_active ||
-      co->callback_active)
+  if (co->task_owner != NULL || co->operation != NULL || co->resume_active ||
+      co->close_active || co->callback_active)
     status = LUA_CO_NORMAL;
   else if (co->status == LUA_YIELD)
     status = LUA_CO_SUSPENDED;
