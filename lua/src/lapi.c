@@ -836,9 +836,9 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 }
 
 
-LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
+static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
   lua_lock(L);
-  if (n == 0) {
+  if (n == 0 && !managed) {
     setfvalue(s2v(L->top.p), fn);
     api_incr_top(L);
   }
@@ -849,6 +849,7 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
     api_check(L, n <= MAXUPVAL, "upvalue index too large");
     cl = luaF_newCclosure(L, n);
     cl->f = fn;
+    cl->managed = cast_byte(managed);
     for (i = 0; i < n; i++) {
       setobj2n(L, &cl->upvalue[i], s2v(L->top.p - n + i));
       /* does not need barrier because closure is white */
@@ -860,6 +861,14 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
     luaC_checkGC(L);
   }
   lua_unlock(L);
+}
+
+LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
+  pushcclosure(L, fn, n, 0);
+}
+
+void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
+  pushcclosure(L, fn, n, 1);
 }
 
 

@@ -5,6 +5,7 @@
 #include <lcallback.h>
 #include <ldo.h>
 #include <lgc.h>
+#include <lpipe.h>
 #include <ltable.h>
 #include <lualib.h>
 #include <luthrum/lua_runtime.h>
@@ -56,6 +57,10 @@ struct pool {
   Table *shared;
   enum wait_kind wait_kind;
   int force_migrate, stage, native_resource;
+  size_t stream_live, stream_peak;
+  unsigned generated, consumed;
+  int stream_foreign;
+  unsigned char stream_seen[1024];
 };
 static __thread int native_marker;
 static struct pool *fixture;
@@ -1011,12 +1016,340 @@ static int exercise_callback(const char *name) {
   free(test);
   return 0;
 }
+enum { STREAM_CHUNKS = 1024, STREAM_HEAP_LIMIT = 128 * 1024 };
+static void *stream_allocate(void *context, void *old, size_t old_size,
+                             size_t size) {
+  struct pool *pool = context;
+  void *pointer;
+  if (old == NULL)
+    old_size = 0;
+  if (size == 0) {
+    pool->stream_live -= old_size;
+    free(old);
+    return NULL;
+  }
+  if (size > STREAM_HEAP_LIMIT - (pool->stream_live - old_size))
+    return NULL;
+  pointer = malloc(size);
+  if (pointer != NULL) {
+    if (old != NULL) {
+      memcpy(pointer, old, old_size < size ? old_size : size);
+      free(old);
+    }
+    pool->stream_live = pool->stream_live - old_size + size;
+    if (pool->stream_peak < pool->stream_live)
+      pool->stream_peak = pool->stream_live;
+  }
+  return pointer;
+}
+static int make_chunk(lua_State *state) {
+  char chunk[LUA_PIPE_CHUNK_MAX];
+  unsigned id = (unsigned)lua_tointeger(state, 1), i;
+  require((luaQ_current()->native_depth != 0) == fixture->stream_foreign);
+  require(id >= 1 && id <= STREAM_CHUNKS);
+  chunk[0] = (char)(id & 255);
+  chunk[1] = (char)(id >> 8);
+  for (i = 2; i < sizeof(chunk); ++i)
+    chunk[i] = (char)((id + i) & 255);
+  lock(fixture);
+  fixture->generated++;
+  signal_change(fixture);
+  unlock(fixture);
+  lua_pushlstring(state, chunk, sizeof(chunk));
+  return 1;
+}
+static int check_chunk(lua_State *state) {
+  size_t size;
+  const unsigned char *chunk =
+      (const unsigned char *)lua_tolstring(state, 1, &size);
+  unsigned i, id;
+  require(luaQ_current()->native_depth == 0);
+  require(chunk != NULL && size == LUA_PIPE_CHUNK_MAX);
+  id = chunk[0] + ((unsigned)chunk[1] << 8);
+  require(id >= 1 && id <= STREAM_CHUNKS);
+  for (i = 2; i < size; ++i)
+    require(chunk[i] == ((id + i) & 255));
+  lock(fixture);
+  require(!fixture->stream_seen[id - 1]);
+  fixture->stream_seen[id - 1] = 1;
+  fixture->consumed++;
+  signal_change(fixture);
+  unlock(fixture);
+  lua_pushboolean(state, id == 1);
+  return 1;
+}
+static void run_stream_task(struct task *task) {
+  task->status =
+      lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
+}
+static void *stream_foreign_entry(void *context) {
+  struct foreign_actor *actor = context;
+  struct pool *pool = actor->task.pool;
+  long carrier = syscall(SYS_gettid);
+  native_marker = 200;
+  actor->status =
+      luaCB_call(actor->registration, &actor->task.fiber.execution,
+                 callback_marshal, actor, actor->error, sizeof(actor->error));
+  require(carrier == syscall(SYS_gettid) && native_marker == 200);
+  require(luaQ_current() == NULL && !actor->task.permit &&
+          actor->task.waiter == NULL);
+  require(actor->task.fiber.execution.protected == NULL &&
+          actor->task.fiber.execution.native_depth == 0 &&
+          actor->task.fiber.execution.managed_depth == 0);
+  lock(pool);
+  actor->done = 1;
+  signal_change(pool);
+  unlock(pool);
+  return NULL;
+}
+static void end_pipe(lua_State *state, int finalizing) {
+  lua_getglobal(state, "p");
+  if (finalizing) {
+    require(lua_getmetatable(state, -1));
+    lua_getfield(state, -1, "__gc");
+    lua_pushvalue(state, -3);
+    lua_call(state, 1, 0);
+    lua_pop(state, 2);
+  } else {
+    lua_getfield(state, -1, "close");
+    lua_pushvalue(state, -2);
+    lua_call(state, 1, 0);
+    lua_pop(state, 1);
+  }
+}
+static int exercise_stream(const char *name) {
+  static const char producer[] =
+      "p:send(make_chunk(1)); ack:recv(); "
+      "for i=2,1024 do p:send(make_chunk(i)) end; p:close(); return 1024";
+  static const char consumer[] =
+      "local n=0; while true do local chunk=p:recv(); "
+      "if chunk==nil then break end; "
+      "if check_chunk(chunk) then checkpoint:recv(); ack:send('ack') end; "
+      "n=n+1 end; return n";
+  struct pool *pool = calloc(1, sizeof(*pool));
+  struct foreign_actor actor;
+  LuaCallback registration;
+  pthread_t workers[WORKERS], provider;
+  int id, native = strstr(name, "native") != NULL;
+  int foreign = strstr(name, "foreign") != NULL;
+  int abort_send = strstr(name, "send") != NULL;
+  int abort_recv = strstr(name, "recv") != NULL;
+  int aborting = abort_send || abort_recv;
+  int finalizing = strstr(name, "close") == NULL;
+  int carriers, consumers, expected_done;
+  unsigned sum = 0;
+  require(pool != NULL);
+  fixture = pool;
+  pool->stream_foreign = foreign;
+  pool->force_migrate = strstr(name, "migrate") != NULL;
+  native |= foreign;
+  carriers = native ? WORKERS : pool->force_migrate ? 2 : 1;
+  consumers = native && !foreign ? 1 : 3;
+  expected_done = abort_send ? 1 : (foreign ? 0 : 1) + consumers;
+  if (abort_recv)
+    expected_done--;
+  if (native)
+    expected_done += 2;
+  check(pthread_mutex_init(&pool->mutex, NULL));
+  check(pthread_cond_init(&pool->changed, NULL));
+  pool->main = lua_newstate(stream_allocate, pool, 0);
+  require(pool->main != NULL);
+  lua_pushcfunction(pool->main, block_binding);
+  lua_setglobal(pool->main, "block");
+  luaQ_pushmanaged(pool->main, make_chunk, 0);
+  lua_setglobal(pool->main, "make_chunk");
+  luaQ_pushmanaged(pool->main, check_chunk, 0);
+  lua_setglobal(pool->main, "check_chunk");
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "p");
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "ack");
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "checkpoint");
+  if (strstr(name, "generational") != NULL)
+    (void)lua_gc(pool->main, LUA_GCGEN);
+  for (id = 0; id < TASKS; ++id) {
+    struct task *task = &pool->tasks[id];
+    const char *script;
+    if ((id < 2 && !native) || (id == 2 && (foreign || abort_recv)) ||
+        (id >= 3 && (abort_send || id >= 3 + consumers)))
+      continue;
+    script = id < 2 ? "return block(...)"
+             : id == 2 && abort_send
+                 ? "p:send(make_chunk(1)); p:send(make_chunk(2)); return 0"
+             : id == 2    ? producer
+             : abort_recv ? "return p:recv()"
+                          : consumer;
+    task->state = lua_newthread(pool->main);
+    require(luaL_loadstring(task->state, script) == LUA_OK);
+    if (id < 2) {
+      unsigned *payload;
+      lua_pushinteger(task->state, id);
+      payload = lua_newuserdatauv(task->state, sizeof(*payload), 0);
+      *payload = 12345U;
+    }
+    init_task(pool, task, id, run_stream_task);
+  }
+  if (foreign) {
+    char script[256];
+    require(snprintf(script, sizeof(script), "return function() %s end",
+                     producer) < (int)sizeof(script));
+    require(luaL_loadstring(pool->main, script) == LUA_OK);
+    require(lua_pcall(pool->main, 0, 1, 0) == LUA_OK);
+    require(luaCB_init(pool->main, &registration, 0) == LUA_OK);
+    lua_pop(pool->main, 1);
+    init_foreign(&actor, pool, &registration, 0);
+  }
+  for (id = 0; id < carriers; ++id) {
+    pool->workers[id].pool = pool;
+    check(pthread_create(&workers[id], NULL, worker_entry, &pool->workers[id]));
+  }
+  if (native) {
+    submit(pool, 0);
+    submit(pool, 1);
+    lock(pool);
+    while (pool->entered != 2)
+      wait_change(pool);
+    require(pool->native == NATIVE);
+    unlock(pool);
+  }
+  if (!abort_send) {
+    for (id = 3; id < 3 + consumers; ++id) {
+      submit(pool, id);
+      lock(pool);
+      while (!pool->tasks[id].published)
+        wait_change(pool);
+      unlock(pool);
+    }
+  }
+  if (!abort_recv) {
+    if (foreign)
+      check(pthread_create(&provider, NULL, stream_foreign_entry, &actor));
+    else
+      submit(pool, 2);
+    lock(pool);
+    if (aborting) {
+      while (!pool->tasks[2].published)
+        wait_change(pool);
+    } else {
+      int parked;
+      do {
+        parked = 0;
+        for (id = 3; id < 3 + consumers; ++id)
+          parked += pool->tasks[id].published != 0;
+        if (pool->consumed == 1 && parked == consumers &&
+            (foreign ? actor.task.pinned_resource_waits != 0
+                     : pool->tasks[2].published))
+          break;
+        wait_change(pool);
+      } while (1);
+      require(pool->generated == 1);
+    }
+    unlock(pool);
+  }
+  /* The producer cannot obtain the remaining input until an actual downstream
+     consumer has acknowledged the first chunk and this collection completes. */
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  if (aborting)
+    end_pipe(pool->main, finalizing);
+  else {
+    lua_getglobal(pool->main, "checkpoint");
+    lua_getfield(pool->main, -1, "send");
+    lua_pushvalue(pool->main, -2);
+    lua_pushliteral(pool->main, "go");
+    lua_call(pool->main, 2, 0);
+    lua_pop(pool->main, 1);
+  }
+  if (foreign) {
+    check(pthread_join(provider, NULL));
+    require(actor.status == LUA_OK && actor.result == STREAM_CHUNKS);
+    require(actor.task.pinned_resource_waits != 0 && actor.task.parks == 0);
+    luaCB_revoke(&registration);
+    require(luaCB_destroy(pool->main, &registration) == LUA_OK);
+  }
+  lock(pool);
+  while (pool->done != (unsigned)(expected_done - (native ? 2 : 0)))
+    wait_change(pool);
+  if (native) {
+    require(pool->native == NATIVE && !pool->tasks[0].finished &&
+            !pool->tasks[1].finished);
+    pool->release[0] = pool->release[1] = 1;
+    signal_change(pool);
+    while (pool->done != (unsigned)expected_done)
+      wait_change(pool);
+  }
+  pool->stop = 1;
+  signal_change(pool);
+  unlock(pool);
+  for (id = 0; id < carriers; ++id)
+    check(pthread_join(workers[id], NULL));
+  require(pool->managed == 0 && pool->native == 0 && pool->native_waits == 0);
+  if (!native)
+    require(pool->native_peak == 0);
+  if (!aborting)
+    require(pool->generated == STREAM_CHUNKS &&
+            pool->consumed == STREAM_CHUNKS);
+  for (id = 0; id < TASKS; ++id) {
+    struct task *task = &pool->tasks[id];
+    if (task->state == NULL)
+      continue;
+    if (task->status != LUA_OK && !(abort_send && id == 2))
+      fprintf(stderr, "stream task %d: %s\n", id,
+              lua_tostring(task->state, -1));
+    require(task->status == (abort_send && id == 2 ? LUA_ERRRUN : LUA_OK));
+    require(task->fiber.execution.protected == NULL &&
+            task->state->native_depth == 0 && task->state->world_depth == 0 &&
+            task->state->native_roots == NULL &&
+            task->state->object_scopes == NULL);
+    if (id >= 3 && !aborting)
+      sum += (unsigned)lua_tointeger(task->state, -1);
+    if (id >= 2) {
+      require(task->resource_waits != 0 && task->pinned_resource_waits == 0);
+      if (pool->force_migrate)
+        require(task->migrations != 0);
+    }
+    (void)lua_closethread(task->state, NULL);
+    test_fiber_destroy(&task->fiber);
+  }
+  if (!aborting)
+    require(sum == STREAM_CHUNKS);
+  require(luaL_loadstring(
+              pool->main,
+              aborting ? "local t=p:stats(); return t.buffered_bytes, t.ready"
+                       : "local t=p:stats(); return t.sent_bytes, "
+                         "t.received_bytes, t.peak_bytes, t.buffered_bytes") ==
+          LUA_OK);
+  require(lua_pcall(pool->main, 0, aborting ? 2 : 4, 0) == LUA_OK);
+  if (aborting) {
+    require(lua_tointeger(pool->main, -2) ==
+            (abort_send && !finalizing ? 1024 : 0));
+    require(lua_toboolean(pool->main, -1) == !finalizing);
+  } else {
+    require(lua_tointeger(pool->main, -4) ==
+            STREAM_CHUNKS * LUA_PIPE_CHUNK_MAX);
+    require(lua_tointeger(pool->main, -3) ==
+            STREAM_CHUNKS * LUA_PIPE_CHUNK_MAX);
+    require(lua_tointeger(pool->main, -2) <= LUA_PIPE_CHUNK_MAX);
+    require(lua_tointeger(pool->main, -1) == 0);
+  }
+  lua_close(pool->main);
+  require(pool->stream_live == 0 && pool->stream_peak <= STREAM_HEAP_LIMIT);
+  check(pthread_cond_destroy(&pool->changed));
+  check(pthread_mutex_destroy(&pool->mutex));
+  printf("chunk stream %s: %u chunks, %zu peak Lua bytes, %d owned carriers\n",
+         name, pool->consumed, pool->stream_peak, carriers);
+  free(pool);
+  return 0;
+}
 int main(int argc, char **argv) {
   struct pool *pool;
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
   require(argc == 2);
+  if (strncmp(argv[1], "stream_", 7) == 0)
+    return exercise_stream(argv[1]);
   if (strncmp(argv[1], "wait_", 5) == 0)
     return exercise_resource_wait(argv[1]);
   if (strncmp(argv[1], "foreign_", 8) == 0)

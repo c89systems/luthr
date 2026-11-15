@@ -95,16 +95,18 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
   if (execution != NULL && execution->wait != NULL && execution->wake != NULL) {
     LuaWaiter waiter;
     unsigned depth = execution->managed_depth;
-    lua_assert(depth != 0);
     waiter.execution = execution;
     waiter.next = *waiters;
     *waiters = &waiter;
     execution->managed_depth = 0;
-    if (execution->managed_leave != NULL)
+    if (depth != 0 && execution->managed_leave != NULL)
       execution->managed_leave(execution);
     execution->wait(execution, mutex, &waiter);
     luaQ_entermanaged(L);
-    execution->managed_depth = depth;
+    if (depth == 0)
+      luaQ_leavemanaged();  /* An opaque native resource needs no VM permit. */
+    else
+      execution->managed_depth = depth;
     luaX_checksync(pthread_mutex_lock(mutex));
   }
   else

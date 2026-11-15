@@ -103,17 +103,22 @@ operations. Their names, syntax, channels and structured lifetime model are
 unresolved. A wait must park the task or relinquish runtime execution rights;
 it must not hold the interpreter lock while waiting for its own dependency.
 
-Migration is allowed only at proven safe boundaries. A carrier executing a
-native C frame remains attached until that frame unwinds. Libraries with stronger
-thread affinity may require a resource or an entire task to stay on a particular
-thread for longer.
+Migration is allowed only at proven safe boundaries. An actual foreign C
+activation remains on its carrier until that activation unwinds. Audited
+runtime C activations can park on retained runtime-owned stacks and migrate
+under the proven context protocol. Libraries with stronger thread affinity may
+require a resource or an entire task to stay on a particular thread for longer.
 
 A shared-VM execution lock would serialize Lua bytecode and is no longer an
 acceptable candidate. Multiplexing, shared-memory correctness and simultaneous
 multicore Lua execution must all be proved. Synchronization must protect shared
 tables, captured variables, registry/module state, allocation and collection
 without retaining a global execution lock across Lua code or native waits.
-The synchronization and collection mechanisms are not selected or proven yet.
+The implementation candidate retains Lua's tracing collector, with object-scoped
+synchronization, explicit roots and coordinated collection pauses. The
+[parallel-state investigation](parallel-state-design.md) records the lessons
+from free-threaded CPython, private implementation evidence and remaining
+acceptance gates. Public scheduler interfaces remain unfrozen.
 
 ## What to borrow from Go
 

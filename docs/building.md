@@ -116,6 +116,15 @@ keeps owned native slots saturated while provider threads invoke registered Lua
 callbacks, including nested calls, C89 budgets, live captures and queued/late
 revocation. Provider threads are distinct from the bounded owned carrier pool.
 
+`pipe_contract_*` covers private runtime closure classification and bounded
+chunk-pipe construction, identity-preserving transfer without body allocation,
+errors and finalization. `native_scheduler_stream_*` moves 1 MiB through a
+one-slot pipe with a 128 KiB Lua-heap cap, withholding further input until the
+first chunk reaches a consumer. Cases cover GC while parked, one-carrier reuse,
+forced migration, native saturation, a foreign producer, and close/finalization
+of entered waits. These are private feasibility gates, not installed APIs or
+proof of the required modules' streaming behavior.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

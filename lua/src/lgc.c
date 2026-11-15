@@ -413,6 +413,7 @@ static void reallymarkobject (global_State *g, GCObject *o) {
 */
 static void markmt (global_State *g) {
   int i;
+  markobjectN(g, g->pipe_meta);
   for (i=0; i < LUA_NUMTYPES; i++)
     markobjectN(g, g->mt[i]);
 }

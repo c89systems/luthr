@@ -16,6 +16,17 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(pipe_contract_test pipe_contract_test.c)
+set_target_properties(pipe_contract_test PROPERTIES C_STANDARD 99)
+target_compile_options(pipe_contract_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(pipe_contract_test PRIVATE luthrum_static)
+target_link_options(pipe_contract_test PRIVATE
+  -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init)
+foreach(case IN ITEMS managed contract transfer_oom corrupt create_oom mutex condition
+    roots_incremental roots_generational)
+  add_test(NAME pipe_contract_${case} COMMAND pipe_contract_test ${case})
+  set_tests_properties(pipe_contract_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
+endforeach()
 luthrum_test_program(callback_entry_test callback_entry_test.c)
 set_target_properties(callback_entry_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_entry_test PRIVATE -Wall -Wextra -Werror)
@@ -58,7 +69,15 @@ foreach(case IN ITEMS incremental generational budget_incremental budget_generat
     resource_incremental resource_generational foreign_incremental foreign_generational
     foreign_revoke_incremental foreign_revoke_generational
     foreign_budget_incremental foreign_budget_generational
-    foreign_open_incremental foreign_open_generational)
+    foreign_open_incremental foreign_open_generational
+    stream_single_incremental stream_single_generational
+    stream_migrate_incremental stream_migrate_generational
+    stream_native_incremental stream_native_generational
+    stream_foreign_incremental stream_foreign_generational
+    stream_abort_send_migrate_incremental stream_abort_send_migrate_generational
+    stream_abort_recv_incremental stream_abort_recv_generational
+    stream_close_send_incremental stream_close_send_generational
+    stream_close_recv_incremental stream_close_recv_generational)
   add_test(NAME native_scheduler_${case} COMMAND native_scheduler_test ${case})
   set_tests_properties(native_scheduler_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
 endforeach()

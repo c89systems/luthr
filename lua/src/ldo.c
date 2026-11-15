@@ -755,7 +755,8 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   LuaWorldScope depth;
   CallInfo *ci;
   ptrdiff_t function = savestack(L, func);
-  luaQ_beginnative(L);
+  int managed = ttisCclosure(s2v(func)) && clCvalue(s2v(func))->managed;
+  if (!managed) luaQ_beginnative(L);
   func = restorestack(L, function);
   checkstackp(L, LUA_MINSTACK, func);  /* ensure minimum stack size */
   L->ci = ci = prepCallInfo(L, func, status | CIST_C,
@@ -768,7 +769,7 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   depth = luaW_detach(L);
   n = (*f)(L);  /* do the actual call */
   luaW_attach(L, depth);
-  luaQ_endnative(L);
+  if (!managed) luaQ_endnative(L);
   api_checknelems(L, n);
   luaD_poscall(L, ci, n);
   return n;
@@ -962,17 +963,19 @@ static void finishCcall (lua_State *L, CallInfo *ci) {
   else {
     LuaWorldScope depth;
     TStatus status = LUA_YIELD;  /* default if there were no errors */
+    int managed = ttisCclosure(s2v(ci->func.p)) &&
+                  clCvalue(s2v(ci->func.p))->managed;
     lua_KFunction kf = ci->u.c.k;  /* continuation function */
     /* must have a continuation and must be able to call it */
     lua_assert(kf != NULL && yieldable(L));
     if (ci->callstatus & CIST_YPCALL)   /* was inside a 'lua_pcallk'? */
       status = finishpcallk(L, ci);  /* finish it */
     adjustresults(L, LUA_MULTRET);  /* finish 'lua_callk' */
-    luaQ_beginnative(L);
+    if (!managed) luaQ_beginnative(L);
     depth = luaW_detach(L);
     n = (*kf)(L, APIstatus(status), ci->u.c.ctx);  /* call continuation */
     luaW_attach(L, depth);
-    luaQ_endnative(L);
+    if (!managed) luaQ_endnative(L);
     api_checknelems(L, n);
   }
   luaD_poscall(L, ci, n);  /* finish 'luaD_call' */
@@ -1055,11 +1058,13 @@ static void resume (lua_State *L, void *ud) {
     else {  /* 'common' yield */
       if (ci->u.c.k != NULL) {  /* does it have a continuation function? */
         LuaWorldScope depth;
-        luaQ_beginnative(L);
+        int managed = ttisCclosure(s2v(ci->func.p)) &&
+                      clCvalue(s2v(ci->func.p))->managed;
+        if (!managed) luaQ_beginnative(L);
         depth = luaW_detach(L);
         n = (*ci->u.c.k)(L, LUA_YIELD, ci->u.c.ctx); /* call continuation */
         luaW_attach(L, depth);
-        luaQ_endnative(L);
+        if (!managed) luaQ_endnative(L);
         api_checknelems(L, n);
       }
       luaD_poscall(L, ci, n);  /* finish 'luaD_call' */

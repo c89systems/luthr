@@ -60,6 +60,9 @@ reused carriers, forced migration and early notification. A private registered
 callback prototype adds protected foreign-thread entry, nested calls at native
 saturation, live captures and revocation with retained roots. General external
 admission, native-resource affinity, shutdown and installed scheduling remain unfinished.
+Audited runtime closures and bounded chunk pipes now have private streaming
+proofs for backpressure, migration, native saturation and foreign callbacks;
+they do not establish streaming compatibility for the required modules.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

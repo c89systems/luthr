@@ -15,11 +15,12 @@ bounded carriers and explicit native-resource affinity and ownership.
 
 ## What free-threaded CPython contributes
 
-CPython's GIL removal combines object locking with changes to reference counting,
-allocation and cycle collection. Its design includes coordinated collection
-pauses and an attached/detached thread protocol. Optimistic container reads need
-additional lifetime and allocator machinery. These mechanisms replace services
-the GIL previously supplied; deleting a mutex would not supply them.
+Free-threaded CPython replaces the GIL's shared-state protection with several
+coordinated mechanisms: container/object locks; biased and deferred reference
+counting plus immortal objects to reduce accounting contention; coordinated
+collection pauses; and attached/detached thread states. Optimistic container
+reads also require safe reclamation and allocator support. Removing the
+execution mutex alone would leave these responsibilities unsatisfied.
 [PEP 703](https://peps.python.org/pep-0703/)
 
 Current extension guidance requires care with borrowed references, direct field
@@ -815,6 +816,64 @@ callback API, promise automatic adaptation of arbitrary modules, or satisfy
 cancellation/shutdown, affinity, streaming, compatibility, sizing and installed
 scheduler gates. Providers still own their threads and must synchronize their
 native payloads and acknowledge unregistration.
+
+## Managed runtime closures and bounded chunk transport
+
+`lua/src/lexec.h` now provides private `luaQ_pushmanaged` for audited runtime C
+closures. Its immutable closure flag covers both the initial call and yielded
+continuations. Those calls keep the normal coroutine pin/native-stack lifetime
+protocol while bypassing foreign-call admission. Ordinary C functions, including
+closures with captures, remain conservatively foreign. A managed closure must
+not retain carrier TLS across a Lua boundary or perform opaque blocking work.
+This classification is private and does not yet audit standard library control
+functions, C89 wrappers or arbitrary modules for migration.
+
+The resource-wait boundary also accepts a detached runtime activation with zero
+managed-entry depth. It still registers/wakes atomically under the predicate
+mutex, parks a task with no foreign activation, preserves a foreign caller's
+carrier, and balances any execution permit granted for dispatch. No physical
+pipe mutex remains held across a park or VM reentry.
+
+`lua/src/lpipe.c` is a private bounded chunk pipe. Capacity zero selects one
+slot; the prototype permits at most 64 slots and 1,024 bytes per string chunk.
+Uservalue slots retain immutable strings, and receive transfers the original
+string without allocating/copying its body. Full/empty waits apply backpressure.
+Close drains queued chunks before EOF; finalization discards queued chunks,
+wakes entered operations and defers synchronization-object destruction until
+their leases retire. Debug mutation of internal userdata/metatables is outside
+the contract; invalid queued values are rejected and the pipe is closed.
+
+Payload retained by one pipe is bounded by its slots times the maximum chunk
+size. Each admitted sender can additionally retain its pending input chunk on
+its task stack. Task/admission limits must account for that memory separately;
+this is no claim that a pipe bounds an unlimited number of producers.
+
+`pipe_contract_*` checks ordinary/managed classification, captures, tail calls,
+yielded and protected continuations, errors, chunk identity, empty/maximal and
+oversized chunks, close/EOF, explicit finalization and corrupted storage. It
+denies allocations throughout a warmed send/receive/close transfer and injects
+construction allocation and mutex/condition failures with a moving allocator.
+GC cases fill/drain every slot after aging the pipe and reuse the metatable
+after all pipe instances have been collected.
+
+Sixteen `native_scheduler_stream_*` cases exercise real VM calls in incremental
+and generational GC modes. The producer generates 1 MiB as 1,024 chunks under a
+128 KiB hard Lua-heap cap, through a one-slot pipe. Consumers must process the
+first chunk before the remaining input is released, with forced collection
+while producer and consumers wait. A single reused carrier supports three
+waiting consumers and the producer without any foreign slot. Other variants
+force two-carrier migration, keep both ordinary native slots blocked until the
+stream finishes, or produce from a registered foreign callback while preserving
+its carrier/TLS. Explicit finalization and ordinary close wake parked senders
+and receivers; a moved sender's error must reach its protected receiver.
+Disabling managed classification, metatable-root marking or zero-depth waits
+makes the corresponding negative control abort; all changes are restored before
+the normal checks.
+
+These gates establish bounded producer-to-consumer chunk flow, not complete
+streaming module compatibility or a public channel API. General cancellation,
+shutdown, resource affinity, standard-library control-call migration, measured
+sizing and installed scheduler/module acceptance remain open.
 
 ## Lua-specific proof obligations
 

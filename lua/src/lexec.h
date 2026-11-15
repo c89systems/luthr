@@ -38,6 +38,9 @@ typedef struct LuaWaiter {
 } LuaWaiter;
 
 LUAI_FUNC LuaExecution *luaQ_current (void);
+/* Trusted runtime code only: body and continuations cannot retain foreign TLS
+** or perform opaque blocking work. Native functions remain foreign by default. */
+LUAI_FUNC void luaQ_pushmanaged (lua_State *L, lua_CFunction function, int n);
 LUAI_FUNC void luaQ_entermanaged (lua_State *L);
 LUAI_FUNC void luaQ_leavemanaged (void);
 LUAI_FUNC void luaQ_beginnative (lua_State *L);

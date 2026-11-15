@@ -30,6 +30,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VCCL, sizeCclosure(nupvals));
   CClosure *c = gco2ccl(o);
   c->access.depth = 0;
+  c->managed = 0;
   c->nupvalues = cast_byte(nupvals);
   return c;
 }

@@ -48,7 +48,7 @@ add_custom_target(luthrum_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
   laccess lapi lcallback lcode lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
-  lparser lroots lstate lstring ltable ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
+  lparser lpipe lroots lstate lstring ltable ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")
 list(TRANSFORM lua_sources APPEND ".c")
