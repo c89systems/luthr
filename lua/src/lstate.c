@@ -287,7 +287,7 @@ static void f_luaopen (lua_State *L, void *ud) {
 ** preinitialize a thread with consistent values without allocating
 ** any memory (to avoid errors)
 */
-static void preinit_thread (lua_State *L, global_State *g) {
+static int preinit_thread (lua_State *L, global_State *g) {
   G(L) = g;
   L->stack.p = NULL;
   L->ci = NULL;
@@ -297,6 +297,9 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->luthrum_stack_limit = 0;
   L->luthrum_stack_context = NULL;
   L->native_roots = NULL;
+  L->state_poll = NULL;
+  L->state_poll_context = NULL;
+  L->poll_remaining = 1024;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;
@@ -308,6 +311,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->errfunc = 0;
   L->oldpc = 0;
   L->base_ci.previous = L->base_ci.next = NULL;
+  return luaX_initgate(&L->stack_gate);
 }
 
 
@@ -320,7 +324,7 @@ lu_mem luaE_threadsize (lua_State *L) {
 }
 
 
-static void close_state (lua_State *L) {
+static void close_state (lua_State *L, int owns_gate) {
   global_State *g = G(L);
   if (!completestate(g))  /* closing a partially built state? */
     luaC_freeallobjects(L);  /* just collect its objects */
@@ -334,6 +338,9 @@ static void close_state (lua_State *L) {
   luaM_freearray(L, G(L)->strt.hash, cast_sizet(G(L)->strt.size));
   freestack(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
+  if (owns_gate)
+    lua_unlock(L);
+  luaX_destroygate(&L->stack_gate);
   (*g->frealloc)(g->ud, g, sizeof(global_State), 0);  /* free main block */
 }
 
@@ -350,7 +357,8 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   /* anchor it on L stack */
   setthvalue2s(L, L->top.p, L1);
   api_incr_top(L);
-  preinit_thread(L1, g);
+  if (preinit_thread(L1, g) != 0)
+    luaM_error(L);
   L1->hookmask = L->hookmask;
   L1->basehookcount = L->basehookcount;
   L1->hook = L->hook;
@@ -371,6 +379,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
   freestack(L1);
+  luaX_destroygate(&L1->stack_gate);
   luaM_free(L, l);
 }
 
@@ -411,7 +420,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   L->tt = LUA_VTHREAD;
   g->currentwhite = bitmask(WHITE0BIT);
   L->marked = luaC_white(g);
-  preinit_thread(L, g);
+  if (preinit_thread(L, g) != 0) {
+    (*f)(ud, g, sizeof(global_State), 0);
+    return NULL;
+  }
   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
   L->next = NULL;
   incnny(L);  /* main thread is always non yieldable */
@@ -449,7 +461,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   for (i=0; i < LUA_NUMTYPES; i++) g->mt[i] = NULL;
   if (luaD_rawrunprotected(L, f_luaopen, NULL) != LUA_OK) {
     /* memory allocation error: free partial state */
-    close_state(L);
+    close_state(L, 0);
     L = NULL;
   }
   return L;
@@ -457,16 +469,20 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
 
 
 LUA_API void lua_close (lua_State *L) {
-  lua_lock(L);
   L = mainthread(G(L));  /* only the main thread can be closed */
-  close_state(L);
+  lua_lock(L);
+  close_state(L, 1);
 }
 
 
 void luaE_warning (lua_State *L, const char *msg, int tocont) {
   lua_WarnFunction wf = G(L)->warnf;
-  if (wf != NULL)
-    wf(G(L)->ud_warn, msg, tocont);
+  void *context = G(L)->ud_warn;
+  if (wf != NULL) {
+    lua_unlock(L);
+    wf(context, msg, tocont);
+    lua_lock(L);
+  }
 }
 
 

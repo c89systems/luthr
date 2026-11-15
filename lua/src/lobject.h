@@ -14,6 +14,7 @@
 
 #include "llimits.h"
 #include "lua.h"
+#include "lgate.h"
 
 
 /*
@@ -690,6 +691,9 @@ typedef struct UpVal {
     } open;
     TValue value;  /* the value (when closed) */
   } u;
+  pthread_mutex_t mutex;
+  lua_State *owner;
+  int mutex_ready;
 } UpVal;
 
 

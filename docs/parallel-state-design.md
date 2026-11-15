@@ -1,7 +1,8 @@
 # Parallel shared-VM design investigation
 
-Status: research recommendation, 2026-11-15. This selects the candidate to
-investigate first, not a proven implementation or a frozen public API.
+Status: candidate with an initial private execution experiment, 2026-11-15.
+The full concurrent heap and scheduler remain unimplemented; no public scheduler
+API is frozen.
 
 ## Required result
 
@@ -95,7 +96,8 @@ copy a complete value into a GC-visible snapshot, then resume under its own gate
 No thread may hold two coroutine stack gates in opposite orders. Periodic VM
 safepoints must allow an owner running a tight loop to service foreign access.
 Upvalue closing, stack relocation, closure mutation and GC still need their own
-coherent protocol. This is the next experiment, not an implemented guarantee.
+coherent protocol. The private experiment below establishes only the gated
+capture transfers, not the complete concurrent VM.
 
 The alternative is to replace stack-backed captures with heap cells and change
 all owner-register accesses to use them. That also needs synchronized value
@@ -108,7 +110,55 @@ The private temporary-root mechanism in `lua/src/lroots.h` supplies snapshot
 lifetime support. Its storage is caller-owned; collection scans those values,
 and protected unwinding retires abandoned scopes. It introduces no execution
 lock. Its sequential GC/unwinding tests establish this mechanism only; they do
-not prove concurrent VM mutation or the proposed gates.
+not prove concurrent VM mutation by themselves.
+
+## Initial gated-stack experiment
+
+`lua/src/lgate.c` gives each coroutine a FIFO ownership gate. Core entry owns
+that coroutine's stack; native callbacks release it. VM dispatch publishes its
+register extent and saved PC, then hands off ownership every 1,024 instructions.
+That interval is experimental, not a measured scheduler policy. A recursive
+gate entry is an internal boundary error. Warning callbacks now release ownership
+before calling native code, including callbacks that change their own handler.
+
+Lua upvalues have a metadata/value mutex and an open-stack owner. Foreign
+transfers root the upvalue, owning coroutine and copied value, release the
+caller's gate before waiting for the owner, and re-read the current value under
+protection. They release the owner's gate before reacquiring their own. Closing
+copies the value and clears its stack owner under the same upvalue mutex. Lua
+capture bytecodes and native get/setupvalue use this transfer mechanism. This
+does not protect mutation of a closure's upvalue array or C closure captures.
+
+`tests/parallel_vm_test.c` prepares two coroutines in one VM and pins their
+carriers to two available logical CPUs when possible. An internal VM poll barrier
+requires both dispatchers to arrive while retaining their respective stack
+ownership. A VM-wide execution lock would prevent this rendezvous. Each case
+then checks observable results:
+
+- Independent preallocated tables with concurrent typed writes/reads of a shared
+  closed capture.
+- A foreign write to a running owner's captured local, required to terminate
+  that owner's tight loop; a separate case uses native get/setupvalue.
+- Reversed cross-coroutine capture reads, including an owner's eventual close.
+- An unchanged blocking C binding whose release is withheld until the other
+  coroutine has completed managed work.
+
+The fixture warms call frames with an explicit initial yield, stops collection,
+and aborts on any allocation or free during overlap. Preparation and cleanup are
+serialized. Thus it proves neither arbitrary concurrent allocation/collection
+nor automatic task scheduling, migration, carrier reuse, replacement limits or
+scaling. Shared-table mutation, closure mutation, C API paths and native-global
+state still need their full synchronization audit. Public embedding callers
+must continue to serialize operations on a VM.
+
+CTest registers these cases under `parallel`; `make racecheck` runs them with
+Helgrind and a failing exit status for reported races. `make memcheck` checks
+them alongside the synchronous contracts. Separate initialization-failure cases
+inject mutex/condition errors during VM, coroutine and upvalue creation, then
+check memory/resource balance and continued VM use where construction survived.
+The tests run on native GNU and musl workers with the normal stack constraints.
+These gates narrow implementation uncertainty without satisfying the remaining
+acceptance requirements below.
 
 ## Lua-specific proof obligations
 

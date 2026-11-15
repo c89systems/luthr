@@ -9,6 +9,7 @@
 
 
 #include "lobject.h"
+struct LuaNativeRoot;
 
 
 #define sizeCclosure(n)  \
@@ -52,6 +53,9 @@ LUAI_FUNC CClosure *luaF_newCclosure (lua_State *L, int nupvals);
 LUAI_FUNC LClosure *luaF_newLclosure (lua_State *L, int nupvals);
 LUAI_FUNC void luaF_initupvals (lua_State *L, LClosure *cl);
 LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
+LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
+                             struct LuaNativeRoot *value);
+LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
 LUAI_FUNC void luaF_newtbcupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_closeupval (lua_State *L, StkId level);
 LUAI_FUNC StkId luaF_close (lua_State *L, StkId level, TStatus status, int yy);

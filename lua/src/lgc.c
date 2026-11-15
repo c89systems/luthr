@@ -836,6 +836,8 @@ static void clearbyvalues (global_State *g, GCObject *l, GCObject *f) {
 static void freeupval (lua_State *L, UpVal *uv) {
   if (upisopen(uv))
     luaF_unlinkupval(uv);
+  if (uv->mutex_ready)
+    luaX_checksync(pthread_mutex_destroy(&uv->mutex));
   luaM_free(L, uv);
 }
 

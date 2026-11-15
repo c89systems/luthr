@@ -27,6 +27,11 @@ instruction-accounting changes extracted from cpkt. See the
 [facade provenance](cpkt-source.md) and [embedding policy](embedding-policy.md).
 It is no longer byte-for-byte upstream source.
 
+Private temporary roots, per-coroutine stack gates, VM poll points and
+synchronized Lua capture transfers are also maintained directly in this tree.
+The [parallel-state investigation](parallel-state-design.md) records the limited
+execution evidence and remaining shared-heap requirements.
+
 Keep generated objects, binaries, and scratch installations outside the source
 tree, under the repository's ignored `build/` directory. Dependency acquisition
 scratch belongs under the ignored `.cache/` directory.

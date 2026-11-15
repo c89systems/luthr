@@ -1,0 +1,28 @@
+/*
+** Per-coroutine stack ownership and VM safepoints.
+** See Copyright Notice in lua.h
+*/
+#ifndef lgate_h
+#define lgate_h
+
+#include <pthread.h>
+#include "llimits.h"
+
+typedef struct LuaStackGate {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  pthread_t owner;
+  unsigned long next_ticket;
+  unsigned long serving;
+  int owned;
+  int ready;
+} LuaStackGate;
+
+LUAI_FUNC int luaX_initgate (LuaStackGate *gate);
+LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
+LUAI_FUNC void luaX_lockstate (lua_State *L);
+LUAI_FUNC void luaX_unlockstate (lua_State *L);
+LUAI_FUNC void luaX_checksync (int status);
+LUAI_FUNC void luaX_poll (lua_State *L);
+
+#endif

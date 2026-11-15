@@ -24,6 +24,7 @@
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
+#include "lroots.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -1387,7 +1388,7 @@ static const char *aux_upvalue (TValue *fi, int n, TValue **val,
       Proto *p = f->p;
       if (!(cast_uint(n) - 1u  < cast_uint(p->sizeupvalues)))
         return NULL;  /* 'n' not in [1, p->sizeupvalues] */
-      *val = f->upvals[n-1]->v.p;
+      *val = NULL;  /* copy Lua captures under their owner/metadata gates */
       if (owner) *owner = obj2gco(f->upvals[n - 1]);
       name = p->upvalues[n-1].name;
       return (name == NULL) ? "(no name)" : getstr(name);
@@ -1400,10 +1401,19 @@ static const char *aux_upvalue (TValue *fi, int n, TValue **val,
 LUA_API const char *lua_getupvalue (lua_State *L, int funcindex, int n) {
   const char *name;
   TValue *val = NULL;  /* to avoid warnings */
+  GCObject *owner = NULL;
   lua_lock(L);
-  name = aux_upvalue(index2value(L, funcindex), n, &val, NULL);
+  name = aux_upvalue(index2value(L, funcindex), n, &val, &owner);
   if (name) {
-    setobj2s(L, L->top.p, val);
+    if (owner->tt == LUA_VUPVAL) {
+      LuaNativeRoot snapshot;
+      luaR_pushroot(L, &snapshot);
+      luaF_readupval(L, gco2upv(owner), &snapshot);
+      setobj2s(L, L->top.p, &snapshot.value);
+      luaR_poproot(L, &snapshot);
+    }
+    else
+      setobj2s(L, L->top.p, val);
     api_incr_top(L);
   }
   lua_unlock(L);
@@ -1422,8 +1432,12 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
   name = aux_upvalue(fi, n, &val, &owner);
   if (name) {
     L->top.p--;
-    setobj(L, val, s2v(L->top.p));
-    luaC_barrier(L, owner, val);
+    if (owner->tt == LUA_VUPVAL)
+      luaF_writeupval(L, gco2upv(owner), s2v(L->top.p));
+    else {
+      setobj(L, val, s2v(L->top.p));
+      luaC_barrier(L, owner, val);
+    }
   }
   lua_unlock(L);
   return name;

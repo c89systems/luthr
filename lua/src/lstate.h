@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include "lua.h"
+#include "lgate.h"
 
 
 /* Some header files included here need this definition */
@@ -326,6 +327,10 @@ struct lua_State {
   uintptr_t luthrum_stack_limit;
   NativeStackContext *luthrum_stack_context;
   LuaNativeRoot *native_roots;
+  LuaStackGate stack_gate;
+  void (*state_poll)(lua_State *L, void *context);
+  void *state_poll_context;
+  unsigned poll_remaining;
 };
 
 

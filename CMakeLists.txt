@@ -47,7 +47,7 @@ add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
 add_custom_target(luthrum_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
-  lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes
+  lapi lcode lctype ldebug ldo ldump lfunc lgate lgc llex lmem lobject lopcodes
   lparser lroots lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")

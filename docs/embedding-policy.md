@@ -2,7 +2,10 @@
 
 This describes the extracted synchronous baseline. It has no task scheduler or
 internal global execution lock; callers serialize host operations on a handle.
-Parallel Lua execution within one shared VM remains required and unimplemented.
+Parallel Lua execution within one shared VM remains required. A private
+[gated-stack experiment](parallel-state-design.md#initial-gated-stack-experiment)
+exercises limited concurrent execution with allocation and collection disabled;
+it does not change this public embedding contract.
 
 The full `<luthrum/lua.h>` facade preserves Lua's public C API. The separate
 `<luthrum/lua_runtime.h>` facade owns a VM and adds embedding policy, including

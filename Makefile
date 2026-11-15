@@ -9,9 +9,9 @@ JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 
-.PHONY: help prepare configure build test memcheck install format format-check clean
+.PHONY: help prepare configure build test memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|test|memcheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: explicitly prepare the selected pinned toolchain' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|test|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: explicitly prepare the selected pinned toolchain' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
 configure:
@@ -22,6 +22,8 @@ test: build
 	ctest --test-dir "$(BUILD_DIR)" --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 memcheck: build
 	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L memcheck --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
+racecheck: build
+	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L parallel --overwrite 'MemoryCheckCommandOptions=--tool=helgrind --error-exitcode=1 --history-level=approx --fair-sched=yes' --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 install: build
 	cmake --install "$(BUILD_DIR)" --prefix "$(ROOT)/build/sdk/$(TARGET)/$(CONFIG)"
 format:

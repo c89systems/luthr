@@ -136,6 +136,10 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
     errcode = luaE_resetthread(L, errcode);  /* close all upvalues */
     L->status = errcode;
     if (mainth->errorJmp) {  /* main thread has a handler? */
+      if (L != mainth) {
+        lua_unlock(L);
+        lua_lock(mainth);
+      }
       setobjs2s(L, mainth->top.p++, L->top.p - 1);  /* copy error obj. */
       luaD_throw(mainth, errcode);  /* re-throw in main thread */
     }

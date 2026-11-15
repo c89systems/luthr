@@ -12,6 +12,28 @@ function(luthrum_test_program name source)
   endif()
 endfunction()
 
+luthrum_test_program(parallel_vm_test parallel_vm_test.c)
+set_target_properties(parallel_vm_test PROPERTIES C_STANDARD 99)
+target_compile_options(parallel_vm_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(parallel_vm_test PRIVATE luthrum_static)
+foreach(case IN ITEMS closed open api cycle blocked)
+  add_test(NAME parallel_vm_${case} COMMAND parallel_vm_test ${case})
+  set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
+luthrum_test_program(synchronization_failure_test synchronization_failure_test.c)
+set_target_properties(synchronization_failure_test PROPERTIES C_STANDARD 99)
+target_compile_options(synchronization_failure_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(synchronization_failure_test PRIVATE luthrum_static)
+target_link_options(synchronization_failure_test PRIVATE
+  -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
+  -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
+foreach(case IN ITEMS main_mutex main_condition thread_mutex thread_condition
+    closed_capture open_capture)
+  add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
+  set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
+endforeach()
+
 luthrum_test_program(native_roots_test native_roots_test.c)
 set_target_properties(native_roots_test PROPERTIES C_STANDARD 99)
 target_compile_options(native_roots_test PRIVATE -Wall -Wextra -Werror)

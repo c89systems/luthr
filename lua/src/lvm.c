@@ -26,6 +26,7 @@
 #include "lobject.h"
 #include "lopcodes.h"
 #include "lstate.h"
+#include "lroots.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -1189,6 +1190,16 @@ void luaV_finishOp (lua_State *L) {
 
 /* fetch an instruction and prepare its execution */
 #define vmfetch()	{ \
+  if (l_unlikely(--L->poll_remaining == 0)) { \
+    ptrdiff_t top = savestack(L, L->top.p); \
+    savepc(ci); \
+    if (L->top.p < ci->top.p) L->top.p = ci->top.p; \
+    L->poll_remaining = 1024; \
+    luaX_poll(L); \
+    updatebase(ci); \
+    L->top.p = restorestack(L, top); \
+    updatetrap(ci); \
+  } \
   if (l_unlikely(trap)) {  /* stack reallocation or hooks? */ \
     trap = luaG_traceexec(L, pc);  /* handle hooks */ \
     updatebase(ci);  /* correct stack */ \
@@ -1291,27 +1302,40 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         vmbreak;
       }
       vmcase(OP_GETUPVAL) {
-        StkId ra = RA(i);
+        LuaNativeRoot value;
         int b = GETARG_B(i);
-        setobj2s(L, ra, cl->upvals[b]->v.p);
+        savestate(L, ci);
+        luaR_pushroot(L, &value);
+        luaF_readupval(L, cl->upvals[b], &value);
+        updatebase(ci);
+        setobj2s(L, RA(i), &value.value);
+        luaR_poproot(L, &value);
         vmbreak;
       }
       vmcase(OP_SETUPVAL) {
         StkId ra = RA(i);
         UpVal *uv = cl->upvals[GETARG_B(i)];
-        setobj(L, uv->v.p, s2v(ra));
-        luaC_barrier(L, uv, s2v(ra));
+        savestate(L, ci);
+        luaF_writeupval(L, uv, s2v(ra));
+        updatebase(ci);
         vmbreak;
       }
       vmcase(OP_GETTABUP) {
-        StkId ra = RA(i);
-        TValue *upval = cl->upvals[GETARG_B(i)]->v.p;
+        StkId ra;
+        LuaNativeRoot snapshot;
+        TValue *upval = &snapshot.value;
         TValue *rc = KC(i);
         TString *key = tsvalue(rc);  /* key must be a short string */
         lu_byte tag;
+        savestate(L, ci);
+        luaR_pushroot(L, &snapshot);
+        luaF_readupval(L, cl->upvals[GETARG_B(i)], &snapshot);
+        updatebase(ci);
+        ra = RA(i);
         luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
         if (tagisempty(tag))
           Protect(luaV_finishget(L, upval, rc, ra, tag));
+        luaR_poproot(L, &snapshot);
         vmbreak;
       }
       vmcase(OP_GETTABLE) {
@@ -1354,15 +1378,22 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       }
       vmcase(OP_SETTABUP) {
         int hres;
-        TValue *upval = cl->upvals[GETARG_A(i)]->v.p;
+        LuaNativeRoot snapshot;
+        TValue *upval = &snapshot.value;
         TValue *rb = KB(i);
-        TValue *rc = RKC(i);
+        TValue *rc;
         TString *key = tsvalue(rb);  /* key must be a short string */
+        savestate(L, ci);
+        luaR_pushroot(L, &snapshot);
+        luaF_readupval(L, cl->upvals[GETARG_A(i)], &snapshot);
+        updatebase(ci);
+        rc = RKC(i);
         luaV_fastset(upval, key, rc, hres, luaH_psetshortstr);
         if (hres == HOK)
           luaV_finishfastset(L, upval, rc);
         else
           Protect(luaV_finishset(L, upval, rb, rc, hres));
+        luaR_poproot(L, &snapshot);
         vmbreak;
       }
       vmcase(OP_SETTABLE) {

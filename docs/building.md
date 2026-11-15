@@ -7,8 +7,9 @@ source download or patch application during configure and build.
 
 Required workstation tools are Bash 4.4 or later, Make, CMake 3.25 or later,
 Ninja, Python 3 for the declared C89 source generator, pkg-config, rg, and
-clang-format. Valgrind is required for `make memcheck`; clangd is used for editor
-verification. The activated lifecycle skill supplies its toolchain resolver.
+clang-format. Valgrind is required for `make memcheck` and `make racecheck`;
+clangd is used for editor verification. The activated lifecycle skill supplies
+its toolchain resolver.
 Run operations serially against a stable checkout and stable prepared tools.
 
 ```sh
@@ -16,6 +17,7 @@ make prepare                         # explicit pinned toolchain preparation
 make test                            # GNU Debug, one build worker
 make test TARGET=x86_64-linux-musl    # native musl, default worker stacks
 make memcheck                        # GNU Debug behavioral memory checks
+make racecheck                       # GNU Debug private VM paths under Helgrind
 make format-check
 make install                         # local SDK under build/sdk/<target>/<config>
 ```
@@ -52,8 +54,12 @@ CTest covers both library variants, instruction limits, tracing, errors,
 allocation failure, coroutine cleanup, finalizers, native-stack exhaustion and
 migration, interpreter/compiler behavior, public symbols and relocated CMake and
 pkg-config consumers. The shared consumer loads a native binding linked to the
-same shared runtime. These are synchronous baseline tests; they do not establish
-parallel scheduler behavior.
+same shared runtime. The private `parallel_vm_*` cases additionally exercise
+shared captures, independent preallocated tables and blocking native work in one
+VM with allocation/collection disabled during overlap. Synchronization failure
+tests check cleanup after native mutex/condition initialization errors. See the
+[experiment's boundaries](parallel-state-design.md#initial-gated-stack-experiment);
+these checks do not establish parallel scheduler behavior.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
