@@ -61,8 +61,8 @@
 /*
 ** some useful bit tricks
 */
-#define resetbits(x,m)		((x) &= cast_byte(~(m)))
-#define setbits(x,m)		((x) |= (m))
+#define resetbits(x,m) __atomic_fetch_and(&(x), cast_byte(~(m)), __ATOMIC_RELAXED)
+#define setbits(x,m) __atomic_fetch_or(&(x), (m), __ATOMIC_RELAXED)
 #define testbits(x,m)		((x) & (m))
 #define bitmask(b)		(1<<(b))
 #define bit2mask(b1,b2)		(bitmask(b1) | bitmask(b2))
@@ -88,18 +88,20 @@
 #define WHITEBITS	bit2mask(WHITE0BIT, WHITE1BIT)
 
 
-#define iswhite(x)      testbits((x)->marked, WHITEBITS)
-#define isblack(x)      testbit((x)->marked, BLACKBIT)
+#define getmarked(x) __atomic_load_n(&(x)->marked, __ATOMIC_RELAXED)
+#define setmarked(x,m) __atomic_store_n(&(x)->marked, (m), __ATOMIC_RELAXED)
+#define iswhite(x)      testbits(getmarked(x), WHITEBITS)
+#define isblack(x)      testbit(getmarked(x), BLACKBIT)
 #define isgray(x)  /* neither white nor black */  \
-	(!testbits((x)->marked, WHITEBITS | bitmask(BLACKBIT)))
+	(!testbits(getmarked(x), WHITEBITS | bitmask(BLACKBIT)))
 
-#define tofinalize(x)	testbit((x)->marked, FINALIZEDBIT)
+#define tofinalize(x)	testbit(getmarked(x), FINALIZEDBIT)
 
 #define otherwhite(g)	((g)->currentwhite ^ WHITEBITS)
 #define isdeadm(ow,m)	((m) & (ow))
-#define isdead(g,v)	isdeadm(otherwhite(g), (v)->marked)
+#define isdead(g,v)	isdeadm(otherwhite(g), getmarked(v))
 
-#define changewhite(x)	((x)->marked ^= WHITEBITS)
+#define changewhite(x) __atomic_fetch_xor(&(x)->marked, WHITEBITS, __ATOMIC_RELAXED)
 #define nw2black(x)  \
 	check_exp(!iswhite(x), l_setbit((x)->marked, BLACKBIT))
 
@@ -117,8 +119,8 @@
 
 #define AGEBITS		7  /* all age bits (111) */
 
-#define getage(o)	((o)->marked & AGEBITS)
-#define setage(o,a)  ((o)->marked = cast_byte(((o)->marked & (~AGEBITS)) | a))
+#define getage(o)	(getmarked(o) & AGEBITS)
+#define setage(o,a) setmarked(o, cast_byte((getmarked(o) & (~AGEBITS)) | a))
 #define isold(o)	(getage(o) > G_SURVIVAL)
 
 
@@ -231,22 +233,24 @@
 #endif
 
 #define luaC_condGC(L,pre,pos) \
-	{ if (G(L)->GCdebt <= 0) { pre; luaC_step(L); pos;}; \
+	{ if (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= 0) \
+          { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 
 /* more often than not, 'pre'/'pos' are empty */
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
 
-#define luaC_objbarrier(L,p,o) (  \
-	(isblack(p) && iswhite(o)) ? \
-	luaC_barrier_(L,obj2gco(p),obj2gco(o)) : cast_void(0))
+#define luaC_objbarrier(L,p,o) \
+        ((isblack(p) && iswhite(o)) ? \
+         luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 0) : cast_void(0))
 
 #define luaC_barrier(L,p,v) (  \
 	iscollectable(v) ? luaC_objbarrier(L,p,gcvalue(v)) : cast_void(0))
 
-#define luaC_objbarrierback(L,p,o) (  \
-	(isblack(p) && iswhite(o)) ? luaC_barrierback_(L,p) : cast_void(0))
+#define luaC_objbarrierback(L,p,o) \
+        ((isblack(p) && iswhite(o)) ? \
+         luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 1) : cast_void(0))
 
 #define luaC_barrierback(L,p,v) (  \
 	iscollectable(v) ? luaC_objbarrierback(L, p, gcvalue(v)) : cast_void(0))
@@ -261,6 +265,7 @@ LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
                                                  size_t offset);
 LUAI_FUNC void luaC_barrier_ (lua_State *L, GCObject *o, GCObject *v);
 LUAI_FUNC void luaC_barrierback_ (lua_State *L, GCObject *o);
+LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back);
 LUAI_FUNC void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt);
 LUAI_FUNC void luaC_changemode (lua_State *L, int newmode);
 

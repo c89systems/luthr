@@ -119,7 +119,8 @@ static int exercise_forwarding(lua_State *state, struct context *context) {
   (void)lua_gc(state, LUA_GCCOLLECT);
   return context->finalized != 1 || state->native_depth != 0 ||
          state->world_depth != 0 || G(state)->world.active != 0 ||
-         G(state)->world.stopped;
+         G(state)->world.stopped || G(state)->world.heap_depth != 0 ||
+         state->heap_waiting != 0;
 }
 
 static void *run(void *user) {
@@ -149,13 +150,14 @@ static void *run(void *user) {
   lua_setwarnf(state, warn_then_throw, context);
   lua_pushcfunction(state, collect);
   status = lua_pcall(state, 0, 0, 0);
-  context->failed = status != LUA_ERRRUN ||
-                    lua_touserdata(state, -1) != context ||
-                    context->finalized != 1 || context->warnings != 1 ||
-                    (context->oom_case && context->allocation_failures == 0) ||
-                    state->native_depth != 0 || state->world_depth != 0 ||
-                    G(state)->world.active != 0 || G(state)->world.stopped ||
-                    G(state)->gcemergency != 0 || G(state)->gcstopem != 0;
+  context->failed =
+      status != LUA_ERRRUN || lua_touserdata(state, -1) != context ||
+      context->finalized != 1 || context->warnings != 1 ||
+      (context->oom_case && context->allocation_failures == 0) ||
+      state->native_depth != 0 || state->world_depth != 0 ||
+      G(state)->world.active != 0 || G(state)->world.stopped ||
+      G(state)->world.heap_depth != 0 || state->heap_waiting != 0 ||
+      G(state)->gcemergency != 0 || G(state)->gcstopem != 0;
   context->reject_growth = 0;
   lua_settop(state, 0);
   context->failed |= lua_gc(state, LUA_GCCOLLECT) != 0;

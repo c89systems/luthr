@@ -175,6 +175,7 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
     *sl = ts = luaS_createlngstrobj(L, size);  /* create string */
     luaC_objbarrier(L, p, ts);
     loadVector(S, getlngstr(ts), size + 1);  /* load directly in final place */
+    luaS_finishlongstr(ts);
   }
   /* add string to list of saved strings */
   S->nstr++;

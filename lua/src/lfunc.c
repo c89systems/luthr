@@ -92,23 +92,29 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
 
 /* Read/write a captured value without holding two coroutine gates. The caller
 ** owns its own gate. Roots keep the upvalue, owner, and transfer value alive
-** across the handoff. The collector still needs a VM-wide rendezvous before
-** concurrent allocation/collection can be enabled. */
+** across the handoff. Writers acquire metadata ownership before the upvalue
+** mutex, so no mutex holder parks behind a collecting metadata owner. */
 static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
                           int writing) {
   LuaNativeRoot upvalue_root, owner_root;
   lua_State *owner;
-  unsigned depth = 0;
+  LuaWorldScope depth = {0, 0};
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
   luaR_pushroot(L, &owner_root);
+  if (writing)
+    luaW_heapenter(L);
   luaX_checksync(pthread_mutex_lock(&uv->mutex));
   owner = uv->owner;
   if (owner != NULL && owner != L) {
     setthvalue(L, &owner_root.value, owner);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    if (writing)
+      luaW_heapleave(L);
     depth = luaW_detach(L);
     luaX_lockstate(owner);
+    if (writing)
+      luaW_heapenter(owner);
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
   }
   if (writing) {
@@ -118,6 +124,8 @@ static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
   else
     luaR_setroot(L, value, uv->v.p);
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+  if (writing)
+    luaW_heapleave(owner != NULL && owner != L ? owner : L);
   if (owner != NULL && owner != L) {
     luaX_unlockstate(owner);
     luaW_attach(L, depth);
@@ -144,17 +152,25 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
 ** at the given level.
 */
 UpVal *luaF_findupval (lua_State *L, StkId level) {
-  UpVal **pp = &L->openupval;
+  ptrdiff_t offset = savestack(L, level);
+  UpVal **pp;
   UpVal *p;
+  luaW_heapenter(L);
+  level = restorestack(L, offset);
+  pp = &L->openupval;
   lua_assert(isintwups(L) || L->openupval == NULL);
   while ((p = *pp) != NULL && uplevel(p) >= level) {  /* search for it */
     lua_assert(!isdead(G(L), p));
-    if (uplevel(p) == level)  /* corresponding upvalue? */
+    if (uplevel(p) == level) {  /* corresponding upvalue? */
+      luaW_heapleave(L);
       return p;  /* return it */
+    }
     pp = &p->u.open.next;
   }
   /* not found: create a new upvalue after 'pp' */
-  return newupval(L, level, pp);
+  p = newupval(L, level, pp);
+  luaW_heapleave(L);
+  return p;
 }
 
 
@@ -255,6 +271,12 @@ void luaF_unlinkupval (UpVal *uv) {
 */
 void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
+  ptrdiff_t offset;
+  if (L->openupval == NULL)
+    return;
+  offset = savestack(L, level);
+  luaW_heapenter(L);
+  level = restorestack(L, offset);
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
     TValue *slot = &uv->u.value;  /* new position for value */
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
@@ -269,6 +291,7 @@ void luaF_closeupval (lua_State *L, StkId level) {
     }
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   }
+  luaW_heapleave(L);
 }
 
 

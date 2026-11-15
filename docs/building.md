@@ -54,7 +54,7 @@ CTest covers both library variants, instruction limits, tracing, errors,
 allocation failure, coroutine cleanup, finalizers, native-stack exhaustion and
 migration, interpreter/compiler behavior, public symbols and relocated CMake and
 pkg-config consumers. The shared consumer loads a native binding linked to the
-same shared runtime. The private `parallel_vm_*` cases additionally exercise
+same shared runtime. Initial private `parallel_vm_*` cases additionally exercise
 shared captures, independent preallocated tables and blocking native work in one
 VM with allocation/collection disabled during overlap. Synchronization failure
 tests check cleanup after native mutex/condition initialization errors. See the
@@ -67,6 +67,15 @@ and finalizers outside collection pauses. `world_unwind_*` verifies cleanup when
 errors abandon collector/native scopes, also after forced allocation failure.
 Ordinary workers still cannot allocate concurrently in these fixtures. Both
 Valgrind commands select its fair thread scheduler for concurrent test progress.
+
+The `parallel_vm_allocate*` cases extend this to allocating coroutines, shared
+closed/live captures, short-string interning, long keys and automatic collection.
+Disposable userdata verify collection during execution and exactly-once cleanup.
+They cover a forced allocation failure while another carrier waits for heap
+metadata, and allocating progress while an unchanged native binding is blocked.
+These are [constrained VM tests](parallel-state-design.md#allocating-shared-vm-experiment),
+with shared-table mutation and the full scheduler still outstanding. Static/shared
+C89 facade checks also cover external string keys and exactly-once buffer release.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

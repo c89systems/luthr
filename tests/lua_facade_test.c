@@ -10,6 +10,67 @@ static const char *luthrum_lua_facade_pushvfstring(luthrum_lua_state *state,
 
 static int reject_allocations;
 
+struct external_string_context {
+  char *pointer;
+  size_t size;
+  int releases;
+  int failed;
+};
+
+static void *release_external_string(void *user, void *pointer, size_t old_size,
+                                     size_t new_size) {
+  struct external_string_context *context;
+  context = (struct external_string_context *)user;
+  context->failed |= pointer != context->pointer || old_size != context->size ||
+                     new_size != 0U;
+  context->releases++;
+  free(pointer);
+  context->pointer = NULL;
+  return NULL;
+}
+
+static int external_string_contract(void) {
+  static const char *const samples[] = {
+      "", "short external string",
+      "a long external string used as a table key with ownership retained "
+      "until its exactly-once release callback"};
+  struct external_string_context context;
+  luthrum_lua_state *state;
+  unsigned int i;
+  int failed;
+  failed = 0;
+  for (i = 0U; i < sizeof(samples) / sizeof(samples[0]); ++i) {
+    memset(&context, 0, sizeof(context));
+    context.size = strlen(samples[i]) + 1U;
+    context.pointer = (char *)malloc(context.size);
+    if (context.pointer == NULL)
+      return 1;
+    memcpy(context.pointer, samples[i], context.size);
+    state = luthrum_lua_l_newstate();
+    if (state == NULL) {
+      free(context.pointer);
+      return 1;
+    }
+    luthrum_lua_newtable(state);
+    (void)luthrum_lua_pushexternalstring(state, samples[i], context.size - 1U,
+                                         NULL, NULL);
+    luthrum_lua_pushinteger(state, luthrum_lua_integer_make(0U, 42U));
+    luthrum_lua_rawset(state, 1);
+    (void)luthrum_lua_pushexternalstring(state, context.pointer,
+                                         context.size - 1U,
+                                         release_external_string, &context);
+    (void)luthrum_lua_rawget(state, 1);
+    failed |= luthrum_lua_integer_low(luthrum_lua_tointeger(state, -1)) != 42U;
+    luthrum_lua_settop(state, 0);
+    (void)luthrum_lua_gc(state, LUTHRUM_LUA_GCCOLLECT);
+    (void)luthrum_lua_gc(state, LUTHRUM_LUA_GCCOLLECT);
+    failed |= context.releases != 1 || context.failed;
+    luthrum_lua_close(state);
+    failed |= context.releases != 1 || context.failed;
+  }
+  return failed;
+}
+
 static void *format_test_allocator(void *user, void *pointer, size_t old_size,
                                    size_t new_size) {
   (void)user;
@@ -218,5 +279,7 @@ int main(void) {
 
   luthrum_lua_l_openlibs(state);
   luthrum_lua_close(state);
+  if (external_string_contract() != 0)
+    return 18;
   return format_test_error_contract();
 }

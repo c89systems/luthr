@@ -334,6 +334,7 @@ struct lua_State {
   unsigned poll_remaining;
   unsigned native_depth;
   unsigned world_depth;
+  unsigned heap_waiting;
 };
 
 

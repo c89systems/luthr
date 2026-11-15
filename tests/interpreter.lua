@@ -22,5 +22,12 @@ end)
 assert(not ok and closed == 1)
 local dumped = string.dump(function(a, b) return a + b end)
 assert(assert(load(dumped))(20, 22) == 42)
+local long_keys = function()
+  local key = "a long constant key retained across source and bytecode loading"
+  local value = {[key] = 42}
+  return value[key]
+end
+assert(long_keys() == 42)
+assert(assert(load(string.dump(long_keys)))() == 42)
 collectgarbage("collect")
 print("interpreter behavior: passed")

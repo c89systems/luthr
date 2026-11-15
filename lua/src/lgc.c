@@ -21,6 +21,7 @@
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
+#include "lroots.h"
 #include "luthrum_hook_policy.h"
 #include "lstring.h"
 #include "ltable.h"
@@ -50,7 +51,7 @@
 
 /* macro to erase all color bits then set only the current white bit */
 #define makewhite(g,x)	\
-  (x->marked = cast_byte((x->marked & ~maskcolors) | luaC_white(g)))
+  setmarked(x, cast_byte((getmarked(x) & ~maskcolors) | luaC_white(g)))
 
 /* make an object gray (neither white nor black) */
 #define set2gray(x)	resetbits(x->marked, maskcolors)
@@ -58,7 +59,7 @@
 
 /* make an object black (coming from any color) */
 #define set2black(x)  \
-  (x->marked = cast_byte((x->marked & ~WHITEBITS) | bitmask(BLACKBIT)))
+  setmarked(x, cast_byte((getmarked(x) & ~WHITEBITS) | bitmask(BLACKBIT)))
 
 
 #define valiswhite(x)   (iscollectable(x) && iswhite(gcvalue(x)))
@@ -279,15 +280,37 @@ void luaC_barrierback_ (lua_State *L, GCObject *o) {
     setage(o, G_TOUCHED1);  /* touched in current cycle */
 }
 
+/* Root both ends before metadata ownership can park this mutator. Collection
+** may change their colors while it waits; make the barrier decision afterward. */
+void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
+  LuaNativeRoot owner, value;
+  luaR_pushroot(L, &owner);
+  setgcovalue(L, &owner.value, o);
+  luaR_pushroot(L, &value);
+  setgcovalue(L, &value.value, v);
+  luaW_heapenter(L);
+  if (isblack(o) && iswhite(v)) {
+    if (back)
+      luaC_barrierback_(L, o);
+    else
+      luaC_barrier_(L, o, v);
+  }
+  luaW_heapleave(L);
+  luaR_poproot(L, &value);
+  luaR_poproot(L, &owner);
+}
+
 
 void luaC_fix (lua_State *L, GCObject *o) {
   global_State *g = G(L);
+  luaW_heapenter(L);
   lua_assert(g->allgc == o);  /* object must be 1st in 'allgc' list! */
   set2gray(o);  /* they will be gray forever */
   setage(o, G_OLD);  /* and old forever */
   g->allgc = o->next;  /* remove object from 'allgc' list */
   o->next = g->fixedgc;  /* link it to 'fixedgc' list */
   g->fixedgc = o;
+  luaW_heapleave(L);
 }
 
 
@@ -297,12 +320,16 @@ void luaC_fix (lua_State *L, GCObject *o) {
 */
 GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   global_State *g = G(L);
-  char *p = cast_charp(luaM_newobject(L, novariant(tt), sz));
-  GCObject *o = cast(GCObject *, p + offset);
-  o->marked = luaC_white(g);
+  char *p;
+  GCObject *o;
+  luaW_heapenter(L);
+  p = cast_charp(luaM_newobject(L, novariant(tt), sz));
+  o = cast(GCObject *, p + offset);
+  setmarked(o, luaC_white(g));
   o->tt = tt;
   o->next = g->allgc;
   g->allgc = o;
+  luaW_heapleave(L);
   return o;
 }
 
@@ -347,11 +374,17 @@ static void reallymarkobject (global_State *g, GCObject *o) {
     }
     case LUA_VUPVAL: {
       UpVal *uv = gco2upv(o);
-      if (upisopen(uv))
+      if (upisopen(uv)) {
         set2gray(uv);  /* open upvalues are kept gray */
-      else
+        /* A mutator barrier must not read a foreign running stack. Atomic
+        ** collection remarks visited open captures under the rendezvous. */
+        if (g->world.stopped)
+          markvalue(g, uv->v.p);
+      }
+      else {
         set2black(uv);  /* closed upvalues are visited here */
-      markvalue(g, uv->v.p);  /* mark its content */
+        markvalue(g, uv->v.p);
+      }
       break;
     }
     case LUA_VUSERDATA: {
@@ -408,8 +441,14 @@ static void remarkupvals (global_State *g) {
   lua_State *thread;
   lua_State **p = &g->twups;
   while ((thread = *p) != NULL) {
-    if (!iswhite(thread) && thread->openupval != NULL)
+    if (!iswhite(thread) && thread->openupval != NULL) {
+      UpVal *uv;
+      for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
+        if (!iswhite(uv))
+          markvalue(g, uv->v.p);
+      }
       p = &thread->twups;  /* keep marked thread with upvalues in the list */
+    }
     else {  /* thread is not marked or without upvalues */
       UpVal *uv;
       lua_assert(!isold(thread) || thread->openupval == NULL);
@@ -722,8 +761,8 @@ static l_mem traversethread (global_State *g, lua_State *th) {
   for (uv = th->openupval; uv != NULL; uv = uv->u.open.next)
     markobject(g, uv);  /* open upvalues cannot be collected */
   if (g->gcstate == GCSatomic) {  /* final traversal? */
-    if (!g->gcemergency)
-      luaD_shrinkstack(th); /* do not change stack in emergency cycle */
+    if (!g->gcemergency && !th->heap_waiting)
+      luaD_shrinkstack(th); /* preserve allocation waiters' borrowed pointers */
     for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
       setnilvalue2s(o);  /* clear dead stack slice */
     /* 'remarkupvals' may have removed thread from 'twups' list */
@@ -994,7 +1033,7 @@ static void GCTM (lua_State *L) {
     TStatus status;
     lu_byte oldah = L->allowhook;
     lu_byte oldgcstp  = g->gcstp;
-    unsigned depth;
+    LuaWorldScope depth;
     g->gcstp |= GCSTPGC;  /* avoid GC steps */
     /* Embedding limits also account for Lua finalizer instructions. */
     L->allowhook = (L->hookmask & LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
@@ -1089,10 +1128,16 @@ static void correctpointers (global_State *g, GCObject *o) {
 */
 void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
   global_State *g = G(L);
+  LuaNativeRoot object_root, metatable_root;
+  luaR_pushroot(L, &object_root);
+  setgcovalue(L, &object_root.value, o);
+  luaR_pushroot(L, &metatable_root);
+  sethvalue(L, &metatable_root.value, mt);
+  luaW_heapenter(L);
   if (tofinalize(o) ||                 /* obj. is already marked... */
       gfasttm(g, mt, TM_GC) == NULL ||    /* or has no finalizer... */
       (g->gcstp & GCSTPCLS))                   /* or closing state? */
-    return;  /* nothing to be done */
+    goto done;  /* nothing to be done */
   else {  /* move 'o' to 'finobj' list */
     GCObject **p;
     if (issweepphase(g)) {
@@ -1109,6 +1154,10 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
     g->finobj = o;
     l_setbit(o->marked, FINALIZEDBIT);  /* mark it as such */
   }
+ done:
+  luaW_heapleave(L);
+  luaR_poproot(L, &metatable_root);
+  luaR_poproot(L, &object_root);
 }
 
 /* }====================================================== */

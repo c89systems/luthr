@@ -59,13 +59,16 @@ static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
 
 
 unsigned luaS_hashlongstr (TString *ts) {
-  lua_assert(ts->tt == LUA_VLNGSTR);
-  if (ts->extra == 0) {  /* no hash? */
-    size_t len = ts->u.lnglen;
-    ts->hash = luaS_hash(getlngstr(ts), len, ts->hash);
-    ts->extra = 1;  /* now it has its hash */
-  }
+  lua_assert(ts->tt == LUA_VLNGSTR && ts->extra == 1);
   return ts->hash;
+}
+
+/* Finish immutable string contents before publishing them to other tasks.
+** This removes the shared lazy hash mutation from table lookup. */
+void luaS_finishlongstr (TString *ts) {
+  lua_assert(ts->tt == LUA_VLNGSTR && ts->extra == 0);
+  ts->hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->hash);
+  ts->extra = 1;
 }
 
 
@@ -216,7 +219,9 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
   global_State *g = G(L);
   stringtable *tb = &g->strt;
   unsigned int h = luaS_hash(str, l, g->seed);
-  TString **list = &tb->hash[lmod(h, tb->size)];
+  TString **list;
+  luaW_heapenter(L);
+  list = &tb->hash[lmod(h, tb->size)];
   lua_assert(str != NULL);  /* otherwise 'memcmp'/'memcpy' are undefined */
   for (ts = *list; ts != NULL; ts = ts->u.hnext) {
     if (l == cast_uint(ts->shrlen) &&
@@ -224,6 +229,7 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
       /* found! */
       if (isdead(g, ts))  /* dead (but not collected yet)? */
         changewhite(ts);  /* resurrect it */
+      luaW_heapleave(L);
       return ts;
     }
   }
@@ -239,6 +245,7 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
   ts->u.hnext = *list;
   *list = ts;
   tb->nuse++;
+  luaW_heapleave(L);
   return ts;
 }
 
@@ -255,6 +262,7 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
       luaM_toobig(L);
     ts = luaS_createlngstrobj(L, l);
     memcpy(getlngstr(ts), str, l * sizeof(char));
+    luaS_finishlongstr(ts);
     return ts;
   }
 }
@@ -270,16 +278,23 @@ TString *luaS_new (lua_State *L, const char *str) {
   unsigned int i = point2uint(str) % STRCACHE_N;  /* hash */
   int j;
   TString **p = G(L)->strcache[i];
+  TString *result;
+  luaW_heapenter(L);
   for (j = 0; j < STRCACHE_M; j++) {
-    if (strcmp(str, getstr(p[j])) == 0)  /* hit? */
-      return p[j];  /* that is it */
+    if (strcmp(str, getstr(p[j])) == 0) { /* hit? */
+      result = p[j];
+      luaW_heapleave(L);
+      return result;  /* that is it */
+    }
   }
   /* normal route */
   for (j = STRCACHE_M - 1; j > 0; j--)
     p[j] = p[j - 1];  /* move out last element */
   /* new element is first in the list */
   p[0] = luaS_newlstr(L, str, strlen(str));
-  return p[0];
+  result = p[0];
+  luaW_heapleave(L);
+  return result;
 }
 
 
@@ -334,6 +349,7 @@ TString *luaS_newextlstr (lua_State *L,
   ne.ts->shrlen = ne.kind;
   ne.ts->u.lnglen = len;
   ne.ts->contents = cast_charp(s);
+  luaS_finishlongstr(ne.ts);
   return ne.ts;
 }
 

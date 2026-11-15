@@ -4,9 +4,10 @@ This describes the extracted synchronous baseline. It has no task scheduler or
 internal global execution lock; callers serialize host operations on a handle.
 Parallel Lua execution within one shared VM remains required. A private
 [gated-stack experiment](parallel-state-design.md#initial-gated-stack-experiment)
-and [collection rendezvous](parallel-state-design.md#collection-rendezvous-experiment)
-exercise constrained concurrent execution. General concurrent allocation and
-heap mutation remain unfinished; this does not change the public embedding contract.
+and [collection rendezvous](parallel-state-design.md#collection-rendezvous-experiment),
+extended by [allocating VM tests](parallel-state-design.md#allocating-shared-vm-experiment),
+exercise constrained concurrent execution. Shared-container synchronization and
+the public API audit remain unfinished; this does not change the public contract.
 
 The full `<luthrum/lua.h>` facade preserves Lua's public C API. The separate
 `<luthrum/lua_runtime.h>` facade owns a VM and adds embedding policy, including

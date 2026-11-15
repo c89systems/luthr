@@ -71,7 +71,7 @@ void luaE_setdebt (global_State *g, l_mem debt) {
   if (debt > MAX_LMEM - tb)
     debt = MAX_LMEM - tb;  /* will make GCtotalbytes == MAX_LMEM */
   g->GCtotalbytes = tb + debt;
-  g->GCdebt = debt;
+  __atomic_store_n(&g->GCdebt, debt, __ATOMIC_RELAXED);
 }
 
 
@@ -301,6 +301,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->state_poll_context = NULL;
   L->poll_remaining = 1024;
   L->native_depth = L->world_depth = 0;
+  L->heap_waiting = 0;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;
@@ -332,7 +333,7 @@ static void close_state (lua_State *L, int owns_gate) {
   if (!completestate(g))  /* closing a partially built state? */
     luaC_freeallobjects(L);  /* just collect its objects */
   else {  /* closing a fully built state */
-    unsigned depth;
+    LuaWorldScope depth;
     resetCI(L);
     depth = luaW_suspend(L);
     luaD_closeprotected(L, 1, LUA_OK);  /* close all upvalues */
@@ -494,7 +495,7 @@ void luaE_warning (lua_State *L, const char *msg, int tocont) {
   lua_WarnFunction wf = G(L)->warnf;
   void *context = G(L)->ud_warn;
   if (wf != NULL) {
-    unsigned depth = luaW_detach(L);
+    LuaWorldScope depth = luaW_detach(L);
     wf(context, msg, tocont);
     luaW_attach(L, depth);
   }

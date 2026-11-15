@@ -65,7 +65,7 @@ typedef struct lua_longjmp {
   lu_byte luthrum_stack_overflow;
   LuaNativeRoot *native_roots;
   unsigned native_depth;
-  unsigned world_depth;
+  LuaWorldScope world_scope;
 } lua_longjmp;
 
 
@@ -135,12 +135,15 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
     global_State *g = G(L);
     lua_State *mainth = mainthread(g);
     L->native_roots = NULL;  /* every native scope on this thread is abandoned */
-    luaW_restore(L, 0, 0);
+    {
+      LuaWorldScope empty = {0, 0};
+      luaW_restore(L, empty, 0);
+    }
     errcode = luaE_resetthread(L, errcode);  /* close all upvalues */
     L->status = errcode;
     if (mainth->errorJmp) {  /* main thread has a handler? */
       if (L != mainth) {
-        unsigned depth;
+        LuaWorldScope depth;
         (void)luaW_detach(L);  /* retain the source until the copy is rooted */
         lua_lock(mainth);
         setobjs2s(L, mainth->top.p++, L->top.p - 1);
@@ -173,7 +176,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
       L->errorJmp = L->errorJmp->previous;
     L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
     L->native_roots = L->errorJmp->native_roots;
-    luaW_restore(L, L->errorJmp->world_depth, L->errorJmp->native_depth);
+    luaW_restore(L, L->errorJmp->world_scope, L->errorJmp->native_depth);
   }
   luaD_throw(L, errcode);
 }
@@ -189,13 +192,13 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
-  lj.world_depth = L->world_depth;
+  lj.world_scope = luaW_scope(L);
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
   if (lj.status != LUA_OK) {
     L->native_roots = lj.native_roots;  /* native scopes have unwound */
-    luaW_restore(L, lj.world_depth, lj.native_depth);
+    luaW_restore(L, lj.world_scope, lj.native_depth);
   }
   L->errorJmp = lj.previous;  /* restore old error handler */
   L->nCcalls = oldnCcalls;
@@ -372,7 +375,11 @@ int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   int i;
   StkId newstack;
   StkId oldstack = L->stack.p;
-  lu_byte oldgcstop = G(L)->gcstopem;
+  lu_byte oldgcstop;
+  luaW_heapenter(L);  /* acquire before making stack pointers unscannable */
+  oldsize = stacksize(L);  /* a collection while waiting may have shrunk it */
+  oldstack = L->stack.p;
+  oldgcstop = G(L)->gcstopem;
   lua_assert(newsize <= MAXSTACK || newsize == ERRORSTACKSIZE);
   relstack(L);  /* change pointers to offsets */
   G(L)->gcstopem = 1;  /* stop emergency collection */
@@ -381,6 +388,7 @@ int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   G(L)->gcstopem = oldgcstop;  /* restore emergency collection */
   if (l_unlikely(newstack == NULL)) {  /* reallocation failed? */
     correctstack(L, oldstack);  /* change offsets back to pointers */
+    luaW_heapleave(L);
     if (raiseerror)
       luaM_error(L);
     else return 0;  /* do not raise an error */
@@ -390,6 +398,7 @@ int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   L->stack_last.p = L->stack.p + newsize;
   for (i = oldsize + EXTRA_STACK; i < newsize + EXTRA_STACK; i++)
     setnilvalue2s(newstack + i); /* erase new segment */
+  luaW_heapleave(L);
   return 1;
 }
 
@@ -482,7 +491,7 @@ void luaD_hook (lua_State *L, int event, int line,
                               int ftransfer, int ntransfer) {
   lua_Hook hook = L->hook;
   if (hook && L->allowhook) {  /* make sure there is a hook */
-    unsigned depth;
+    LuaWorldScope depth;
     CallInfo *ci = L->ci;
     ptrdiff_t top = savestack(L, L->top.p);  /* preserve original 'top' */
     ptrdiff_t ci_top = savestack(L, ci->top.p);  /* idem for 'ci->top' */
@@ -685,7 +694,7 @@ l_sinline CallInfo *prepCallInfo (lua_State *L, StkId func, unsigned status,
 l_sinline int precallC (lua_State *L, StkId func, unsigned status,
                                             lua_CFunction f) {
   int n;  /* number of returns */
-  unsigned depth;
+  LuaWorldScope depth;
   CallInfo *ci;
   checkstackp(L, LUA_MINSTACK, func);  /* ensure minimum stack size */
   L->ci = ci = prepCallInfo(L, func, status | CIST_C,
@@ -889,7 +898,7 @@ static void finishCcall (lua_State *L, CallInfo *ci) {
     /* don't need to reset CIST_CLSRET, as it will be set again anyway */
   }
   else {
-    unsigned depth;
+    LuaWorldScope depth;
     TStatus status = LUA_YIELD;  /* default if there were no errors */
     lua_KFunction kf = ci->u.c.k;  /* continuation function */
     /* must have a continuation and must be able to call it */
@@ -981,7 +990,7 @@ static void resume (lua_State *L, void *ud) {
     }
     else {  /* 'common' yield */
       if (ci->u.c.k != NULL) {  /* does it have a continuation function? */
-        unsigned depth = luaW_detach(L);
+        LuaWorldScope depth = luaW_detach(L);
         n = (*ci->u.c.k)(L, LUA_YIELD, ci->u.c.ctx); /* call continuation */
         luaW_attach(L, depth);
         api_checknelems(L, n);

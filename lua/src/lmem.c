@@ -149,9 +149,11 @@ l_noret luaM_toobig (lua_State *L) {
 */
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
   global_State *g = G(L);
+  luaW_heapenter(L);
   lua_assert((osize == 0) == (block == NULL));
   callfrealloc(g, block, osize, 0);
-  g->GCdebt += cast(l_mem, osize);
+  __atomic_fetch_add(&g->GCdebt, cast(l_mem, osize), __ATOMIC_RELAXED);
+  luaW_heapleave(L);
 }
 
 
@@ -176,15 +178,20 @@ static void *tryagain (lua_State *L, void *block,
 void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   void *newblock;
   global_State *g = G(L);
+  luaW_heapenter(L);
   lua_assert((osize == 0) == (block == NULL));
   newblock = firsttry(g, block, osize, nsize);
   if (l_unlikely(newblock == NULL && nsize > 0)) {
     newblock = tryagain(L, block, osize, nsize);
-    if (newblock == NULL)  /* still no memory? */
+    if (newblock == NULL) {  /* still no memory? */
+      luaW_heapleave(L);
       return NULL;  /* do not update 'GCdebt' */
+    }
   }
   lua_assert((nsize == 0) == (newblock == NULL));
-  g->GCdebt -= cast(l_mem, nsize) - cast(l_mem, osize);
+  __atomic_fetch_sub(&g->GCdebt, cast(l_mem, nsize) - cast(l_mem, osize),
+                    __ATOMIC_RELAXED);
+  luaW_heapleave(L);
   return newblock;
 }
 
@@ -203,13 +210,16 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
     return NULL;  /* that's all */
   else {
     global_State *g = G(L);
-    void *newblock = firsttry(g, NULL, cast_sizet(tag), size);
+    void *newblock;
+    luaW_heapenter(L);
+    newblock = firsttry(g, NULL, cast_sizet(tag), size);
     if (l_unlikely(newblock == NULL)) {
       newblock = tryagain(L, NULL, cast_sizet(tag), size);
       if (newblock == NULL)
         luaM_error(L);
     }
-    g->GCdebt -= cast(l_mem, size);
+    __atomic_fetch_sub(&g->GCdebt, cast(l_mem, size), __ATOMIC_RELAXED);
+    luaW_heapleave(L);
     return newblock;
   }
 }

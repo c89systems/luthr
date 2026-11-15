@@ -14,7 +14,7 @@
 int luaW_init (LuaWorld *world) {
   int status;
   world->ready = world->stopped = 0;
-  world->active = 0;
+  world->active = world->heap_depth = 0;
   status = pthread_mutex_init(&world->mutex, NULL);
   if (status != 0)
     return status;
@@ -28,7 +28,8 @@ int luaW_init (LuaWorld *world) {
 }
 
 void luaW_destroy (LuaWorld *world) {
-  lua_assert(world->ready && !world->stopped && world->active == 0);
+  lua_assert(world->ready && !world->stopped && world->active == 0 &&
+             world->heap_depth == 0);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
@@ -64,18 +65,9 @@ void luaW_stop (lua_State *L) {
     L->world_depth++;
     return;
   }
+  luaW_heapenter(L);  /* collect only after pending metadata scopes finish */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  while (world->stopped) {
-    L->native_depth++;
-    lua_assert(world->active != 0);
-    world->active--;
-    luaX_checksync(pthread_cond_broadcast(&world->changed));
-    do {
-      luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
-    } while (world->stopped);
-    world->active++;
-    L->native_depth--;
-  }
+  lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
   world->stopped = 1;
   world->collector = pthread_self();
   luaX_checksync(pthread_cond_broadcast(&world->changed));
@@ -99,44 +91,123 @@ void luaW_start (lua_State *L) {
   world->stopped = 0;
   luaX_checksync(pthread_cond_broadcast(&world->changed));
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaW_heapleave(L);
 }
 
-unsigned luaW_suspend (lua_State *L) {
-  unsigned depth = L->world_depth;
-  if (depth != 0) {
-    L->world_depth = 1;
-    luaW_start(L);
+/* Reentrant on the physical carrier, including collector operations on another
+** coroutine's stack. A blocked metadata waiter is pinned but not a mutator.
+** The outermost acquisition must be a GC-safe boundary, before mutation. */
+void luaW_heapenter (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (world->heap_depth != 0 &&
+      pthread_equal(world->heap_owner, pthread_self())) {
+    world->heap_depth++;
   }
+  else {
+    if (world->heap_depth != 0 || world->stopped) {
+      lua_assert(L->world_depth == 0 && world->active != 0);
+      L->native_depth++;
+      L->heap_waiting++;
+      world->active--;
+      luaX_checksync(pthread_cond_broadcast(&world->changed));
+      do {
+        luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
+      } while (world->heap_depth != 0 || world->stopped);
+      world->active++;
+      L->heap_waiting--;
+      L->native_depth--;
+    }
+    world->heap_owner = pthread_self();
+    world->heap_depth = 1;
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void luaW_heapleave (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(world->heap_depth != 0 &&
+             pthread_equal(world->heap_owner, pthread_self()));
+  if (--world->heap_depth == 0)
+    luaX_checksync(pthread_cond_broadcast(&world->changed));
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+static unsigned heapdepth (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  unsigned depth;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  depth = (world->heap_depth != 0 &&
+           pthread_equal(world->heap_owner, pthread_self()))
+          ? world->heap_depth : 0;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
   return depth;
 }
 
-void luaW_restore (lua_State *L, unsigned depth, unsigned native) {
-  if (L->world_depth != depth) {
-    (void)luaW_suspend(L);
-    if (depth != 0) {
+static void restoreheap (lua_State *L, unsigned depth) {
+  unsigned current = heapdepth(L);
+  while (current > depth) {
+    luaW_heapleave(L);
+    current--;
+  }
+  while (current < depth) {
+    luaW_heapenter(L);
+    current++;
+  }
+}
+
+LuaWorldScope luaW_scope (lua_State *L) {
+  LuaWorldScope scope;
+  scope.collection = L->world_depth;
+  scope.heap = heapdepth(L);
+  if (scope.collection != 0) {
+    lua_assert(scope.heap != 0);
+    scope.heap--;  /* exclude the collector's implicit metadata ownership */
+  }
+  return scope;
+}
+
+LuaWorldScope luaW_suspend (lua_State *L) {
+  LuaWorldScope scope = luaW_scope(L);
+  if (scope.collection != 0) {
+    L->world_depth = 1;
+    luaW_start(L);
+  }
+  restoreheap(L, 0);
+  return scope;
+}
+
+void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native) {
+  if (L->world_depth != scope.collection) {
+    if (L->world_depth != 0) {
+      L->world_depth = 1;
+      luaW_start(L);
+    }
+    restoreheap(L, scope.heap);
+    if (scope.collection != 0) {
       luaW_stop(L);
-      L->world_depth = depth;
+      L->world_depth = scope.collection;
     }
   }
+  else
+    restoreheap(L, scope.heap + (scope.collection != 0));
   L->native_depth = native;
 }
 
 /* These boundaries retain the coroutine while native code blocks or reenters.
 ** Protected unwinding restores the enclosing depth if a callback never returns. */
-unsigned luaW_detach (lua_State *L) {
-  unsigned depth;
+LuaWorldScope luaW_detach (lua_State *L) {
+  LuaWorldScope scope;
   L->native_depth++;
-  depth = luaW_suspend(L);
+  scope = luaW_suspend(L);
   lua_unlock(L);
-  return depth;
+  return scope;
 }
 
-void luaW_attach (lua_State *L, unsigned depth) {
+void luaW_attach (lua_State *L, LuaWorldScope scope) {
   lua_lock(L);
-  if (depth != 0) {
-    luaW_stop(L);
-    L->world_depth = depth;
-  }
+  luaW_restore(L, scope, L->native_depth);
   lua_assert(L->native_depth != 0);
   L->native_depth--;
 }

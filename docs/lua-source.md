@@ -29,7 +29,8 @@ It is no longer byte-for-byte upstream source.
 
 Private temporary roots, per-coroutine stack gates, VM poll points and
 synchronized Lua capture transfers, managed/native pins and collection rendezvous
-are also maintained directly in this tree.
+are also maintained directly in this tree, along with heap-metadata ownership,
+coordinated barriers and long-string hash completion before publication.
 The [parallel-state investigation](parallel-state-design.md) records the limited
 execution evidence and remaining shared-heap requirements.
 

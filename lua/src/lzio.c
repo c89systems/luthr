@@ -25,7 +25,7 @@ int luaZ_fill (ZIO *z) {
   size_t size;
   lua_State *L = z->L;
   const char *buff;
-  unsigned depth = luaW_detach(L);
+  LuaWorldScope depth = luaW_detach(L);
   buff = z->reader(L, z->data, &size);
   luaW_attach(L, depth);
   if (buff == NULL || size == 0)

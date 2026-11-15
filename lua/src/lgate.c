@@ -80,7 +80,7 @@ void luaX_unlockstate (lua_State *L) {
 }
 
 void luaX_poll (lua_State *L) {
-  unsigned depth;
+  LuaWorldScope depth;
   /* Internal poll handlers execute as managed VM code, with stack ownership.
   ** They are not ordinary C bindings and do not detach automatically. */
   if (L->state_poll != NULL)

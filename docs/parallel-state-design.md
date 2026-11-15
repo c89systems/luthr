@@ -1,8 +1,8 @@
 # Parallel shared-VM design investigation
 
-Status: candidate with private execution and GC experiments, 2026-11-15.
-The full concurrent heap and scheduler remain unimplemented; no public scheduler
-API is frozen.
+Status: candidate with private execution, GC and allocation experiments,
+2026-11-15. Shared-container synchronization and the scheduler remain unfinished;
+no public scheduler API is frozen.
 
 ## Required result
 
@@ -212,9 +212,75 @@ overlap; allocation belongs to the collector carrier, or to the competing worker
 while it exclusively collects. Finalizer execution is allowed on the collector
 carrier. This does not yet establish concurrent allocation, shared-container
 mutation, barrier/metadata synchronization or arbitrary native module safety.
-Debug-hook signal behavior, closure mutation and the remaining public API paths
-still require their parallel-safety audit. General embedding access remains
-serialized until these boundaries and the scheduler are complete.
+The allocation experiment below extends the tested paths. Debug-hook signal
+behavior, closure mutation and the remaining public API paths still require
+their parallel-safety audit. General embedding access remains serialized until
+these boundaries and the scheduler are complete.
+
+## Allocating shared-VM experiment
+
+The world coordinator now also owns a short heap-metadata scope, reentrant on
+the physical carrier. Allocation callbacks and debt accounting, object-list
+insertion, short-string interning/cache updates, open-upvalue registration and
+collector barriers use it. It is not retained during ordinary bytecode dispatch
+or native binding execution. A collection request first acquires this ownership,
+so it cannot interrupt another carrier's partially completed metadata operation.
+An allocation failure can collect while retaining its own enclosing metadata
+scope; emergency collection preserves the existing no-shrink constraints.
+
+A metadata waiter pins its coroutine, retains its stack gate, and leaves managed
+participation before waiting. Its entry resumes atomically with ownership, after
+any collection pause. Normal collection does not relocate that waiter's stack:
+allocation callers can retain stack pointers, as they could across Lua's existing
+emergency-collection path. Stack reallocation acquires metadata ownership before
+turning pointers into temporary offsets. Protected/native scope snapshots restore
+both collection and metadata ownership, retiring abandoned scopes on errors.
+Finalizers suspend both scopes before executing Lua or native callbacks.
+
+Barrier decisions are rechecked under metadata ownership after both referenced
+objects have been rooted. GC color reads and allocation-debt checks use atomic
+loads; serialized updates use corresponding atomic operations. A mutator barrier
+marks an open upvalue gray without reading its foreign running stack. Atomic
+collection remarks visited open captures under the rendezvous. Capture writes
+and closing acquire metadata ownership before their upvalue mutex, preventing a
+mutex holder from waiting behind a collecting carrier.
+
+Long-string hashes are completed after filling contents and before publication,
+including concatenation, source/bytecode loading and external strings. Table
+lookup now reads immutable hash data. This avoids a shared lazy cache and adds
+hashing work for long strings that never become keys; measure that cost alongside
+the other synchronization overhead before settling performance policy.
+
+The `parallel_vm_allocate*` cases use two coroutines in one VM on separate usable
+logical CPUs, with the same internal-dispatch overlap barrier. Both allocate
+independent tables, nested closures, short strings and long keys. Captured table
+values are published only after construction. Variants retain a running capture
+owner, exercise closing while another coroutine uses its captures, and run with
+stopped, incremental and generational collection. The allocator has ordinary
+mutable accounting, verifying serialized legacy allocator callbacks under race
+checking.
+Disposable userdata prove that automatic collection actually runs during active
+cases and remains stopped in the stopped case. Their finalizers check released
+metadata ownership and exactly-once cleanup, including all remaining objects at
+VM close.
+
+The failure case acknowledges a carrier inside its allocator, then waits until
+the other carrier is pinned and inactive behind metadata ownership. It rejects
+the first carrier's allocation and its emergency-GC retry. With ordinary GC
+initially stopped, known garbage must be freed during emergency collection.
+A protected call must receive the memory error, then resume ordinary collection;
+both coroutines must finish with correct results.
+The native-wait case requires an allocating coroutine, with automatic collection
+enabled, to finish before releasing the other coroutine's unchanged C binding.
+Strict-C89 static/shared SDK tests also check external string key equality and
+exactly-once owned-buffer release for empty, short and long strings.
+
+This establishes the exercised concurrent allocation and capture paths. It does
+not establish concurrent mutation of one shared table, arbitrary metatable or
+closure changes, native userdata/module globals, or the complete public API.
+Those synchronization boundaries, scheduler/carrier reuse, admission limits and
+module compatibility gates remain required. No public concurrent embedding
+contract or measured scaling claim follows from these fixtures.
 
 ## Lua-specific proof obligations
 

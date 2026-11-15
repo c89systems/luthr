@@ -107,8 +107,8 @@ static void worker_poll(lua_State *state, void *context) {
 
 static void finalizer_poll(lua_State *state, void *context) {
   struct fixture *fixture = context;
-  if (state->world_depth != 0) {
-    fputs("Lua finalizer executed inside a collection pause\n", stderr);
+  if (state->world_depth != 0 || luaW_scope(state).heap != 0) {
+    fputs("Lua finalizer retained collection or heap ownership\n", stderr);
     abort();
   }
   fixture->finalizer_polls++;
@@ -304,7 +304,9 @@ int main(int argc, char **argv) {
   fixture.failed |=
       world->active != 0 || world->stopped ||
       fixture.worker->native_depth != 0 || fixture.worker->world_depth != 0 ||
-      fixture.main->native_depth != 0 || fixture.main->world_depth != 0;
+      fixture.main->native_depth != 0 || fixture.main->world_depth != 0 ||
+      world->heap_depth != 0 || fixture.worker->heap_waiting != 0 ||
+      fixture.main->heap_waiting != 0;
   fixture.failed |= fixture.worker_status != LUA_OK ||
                     fixture.worker_results != 2 || fixture.finalized[1] != 0 ||
                     fixture.finalized[2] != 1 || fixture.finalizer_polls == 0;
