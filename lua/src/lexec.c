@@ -65,12 +65,18 @@ void luaQ_poll (lua_State *L) {
 }
 
 void luaQ_work (lua_State *L, unsigned *work) {
-  if (++*work == 1024u) {
+  luaQ_workn(L, work, 1);
+}
+
+void luaQ_workn (lua_State *L, unsigned *work, size_t amount) {
+  while (amount >= 1024u - *work) {
+    amount -= 1024u - *work;
     *work = 0;
     lua_lock(L);
     luaX_poll(L);
     lua_unlock(L);
   }
+  *work += cast_uint(amount);
 }
 
 void luaQ_setmanagedhook (lua_State *L, lua_Hook hook) {

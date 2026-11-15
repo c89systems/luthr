@@ -177,6 +177,20 @@ Moving-allocator callbacks also exercise relocation and errors after partial
 encoding/decoding. `api_ownership_vm_*` forces stack relocation at unlocked VM
 allocation handoffs and verifies subsequent table, string and closure results.
 
+`pattern_library_*` covers find/match/gmatch/gsub semantics, malformed patterns,
+replacement errors, canonical functions, allocation denial and bounded native
+recursion. Input snapshots survive debug argument/capture replacement and GC;
+substitution callbacks also replace their caller's arguments and return external
+strings retained across copying checkpoints. Two concurrent consumers share one
+iterator and must return each position exactly once, including collection during
+consumption. `native_scheduler_task_*pattern*` checks bounded work in literal
+search, class parsing, balanced matches, repetition/backtracking, backreferences,
+replacement copying and iterator scans while both native slots are occupied.
+Cases require migration inside each matching helper, GC with saved C contexts,
+unrelated-task progress, callbacks that await a scheduled result, pinned nested
+native callbacks, moving allocators and error cleanup. Other string helpers
+still use native-call admission.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

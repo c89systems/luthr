@@ -56,6 +56,8 @@ LUAI_FUNC void luaQ_poll (lua_State *L);
 ** all borrowed Lua values must remain rooted across this migration point.
 ** Initialize the caller-local counter to zero. Does not charge bytecode fuel. */
 LUAI_FUNC void luaQ_work (lua_State *L, unsigned *work);
+/* Charge a completed bounded chunk; the operation itself must be bounded. */
+LUAI_FUNC void luaQ_workn (lua_State *L, unsigned *work, size_t amount);
 LUAI_FUNC void luaQ_setmanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC int luaQ_ismanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC void luaQ_setowner (LuaOwner *owner);

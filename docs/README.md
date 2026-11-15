@@ -69,6 +69,8 @@ wrapped-coroutine snapshots. Math/table helpers and auxiliary-buffer cleanup now
 also support managed execution, with scoped ownership for shared PRNG state.
 UTF-8 helpers also support managed execution, with bounded work checkpoints
 and private roots for input strings across parking and debug argument changes.
+String pattern helpers also support managed execution, with invocation-local
+matching scratch, rooted inputs/replacements and synchronized shared iterators.
 Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.

@@ -18,8 +18,9 @@
 
 
 /*
-** Most functions here use only Lua's public API. Owned buffer allocation also
-** uses a private entry to serialize legacy allocators with the VM heap.
+** Most functions here use only Lua's public API. Owned buffer allocation
+** serializes legacy allocators with the VM heap. Trusted runtime libraries
+** also use private rooted snapshots across parking and replaceable arguments.
 */
 
 #include "lua.h"
@@ -28,6 +29,73 @@
 #include "llimits.h"
 #include "lmem.h"
 #include "lexec.h"
+#include "lapi.h"
+#include "lgc.h"
+#include "lauxowned.h"
+#include "lvm.h"
+
+
+void luaL_rootarg (lua_State *L, int arg, LuaNativeRoot *root) {
+  lua_lock(L);
+  lua_assert(arg > 0);
+  luaR_pushroot(L, root);
+  if (arg < L->top.p - L->ci->func.p)
+    luaR_setroot(L, root, s2v(L->ci->func.p + arg));
+  lua_unlock(L);
+}
+
+/* Conversion can allocate and release ownership. Recheck the slot and root
+** the actual string together before borrowing its immutable bytes. */
+const char *luaL_rootstring (lua_State *L, int arg, LuaNativeRoot *root,
+                             size_t *len) {
+  for (;;) {
+    const TValue *value;
+    luaL_checklstring(L, arg, NULL);
+    lua_lock(L);
+    lua_assert(arg > 0);
+    value = s2v(L->ci->func.p + arg);
+    if (ttisstring(value)) {
+      const char *string;
+      luaR_pushroot(L, root);
+      luaR_setroot(L, root, value);
+      string = getlstr(tsvalue(value), *len);
+      lua_unlock(L);
+      return string;
+    }
+    lua_unlock(L);
+  }
+}
+
+const char *luaL_roottostring (lua_State *L, LuaNativeRoot *root, size_t *len) {
+  const char *string;
+  lua_lock(L);
+  if (!ttisstring(&root->value) && !cvt2str(&root->value)) {
+    lua_unlock(L);
+    luaL_error(L, "invalid string snapshot");
+    return NULL;
+  }
+  if (!ttisstring(&root->value))
+    luaO_tostring(L, &root->value);
+  string = getlstr(tsvalue(&root->value), *len);
+  lua_unlock(L);
+  return string;
+}
+
+void luaL_pushrooted (lua_State *L, const LuaNativeRoot *root) {
+  lua_lock(L);
+  setobj2s(L, L->top.p, &root->value);
+  api_incr_top(L);
+  lua_unlock(L);
+}
+
+int luaL_rootresult (lua_State *L, LuaNativeRoot *roots, unsigned count,
+                     int results) {
+  lua_lock(L);
+  while (count != 0)
+    luaR_poproot(L, &roots[--count]);
+  lua_unlock(L);
+  return results;
+}
 
 
 /*

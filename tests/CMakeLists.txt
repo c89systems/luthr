@@ -16,6 +16,25 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(pattern_library_test pattern_library_test.c)
+set_target_properties(pattern_library_test PROPERTIES C_STANDARD 99)
+target_compile_options(pattern_library_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(pattern_library_test PRIVATE luthrum_static)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS semantics errors bindings oom stack snapshot_find
+        snapshot_match snapshot_gsub snapshot_iterator snapshot_values callback_snapshot parallel stress)
+      add_test(NAME pattern_library_${backend}_${case}_${gc}
+        COMMAND pattern_library_test ${backend}_${case}_${gc})
+      set_tests_properties(pattern_library_${backend}_${case}_${gc}
+        PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
+      if(case MATCHES "^(parallel|stress)$")
+        set_tests_properties(pattern_library_${backend}_${case}_${gc}
+          PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 120)
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(utf8_library_test utf8_library_test.c)
 set_target_properties(utf8_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(utf8_library_test PRIVATE -Wall -Wextra -Werror)
@@ -140,12 +159,13 @@ foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS normal migrate early error callback callback_migrate callback_error
         driver driver_migrate library library_migrate library_callback library_error
-        utf8 utf8_migrate utf8_callback utf8_movealloc_callback utf8_error)
+        utf8 utf8_migrate utf8_callback utf8_movealloc_callback utf8_error
+        pattern pattern_migrate pattern_callback pattern_movealloc_callback pattern_error)
       add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
         COMMAND native_scheduler_test task_${backend}_${case}_${gc})
       set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
         PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
-      if(case MATCHES "^utf8")
+      if(case MATCHES "^(utf8|pattern)")
         # Forced carrier switches and large result sets under Valgrind.
         set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
           PROPERTIES TIMEOUT 180)

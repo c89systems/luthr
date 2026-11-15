@@ -20,9 +20,7 @@
 #include "lualib.h"
 #include "llimits.h"
 #include "lexec.h"
-#include "lapi.h"
-#include "lgc.h"
-#include "lroots.h"
+#include "lauxowned.h"
 
 
 #define MAXUNICODE	0x10FFFFu
@@ -35,35 +33,6 @@
 
 #define iscont(c)	(((c) & 0xC0) == 0x80)
 #define iscontp(p)	iscont(*(p))
-
-/* Keep the immutable input independently of replaceable debug stack slots.
-** Conversion can allocate and release stack ownership; recheck and snapshot
-** the resulting value together under ownership before borrowing its bytes. */
-static const char *checkstring (lua_State *L, size_t *len,
-                                LuaNativeRoot *root) {
-  for (;;) {
-    const TValue *value;
-    luaL_checklstring(L, 1, NULL);
-    lua_lock(L);
-    value = s2v(L->ci->func.p + 1);
-    if (ttisstring(value)) {
-      const char *string;
-      luaR_pushroot(L, root);
-      luaR_setroot(L, root, value);
-      string = getlstr(tsvalue(value), *len);
-      lua_unlock(L);
-      return string;
-    }
-    lua_unlock(L);
-  }
-}
-
-static int stringresult (lua_State *L, LuaNativeRoot *root, int results) {
-  lua_lock(L);
-  luaR_poproot(L, root);
-  lua_unlock(L);
-  return results;
-}
 
 
 /* from strlib */
@@ -125,7 +94,7 @@ static int utflen (lua_State *L) {
   unsigned work = 0;
   LuaNativeRoot root;
   size_t len;  /* string length in bytes */
-  const char *s = checkstring(L, &len, &root);
+  const char *s = luaL_rootstring(L, 1, &root, &len);
   lua_Integer posi = u_posrelat(luaL_optinteger(L, 2, 1), len);
   lua_Integer posj = u_posrelat(luaL_optinteger(L, 3, -1), len);
   int lax = lua_toboolean(L, 4);
@@ -138,14 +107,14 @@ static int utflen (lua_State *L) {
     if (s1 == NULL) {  /* conversion error? */
       luaL_pushfail(L);  /* return fail ... */
       lua_pushinteger(L, posi + 1);  /* ... and current position */
-      return stringresult(L, &root, 2);
+      return luaL_rootresult(L, &root, 1, 2);
     }
     posi = ct_diff2S(s1 - s);
     n++;
     luaQ_work(L, &work);
   }
   lua_pushinteger(L, n);
-  return stringresult(L, &root, 1);
+  return luaL_rootresult(L, &root, 1, 1);
 }
 
 
@@ -157,7 +126,7 @@ static int codepoint (lua_State *L) {
   size_t len;
   unsigned work = 0;
   LuaNativeRoot root;
-  const char *s = checkstring(L, &len, &root);
+  const char *s = luaL_rootstring(L, 1, &root, &len);
   lua_Integer posi = u_posrelat(luaL_optinteger(L, 2, 1), len);
   lua_Integer pose = u_posrelat(luaL_optinteger(L, 3, posi), len);
   int lax = lua_toboolean(L, 4);
@@ -165,7 +134,7 @@ static int codepoint (lua_State *L) {
   const char *se;
   luaL_argcheck(L, posi >= 1, 2, "out of bounds");
   luaL_argcheck(L, pose <= (lua_Integer)len, 3, "out of bounds");
-  if (posi > pose) return stringresult(L, &root, 0);  /* empty interval */
+  if (posi > pose) return luaL_rootresult(L, &root, 1, 0);  /* empty interval */
   if (pose - posi >= INT_MAX)  /* (lua_Integer -> int) overflow? */
     return luaL_error(L, "string slice too long");
   n = (int)(pose -  posi) + 1;  /* upper bound for number of returns */
@@ -181,7 +150,7 @@ static int codepoint (lua_State *L) {
     n++;
     luaQ_work(L, &work);
   }
-  return stringresult(L, &root, n);
+  return luaL_rootresult(L, &root, 1, n);
 }
 
 
@@ -223,7 +192,7 @@ static int byteoffset (lua_State *L) {
   size_t len;
   unsigned work = 0;
   LuaNativeRoot root;
-  const char *s = checkstring(L, &len, &root);
+  const char *s = luaL_rootstring(L, 1, &root, &len);
   lua_Integer n  = luaL_checkinteger(L, 2);
   lua_Integer posi = (n >= 0) ? 1 : cast_st2S(len) + 1;
   posi = u_posrelat(luaL_optinteger(L, 3, posi), len);
@@ -261,7 +230,7 @@ static int byteoffset (lua_State *L) {
   }
   if (n != 0) {  /* did not find given character? */
     luaL_pushfail(L);
-    return stringresult(L, &root, 1);
+    return luaL_rootresult(L, &root, 1, 1);
   }
   lua_pushinteger(L, posi + 1);  /* initial position */
   if ((s[posi] & 0x80) != 0) {  /* multi-byte character? */
@@ -274,7 +243,7 @@ static int byteoffset (lua_State *L) {
   }
   /* else one-byte character: final position is the initial one */
   lua_pushinteger(L, posi + 1);  /* 'posi' now is the final position */
-  return stringresult(L, &root, 2);
+  return luaL_rootresult(L, &root, 1, 2);
 }
 
 
@@ -282,7 +251,7 @@ static int iter_aux (lua_State *L, int strict) {
   size_t len;
   unsigned work = 0;
   LuaNativeRoot root;
-  const char *s = checkstring(L, &len, &root);
+  const char *s = luaL_rootstring(L, 1, &root, &len);
   lua_Unsigned n = (lua_Unsigned)lua_tointeger(L, 2);
   if (n < len) {
     while (iscontp(s + n)) {
@@ -291,7 +260,7 @@ static int iter_aux (lua_State *L, int strict) {
     }
   }
   if (n >= len)  /* (also handles original 'n' being negative) */
-    return stringresult(L, &root, 0);  /* no more codepoints */
+    return luaL_rootresult(L, &root, 1, 0);  /* no more codepoints */
   else {
     l_uint32 code;
     const char *next = utf8_decode(s + n, &code, strict);
@@ -299,7 +268,7 @@ static int iter_aux (lua_State *L, int strict) {
       return luaL_error(L, MSGInvalid);
     lua_pushinteger(L, l_castU2S(n + 1));
     lua_pushinteger(L, l_castU2S(code));
-    return stringresult(L, &root, 2);
+    return luaL_rootresult(L, &root, 1, 2);
   }
 }
 
@@ -317,15 +286,12 @@ static int iter_codes (lua_State *L) {
   LuaNativeRoot root;
   size_t len;
   int lax = lua_toboolean(L, 2);
-  const char *s = checkstring(L, &len, &root);
+  const char *s = luaL_rootstring(L, 1, &root, &len);
   luaL_argcheck(L, !iscontp(s), 1, MSGInvalid);
   luaQ_pushmanaged(L, lax ? iter_auxlax : iter_auxstrict, 0);
-  lua_lock(L);
-  setobj2s(L, L->top.p, &root.value);
-  api_incr_top(L);
-  lua_unlock(L);
+  luaL_pushrooted(L, &root);
   lua_pushinteger(L, 0);
-  return stringresult(L, &root, 3);
+  return luaL_rootresult(L, &root, 1, 3);
 }
 
 

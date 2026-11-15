@@ -25,6 +25,15 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lapi.h"
+#include "laccess.h"
+#include "lauxowned.h"
+#include "ldo.h"
+#include "lexec.h"
+#include "lfunc.h"
+#include "lgc.h"
+#include "lstring.h"
+#include "lvm.h"
 
 
 /*
@@ -364,6 +373,7 @@ typedef struct MatchState {
   lua_State *L;
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
   int level;  /* total number of captures (finished or unfinished) */
+  unsigned work;  /* invocation-local CPU work across retries/backtracking */
   struct {
     const char *init;
     ptrdiff_t len;  /* length or special value (CAP_*) */
@@ -412,6 +422,7 @@ static const char *classend (MatchState *ms, const char *p) {
     case '[': {
       if (*p == '^') p++;
       do {  /* look for a ']' */
+        luaQ_work(ms->L, &ms->work);
         if (l_unlikely(p == ms->p_end))
           luaL_error(ms->L, "malformed pattern (missing ']')");
         if (*(p++) == L_ESC && p < ms->p_end)
@@ -426,7 +437,8 @@ static const char *classend (MatchState *ms, const char *p) {
 }
 
 
-static int match_class (int c, int cl) {
+/* Keep libc's ctype TLS inside a leaf that returns before any checkpoint. */
+static int __attribute__((noinline)) match_class (int c, int cl) {
   int res;
   switch (tolower(cl)) {
     case 'a' : res = isalpha(c); break;
@@ -446,13 +458,15 @@ static int match_class (int c, int cl) {
 }
 
 
-static int matchbracketclass (int c, const char *p, const char *ec) {
+static int matchbracketclass (MatchState *ms, int c, const char *p,
+                              const char *ec) {
   int sig = 1;
   if (*(p+1) == '^') {
     sig = 0;
     p++;  /* skip the '^' */
   }
   while (++p < ec) {
+    luaQ_work(ms->L, &ms->work);
     if (*p == L_ESC) {
       p++;
       if (match_class(c, cast_uchar(*p)))
@@ -478,7 +492,7 @@ static int singlematch (MatchState *ms, const char *s, const char *p,
     switch (*p) {
       case '.': return 1;  /* matches any char */
       case L_ESC: return match_class(c, cast_uchar(*(p+1)));
-      case '[': return matchbracketclass(c, p, ep-1);
+      case '[': return matchbracketclass(ms, c, p, ep-1);
       default:  return (cast_uchar(*p) == c);
     }
   }
@@ -495,6 +509,7 @@ static const char *matchbalance (MatchState *ms, const char *s,
     int e = *(p+1);
     int cont = 1;
     while (++s < ms->src_end) {
+      luaQ_work(ms->L, &ms->work);
       if (*s == e) {
         if (--cont == 0) return s+1;
       }
@@ -508,8 +523,10 @@ static const char *matchbalance (MatchState *ms, const char *s,
 static const char *max_expand (MatchState *ms, const char *s,
                                  const char *p, const char *ep) {
   ptrdiff_t i = 0;  /* counts maximum expand for item */
-  while (singlematch(ms, s + i, p, ep))
+  while (singlematch(ms, s + i, p, ep)) {
     i++;
+    luaQ_work(ms->L, &ms->work);
+  }
   /* keeps trying to match with the maximum repetitions */
   while (i>=0) {
     const char *res = match(ms, (s+i), ep+1);
@@ -558,21 +575,39 @@ static const char *end_capture (MatchState *ms, const char *s,
 }
 
 
+static int matchbytes (MatchState *ms, const char *a, const char *b, size_t len) {
+  while (len != 0) {
+    size_t chunk = len < 1024u ? len : 1024u;
+    int different = memcmp(a, b, chunk);
+    luaQ_workn(ms->L, &ms->work, chunk);
+    if (different) return 0;
+    a += chunk; b += chunk; len -= chunk;
+  }
+  return 1;
+}
+
 static const char *match_capture (MatchState *ms, const char *s, int l) {
   size_t len;
   l = check_capture(ms, l);
   len = cast_sizet(ms->capture[l].len);
   if ((size_t)(ms->src_end-s) >= len &&
-      memcmp(ms->capture[l].init, s, len) == 0)
+      matchbytes(ms, ms->capture[l].init, s, len))
     return s+len;
   else return NULL;
 }
 
 
 static const char *match (MatchState *ms, const char *s, const char *p) {
+  /* Pattern recursion also runs outside interpreter C-call accounting. */
+  if (l_unlikely(luaD_nativeposition() <= ms->L->luthrum_stack_limit)) {
+    lua_lock(ms->L);
+    luaD_checknativestack(ms->L);
+    lua_unlock(ms->L);
+  }
   if (l_unlikely(ms->matchdepth-- == 0))
     luaL_error(ms->L, "pattern too complex");
   init: /* using goto to optimize tail recursion */
+  luaQ_work(ms->L, &ms->work);
   if (p != ms->p_end) {  /* end of pattern? */
     switch (*p) {
       case '(': {  /* start capture */
@@ -608,8 +643,8 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
               luaL_error(ms->L, "missing '[' after '%%f' in pattern");
             ep = classend(ms, p);  /* points to what is next */
             previous = (s == ms->src_init) ? '\0' : *(s - 1);
-            if (!matchbracketclass(cast_uchar(previous), p, ep - 1) &&
-               matchbracketclass(cast_uchar(*s), p, ep - 1)) {
+            if (!matchbracketclass(ms, cast_uchar(previous), p, ep - 1) &&
+               matchbracketclass(ms, cast_uchar(*s), p, ep - 1)) {
               p = ep; goto init;  /* return match(ms, s, ep); */
             }
             s = NULL;  /* match failed */
@@ -672,7 +707,7 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
 
 
 
-static const char *lmemfind (const char *s1, size_t l1,
+static const char *lmemfind (MatchState *ms, const char *s1, size_t l1,
                                const char *s2, size_t l2) {
   if (l2 == 0) return s1;  /* empty strings are everywhere */
   else if (l2 > l1) return NULL;  /* avoids a negative 'l1' */
@@ -680,14 +715,15 @@ static const char *lmemfind (const char *s1, size_t l1,
     const char *init;  /* to search for a '*s2' inside 's1' */
     l2--;  /* 1st char will be checked by 'memchr' */
     l1 = l1-l2;  /* 's2' cannot be found after that */
-    while (l1 > 0 && (init = (const char *)memchr(s1, *s2, l1)) != NULL) {
-      init++;   /* 1st char is already checked */
-      if (memcmp(init, s2+1, l2) == 0)
-        return init-1;
-      else {  /* correct 'l1' and 's1' to try again */
-        l1 -= ct_diff2sz(init - s1);
-        s1 = init;
-      }
+    while (l1 > 0) {
+      size_t chunk = l1 < 1024u ? l1 : 1024u;
+      size_t used;
+      init = (const char *)memchr(s1, *s2, chunk);
+      used = init != NULL ? ct_diff2sz(init - s1) + 1 : chunk;
+      luaQ_workn(ms->L, &ms->work, used);
+      s1 += used; l1 -= used;
+      if (init != NULL && matchbytes(ms, init + 1, s2 + 1, l2))
+        return init;
     }
     return NULL;  /* not found */
   }
@@ -746,13 +782,13 @@ static int push_captures (MatchState *ms, const char *s, const char *e) {
 
 
 /* check whether pattern has no special characters */
-static int nospecials (const char *p, size_t l) {
-  size_t upto = 0;
-  do {
-    if (strpbrk(p + upto, SPECIALS))
+static int nospecials (MatchState *ms, const char *p, size_t l) {
+  size_t upto;
+  for (upto = 0; upto < l; ++upto) {
+    luaQ_work(ms->L, &ms->work);
+    if (p[upto] != '\0' && strchr(SPECIALS, p[upto]) != NULL)
       return 0;  /* pattern has a special character */
-    upto += strlen(p + upto) + 1;  /* may have more after \0 */
-  } while (upto <= l);
+  }
   return 1;  /* no special chars found */
 }
 
@@ -766,6 +802,7 @@ static void prepstate (MatchState *ms, lua_State *L,
   ms->src_init = s;
   ms->src_end = s + ls;
   ms->p_end = p + lp;
+  ms->work = 0;
 }
 
 
@@ -780,32 +817,33 @@ static void reprepstate (MatchState *ms) {
 
 
 static int str_find_aux (lua_State *L, int find) {
+  LuaNativeRoot roots[2];
+  MatchState ms;
   size_t ls, lp;
-  const char *s = luaL_checklstring(L, 1, &ls);
-  const char *p = luaL_checklstring(L, 2, &lp);
+  const char *s = luaL_rootstring(L, 1, &roots[0], &ls);
+  const char *p = luaL_rootstring(L, 2, &roots[1], &lp);
   size_t init = posrelatI(luaL_optinteger(L, 3, 1), ls) - 1;
+  prepstate(&ms, L, s, ls, p, lp);
   if (init > ls) {  /* start after string's end? */
     luaL_pushfail(L);  /* cannot find anything */
-    return 1;
+    return luaL_rootresult(L, roots, 2, 1);
   }
   /* explicit request or no special characters? */
-  if (find && (lua_toboolean(L, 4) || nospecials(p, lp))) {
+  if (find && (lua_toboolean(L, 4) || nospecials(&ms, p, lp))) {
     /* do a plain search */
-    const char *s2 = lmemfind(s + init, ls - init, p, lp);
+    const char *s2 = lmemfind(&ms, s + init, ls - init, p, lp);
     if (s2) {
       lua_pushinteger(L, ct_diff2S(s2 - s) + 1);
       lua_pushinteger(L, cast_st2S(ct_diff2sz(s2 - s) + lp));
-      return 2;
+      return luaL_rootresult(L, roots, 2, 2);
     }
   }
   else {
-    MatchState ms;
     const char *s1 = s + init;
     int anchor = (*p == '^');
     if (anchor) {
       p++; lp--;  /* skip anchor character */
     }
-    prepstate(&ms, L, s, ls, p, lp);
     do {
       const char *res;
       reprepstate(&ms);
@@ -813,15 +851,15 @@ static int str_find_aux (lua_State *L, int find) {
         if (find) {
           lua_pushinteger(L, ct_diff2S(s1 - s) + 1);  /* start */
           lua_pushinteger(L, ct_diff2S(res - s));   /* end */
-          return push_captures(&ms, NULL, 0) + 2;
+          return luaL_rootresult(L, roots, 2, push_captures(&ms, NULL, 0) + 2);
         }
         else
-          return push_captures(&ms, s1, res);
+          return luaL_rootresult(L, roots, 2, push_captures(&ms, s1, res));
       }
     } while (s1++ < ms.src_end && !anchor);
   }
   luaL_pushfail(L);  /* not found */
-  return 1;
+  return luaL_rootresult(L, roots, 2, 1);
 }
 
 
@@ -837,73 +875,205 @@ static int str_match (lua_State *L) {
 
 /* state for 'gmatch' */
 typedef struct GMatchState {
-  const char *src;  /* current position */
-  const char *p;  /* pattern */
-  const char *lastmatch;  /* end of last match */
-  MatchState ms;  /* match state */
+  const void *identity;
+  TString *subject, *pattern;  /* identities only; user values hold the roots */
+  size_t source_len, pattern_len;
+  size_t next, last;
+  lua_Unsigned version;
+  int matched;
 } GMatchState;
+
+static const char gmatch_identity;
+
+/* Payload ownership is held. Stored identities are never dereferenced: debug
+** code can replace user values, but cannot make a stale input pointer safe. */
+static GMatchState *gmatch_state (Udata *owner) {
+  GMatchState *gm;
+  if (owner->len != sizeof(GMatchState) || owner->nuvalue != 2)
+    return NULL;
+  gm = cast(GMatchState *, getudatamem(owner));
+  if (gm->identity != &gmatch_identity ||
+      !ttisstring(&owner->uv[0].uv) || !ttisstring(&owner->uv[1].uv) ||
+      tsvalue(&owner->uv[0].uv) != gm->subject ||
+      tsvalue(&owner->uv[1].uv) != gm->pattern ||
+      tsslen(tsvalue(&owner->uv[0].uv)) != gm->source_len ||
+      tsslen(tsvalue(&owner->uv[1].uv)) != gm->pattern_len ||
+      gm->next > gm->source_len + 1 ||
+      (gm->matched && gm->last > gm->source_len))
+    return NULL;
+  return gm;
+}
+
+static int badgmatch (lua_State *L, LuaObjectScope *scope) {
+  if (scope != NULL) luaA_end(L, scope);
+  lua_unlock(L);
+  return luaL_error(L, "invalid gmatch iterator state");
+}
 
 
 static int gmatch_aux (lua_State *L) {
-  GMatchState *gm = (GMatchState *)lua_touserdata(L, lua_upvalueindex(3));
-  const char *src;
-  gm->ms.L = L;
-  for (src = gm->src; src <= gm->ms.src_end; src++) {
-    const char *e;
-    reprepstate(&gm->ms);
-    if ((e = match(&gm->ms, src, gm->p)) != NULL && e != gm->lastmatch) {
-      gm->src = gm->lastmatch = e;
-      return push_captures(&gm->ms, src, e);
+  LuaNativeRoot roots[3];  /* selected userdata, subject and pattern */
+  LuaObjectScope scope;
+  CClosure *function;
+  Udata *owner;
+  unsigned index, work = 0;
+  MatchState ms;
+  lua_lock(L);
+  if (!ttisCclosure(s2v(L->ci->func.p)) ||
+      clCvalue(s2v(L->ci->func.p))->nupvalues < 3)
+    return badgmatch(L, NULL);
+  for (index = 0; index < 3; ++index)
+    luaR_pushroot(L, &roots[index]);
+  function = clCvalue(s2v(L->ci->func.p));
+  luaA_begin(L, obj2gco(function), &scope);
+  luaR_setroot(L, &roots[0], &function->upvalue[2]);
+  luaA_end(L, &scope);
+  if (!ttisfulluserdata(&roots[0].value))
+    return badgmatch(L, NULL);
+  owner = uvalue(&roots[0].value);
+  lua_unlock(L);
+  for (;;) {
+    GMatchState *gm;
+    lua_Unsigned version;
+    size_t ls, lp, next, last;
+    int matched, committed;
+    const char *s, *p, *src, *end = NULL;
+    lua_lock(L);
+    luaA_begin(L, obj2gco(owner), &scope);
+    gm = gmatch_state(owner);
+    if (gm == NULL) return badgmatch(L, &scope);
+    luaR_setroot(L, &roots[1], &owner->uv[0].uv);
+    luaR_setroot(L, &roots[2], &owner->uv[1].uv);
+    s = getlstr(tsvalue(&roots[1].value), ls);
+    p = getlstr(tsvalue(&roots[2].value), lp);
+    next = gm->next; last = gm->last; matched = gm->matched;
+    version = gm->version;
+    luaA_end(L, &scope);
+    lua_unlock(L);
+    prepstate(&ms, L, s, ls, p, lp);
+    ms.work = work;
+    for (src = s + next; src <= ms.src_end; src++) {
+      reprepstate(&ms);
+      end = match(&ms, src, p);
+      if (end != NULL && (!matched || ct_diff2sz(end - s) != last))
+        break;
     }
+    if (src > ms.src_end)
+      return luaL_rootresult(L, roots, 3, 0);
+    work = ms.work;
+    lua_lock(L);
+    luaA_begin(L, obj2gco(owner), &scope);
+    gm = gmatch_state(owner);
+    if (gm == NULL) return badgmatch(L, &scope);
+    committed = gm->version == version;
+    if (committed) {
+      gm->next = gm->last = ct_diff2sz(end - s);
+      gm->matched = 1;
+      gm->version++;
+    }
+    luaA_end(L, &scope);
+    lua_unlock(L);
+    if (committed)
+      return luaL_rootresult(L, roots, 3, push_captures(&ms, src, end));
+    /* A peer consumed this position while matching ran outside ownership. */
   }
-  return 0;  /* not found */
 }
 
 
 static int gmatch (lua_State *L) {
+  LuaNativeRoot roots[3];
   size_t ls, lp;
-  const char *s = luaL_checklstring(L, 1, &ls);
-  const char *p = luaL_checklstring(L, 2, &lp);
+  Udata *owner;
+  CClosure *function;
+  unsigned index;
+  luaL_rootstring(L, 1, &roots[0], &ls);
+  luaL_rootstring(L, 2, &roots[1], &lp);
   size_t init = posrelatI(luaL_optinteger(L, 3, 1), ls) - 1;
   GMatchState *gm;
-  lua_settop(L, 2);  /* keep strings on closure to avoid being collected */
-  gm = (GMatchState *)lua_newuserdatauv(L, sizeof(GMatchState), 0);
   if (init > ls)  /* start after string's end? */
-    init = ls + 1;  /* avoid overflows in 's + init' */
-  prepstate(&gm->ms, L, s, ls, p, lp);
-  gm->src = s + init; gm->p = p; gm->lastmatch = NULL;
-  lua_pushcclosure(L, gmatch_aux, 3);
+    init = ls + 1;
+  lua_lock(L);
+  luaW_heapenter(L);
+  luaR_pushroot(L, &roots[2]);
+  owner = luaS_newudata(L, sizeof(GMatchState), 2);
+  setuvalue(L, &roots[2].value, owner);
+  gm = cast(GMatchState *, getudatamem(owner));
+  gm->identity = &gmatch_identity;
+  gm->subject = tsvalue(&roots[0].value);
+  gm->pattern = tsvalue(&roots[1].value);
+  gm->source_len = ls; gm->pattern_len = lp;
+  gm->next = init; gm->last = 0; gm->matched = 0; gm->version = 0;
+  setobj(L, &owner->uv[0].uv, &roots[0].value);
+  setobj(L, &owner->uv[1].uv, &roots[1].value);
+  function = luaF_newCclosure(L, 3);
+  function->f = gmatch_aux;
+  function->managed = 1;
+  for (index = 0; index < 3; ++index)
+    setobj(L, &function->upvalue[index], &roots[index].value);
+  L->top.p = L->ci->func.p + 1;
+  setclCvalue(L, s2v(L->top.p), function);
+  api_incr_top(L);
+  for (index = 3; index != 0;)
+    luaR_poproot(L, &roots[--index]);
+  luaW_heapleave(L);
+  luaC_checkGC(L);
+  lua_unlock(L);
   return 1;
 }
 
 
+static void addbytes (MatchState *ms, luaL_Buffer *b, const char *s, size_t len) {
+  while (len != 0) {
+    size_t chunk = len < 1024u ? len : 1024u;
+    luaL_addlstring(b, s, chunk);
+    luaQ_workn(ms->L, &ms->work, chunk);
+    s += chunk; len -= chunk;
+  }
+}
+
 static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
-                                                   const char *e) {
+                   const char *e, LuaNativeRoot *replacement) {
   size_t l;
   lua_State *L = ms->L;
-  const char *news = lua_tolstring(L, 3, &l);
+  const char *news = luaL_roottostring(L, replacement, &l);
   const char *p;
-  while ((p = (char *)memchr(news, L_ESC, l)) != NULL) {
-    luaL_addlstring(b, news, ct_diff2sz(p - news));
+  while (l != 0) {
+    size_t chunk = l < 1024u ? l : 1024u;
+    size_t prefix;
+    p = (const char *)memchr(news, L_ESC, chunk);
+    prefix = p != NULL ? ct_diff2sz(p - news) : chunk;
+    luaQ_workn(L, &ms->work, p != NULL ? prefix + 1 : chunk);
+    addbytes(ms, b, news, prefix);
+    if (p == NULL) {
+      news += chunk; l -= chunk;
+      continue;
+    }
     p++;  /* skip ESC */
     if (*p == L_ESC)  /* '%%' */
       luaL_addchar(b, *p);
     else if (*p == '0')  /* '%0' */
-        luaL_addlstring(b, s, ct_diff2sz(e - s));
-    else if (isdigit(cast_uchar(*p))) {  /* '%n' */
+        addbytes(ms, b, s, ct_diff2sz(e - s));
+    else if (*p >= '1' && *p <= '9') {  /* '%n', independent of libc TLS */
       const char *cap;
       ptrdiff_t resl = get_onecapture(ms, *p - '1', s, e, &cap);
-      if (resl == CAP_POSITION)
-        luaL_addvalue(b);  /* add position to accumulated result */
+      if (resl == CAP_POSITION) {
+        LuaNativeRoot position;
+        size_t len;
+        const char *value;
+        luaL_rootarg(L, lua_gettop(L), &position);
+        lua_pop(L, 1);  /* Restore the buffer box before a possible wait. */
+        value = luaL_roottostring(L, &position, &len);
+        addbytes(ms, b, value, len);
+        luaL_rootresult(L, &position, 1, 0);
+      }
       else
-        luaL_addlstring(b, cap, cast_sizet(resl));
+        addbytes(ms, b, cap, cast_sizet(resl));
     }
     else
       luaL_error(L, "invalid use of '%c' in replacement string", L_ESC);
     l -= ct_diff2sz(p + 1 - news);
     news = p + 1;
   }
-  luaL_addlstring(b, news, l);
 }
 
 
@@ -913,47 +1083,58 @@ static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
 ** table indexing resulting in nil or false do not change the subject.)
 */
 static int add_value (MatchState *ms, luaL_Buffer *b, const char *s,
-                                      const char *e, int tr) {
+                      const char *e, int tr, LuaNativeRoot *replacement) {
   lua_State *L = ms->L;
+  LuaNativeRoot result;
+  int changed;
   switch (tr) {
     case LUA_TFUNCTION: {  /* call the function */
       int n;
-      lua_pushvalue(L, 3);  /* push the function */
+      luaL_pushrooted(L, replacement);
       n = push_captures(ms, s, e);  /* all captures as arguments */
       lua_call(L, n, 1);  /* call it */
       break;
     }
     case LUA_TTABLE: {  /* index the table */
+      luaL_pushrooted(L, replacement);
       push_onecapture(ms, 0, s, e);  /* first capture is the index */
-      lua_gettable(L, 3);
+      lua_gettable(L, -2);
+      lua_remove(L, -2);
       break;
     }
     default: {  /* LUA_TNUMBER or LUA_TSTRING */
-      add_s(ms, b, s, e);  /* add value to the buffer */
+      add_s(ms, b, s, e, replacement);
       return 1;  /* something changed */
     }
   }
-  if (!lua_toboolean(L, -1)) {  /* nil or false? */
-    lua_pop(L, 1);  /* remove value */
-    luaL_addlstring(b, s, ct_diff2sz(e - s));  /* keep original text */
-    return 0;  /* no changes */
+  luaL_rootarg(L, lua_gettop(L), &result);
+  lua_pop(L, 1);  /* The buffer's box must again be the top stack value. */
+  if (l_isfalse(&result.value)) {  /* nil or false? */
+    addbytes(ms, b, s, ct_diff2sz(e - s));
+    changed = 0;
   }
-  else if (l_unlikely(!lua_isstring(L, -1)))
+  else if (l_unlikely(!ttisstring(&result.value) &&
+                     !cvt2str(&result.value)))
     return luaL_error(L, "invalid replacement value (a %s)",
-                         luaL_typename(L, -1));
+                         lua_typename(L, ttype(&result.value)));
   else {
-    luaL_addvalue(b);  /* add result to accumulator */
-    return 1;  /* something changed */
+    size_t len;
+    const char *value = luaL_roottostring(L, &result, &len);
+    addbytes(ms, b, value, len);
+    changed = 1;
   }
+  luaL_rootresult(L, &result, 1, 0);
+  return changed;
 }
 
 
 static int str_gsub (lua_State *L) {
+  LuaNativeRoot roots[3];
   size_t srcl, lp;
-  const char *src = luaL_checklstring(L, 1, &srcl);  /* subject */
-  const char *p = luaL_checklstring(L, 2, &lp);  /* pattern */
+  const char *src = luaL_rootstring(L, 1, &roots[0], &srcl);
+  const char *p = luaL_rootstring(L, 2, &roots[1], &lp);
   const char *lastmatch = NULL;  /* end of last match */
-  int tr = lua_type(L, 3);  /* replacement type */
+  int tr;
   /* max replacements */
   lua_Integer max_s = luaL_optinteger(L, 4, cast_st2S(srcl) + 1);
   int anchor = (*p == '^');
@@ -961,6 +1142,8 @@ static int str_gsub (lua_State *L) {
   int changed = 0;  /* change flag */
   MatchState ms;
   luaL_Buffer b;
+  luaL_rootarg(L, 3, &roots[2]);
+  tr = ttype(&roots[2].value);
   luaL_argexpected(L, tr == LUA_TNUMBER || tr == LUA_TSTRING ||
                    tr == LUA_TFUNCTION || tr == LUA_TTABLE, 3,
                       "string/function/table");
@@ -974,7 +1157,7 @@ static int str_gsub (lua_State *L) {
     reprepstate(&ms);  /* (re)prepare state for new match */
     if ((e = match(&ms, src, p)) != NULL && e != lastmatch) {  /* match? */
       n++;
-      changed = add_value(&ms, &b, src, e, tr) || changed;
+      changed = add_value(&ms, &b, src, e, tr, &roots[2]) || changed;
       src = lastmatch = e;
     }
     else if (src < ms.src_end)  /* otherwise, skip one character */
@@ -983,13 +1166,13 @@ static int str_gsub (lua_State *L) {
     if (anchor) break;
   }
   if (!changed)  /* no changes? */
-    lua_pushvalue(L, 1);  /* return original string */
+    luaL_pushrooted(L, &roots[0]);  /* return the original subject snapshot */
   else {  /* something changed */
-    luaL_addlstring(&b, src, ct_diff2sz(ms.src_end - src));
+    addbytes(&ms, &b, src, ct_diff2sz(ms.src_end - src));
     luaL_pushresult(&b);  /* create and return new string */
   }
   lua_pushinteger(L, n);  /* number of substitutions */
-  return 2;
+  return luaL_rootresult(L, roots, 3, 2);
 }
 
 /* }====================================================== */
@@ -1893,7 +2076,16 @@ static void createmetatable (lua_State *L) {
 ** Open string library
 */
 LUAMOD_API int luaopen_string (lua_State *L) {
-  luaL_newlib(L, strlib);
+  const luaL_Reg *entry;
+  luaL_newlibtable(L, strlib);
+  for (entry = strlib; entry->name != NULL; ++entry) {
+    if (entry->func == str_find || entry->func == str_match ||
+        entry->func == gmatch || entry->func == str_gsub)
+      luaQ_pushmanaged(L, entry->func, 0);
+    else
+      lua_pushcfunction(L, entry->func);
+    lua_setfield(L, -2, entry->name);
+  }
   createmetatable(L);
   return 1;
 }

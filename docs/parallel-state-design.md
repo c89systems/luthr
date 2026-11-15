@@ -1202,8 +1202,33 @@ in both GC modes. A moving allocator poisons the retired stack. All six fail
 without the repair and pass with it; this makes the rare stress failure
 deterministic without depending on scheduling luck.
 
-Other libraries, required modules and the remaining scheduler acceptance gates
-are still unfinished.
+## Managed string-pattern helpers
+
+`string.find`, `match`, `gmatch` and `gsub` now use managed runtime closures.
+Matching scratch belongs to each invocation. Shared `gmatch` userdata retains
+its source and pattern as user values, with short object-ownership scopes for
+cursor snapshots and version-checked commits. Matching and result construction
+run outside those scopes; a competing consumer retries after a cursor change.
+Private roots retain the selected userdata and immutable inputs independently
+of debug-replaceable captures or argument slots. Substitution also retains the
+replacement and each callback result independently of the caller's stack slots.
+UTF-8 helpers reuse the same private rooted-input operations.
+
+Long searches, pattern classes, balanced matches, repetition, backreferences and
+replacement copies have bounded work checkpoints. Character classification
+returns from its libc TLS-using leaf before a checkpoint can move the frame.
+Recursive matching checks the task's native-stack limit, including on default
+128 KiB workers. Iterator payload identity and its retained user values are
+validated before each snapshot and commit; malformed state raises a Lua error.
+
+`pattern_library_*` verifies Lua behavior, exactly-once concurrent consumption,
+GC after argument/capture changes, callback-result retention, allocation failure
+and native-stack recovery. `native_scheduler_task_*pattern*` runs the helpers
+with two managed permits and two blocked native slots over four carriers. It
+requires unrelated progress while both matching frames are saved, collection,
+migration inside each helper, callback result waiting, pinned native reentry,
+moving allocators and error cleanup. Other string helpers, other libraries,
+required modules and the remaining scheduler acceptance gates are unfinished.
 
 ## Lua-specific proof obligations
 
