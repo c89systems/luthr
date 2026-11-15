@@ -65,7 +65,9 @@ proofs for backpressure, migration, native saturation and foreign callbacks;
 they do not establish streaming compatibility for the required modules.
 Owned base/coroutine control functions and C89 policy wrappers now support these
 parking/migration paths, with stable function identity on reopening and rooted
-wrapped-coroutine snapshots. The remaining libraries still require their audit.
+wrapped-coroutine snapshots. Math/table helpers and auxiliary-buffer cleanup now
+also support managed execution, with scoped ownership for shared PRNG state.
+Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.
 Private scheduled-task records now reserve coroutines and retain their results

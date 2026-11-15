@@ -159,6 +159,14 @@ unrelated-task progress, nested native callbacks, self-wait rejection and cleanu
 Driver variants await before their first Lua entry. CPU IDs are printed by the
 fixture; throughput, automatic sizing and public task lifecycle remain open.
 
+`math_library_*` checks pre-change seed/draw vectors, invalid-call advancement,
+reopening identity, concurrent draws and reseeding, capture replacement with GC,
+invalid userdata/captures and allocation failure. A gated holder/waiter case
+proves exclusive payload access and roots after both function captures change.
+The `native_scheduler_task_*library*` variants run math/table helpers and large
+buffer cleanup while both native slots are occupied, including a sort comparator
+that awaits through math comparison callbacks, migration, GC and error unwinding.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

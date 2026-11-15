@@ -1083,6 +1083,52 @@ permit, callback self-wait and serialized managed capacity. All negative edits
 are restored for normal verification. These remain private runtime/driver
 interfaces; affinity, module compatibility and the public scheduler remain open.
 
+## Managed math/table helpers and shared random state
+
+Math/table library entries and auxiliary-buffer close/finalizer functions now
+use the owned managed-call path. Their audited bodies use local computations,
+leaf libm calls and synchronized Lua APIs; Lua callbacks can park their retained
+frames. The pinned x86_64 seed generator uses a local address and a time read.
+Zero-capture functions keep canonical VM identities when libraries reopen.
+Captured random functions retain their original per-open shared-state model.
+
+The PRNG userdata now has a private identity and scoped object ownership.
+An invocation snapshots the mutable closure capture under its own guard, then
+roots/reserves that userdata independently. Type, size and identity validation
+reject missing, replaced or stripped captures before payload access. Initial
+draws, rejection sampling and reseeding use one payload reservation without Lua
+APIs, allocation or callbacks inside it. Numeric-bound conversions occur first;
+invalid random calls still consume their original single draw before reporting
+the ordinary error outside the reservation. Invalid explicit seeds leave the
+state unchanged. Result values and seed integers are pushed after release.
+
+Thirty-two `math_library_*` cases use raw/C89 entrypoints, both GC modes and
+default worker stacks. Literal seed/draw vectors and mixed results were captured
+from the verified `ecb61f7` build before replacing its Release library. Error
+cases verify advancement, handler reentry and allocation denial/recovery.
+Concurrent full/bounded draws compare with a sequential outcome multiset;
+concurrent reseeding verifies its returned seeds and exercises synchronization.
+A gated invocation reserves the old userdata, makes a peer wait, drops both
+function captures and forces collection. The two calls must then receive the
+first and second seeded results, and finalization must occur once afterward.
+
+Sixteen `native_scheduler_task_*library*` cases extend the two-managed-permit,
+two-blocked-native-slot pipeline. They exercise math entries, table creation,
+packing/unpacking, insertion/removal, overlapping moves, sorting and concatenation.
+Proxy metamethods and comparators execute Lua. A sort comparator enters math
+comparison callbacks that await another task, preserving both C frames through
+parking, GC and migration. Large concatenations exercise auxiliary-box cleanup
+on success and error while native admission is saturated. Buffer cleanup keeps
+the existing VM-serialized allocator path. Uncaught task errors and nested
+native callbacks keep the earlier ownership/cleanup requirements.
+
+The gated tests fail when userdata ownership or its root is removed. The
+saturation test stops progressing if math, table or buffer cleanup is registered
+as foreign; invalid-call advancement fails if validation throws before the draw.
+Those six negative edits are restored for final verification. Other libraries,
+module compatibility, cancellation/shutdown, affinity, sizing and the public
+scheduler still require their own acceptance work.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

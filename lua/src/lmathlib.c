@@ -21,6 +21,9 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lapi.h"
+#include "laccess.h"
+#include "lexec.h"
 
 
 #undef PI
@@ -552,8 +555,51 @@ static Rand64 Int2I (lua_Unsigned n) {
 ** A state uses four 'Rand64' values.
 */
 typedef struct {
+  const void *identity;
   Rand64 s[4];
 } RanState;
+
+static const char random_identity;
+
+/* Snapshot the mutable C capture before reserving its userdata. No Lua API,
+** allocation or callback runs under the payload's object scope. */
+static RanState *random_enter (lua_State *L, LuaObjectScope *access) {
+  LuaObjectScope capture;
+  CClosure *function;
+  Udata *owner;
+  RanState *state;
+  lua_lock(L);
+  if (!ttisCclosure(s2v(L->ci->func.p)) ||
+      clCvalue(s2v(L->ci->func.p))->nupvalues == 0) {
+    lua_unlock(L);
+    luaL_error(L, "invalid random generator state");
+    return NULL;
+  }
+  function = clCvalue(s2v(L->ci->func.p));
+  luaA_begin(L, obj2gco(function), &capture);
+  owner = ttisfulluserdata(&function->upvalue[0])
+          ? uvalue(&function->upvalue[0]) : NULL;
+  luaA_end(L, &capture);
+  if (owner == NULL) {
+    lua_unlock(L);
+    luaL_error(L, "invalid random generator state");
+    return NULL;
+  }
+  luaA_begin(L, obj2gco(owner), access);
+  state = cast(RanState *, getudatamem(owner));
+  if (owner->len != sizeof(RanState) || state->identity != &random_identity) {
+    luaA_end(L, access);
+    lua_unlock(L);
+    luaL_error(L, "invalid random generator state");
+    return NULL;
+  }
+  return state;
+}
+
+static void random_leave (lua_State *L, LuaObjectScope *access) {
+  luaA_end(L, access);
+  lua_unlock(L);
+}
 
 
 /*
@@ -580,18 +626,42 @@ static lua_Unsigned project (lua_Unsigned ran, lua_Unsigned n,
 
 
 static int math_random (lua_State *L) {
-  lua_Integer low, up;
-  lua_Unsigned p;
-  RanState *state = (RanState *)lua_touserdata(L, lua_upvalueindex(1));
-  Rand64 rv = nextrand(state->s);  /* next pseudo-random value */
-  switch (lua_gettop(L)) {  /* check number of arguments */
+  lua_Integer low = 1, up = 0;
+  lua_Unsigned p = 0;
+  int narg = lua_gettop(L), valid, badarg = 0;
+  LuaObjectScope access;
+  RanState *state;
+  Rand64 rv;
+  /* Conversion has no Lua callbacks or allocations. Preserve the original
+  ** draw-on-error behavior, but report errors only after payload release. */
+  if (narg == 1) {
+    up = lua_tointegerx(L, 1, &valid);
+    if (!valid) badarg = 1;
+  }
+  else if (narg == 2) {
+    low = lua_tointegerx(L, 1, &valid);
+    if (!valid) badarg = 1;
+    else {
+      up = lua_tointegerx(L, 2, &valid);
+      if (!valid) badarg = 2;
+    }
+  }
+  state = random_enter(L, &access);
+  rv = nextrand(state->s);
+  if (badarg == 0 && (narg == 1 || narg == 2) && low <= up &&
+      !(narg == 1 && up == 0))
+    p = project(I2UInt(rv), l_castS2U(up) - l_castS2U(low), state);
+  random_leave(L, &access);
+  if (badarg != 0) {
+    (void)luaL_checkinteger(L, badarg);  /* preserve the ordinary Lua error */
+    return luaL_error(L, "random bound changed during validation");
+  }
+  switch (narg) {
     case 0: {  /* no arguments */
       lua_pushnumber(L, I2d(rv));  /* float between 0 and 1 */
       return 1;
     }
     case 1: {  /* only upper limit */
-      low = 1;
-      up = luaL_checkinteger(L, 1);
       if (up == 0) {  /* single 0 as argument? */
         lua_pushinteger(L, l_castU2S(I2UInt(rv)));  /* full random integer */
         return 1;
@@ -599,22 +669,18 @@ static int math_random (lua_State *L) {
       break;
     }
     case 2: {  /* lower and upper limits */
-      low = luaL_checkinteger(L, 1);
-      up = luaL_checkinteger(L, 2);
       break;
     }
     default: return luaL_error(L, "wrong number of arguments");
   }
   /* random integer in the interval [low, up] */
   luaL_argcheck(L, low <= up, 1, "interval is empty");
-  /* project random integer into the interval [0, up - low] */
-  p = project(I2UInt(rv), l_castS2U(up) - l_castS2U(low), state);
   lua_pushinteger(L, l_castU2S(p + l_castS2U(low)));
   return 1;
 }
 
 
-static void setseed (lua_State *L, Rand64 *state,
+static void setseed (Rand64 *state,
                      lua_Unsigned n1, lua_Unsigned n2) {
   int i;
   state[0] = Int2I(n1);
@@ -623,23 +689,29 @@ static void setseed (lua_State *L, Rand64 *state,
   state[3] = Int2I(0);
   for (i = 0; i < 16; i++)
     nextrand(state);  /* discard initial values to "spread" seed */
-  lua_pushinteger(L, l_castU2S(n1));
-  lua_pushinteger(L, l_castU2S(n2));
 }
 
 
 static int math_randomseed (lua_State *L) {
-  RanState *state = (RanState *)lua_touserdata(L, lua_upvalueindex(1));
+  LuaObjectScope access;
+  RanState *state;
+  int random = lua_isnone(L, 1);
   lua_Unsigned n1, n2;
-  if (lua_isnone(L, 1)) {
+  if (random) {
     n1 = luaL_makeseed(L);  /* "random" seed */
-    n2 = I2UInt(nextrand(state->s));  /* in case seed is not that random... */
+    n2 = 0;
   }
   else {
     n1 = l_castS2U(luaL_checkinteger(L, 1));
     n2 = l_castS2U(luaL_optinteger(L, 2, 0));
   }
-  setseed(L, state->s, n1, n2);
+  state = random_enter(L, &access);
+  if (random)
+    n2 = I2UInt(nextrand(state->s));  /* in case seed is not that random... */
+  setseed(state->s, n1, n2);
+  random_leave(L, &access);
+  lua_pushinteger(L, l_castU2S(n1));
+  lua_pushinteger(L, l_castU2S(n2));
   return 2;  /* return seeds */
 }
 
@@ -655,10 +727,16 @@ static const luaL_Reg randfuncs[] = {
 ** Register the random functions and initialize their state.
 */
 static void setrandfunc (lua_State *L) {
+  const luaL_Reg *entry;
   RanState *state = (RanState *)lua_newuserdatauv(L, sizeof(RanState), 0);
-  setseed(L, state->s, luaL_makeseed(L), 0);  /* initialize with random seed */
-  lua_pop(L, 2);  /* remove pushed seeds */
-  luaL_setfuncs(L, randfuncs, 1);
+  state->identity = &random_identity;
+  setseed(state->s, luaL_makeseed(L), 0);
+  for (entry = randfuncs; entry->name != NULL; ++entry) {
+    lua_pushvalue(L, -1);
+    luaQ_pushmanaged(L, entry->func, 1);
+    lua_setfield(L, -3, entry->name);
+  }
+  lua_pop(L, 1);
 }
 
 /* }================================================================== */
@@ -750,7 +828,13 @@ static const luaL_Reg mathlib[] = {
 ** Open math library
 */
 LUAMOD_API int luaopen_math (lua_State *L) {
-  luaL_newlib(L, mathlib);
+  const luaL_Reg *entry;
+  luaL_newlibtable(L, mathlib);
+  for (entry = mathlib; entry->name != NULL; ++entry) {
+    if (entry->func == NULL) lua_pushboolean(L, 0);
+    else luaQ_pushmanaged(L, entry->func, 0);
+    lua_setfield(L, -2, entry->name);
+  }
   lua_pushnumber(L, PI);
   lua_setfield(L, -2, "pi");
   lua_pushnumber(L, (lua_Number)HUGE_VAL);

@@ -27,6 +27,7 @@
 #include "lauxlib.h"
 #include "llimits.h"
 #include "lmem.h"
+#include "lexec.h"
 
 
 /*
@@ -518,8 +519,12 @@ static const luaL_Reg boxmt[] = {  /* box metamethods */
 static void getBoxMT (lua_State *L) {
   const char *BOXMT = "_UBOX*"; /* key for the metatable */
   if (luaL_getmetatable(L, BOXMT) == LUA_TNIL) {  /* MT not created yet? */
+    const luaL_Reg *entry;
     luaL_newlibtable(L, boxmt);  /* create it */
-    luaL_setfuncs(L, boxmt, 0);  /* initialize it */
+    for (entry = boxmt; entry->name != NULL; ++entry) {
+      luaQ_pushmanaged(L, entry->func, 0);
+      lua_setfield(L, -2, entry->name);
+    }
     lua_copy(L, -1, -2);  /* change stack from nil,MT to MT,MT */
     lua_setfield(L, LUA_REGISTRYINDEX, BOXMT);  /* store MT in the registry */
   }

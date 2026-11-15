@@ -16,6 +16,21 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(math_library_test math_library_test.c)
+set_target_properties(math_library_test PROPERTIES C_STANDARD 99)
+target_compile_options(math_library_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(math_library_test PRIVATE luthrum_static)
+target_link_options(math_library_test PRIVATE -Wl,--wrap=luaA_begin)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS sequence errors bindings oom capture parallel_full parallel_bounded reseed)
+      add_test(NAME math_library_${backend}_${case}_${gc}
+        COMMAND math_library_test ${backend}_${case}_${gc})
+      set_tests_properties(math_library_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(task_ownership_test task_ownership_test.c)
 set_target_properties(task_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(task_ownership_test PRIVATE -Wall -Wextra -Werror)
@@ -110,7 +125,7 @@ target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS normal migrate early error callback callback_migrate callback_error
-        driver driver_migrate)
+        driver driver_migrate library library_migrate library_callback library_error)
       add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
         COMMAND native_scheduler_test task_${backend}_${case}_${gc})
       set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}

@@ -1623,6 +1623,58 @@ static void run_await_driver(struct task *task) {
              2); /* The unentered task function stays at index 1. */
   task->status = luaTK_resume(&task->root, results + 1, &task->results);
 }
+static void install_library_audit(lua_State *state) {
+  static const char source[] =
+      "function audit_libraries(id) check_managed(); "
+      "assert(math.abs(-3)==3 and math.acos(1)==0 and math.asin(0)==0); "
+      "assert(math.atan(0,1)==0 and math.ceil(1.2)==2 and math.floor(1.8)==1); "
+      "assert(math.cos(0)==1 and math.sin(0)==0 and math.tan(0)==0); "
+      "assert(math.deg(0)==0 and math.rad(0)==0 and math.exp(0)==1); "
+      "assert(math.tointeger('12')==12 and math.tointeger(1.5)==nil); "
+      "assert(math.fmod(17,5)==2 and math.fmod(17.5,5)==2.5); "
+      "local m,e=math.frexp(8); assert(m==0.5 and e==4 and "
+      "math.ldexp(m,e)==8); "
+      "assert(math.ult(1,-1) and math.log(8,2)==3 and math.log(100,10)==2); "
+      "m,e=math.modf(-3.25); assert(m==-3 and e==-0.25 and math.sqrt(81)==9); "
+      "assert(math.type(7)=='integer' and math.type(7.5)=='float' and "
+      "math.type('7')==nil); "
+      "local x,y=math.randomseed(id,id+1); assert(x==id and y==id+1); "
+      "for i=1,32 do x=math.random(); assert(x>=0 and x<1); "
+      "x=math.random(1,7); assert(x>=1 and x<=7); math.random(0) end; "
+      "math.randomseed(); local waited=false; "
+      "local mt={__lt=function(a,b) check_managed(); "
+      "if id==2 and not waited then waited=true; assert(await_checked(3)==42) "
+      "end; "
+      "return a.n<b.n end}; "
+      "local a,b=setmetatable({n=1},mt),setmetatable({n=2},mt); "
+      "local t=table.pack(4,1,3,2); assert(t.n==4); "
+      "table.sort(t,function(x,y) check_managed(); "
+      "assert(math.min(a,b)==a and math.max(a,b)==b); return x<y end); "
+      "assert(table.concat(t,',')=='1,2,3,4'); "
+      "assert(table.remove(t,2)==2); table.insert(t,2,8); "
+      "local c=table.create(4,2); assert(table.move(t,1,4,1,c)==c); "
+      "local p,q,r,s=table.unpack(c); assert(p==1 and q==8 and r==3 and s==4); "
+      "table.move(c,1,3,2); assert(table.concat(c,':')=='1:1:8:3'); "
+      "assert(select('#',table.unpack(table.pack(1,nil,3),1,3))==3); "
+      "local backing={3,1,2}; local proxy=setmetatable({}, { "
+      "__len=function() check_managed(); return #backing end, "
+      "__index=function(_,k) check_managed(); return backing[k] end, "
+      "__newindex=function(_,k,v) check_managed(); backing[k]=v end}); "
+      "table.sort(proxy); assert(table.concat(proxy,',')=='1,2,3'); "
+      "local ok=pcall(table.sort,{3,2,1},function() check_managed(); "
+      "error('sort expected') end); "
+      "assert(not ok); ok=pcall(math.min,setmetatable({}, {__lt=function() "
+      "check_managed(); error('min expected') end}),{}); assert(not ok); "
+      "local chunks={}; local text='0123456789abcdef0123456789abcdef'; "
+      "for i=1,400 do chunks[i]=text end; "
+      "assert(#table.concat(chunks)==12800); "
+      "chunks[401]={}; ok=pcall(table.concat,chunks); assert(not ok); "
+      "collectgarbage('collect'); check_managed() end";
+  luaQ_pushmanaged(state, check_managed, 0);
+  lua_setglobal(state, "check_managed");
+  require(luaL_loadstring(state, source) == LUA_OK);
+  require(lua_pcall(state, 0, 0, 0) == LUA_OK);
+}
 static int exercise_task_wait(const char *name) {
   struct pool *pool = calloc(1, sizeof(*pool));
   pthread_t workers[MAX_WORKERS];
@@ -1633,12 +1685,14 @@ static int exercise_task_wait(const char *name) {
   int callback = strstr(name, "callback") != NULL;
   int driver = strstr(name, "driver") != NULL;
   int error = strstr(name, "error") != NULL;
+  int library = strstr(name, "library") != NULL;
   static const char producer[] =
       "local token,id=...; return function() "
       "local r <close> =setmetatable({}, {__close=function() cleanup(token) "
       "end}); "
       "local n=0; for i=1,2000 do local t={i}; n=n+t[1] end; "
       "shared[id]=n; producer_ready(id); "
+      "if audit_libraries then audit_libraries(id) end; "
       "if id==2 then gate2:recv() else gate3:recv() end; "
       "if id==3 and failing then error(token) end; "
       "return token,function() return shared end,42 end";
@@ -1709,6 +1763,8 @@ static int exercise_task_wait(const char *name) {
           "assert(status==0 and n==42 and fn()==shared) end; "
           "report(id,true,token); return 42 end") == LUA_OK);
   require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  if (library)
+    install_library_audit(pool->main);
   if (strstr(name, "generational") != NULL)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < MAX_TASKS; ++id) {
@@ -1780,7 +1836,8 @@ static int exercise_task_wait(const char *name) {
   append(&pool->requests, &pool->requests_tail, &pool->tasks[3]);
   grant(pool);
   while (!pool->await_ready[0] || !pool->await_ready[1] ||
-         !pool->tasks[2].published || !pool->tasks[3].published)
+         !pool->tasks[2].published || !pool->tasks[3].published ||
+         (library && !pool->tasks[2].await_waits))
     wait_change(pool);
   require(pool->parallel_arrivals == 2 && pool->managed_peak == 2);
   require(pool->tasks[2].parallel_cpu == cpus[0] &&
@@ -1831,7 +1888,7 @@ static int exercise_task_wait(const char *name) {
   require(pool->native == 2 && pool->await_closed == 2);
   require(pool->await_winners[0] == 1 && pool->await_winners[1] == 1);
   require(pool->await_losers[0] == (callback ? 2U : 1U) &&
-          pool->await_losers[1] == 0);
+          pool->await_losers[1] == (library ? 1U : 0U));
   pool->release[0] = pool->release[1] = 1;
   signal_change(pool);
   while (pool->done != MAX_TASKS)
@@ -1857,6 +1914,11 @@ static int exercise_task_wait(const char *name) {
       collect_task(task);
     }
     if (id == 4 || id == 5 || id == 7) {
+      require(task->await_waits != 0 && task->pinned_resource_waits == 0);
+      if (pool->force_migrate)
+        require(task->migrations != 0);
+    }
+    if (library && id == 2) {
       require(task->await_waits != 0 && task->pinned_resource_waits == 0);
       if (pool->force_migrate)
         require(task->migrations != 0);

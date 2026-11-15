@@ -19,6 +19,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lexec.h"
 
 
 /*
@@ -423,7 +424,12 @@ static const luaL_Reg tab_funcs[] = {
 
 
 LUAMOD_API int luaopen_table (lua_State *L) {
-  luaL_newlib(L, tab_funcs);
+  const luaL_Reg *entry;
+  luaL_newlibtable(L, tab_funcs);
+  for (entry = tab_funcs; entry->name != NULL; ++entry) {
+    luaQ_pushmanaged(L, entry->func, 0);
+    lua_setfield(L, -2, entry->name);
+  }
   return 1;
 }
 
