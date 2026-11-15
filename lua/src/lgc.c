@@ -14,6 +14,7 @@
 
 #include "lua.h"
 
+#include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -761,7 +762,7 @@ static l_mem traversethread (global_State *g, lua_State *th) {
   for (uv = th->openupval; uv != NULL; uv = uv->u.open.next)
     markobject(g, uv);  /* open upvalues cannot be collected */
   if (g->gcstate == GCSatomic) {  /* final traversal? */
-    if (!g->gcemergency && !th->heap_waiting)
+    if (!g->gcemergency && !th->heap_waiting && !th->object_waiting)
       luaD_shrinkstack(th); /* preserve allocation waiters' borrowed pointers */
     for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
       setnilvalue2s(o);  /* clear dead stack slice */
@@ -1024,12 +1025,13 @@ static void dothecall (lua_State *L, void *ud) {
 
 static void GCTM (lua_State *L) {
   global_State *g = G(L);
-  const TValue *tm;
+  LuaNativeRoot method;
   TValue v;
   lua_assert(!g->gcemergency);
   setgcovalue(L, &v, udata2finalize(g));
-  tm = luaT_gettmbyobj(L, &v, TM_GC);
-  if (!notm(tm)) {  /* is there a finalizer? */
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, &v, TM_GC, &method);
+  if (!ttisnil(&method.value)) {
     TStatus status;
     lu_byte oldah = L->allowhook;
     lu_byte oldgcstp  = g->gcstp;
@@ -1037,7 +1039,7 @@ static void GCTM (lua_State *L) {
     g->gcstp |= GCSTPGC;  /* avoid GC steps */
     /* Embedding limits also account for Lua finalizer instructions. */
     L->allowhook = (L->hookmask & LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
-    setobj2s(L, L->top.p++, tm);  /* push finalizer... */
+    setobj2s(L, L->top.p++, &method.value);  /* push finalizer... */
     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
     depth = luaW_suspend(L);
@@ -1051,6 +1053,7 @@ static void GCTM (lua_State *L) {
       L->top.p--;  /* pops error object */
     }
   }
+  luaR_poproot(L, &method);
 }
 
 
@@ -1128,14 +1131,16 @@ static void correctpointers (global_State *g, GCObject *o) {
 */
 void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
   global_State *g = G(L);
-  LuaNativeRoot object_root, metatable_root;
+  LuaNativeRoot object_root, metatable_root, method;
   luaR_pushroot(L, &object_root);
   setgcovalue(L, &object_root.value, o);
   luaR_pushroot(L, &metatable_root);
   sethvalue(L, &metatable_root.value, mt);
+  luaR_pushroot(L, &method);
+  luaA_tabletm(L, mt, TM_GC, &method);
   luaW_heapenter(L);
   if (tofinalize(o) ||                 /* obj. is already marked... */
-      gfasttm(g, mt, TM_GC) == NULL ||    /* or has no finalizer... */
+      ttisnil(&method.value) ||         /* or has no finalizer... */
       (g->gcstp & GCSTPCLS))                   /* or closing state? */
     goto done;  /* nothing to be done */
   else {  /* move 'o' to 'finobj' list */
@@ -1156,6 +1161,7 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
   }
  done:
   luaW_heapleave(L);
+  luaR_poproot(L, &method);
   luaR_poproot(L, &metatable_root);
   luaR_poproot(L, &object_root);
 }

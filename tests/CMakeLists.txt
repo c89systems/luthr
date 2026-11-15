@@ -17,7 +17,9 @@ set_target_properties(parallel_vm_test PROPERTIES C_STANDARD 99)
 target_compile_options(parallel_vm_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(parallel_vm_test PRIVATE luthrum_static)
 foreach(case IN ITEMS closed open api cycle blocked allocate_stopped allocate_incremental
-    allocate_generational allocate_failure allocate_open allocate_open_generational allocate_blocked)
+    allocate_generational allocate_failure allocate_open allocate_open_generational allocate_blocked
+    table_stopped table_incremental table_generational table_meta_incremental table_meta_generational
+    table_blocked table_error table_failure table_handler_blocked table_yield)
   add_test(NAME parallel_vm_${case} COMMAND parallel_vm_test ${case})
   set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()

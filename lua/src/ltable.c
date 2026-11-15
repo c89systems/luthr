@@ -30,6 +30,8 @@
 #include "lua.h"
 
 #include "ldebug.h"
+#include "laccess.h"
+#include "lroots.h"
 #include "ldo.h"
 #include "lgc.h"
 #include "lmem.h"
@@ -358,7 +360,7 @@ static unsigned findindex (lua_State *L, Table *t, TValue *key,
 }
 
 
-int luaH_next (lua_State *L, Table *t, StkId key) {
+static int rawnext (lua_State *L, Table *t, StkId key) {
   unsigned int asize = t->asize;
   unsigned int i = findindex(L, t, s2v(key), asize);  /* find original key */
   for (; i < asize; i++) {  /* try first array part */
@@ -658,13 +660,14 @@ static void reinserthash (lua_State *L, Table *ot, Table *t) {
 static void exchangehashpart (Table *t1, Table *t2) {
   lu_byte lsizenode = t1->lsizenode;
   Node *node = t1->node;
-  int bitdummy1 = t1->flags & BITDUMMY;
+  int bitdummy1 = gettableflags(t1) & BITDUMMY;
   t1->lsizenode = t2->lsizenode;
   t1->node = t2->node;
-  t1->flags = cast_byte((t1->flags & NOTBITDUMMY) | (t2->flags & BITDUMMY));
+  settableflags(t1, cast_byte((gettableflags(t1) & NOTBITDUMMY) |
+                             (gettableflags(t2) & BITDUMMY)));
   t2->lsizenode = lsizenode;
   t2->node = node;
-  t2->flags = cast_byte((t2->flags & NOTBITDUMMY) | bitdummy1);
+  settableflags(t2, cast_byte((gettableflags(t2) & NOTBITDUMMY) | bitdummy1));
 }
 
 
@@ -712,11 +715,13 @@ static void clearNewSlice (Table *t, unsigned oldasize, unsigned newasize) {
 ** the old one ('oldasize'), this function will do nothing with that
 ** part.
 */
-void luaH_resize (lua_State *L, Table *t, unsigned newasize,
+static void rawresize (lua_State *L, Table *t, unsigned newasize,
                                           unsigned nhsize) {
   Table newt;  /* to keep the new hash part */
-  unsigned oldasize = t->asize;
+  unsigned oldasize;
   Value *newarray;
+  luaW_heapenter(L);
+  oldasize = t->asize;
   if (newasize > MAXASIZE)
     luaG_runerror(L, "table overflow");
   /* create new hash part with appropriate size into 'newt' */
@@ -744,12 +749,13 @@ void luaH_resize (lua_State *L, Table *t, unsigned newasize,
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
   freehash(L, &newt);  /* free old hash part */
+  luaW_heapleave(L);
 }
 
 
-void luaH_resizearray (lua_State *L, Table *t, unsigned int nasize) {
+static void rawresizearray (lua_State *L, Table *t, unsigned int nasize) {
   unsigned nsize = allocsizenode(t);
-  luaH_resize(L, t, nasize, nsize);
+  rawresize(L, t, nasize, nsize);
 }
 
 
@@ -787,7 +793,7 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
     nsize += nsize >> 2;
   }
   /* resize the table to new computed sizes */
-  luaH_resize(L, t, asize, nsize);
+  rawresize(L, t, asize, nsize);
 }
 
 /*
@@ -798,6 +804,7 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
 Table *luaH_new (lua_State *L) {
   GCObject *o = luaC_newobj(L, LUA_VTABLE, sizeof(Table));
   Table *t = gco2t(o);
+  t->access.depth = 0;
   t->metatable = NULL;
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
@@ -819,6 +826,7 @@ lu_mem luaH_size (Table *t) {
 ** Frees a table.
 */
 void luaH_free (lua_State *L, Table *t) {
+  lua_assert(t->access.depth == 0);
   freehash(L, t);
   resizearray(L, t, t->asize, 0);
   luaM_free(L, t);
@@ -955,7 +963,7 @@ static lu_byte finishnodeget (const TValue *val, TValue *res) {
 }
 
 
-lu_byte luaH_getint (Table *t, lua_Integer key, TValue *res) {
+static lu_byte rawgetint (Table *t, lua_Integer key, TValue *res) {
   unsigned k = ikeyinarray(t, key);
   if (k > 0) {
     lu_byte tag = *getArrTag(t, k - 1);
@@ -987,7 +995,7 @@ const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
 }
 
 
-lu_byte luaH_getshortstr (Table *t, TString *key, TValue *res) {
+static lu_byte rawgetshortstr (Table *t, TString *key, TValue *res) {
   return finishnodeget(luaH_Hgetshortstr(t, key), res);
 }
 
@@ -1008,7 +1016,7 @@ static const TValue *Hgetstr (Table *t, TString *key) {
 }
 
 
-lu_byte luaH_getstr (Table *t, TString *key, TValue *res) {
+static lu_byte rawgetstr (Table *t, TString *key, TValue *res) {
   return finishnodeget(Hgetstr(t, key), res);
 }
 
@@ -1016,21 +1024,20 @@ lu_byte luaH_getstr (Table *t, TString *key, TValue *res) {
 /*
 ** main search function
 */
-lu_byte luaH_get (Table *t, const TValue *key, TValue *res) {
+static lu_byte rawget (Table *t, const TValue *key, TValue *res) {
   const TValue *slot;
   switch (ttypetag(key)) {
     case LUA_VSHRSTR:
-      slot = luaH_Hgetshortstr(t, tsvalue(key));
-      break;
+      return rawgetshortstr(t, tsvalue(key), res);
     case LUA_VNUMINT:
-      return luaH_getint(t, ivalue(key), res);
+      return rawgetint(t, ivalue(key), res);
     case LUA_VNIL:
       slot = &absentkey;
       break;
     case LUA_VNUMFLT: {
       lua_Integer k;
       if (luaV_flttointeger(fltvalue(key), &k, F2Ieq)) /* integral index? */
-        return luaH_getint(t, k, res);  /* use specialized version */
+        return rawgetint(t, k, res);  /* use specialized version */
       /* else... */
     }  /* FALLTHROUGH */
     default:
@@ -1043,7 +1050,7 @@ lu_byte luaH_get (Table *t, const TValue *key, TValue *res) {
 
 /*
 ** When a 'pset' cannot be completed, this function returns an encoding
-** of its result, to be used by 'luaH_finishset'.
+** of its result, to be used by 'rawfinishset'.
 */
 static int retpsetcode (Table *t, const TValue *slot) {
   if (isabstkey(slot))
@@ -1073,16 +1080,23 @@ static int rawfinishnodeset (const TValue *slot, TValue *val) {
 }
 
 
-int luaH_psetint (Table *t, lua_Integer key, TValue *val) {
+static int rawpsetint (Table *t, lua_Integer key, TValue *val) {
   lua_assert(!ikeyinarray(t, key));
   return finishnodeset(t, getintfromhash(t, key), val);
 }
 
 
 static int psetint (Table *t, lua_Integer key, TValue *val) {
-  int hres;
-  luaH_fastseti(t, key, val, hres);
-  return hres;
+  lua_Unsigned u = l_castS2U(key) - 1u;
+  if (u < t->asize) {
+    lu_byte *tag = getArrTag(t, u);
+    if (!tagisempty(*tag)) {
+      fval2arr(t, u, tag, val);
+      return HOK;
+    }
+    return ~cast_int(u);
+  }
+  return rawpsetint(t, key, val);
 }
 
 
@@ -1094,24 +1108,11 @@ static int psetint (Table *t, lua_Integer key, TValue *val) {
 ** it is not old/black, and it already has space for the key.
 */
 
-int luaH_psetshortstr (Table *t, TString *key, TValue *val) {
+static int rawpsetshortstr (Table *t, TString *key, TValue *val) {
   const TValue *slot = luaH_Hgetshortstr(t, key);
   if (!ttisnil(slot)) {  /* key already has a value? (all too common) */
     setobj(((lua_State*)NULL), cast(TValue*, slot), val);  /* update it */
     return HOK;  /* done */
-  }
-  else if (checknoTM(t->metatable, TM_NEWINDEX)) {  /* no metamethod? */
-    if (ttisnil(val))  /* new value is nil? */
-      return HOK;  /* done (value is already nil/absent) */
-    if (isabstkey(slot) &&  /* key is absent? */
-       !(isblack(t) && iswhite(key))) {  /* and don't need barrier? */
-      TValue tk;  /* key as a TValue */
-      setsvalue(cast(lua_State *, NULL), &tk, key);
-      if (insertkey(t, &tk, val)) {  /* insert key, if there is space */
-        invalidateTMcache(t);
-        return HOK;
-      }
-    }
   }
   /* Else, either table has new-index metamethod, or it needs barrier,
      or it needs to rehash for the new key. In any of these cases, the
@@ -1120,17 +1121,18 @@ int luaH_psetshortstr (Table *t, TString *key, TValue *val) {
 }
 
 
-int luaH_psetstr (Table *t, TString *key, TValue *val) {
+static int rawpsetstr (Table *t, TString *key, TValue *val) {
   if (strisshr(key))
-    return luaH_psetshortstr(t, key, val);
+    return rawpsetshortstr(t, key, val);
   else
     return finishnodeset(t, Hgetlongstr(t, key), val);
 }
 
 
-int luaH_pset (Table *t, const TValue *key, TValue *val) {
+static int rawpset (Table *t, const TValue *key, TValue *val) {
   switch (ttypetag(key)) {
-    case LUA_VSHRSTR: return luaH_psetshortstr(t, tsvalue(key), val);
+    case LUA_VSHRSTR: return rawpsetshortstr(t, tsvalue(key), val);
+    case LUA_VLNGSTR: return rawpsetstr(t, tsvalue(key), val);
     case LUA_VNUMINT: return psetint(t, ivalue(key), val);
     case LUA_VNIL: return HNOTFOUND;
     case LUA_VNUMFLT: {
@@ -1150,7 +1152,7 @@ int luaH_pset (Table *t, const TValue *key, TValue *val) {
 ** Beware: when using this function the caller probably need to check a
 ** GC barrier and invalidate the TM cache.
 */
-void luaH_finishset (lua_State *L, Table *t, const TValue *key,
+static void rawfinishset (lua_State *L, Table *t, const TValue *key,
                                     TValue *value, int hres) {
   lua_assert(hres != HOK);
   if (hres == HNOTFOUND) {
@@ -1192,10 +1194,10 @@ void luaH_finishset (lua_State *L, Table *t, const TValue *key,
 ** beware: when using this function you probably need to check a GC
 ** barrier and invalidate the TM cache.
 */
-void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  int hres = luaH_pset(t, key, value);
+static void rawset (lua_State *L, Table *t, const TValue *key, TValue *value) {
+  int hres = rawpset(t, key, value);
   if (hres != HOK)
-    luaH_finishset(L, t, key, value, hres);
+    rawfinishset(L, t, key, value, hres);
 }
 
 
@@ -1203,7 +1205,7 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
 ** Ditto for a GC barrier. (No need to invalidate the TM cache, as
 ** integers cannot be keys to metamethods.)
 */
-void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
+static void rawsetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   unsigned ik = ikeyinarray(t, key);
   if (ik > 0)
     obj2arr(t, ik - 1, value);
@@ -1298,7 +1300,7 @@ static lua_Unsigned newhint (Table *t, unsigned hint) {
 ** If there is no array part, or its last element is non empty, the
 ** border may be in the hash part.
 */
-lua_Unsigned luaH_getn (lua_State *L, Table *t) {
+static lua_Unsigned rawgetn (lua_State *L, Table *t) {
   unsigned asize = t->asize;
   if (asize > 0) {  /* is there an array part? */
     const unsigned maxvicinity = 4;
@@ -1343,6 +1345,143 @@ lua_Unsigned luaH_getn (lua_State *L, Table *t) {
 }
 
 
+
+/* Complete mutator operations. Encoded slots never cross an unlock. */
+lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
+  LuaNativeRoot rooted_key;
+  LuaObjectScope scope;
+  lu_byte tag;
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaA_begin(L, obj2gco(t), &scope);
+  tag = rawget(t, &rooted_key.value, res);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &rooted_key);
+  return tag;
+}
+
+lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
+  LuaObjectScope scope;
+  lu_byte tag;
+  luaA_begin(L, obj2gco(t), &scope);
+  tag = rawgetint(t, key, res);
+  luaA_end(L, &scope);
+  return tag;
+}
+
+lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
+  LuaNativeRoot rooted_key;
+  LuaObjectScope scope;
+  lu_byte tag;
+  luaR_pushroot(L, &rooted_key);
+  setsvalue(L, &rooted_key.value, key);
+  luaA_begin(L, obj2gco(t), &scope);
+  tag = rawgetstr(t, key, res);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &rooted_key);
+  return tag;
+}
+
+lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res) {
+  return luaH_getstr(L, t, key, res);
+}
+
+int luaH_pset (lua_State *L, Table *t, const TValue *key, TValue *value) {
+  LuaNativeRoot rooted_key, rooted_value;
+  LuaObjectScope scope;
+  int result;
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaR_pushroot(L, &rooted_value);
+  luaR_setroot(L, &rooted_value, value);
+  luaA_begin(L, obj2gco(t), &scope);
+  invalidateTMcache(t);
+  result = rawpset(t, &rooted_key.value, &rooted_value.value);
+  invalidateTMcache(t);
+  if (result == HOK)
+    luaC_barrierback(L, obj2gco(t), &rooted_value.value);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &rooted_value);
+  luaR_poproot(L, &rooted_key);
+  return result == HOK ? HOK : HNOTFOUND;
+}
+
+int luaH_psetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
+  TValue k;
+  setivalue(&k, key);
+  return luaH_pset(L, t, &k, value);
+}
+
+int luaH_psetstr (lua_State *L, Table *t, TString *key, TValue *value) {
+  TValue k;
+  setsvalue(L, &k, key);
+  return luaH_pset(L, t, &k, value);
+}
+
+int luaH_psetshortstr (lua_State *L, Table *t, TString *key, TValue *value) {
+  return luaH_psetstr(L, t, key, value);
+}
+
+void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
+  LuaNativeRoot rooted_key, rooted_value;
+  LuaObjectScope scope;
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaR_pushroot(L, &rooted_value);
+  luaR_setroot(L, &rooted_value, value);
+  luaA_begin(L, obj2gco(t), &scope);
+  invalidateTMcache(t);
+  rawset(L, t, &rooted_key.value, &rooted_value.value);
+  invalidateTMcache(t);
+  luaC_barrierback(L, obj2gco(t), &rooted_value.value);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &rooted_value);
+  luaR_poproot(L, &rooted_key);
+}
+
+void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
+  LuaNativeRoot rooted_value;
+  LuaObjectScope scope;
+  luaR_pushroot(L, &rooted_value);
+  luaR_setroot(L, &rooted_value, value);
+  luaA_begin(L, obj2gco(t), &scope);
+  rawsetint(L, t, key, &rooted_value.value);
+  luaC_barrierback(L, obj2gco(t), &rooted_value.value);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &rooted_value);
+}
+
+void luaH_resize (lua_State *L, Table *t, unsigned asize, unsigned hsize) {
+  LuaObjectScope scope;
+  luaA_begin(L, obj2gco(t), &scope);
+  rawresize(L, t, asize, hsize);
+  luaA_end(L, &scope);
+}
+
+void luaH_resizearray (lua_State *L, Table *t, unsigned asize) {
+  LuaObjectScope scope;
+  luaA_begin(L, obj2gco(t), &scope);
+  rawresizearray(L, t, asize);
+  luaA_end(L, &scope);
+}
+
+int luaH_next (lua_State *L, Table *t, StkId key) {
+  LuaObjectScope scope;
+  int result;
+  luaA_begin(L, obj2gco(t), &scope);
+  result = rawnext(L, t, key);
+  luaA_end(L, &scope);
+  return result;
+}
+
+lua_Unsigned luaH_getn (lua_State *L, Table *t) {
+  LuaObjectScope scope;
+  lua_Unsigned result;
+  luaA_begin(L, obj2gco(t), &scope);
+  result = rawgetn(L, t);
+  luaA_end(L, &scope);
+  return result;
+}
 
 #if defined(LUA_DEBUG)
 

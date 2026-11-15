@@ -19,6 +19,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -291,91 +292,81 @@ static int floatforloop (lua_State *L, StkId ra) {
 */
 lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
                                       StkId val, lu_byte tag) {
-  int loop;  /* counter to avoid infinite loops */
-  const TValue *tm;  /* metamethod */
+  LuaNativeRoot object, rooted_key, method;
+  int loop;
+  luaR_pushroot(L, &object);
+  luaR_setroot(L, &object, t);
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaR_pushroot(L, &method);
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
-    if (tag == LUA_VNOTABLE) {  /* 't' is not a table? */
-      lua_assert(!ttistable(t));
-      tm = luaT_gettmbyobj(L, t, TM_INDEX);
-      if (l_unlikely(notm(tm)))
-        luaG_typeerror(L, t, "index");  /* no metamethod */
-      /* else will try the metamethod */
+    if (ttistable(&object.value)) {
+      tag = luaA_index(L, hvalue(&object.value), &rooted_key.value,
+                       s2v(val), &method);
+      if (ttisnil(&method.value))
+        goto done;
     }
-    else {  /* 't' is a table */
-      tm = fasttm(L, hvalue(t)->metatable, TM_INDEX);  /* table's metamethod */
-      if (tm == NULL) {  /* no metamethod? */
-        setnilvalue2s(val);  /* result is nil */
-        return LUA_VNIL;
-      }
-      /* else will try the metamethod */
+    else {
+      luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
+      if (ttisnil(&method.value))
+        luaG_typeerror(L, &object.value, "index");
     }
-    if (ttisfunction(tm)) {  /* is metamethod a function? */
-      tag = luaT_callTMres(L, tm, t, key, val);  /* call it */
-      return tag;  /* return tag of the result */
+    if (ttisfunction(&method.value)) {
+      tag = luaT_callTMres(L, &method.value, &object.value,
+                          &rooted_key.value, val);
+      goto done;
     }
-    t = tm;  /* else try to access 'tm[key]' */
-    luaV_fastget(t, key, s2v(val), luaH_get, tag);
-    if (!tagisempty(tag))
-      return tag;  /* done */
-    /* else repeat (tail call 'luaV_finishget') */
+    luaR_setroot(L, &object, &method.value);
   }
   luaG_runerror(L, "'__index' chain too long; possible loop");
-  return 0;  /* to avoid warnings */
+ done:
+  luaR_poproot(L, &method);
+  luaR_poproot(L, &rooted_key);
+  luaR_poproot(L, &object);
+  return tag;
 }
 
 
 /*
 ** Finish a table assignment 't[key] = val'.
-** About anchoring the table before the call to 'luaH_finishset':
-** This call may trigger an emergency collection. When loop>0,
-** the table being accessed is a field in some metatable. If this
-** metatable is weak and the table is not anchored, this collection
-** could collect that table while it is being updated.
+** Recheck the key and metamethod together under object ownership. No slot
+** from an earlier fast-path miss survives an ownership boundary.
 */
 void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
                       TValue *val, int hres) {
-  int loop;  /* counter to avoid infinite loops */
+  LuaNativeRoot object, rooted_key, value, method;
+  int loop;
+  UNUSED(hres);
+  luaR_pushroot(L, &object);
+  luaR_setroot(L, &object, t);
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaR_pushroot(L, &value);
+  luaR_setroot(L, &value, val);
+  luaR_pushroot(L, &method);
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
-    const TValue *tm;  /* '__newindex' metamethod */
-    if (hres != HNOTATABLE) {  /* is 't' a table? */
-      Table *h = hvalue(t);  /* save 't' table */
-      tm = fasttm(L, h->metatable, TM_NEWINDEX);  /* get metamethod */
-      if (tm == NULL) {  /* no metamethod? */
-        sethvalue2s(L, L->top.p, h);  /* anchor 't' */
-        L->top.p++;  /* assume EXTRA_STACK */
-        luaH_finishset(L, h, key, val, hres);  /* set new value */
-        L->top.p--;
-        invalidateTMcache(h);
-        luaC_barrierback(L, obj2gco(h), val);
-        return;
-      }
-      /* else will try the metamethod */
+    if (ttistable(&object.value)) {
+      if (luaA_assign(L, hvalue(&object.value), &rooted_key.value,
+                      &value.value, &method))
+        goto done;
     }
-    else {  /* not a table; check metamethod */
-      tm = luaT_gettmbyobj(L, t, TM_NEWINDEX);
-      if (l_unlikely(notm(tm)))
-        luaG_typeerror(L, t, "index");
-    }
-    /* try the metamethod */
-    if (ttisfunction(tm)) {
-      luaT_callTM(L, tm, t, key, val);
-      return;
-    }
-    t = tm;  /* else must repeat assignment over 'tm' */
-    /* do the equivalent to 'luaV_fastset', but saving 'h' */
-    if (!ttistable(t))
-      hres = HNOTATABLE;
     else {
-      Table *h = hvalue(t);  /* next call can change the value at 't' */
-      hres = luaH_pset(h, key, val);
-      if (hres == HOK) {
-        luaC_barrierback(L, obj2gco(h), val);  /* luaV_finishfastset */
-        return;  /* done */
-      }
+      luaT_gettmbyobj(L, &object.value, TM_NEWINDEX, &method);
+      if (ttisnil(&method.value))
+        luaG_typeerror(L, &object.value, "index");
     }
-    /* else 'return luaV_finishset(L, t, key, val, hres)' (loop) */
+    if (ttisfunction(&method.value)) {
+      luaT_callTM(L, &method.value, &object.value, &rooted_key.value, &value.value);
+      goto done;
+    }
+    luaR_setroot(L, &object, &method.value);
   }
   luaG_runerror(L, "'__newindex' chain too long; possible loop");
+ done:
+  luaR_poproot(L, &method);
+  luaR_poproot(L, &value);
+  luaR_poproot(L, &rooted_key);
+  luaR_poproot(L, &object);
 }
 
 
@@ -586,8 +577,20 @@ int luaV_lessequal (lua_State *L, const TValue *l, const TValue *r) {
 ** Main operation for equality of Lua values; return 't1 == t2'.
 ** L == NULL means raw equality (no metamethods)
 */
+static int equalmethod (lua_State *L, const TValue *t1, const TValue *t2) {
+  LuaNativeRoot method;
+  int result = 0;
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, t1, TM_EQ, &method);
+  if (ttisnil(&method.value))
+    luaT_gettmbyobj(L, t2, TM_EQ, &method);
+  if (!ttisnil(&method.value))
+    result = !tagisfalse(luaT_callTMres(L, &method.value, t1, t2, L->top.p));
+  luaR_poproot(L, &method);
+  return result;
+}
+
 int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
-  const TValue *tm;
   if (ttype(t1) != ttype(t2))  /* not the same type? */
     return 0;
   else if (ttypetag(t1) != ttypetag(t2)) {
@@ -632,29 +635,17 @@ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
       case LUA_VUSERDATA: {
         if (uvalue(t1) == uvalue(t2)) return 1;
         else if (L == NULL) return 0;
-        tm = fasttm(L, uvalue(t1)->metatable, TM_EQ);
-        if (tm == NULL)
-          tm = fasttm(L, uvalue(t2)->metatable, TM_EQ);
-        break;  /* will try TM */
+        return equalmethod(L, t1, t2);
       }
       case LUA_VTABLE: {
         if (hvalue(t1) == hvalue(t2)) return 1;
         else if (L == NULL) return 0;
-        tm = fasttm(L, hvalue(t1)->metatable, TM_EQ);
-        if (tm == NULL)
-          tm = fasttm(L, hvalue(t2)->metatable, TM_EQ);
-        break;  /* will try TM */
+        return equalmethod(L, t1, t2);
       }
       case LUA_VLCF:
         return (fvalue(t1) == fvalue(t2));
       default:  /* functions and threads */
         return (gcvalue(t1) == gcvalue(t2));
-    }
-    if (tm == NULL)  /* no TM? */
-      return 0;  /* objects are different */
-    else {
-      int tag = luaT_callTMres(L, tm, t1, t2, L->top.p);  /* call TM */
-      return !tagisfalse(tag);
     }
   }
 }
@@ -737,31 +728,29 @@ void luaV_concat (lua_State *L, int total) {
 ** Main operation 'ra = #rb'.
 */
 void luaV_objlen (lua_State *L, StkId ra, const TValue *rb) {
-  const TValue *tm;
+  LuaNativeRoot method;
+  if (ttisstring(rb)) {
+    setivalue(s2v(ra), cast_st2S(tsslen(tsvalue(rb))));
+    return;
+  }
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, rb, TM_LEN, &method);
   switch (ttypetag(rb)) {
     case LUA_VTABLE: {
       Table *h = hvalue(rb);
-      tm = fasttm(L, h->metatable, TM_LEN);
-      if (tm) break;  /* metamethod? break switch to call it */
+      if (!ttisnil(&method.value)) break;
       setivalue(s2v(ra), l_castU2S(luaH_getn(L, h)));  /* else primitive len */
-      return;
-    }
-    case LUA_VSHRSTR: {
-      setivalue(s2v(ra), tsvalue(rb)->shrlen);
-      return;
-    }
-    case LUA_VLNGSTR: {
-      setivalue(s2v(ra), cast_st2S(tsvalue(rb)->u.lnglen));
+      luaR_poproot(L, &method);
       return;
     }
     default: {  /* try metamethod */
-      tm = luaT_gettmbyobj(L, rb, TM_LEN);
-      if (l_unlikely(notm(tm)))  /* no metamethod? */
+      if (l_unlikely(ttisnil(&method.value)))
         luaG_typeerror(L, rb, "get length of");
       break;
     }
   }
-  luaT_callTMres(L, tm, rb, rb, ra);
+  luaT_callTMres(L, &method.value, rb, rb, ra);
+  luaR_poproot(L, &method);
 }
 
 
@@ -1390,9 +1379,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         updatebase(ci);
         rc = RKC(i);
         luaV_fastset(upval, key, rc, hres, luaH_psetshortstr);
-        if (hres == HOK)
-          luaV_finishfastset(L, upval, rc);
-        else
+        if (hres != HOK)
           Protect(luaV_finishset(L, upval, rb, rc, hres));
         luaR_poproot(L, &snapshot);
         vmbreak;
@@ -1408,9 +1395,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         else {
           luaV_fastset(s2v(ra), rb, rc, hres, luaH_pset);
         }
-        if (hres == HOK)
-          luaV_finishfastset(L, s2v(ra), rc);
-        else
+        if (hres != HOK)
           Protect(luaV_finishset(L, s2v(ra), rb, rc, hres));
         vmbreak;
       }
@@ -1420,9 +1405,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         int b = GETARG_B(i);
         TValue *rc = RKC(i);
         luaV_fastseti(s2v(ra), b, rc, hres);
-        if (hres == HOK)
-          luaV_finishfastset(L, s2v(ra), rc);
-        else {
+        if (hres != HOK) {
           TValue key;
           setivalue(&key, b);
           Protect(luaV_finishset(L, s2v(ra), &key, rc, hres));
@@ -1436,9 +1419,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         TValue *rc = RKC(i);
         TString *key = tsvalue(rb);  /* key must be a short string */
         luaV_fastset(s2v(ra), key, rc, hres, luaH_psetshortstr);
-        if (hres == HOK)
-          luaV_finishfastset(L, s2v(ra), rc);
-        else
+        if (hres != HOK)
           Protect(luaV_finishset(L, s2v(ra), rb, rc, hres));
         vmbreak;
       }
@@ -1938,6 +1919,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       }}
       vmcase(OP_SETLIST) {
         StkId ra = RA(i);
+        LuaObjectScope scope;
         unsigned n = cast_uint(GETARG_vB(i));
         unsigned last = cast_uint(GETARG_vC(i));
         Table *h = hvalue(s2v(ra));
@@ -1950,6 +1932,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           last += cast_uint(GETARG_Ax(*pc)) * (MAXARG_vC + 1);
           pc++;
         }
+        luaA_begin(L, obj2gco(h), &scope);
         /* when 'n' is known, table should have proper size */
         if (last > h->asize) {  /* needs more space? */
           /* fixed-size sets should have space preallocated */
@@ -1962,6 +1945,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           last--;
           luaC_barrierback(L, obj2gco(h), val);
         }
+        luaA_end(L, &scope);
         vmbreak;
       }
       vmcase(OP_CLOSURE) {

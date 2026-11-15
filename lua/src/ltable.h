@@ -20,7 +20,10 @@
 ** may have any of these metamethods. (First access that fails after the
 ** clearing will set the bit again.)
 */
-#define invalidateTMcache(t)	((t)->flags &= cast_byte(~maskflags))
+#define gettableflags(t) __atomic_load_n(&(t)->flags, __ATOMIC_RELAXED)
+#define settableflags(t,f) __atomic_store_n(&(t)->flags, (f), __ATOMIC_RELAXED)
+#define invalidateTMcache(t) \
+  __atomic_fetch_and(&(t)->flags, cast_byte(~maskflags), __ATOMIC_RELAXED)
 
 
 /*
@@ -30,10 +33,10 @@
 
 #define BITDUMMY		(1 << 6)
 #define NOTBITDUMMY		cast_byte(~BITDUMMY)
-#define isdummy(t)		((t)->flags & BITDUMMY)
+#define isdummy(t)		(gettableflags(t) & BITDUMMY)
 
-#define setnodummy(t)		((t)->flags &= NOTBITDUMMY)
-#define setdummy(t)		((t)->flags |= BITDUMMY)
+#define setnodummy(t) __atomic_fetch_and(&(t)->flags, NOTBITDUMMY, __ATOMIC_RELAXED)
+#define setdummy(t) __atomic_fetch_or(&(t)->flags, BITDUMMY, __ATOMIC_RELAXED)
 
 
 
@@ -47,21 +50,11 @@
 
 
 #define luaH_fastgeti(t,k,res,tag) \
-  { Table *h = t; lua_Unsigned u = l_castS2U(k) - 1u; \
-    if ((u < h->asize)) { \
-      tag = *getArrTag(h, u); \
-      if (!tagisempty(tag)) { farr2val(h, u, tag, res); }} \
-    else { tag = luaH_getint(h, (k), res); }}
+  { tag = luaH_getint(L, t, k, res); }
 
 
 #define luaH_fastseti(t,k,val,hres) \
-  { Table *h = t; lua_Unsigned u = l_castS2U(k) - 1u; \
-    if ((u < h->asize)) { \
-      lu_byte *tag = getArrTag(h, u); \
-      if (checknoTM(h->metatable, TM_NEWINDEX) || !tagisempty(*tag)) \
-        { fval2arr(h, u, tag, val); hres = HOK; } \
-      else hres = ~cast_int(u); } \
-    else { hres = luaH_psetint(h, k, val); }}
+  { hres = luaH_psetint(L, t, k, val); }
 
 
 /* results from pset */
@@ -74,21 +67,11 @@
 ** 'luaH_get*' operations set 'res', unless the value is absent, and
 ** return the tag of the result.
 ** The 'luaH_pset*' (pre-set) operations set the given value and return
-** HOK, unless the original value is absent. In that case, if the key
-** is really absent, they return HNOTFOUND. Otherwise, if there is a
-** slot with that key but with no value, 'luaH_pset*' return an encoding
-** of where the key is (usually called 'hres'). (pset cannot set that
-** value because there might be a metamethod.) If the slot is in the
-** hash part, the encoding is (HFIRSTNODE + hash index); if the slot is
-** in the array part, the encoding is (~array index), a negative value.
+** HOK, unless the original value is absent, when they return HNOTFOUND.
+** A miss must be rechecked with its metamethod under object ownership.
+** Encoded slots are private to ltable.c and never cross an unlock boundary.
 ** The value HNOTATABLE is used by the fast macros to signal that the
 ** value being indexed is not a table.
-** (The size for the array part is limited by the maximum power of two
-** that fits in an unsigned integer; that is INT_MAX+1. So, the C-index
-** ranges from 0, which encodes to -1, to INT_MAX, which encodes to
-** INT_MIN. The size of the hash part is limited by the maximum power of
-** two that fits in a signed integer; that is (INT_MAX+1)/2. So, it is
-** safe to add HFIRSTNODE to any index there.)
 */
 
 
@@ -146,26 +129,24 @@
   (*tag = (val)->tt_, *getArrVal(h,(k)) = (val)->value_)
 
 
-LUAI_FUNC lu_byte luaH_get (Table *t, const TValue *key, TValue *res);
-LUAI_FUNC lu_byte luaH_getshortstr (Table *t, TString *key, TValue *res);
-LUAI_FUNC lu_byte luaH_getstr (Table *t, TString *key, TValue *res);
-LUAI_FUNC lu_byte luaH_getint (Table *t, lua_Integer key, TValue *res);
+LUAI_FUNC lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res);
+LUAI_FUNC lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res);
+LUAI_FUNC lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res);
+LUAI_FUNC lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res);
 
-/* Special get for metamethods */
+/* Borrowed lookup: requires object ownership or collector quiescence. */
 LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);
 
-LUAI_FUNC int luaH_psetint (Table *t, lua_Integer key, TValue *val);
-LUAI_FUNC int luaH_psetshortstr (Table *t, TString *key, TValue *val);
-LUAI_FUNC int luaH_psetstr (Table *t, TString *key, TValue *val);
-LUAI_FUNC int luaH_pset (Table *t, const TValue *key, TValue *val);
+LUAI_FUNC int luaH_psetint (lua_State *L, Table *t, lua_Integer key, TValue *val);
+LUAI_FUNC int luaH_psetshortstr (lua_State *L, Table *t, TString *key, TValue *val);
+LUAI_FUNC int luaH_psetstr (lua_State *L, Table *t, TString *key, TValue *val);
+LUAI_FUNC int luaH_pset (lua_State *L, Table *t, const TValue *key, TValue *val);
 
 LUAI_FUNC void luaH_setint (lua_State *L, Table *t, lua_Integer key,
                                                     TValue *value);
 LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value);
 
-LUAI_FUNC void luaH_finishset (lua_State *L, Table *t, const TValue *key,
-                                              TValue *value, int hres);
 LUAI_FUNC Table *luaH_new (lua_State *L);
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);

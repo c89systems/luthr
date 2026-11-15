@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <laccess.h>
 #include <lauxlib.h>
 #include <lstate.h>
 #include <lua.h>
@@ -21,6 +22,7 @@ struct actor {
   int status;
   int results;
   int done;
+  unsigned yields;
 };
 
 struct fixture {
@@ -45,6 +47,7 @@ struct fixture {
   unsigned resources_finalized;
   int native_entered;
   int release_native;
+  int resume_yields;
   struct actor actors[2];
 };
 
@@ -125,6 +128,96 @@ static const char allocation_open_source[] =
     "local f=function() return t[1]+t[k]+t[long]+t[lk] end; "
     "sum=sum+f(); shared=t end; return sum end";
 
+static const char table_source[] =
+    "local t={hot=7}; fixture_table=t; local long=string.rep('long',32); "
+    "local function actor(id) return function() coroutine.yield(); "
+    "local sum=0; for i=1,300 do local k='key'..id..':'..i; "
+    "local lk=long..id..':'..i; t[(id-1)*300+i]=i; t[k]={i}; t[lk]=i; "
+    "t.hot=(i%3==0) and {7} or ((i%2==0) and 7 or 'word'); "
+    "local v=t.hot; assert(v==7 or v=='word' or "
+    "(type(v)=='table' and v[1]==7)); "
+    "t['gone'..id]=i; t['gone'..id]=nil; "
+    "rawset(t,'raw'..id,i); assert(rawget(t,'raw'..id)==i); "
+    "assert(t[k][1]==i and t[lk]==i); "
+    "assert(type(#t)=='number' and next(t)~=nil); "
+    "local bulk={1,2,3,(function() return 4,5,6 end)()}; assert(#bulk==6); "
+    "fixture_table_api(t,id,i); sum=sum+i end; "
+    "for i=1,300 do assert(t[(id-1)*300+i]==i and "
+    "t['key'..id..':'..i][1]==i and t[long..id..':'..i]==i) end; "
+    "return true,sum end end; "
+    "return actor(1),actor(2)";
+
+static const char table_meta_source[] =
+    "local a,b={},{}; setmetatable(a,b); setmetatable(b,a); "
+    "local u=fixture_userdata; local function index(t,k) "
+    "assert(rawget(t,'self')==t); rawset(t,'reentered',true); "
+    "if k=='missing' then return 17 end; return nil end; "
+    "local function newindex(t,k,v) rawset(t,k,v) end; "
+    "rawset(a,'self',a); rawset(b,'self',b); "
+    "local function actor(id,t,mt) return function() coroutine.yield(); "
+    "for i=1,300 do rawset(t,'__index',index); "
+    "rawset(t,'__newindex',newindex); rawset(t,'__len',function() return 29 "
+    "end); "
+    "rawset(t,'__eq',function() return true end); "
+    "setmetatable(t,(i%2==0) and mt or t); "
+    "t.x=nil; t.x=i; assert(t.x==i); local v=t.missing; "
+    "assert(v==nil or v==17); local len=#t; assert(len==0 or len==29); "
+    "local equal=(t==mt); assert(type(equal)=='boolean'); "
+    "fixture_userdata_api(u,id,i,t); "
+    "end; return true,45150 end end; return actor(1,a,b),actor(2,b,a)";
+
+static const char table_blocked_source[] =
+    "local t={}; local mt={__index=function() fixture_wait(); return 17 end}; "
+    "setmetatable(t,mt); return function() coroutine.yield(); "
+    "assert(t.missing==17); return true end, "
+    "function() coroutine.yield(); fixture_entered(); "
+    "mt.__index=nil; setmetatable(t,nil); "
+    "for i=1,5000 do rawset(t,i,i); assert(t[i]==i); "
+    "mt['key'..i]=i end; mt=nil; collectgarbage('collect'); return 5000 end";
+
+static const char table_error_source[] =
+    "local t={}; local mt={__index=function(self,k) "
+    "if k=='wait' then fixture_wait(); return 17 end; error('meta failure') "
+    "end}; "
+    "setmetatable(t,mt); return function() coroutine.yield(); "
+    "for i=1,300 do local ok,msg=xpcall(function() return t.missing end, "
+    "function(e) rawset(t,'handled',true); return e end); "
+    "assert(not ok and msg:match('meta failure')); "
+    "local ok=pcall(function() t[nil]=1 end); assert(not ok); "
+    "rawset(t,i,i) end; return true,45150 end, "
+    "function() coroutine.yield(); local sum=0; for i=1,300 do "
+    "t['key'..i]={i}; assert(t['key'..i][1]==i); sum=sum+i "
+    "end; return true,sum end";
+
+static const char table_failure_source[] =
+    "local t={hot=7}; return function() coroutine.yield(); "
+    "fixture_allocate_ready(1); fixture_fail(t); "
+    "assert(rawget(t,65536)==nil); t.recovered=true; return true,45150 end, "
+    "function() coroutine.yield(); fixture_allocate_ready(2); "
+    "assert(t.hot==7); for i=1,300 do t[i]={i}; assert(t[i][1]==i) end; "
+    "return true,45150 end";
+
+static const char table_handler_source[] =
+    "local t={}; return function() coroutine.yield(); "
+    "local ok,msg=xpcall(function() t[nil]=1 end,function(e) "
+    "fixture_wait(); rawset(t,'handled',true); return e end); "
+    "assert(not ok and msg:match('table index is nil') and t.handled); "
+    "return true end, function() coroutine.yield(); fixture_entered(); "
+    "for i=1,5000 do t[i]=i; assert(t[i]==i) end; return 5000 end";
+
+static const char table_yield_source[] =
+    "local t,other={},{}; local mt={}; setmetatable(t,mt); "
+    "setmetatable(other,mt); local function method(v) return function() "
+    "coroutine.yield('metamethod'); return v end end; "
+    "mt.__index=method(17); mt.__newindex=function(self,k,v) "
+    "coroutine.yield('newindex'); rawset(self,k,v) end; "
+    "mt.__len=method(29); mt.__eq=method(true); mt.__call=method(31); "
+    "mt.__add=method(37); return function() coroutine.yield(); "
+    "assert(t.missing==17); t.x=23; assert(t.x==23); assert(#t==29); "
+    "assert(t==other and t()==31 and t+t==37); return true,45150 end, "
+    "function() coroutine.yield(); for i=1,300 do rawset(t,i,i); "
+    "mt['key'..i]={i}; assert(t[i]==i) end; return true,45150 end";
+
 static void check(int status) {
   if (status != 0) {
     fprintf(stderr, "parallel fixture synchronization failed: %d\n", status);
@@ -190,6 +283,10 @@ static struct fixture *native_context(lua_State *state) {
 
 static int native_wait(lua_State *state) {
   struct fixture *fixture = native_context(state);
+  LuaObjectScope *scope;
+  for (scope = state->object_scopes; scope != NULL; scope = scope->previous)
+    if (scope->held)
+      abort();
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->native_entered = 1;
   check(pthread_cond_broadcast(&fixture->changed));
@@ -229,6 +326,40 @@ static int native_intern(lua_State *state) {
   return 1;
 }
 
+static int native_table_api(lua_State *state) {
+  lua_Integer id = lua_tointeger(state, 2);
+  lua_Integer value = lua_tointeger(state, 3);
+  lua_Integer key = 10000 + id;
+  lua_pushinteger(state, value);
+  lua_rawseti(state, 1, key);
+  lua_rawgeti(state, 1, key);
+  if (lua_tointeger(state, -1) != value || lua_rawlen(state, 1) > 10002)
+    abort();
+  lua_pop(state, 1);
+  lua_pushinteger(state, value);
+  lua_setfield(state, 1, id == 1 ? "api1" : "api2");
+  lua_getfield(state, 1, id == 1 ? "api1" : "api2");
+  if (lua_tointeger(state, -1) != value)
+    abort();
+  return 0;
+}
+
+static int native_userdata_api(lua_State *state) {
+  int id = (int)lua_tointeger(state, 2);
+  lua_Integer value = lua_tointeger(state, 3);
+  lua_pushinteger(state, value);
+  if (!lua_setiuservalue(state, 1, id) ||
+      lua_getiuservalue(state, 1, id) != LUA_TNUMBER ||
+      lua_tointeger(state, -1) != value)
+    abort();
+  lua_pop(state, 1);
+  lua_pushvalue(state, 4);
+  lua_setmetatable(state, 1);
+  if (!lua_getmetatable(state, 1) || !lua_istable(state, -1))
+    abort();
+  return 0;
+}
+
 static int fail_allocation(lua_State *state) {
   struct fixture *fixture;
   void *user;
@@ -239,13 +370,20 @@ static int fail_allocation(lua_State *state) {
   fixture->failures_left =
       2; /* original attempt, then the emergency-GC retry */
   check(pthread_mutex_unlock(&fixture->mutex));
-  (void)lua_newuserdatauv(state, 4096, 0);
+  if (lua_istable(state, 1)) {
+    lua_pushinteger(state, 1);
+    lua_rawseti(state, 1, 65536);
+  } else
+    (void)lua_newuserdatauv(state, 4096, 0);
   abort();
 }
 
 static int native_fail(lua_State *state) {
+  int args = lua_istable(state, 1) ? 1 : 0;
   lua_pushcfunction(state, fail_allocation);
-  if (lua_pcall(state, 0, 0, 0) != LUA_ERRMEM)
+  if (args)
+    lua_pushvalue(state, 1);
+  if (lua_pcall(state, args, 0, 0) != LUA_ERRMEM)
     abort();
   lua_pop(state, 1);
   (void)lua_gc(state, LUA_GCRESTART);
@@ -333,10 +471,30 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
     source = allocation_open_source;
   else if (strncmp(name, "allocate", 8) == 0)
     source = allocation_source;
+  else if (strncmp(name, "table_meta", 10) == 0)
+    source = table_meta_source;
+  else if (strcmp(name, "table_blocked") == 0)
+    source = table_blocked_source;
+  else if (strcmp(name, "table_error") == 0)
+    source = table_error_source;
+  else if (strcmp(name, "table_failure") == 0)
+    source = table_failure_source;
+  else if (strcmp(name, "table_handler_blocked") == 0)
+    source = table_handler_source;
+  else if (strcmp(name, "table_yield") == 0)
+    source = table_yield_source;
+  else if (strncmp(name, "table_", 6) == 0)
+    source = table_source;
   else
     return 1;
   register_native(main, "fixture_wait", native_wait, fixture);
   register_native(main, "fixture_entered", native_entered, fixture);
+  lua_pushcfunction(main, native_table_api);
+  lua_setglobal(main, "fixture_table_api");
+  lua_pushcfunction(main, native_userdata_api);
+  lua_setglobal(main, "fixture_userdata_api");
+  (void)lua_newuserdatauv(main, 1, 2);
+  lua_setglobal(main, "fixture_userdata");
   lua_pushcfunction(main, native_setcapture);
   lua_setglobal(main, "fixture_setcapture");
   lua_pushcfunction(main, native_intern);
@@ -431,6 +589,12 @@ static void *run_actor(void *context) {
   }
   check(pthread_mutex_unlock(&fixture->mutex));
   actor->status = lua_resume(actor->state, NULL, actor->nargs, &actor->results);
+  while (actor->status == LUA_YIELD && fixture->resume_yields) {
+    actor->yields++;
+    lua_settop(actor->state, 0);
+    (void)lua_gc(actor->state, LUA_GCCOLLECT);
+    actor->status = lua_resume(actor->state, NULL, 0, &actor->results);
+  }
   check(pthread_mutex_lock(&fixture->mutex));
   actor->done = 1;
   check(pthread_cond_broadcast(&fixture->changed));
@@ -447,9 +611,16 @@ static int verify_results(struct fixture *fixture, const char *name) {
     if (actor->status != LUA_OK || !actor->polled) {
       fprintf(stderr, "%s actor %d: status=%d poll=%d\n", name, i,
               actor->status, actor->polled);
+      if (actor->status != LUA_OK)
+        fprintf(stderr, "%s\n", lua_tostring(actor->state, -1));
       return 1;
     }
   }
+  if (strncmp(name, "table_", 6) == 0 && strstr(name, "blocked") == NULL)
+    return first->results != 2 || !lua_toboolean(first->state, -2) ||
+           lua_tointeger(first->state, -1) != 45150 || second->results != 2 ||
+           !lua_toboolean(second->state, -2) ||
+           lua_tointeger(second->state, -1) != 45150;
   if (strcmp(name, "closed") == 0)
     return first->results != 1 || lua_tointeger(first->state, -1) != 5000 ||
            second->results != 2 || !lua_toboolean(second->state, -2) ||
@@ -480,13 +651,16 @@ int main(int argc, char **argv) {
   lua_State *main_state;
   int cpus[2] = {-1, -1};
   int cpu, i, created = 0, failed = 0;
-  int allocation_case;
+  int allocation_case, table_case;
   unsigned before_allocations;
   if (argc != 2)
     return 2;
   memset(&fixture, 0, sizeof(fixture));
-  allocation_case = strncmp(argv[1], "allocate", 8) == 0;
-  fixture.inject_failure = strcmp(argv[1], "allocate_failure") == 0;
+  table_case = strncmp(argv[1], "table_", 6) == 0;
+  allocation_case = strncmp(argv[1], "allocate", 8) == 0 || table_case;
+  fixture.inject_failure = strcmp(argv[1], "allocate_failure") == 0 ||
+                           strcmp(argv[1], "table_failure") == 0;
+  fixture.resume_yields = strcmp(argv[1], "table_yield") == 0;
   if (sched_getaffinity(0, sizeof(available), &available) != 0)
     return 1;
   for (cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
@@ -527,7 +701,8 @@ int main(int argc, char **argv) {
     }
     if (strstr(argv[1], "generational") != NULL)
       (void)lua_gc(main_state, LUA_GCGEN);
-    if (strcmp(argv[1], "allocate_stopped") != 0 && !fixture.inject_failure)
+    if (strcmp(argv[1], "allocate_stopped") != 0 &&
+        strcmp(argv[1], "table_stopped") != 0 && !fixture.inject_failure)
       (void)lua_gc(main_state, LUA_GCRESTART);
   }
   before_allocations = fixture.allocations;
@@ -557,7 +732,9 @@ int main(int argc, char **argv) {
   check(pthread_cond_broadcast(&fixture.changed));
   check(pthread_mutex_unlock(&fixture.mutex));
   if (!failed && (strcmp(argv[1], "blocked") == 0 ||
-                  strcmp(argv[1], "allocate_blocked") == 0)) {
+                  strcmp(argv[1], "allocate_blocked") == 0 ||
+                  strcmp(argv[1], "table_blocked") == 0 ||
+                  strcmp(argv[1], "table_handler_blocked") == 0)) {
     check(pthread_mutex_lock(&fixture.mutex));
     while (!fixture.native_entered)
       check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
@@ -577,7 +754,8 @@ int main(int argc, char **argv) {
         check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
       check(pthread_mutex_unlock(&fixture.mutex));
       check(pthread_mutex_lock(&world->mutex));
-      while (fixture.actors[1].state->heap_waiting == 0)
+      while ((table_case ? fixture.actors[1].state->object_waiting
+                         : fixture.actors[1].state->heap_waiting) == 0)
         check(pthread_cond_wait(&world->changed, &world->mutex));
       failed |= world->active != 1 || world->heap_depth == 0 ||
                 fixture.actors[1].state->native_depth == 0 ||
@@ -595,9 +773,12 @@ int main(int argc, char **argv) {
   fixture.forbid_allocations = 0;
   if (!failed)
     failed = verify_results(&fixture, argv[1]);
-  if (allocation_case)
-    failed |= fixture.allocations - before_allocations < 1000;
-  if (allocation_case) {
+  if (fixture.resume_yields)
+    failed |= fixture.actors[0].yields != 6;
+  if (allocation_case && strcmp(argv[1], "table_handler_blocked") != 0)
+    failed |=
+        fixture.allocations - before_allocations < (table_case ? 1U : 1000U);
+  if (allocation_case && !table_case) {
     failed |= fixture.resources_created !=
               (strcmp(argv[1], "allocate_blocked") == 0 ? 500U : 1000U);
     if (strcmp(argv[1], "allocate_stopped") == 0)
@@ -608,8 +789,7 @@ int main(int argc, char **argv) {
   if (fixture.inject_failure)
     failed |= !fixture.waiter_observed || fixture.emergency_frees == 0;
   failed |= fixture.failures_left != 0 ||
-            fixture.allocation_failures !=
-                (strcmp(argv[1], "allocate_failure") == 0 ? 2U : 0U);
+            fixture.allocation_failures != (fixture.inject_failure ? 2U : 0U);
   if (!failed)
     printf("parallel VM %s: shared VM, CPU %d/%d, managed overlap, %u "
            "allocator calls\n",

@@ -15,6 +15,8 @@
 #include "lua.h"
 
 #include "ldebug.h"
+#include "laccess.h"
+#include "lroots.h"
 #include "ldo.h"
 #include "lgc.h"
 #include "lobject.h"
@@ -54,33 +56,23 @@ void luaT_init (lua_State *L) {
 
 
 /*
-** function to be used with macro "fasttm": optimized for absence of
-** tag methods
+** Borrowed lookup for the collector under world quiescence. Mutators use
+** rooted snapshots through luaT_gettmbyobj instead.
 */
-const TValue *luaT_gettm (Table *events, TMS event, TString *ename) {
+const TValue *luaT_gettmunlocked (Table *events, TMS event, TString *ename) {
   const TValue *tm = luaH_Hgetshortstr(events, ename);
   lua_assert(event <= TM_EQ);
   if (notm(tm)) {  /* no tag method? */
-    events->flags |= cast_byte(1u<<event);  /* cache this fact */
+    __atomic_fetch_or(&events->flags, cast_byte(1u << event), __ATOMIC_RELAXED);
     return NULL;
   }
   else return tm;
 }
 
 
-const TValue *luaT_gettmbyobj (lua_State *L, const TValue *o, TMS event) {
-  Table *mt;
-  switch (ttype(o)) {
-    case LUA_TTABLE:
-      mt = hvalue(o)->metatable;
-      break;
-    case LUA_TUSERDATA:
-      mt = uvalue(o)->metatable;
-      break;
-    default:
-      mt = G(L)->mt[ttype(o)];
-  }
-  return (mt ? luaH_Hgetshortstr(mt, G(L)->tmname[event]) : &G(L)->nilvalue);
+void luaT_gettmbyobj (lua_State *L, const TValue *o, TMS event,
+                      LuaNativeRoot *result) {
+  luaA_metafield(L, o, G(L)->tmname[event], result, event);
 }
 
 
@@ -88,15 +80,18 @@ const TValue *luaT_gettmbyobj (lua_State *L, const TValue *o, TMS event) {
 ** Return the name of the type of an object. For tables and userdata
 ** with metatable, use their '__name' metafield, if present.
 */
-const char *luaT_objtypename (lua_State *L, const TValue *o) {
-  Table *mt;
-  if ((ttistable(o) && (mt = hvalue(o)->metatable) != NULL) ||
-      (ttisfulluserdata(o) && (mt = uvalue(o)->metatable) != NULL)) {
-    const TValue *name = luaH_Hgetshortstr(mt, luaS_new(L, "__name"));
-    if (ttisstring(name))  /* is '__name' a string? */
-      return getstr(tsvalue(name));  /* use it as type name */
-  }
-  return ttypename(ttype(o));  /* else use standard type name */
+const char *luaT_objtypename (lua_State *L, const TValue *o,
+                              LuaNativeRoot *name) {
+  LuaNativeRoot owner;
+  int type = ttype(o);
+  luaR_pushroot(L, &owner);
+  luaR_setroot(L, &owner, o);
+  if (ttistable(&owner.value) || ttisfulluserdata(&owner.value))
+    luaA_metafield(L, &owner.value, luaS_new(L, "__name"), name, -1);
+  else
+    setnilvalue(&name->value);
+  luaR_poproot(L, &owner);
+  return ttisstring(&name->value) ? getstr(tsvalue(&name->value)) : ttypename(type);
 }
 
 
@@ -137,13 +132,15 @@ lu_byte luaT_callTMres (lua_State *L, const TValue *f, const TValue *p1,
 
 static int callbinTM (lua_State *L, const TValue *p1, const TValue *p2,
                       StkId res, TMS event) {
-  const TValue *tm = luaT_gettmbyobj(L, p1, event);  /* try first operand */
-  if (notm(tm))
-    tm = luaT_gettmbyobj(L, p2, event);  /* try second operand */
-  if (notm(tm))
-    return -1;  /* tag method not found */
-  else  /* call tag method and return the tag of the result */
-    return luaT_callTMres(L, tm, p1, p2, res);
+  LuaNativeRoot method;
+  int tag;
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, p1, event, &method);
+  if (notm(&method.value))
+    luaT_gettmbyobj(L, p2, event, &method);
+  tag = notm(&method.value) ? -1 : luaT_callTMres(L, &method.value, p1, p2, res);
+  luaR_poproot(L, &method);
+  return tag;
 }
 
 
@@ -323,7 +320,7 @@ static int getnumargs (lua_State *L, CallInfo *ci, Table *h) {
     return ci->u.l.nextraargs;
   else {
     TValue res;
-    if (luaH_getshortstr(h, luaS_new(L, "n"), &res) != LUA_VNUMINT ||
+    if (luaH_getshortstr(L, h, luaS_new(L, "n"), &res) != LUA_VNUMINT ||
         l_castS2U(ivalue(&res)) > cast_uint(INT_MAX/2))
       luaG_runerror(L, "vararg table has no proper 'n'");
     return cast_int(ivalue(&res));
@@ -353,7 +350,7 @@ void luaT_getvarargs (lua_State *L, CallInfo *ci, StkId where, int wanted,
   }
   else {  /* get vararg values from vararg table */
     for (i = 0; i < touse; i++) {
-      lu_byte tag = luaH_getint(h, i + 1, s2v(where + i));
+      lu_byte tag = luaH_getint(L, h, i + 1, s2v(where + i));
       if (tagisempty(tag))
        setnilvalue2s(where + i);
     }

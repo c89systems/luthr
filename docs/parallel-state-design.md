@@ -1,7 +1,7 @@
 # Parallel shared-VM design investigation
 
-Status: candidate with private execution, GC and allocation experiments,
-2026-11-15. Shared-container synchronization and the scheduler remain unfinished;
+Status: candidate with private execution, GC, allocation and shared-container
+experiments, 2026-11-15. The public API audit and scheduler remain unfinished;
 no public scheduler API is frozen.
 
 ## Required result
@@ -67,8 +67,8 @@ multi-step application operations.
 ## First candidate and its limits
 
 Keep coroutine stacks exclusive to their executing task. Protect shared mutable
-objects at operation boundaries, starting with ordinary mutexes and explicit
-lock order where an operation needs multiple objects. Protect allocator,
+objects at operation boundaries, using explicit ownership and conventional
+mutex/condition synchronization, with a fixed order for multiple objects. Protect allocator,
 interning, registry/module and collector metadata under their own short scopes.
 Do not hold a global lock while executing Lua bytecode. Do not hold object locks
 across arbitrary callbacks or native waits.
@@ -275,12 +275,66 @@ enabled, to finish before releasing the other coroutine's unchanged C binding.
 Strict-C89 static/shared SDK tests also check external string key equality and
 exactly-once owned-buffer release for empty, short and long strings.
 
-This establishes the exercised concurrent allocation and capture paths. It does
-not establish concurrent mutation of one shared table, arbitrary metatable or
-closure changes, native userdata/module globals, or the complete public API.
-Those synchronization boundaries, scheduler/carrier reuse, admission limits and
-module compatibility gates remain required. No public concurrent embedding
-contract or measured scaling claim follows from these fixtures.
+This establishes the exercised concurrent allocation and capture paths. The
+shared-container experiment below extends this coverage; it does not establish
+arbitrary closure changes, native userdata payloads/module globals, or the
+complete public API. No public concurrent embedding contract or measured scaling
+claim follows from these fixtures.
+
+## Shared-container experiment
+
+Tables and userdata headers now carry object ownership. Short accesses to the
+world mutex arbitrate ownership; the mutex is released during the operation.
+Condition waits release managed participation and pin the waiting coroutine and
+object, while preserving its stack mapping. Lua register extent is published
+before even a formerly nonallocating read can wait. This reuses the existing
+rendezvous primitives without allocating an OS mutex/condition per table.
+Contention and wakeup costs still require measurement.
+
+Table reads copy complete values under ownership. Writes, array/hash resizing,
+length hints, iteration steps, cache invalidation and their collector barriers
+use the same protocol in VM and native API paths. A failed fast assignment
+returns no reusable slot: its slow path rechecks the key and metamethod. Compound
+application operations such as `t.x = t.x + 1` remain multiple operations and
+require application synchronization for an atomic update. Iteration does not
+promise a snapshot across separate `next` calls while keys are changing.
+
+Metatable discovery roots a snapshot, acquires the object and metatable in
+address order, and verifies discovery again before selecting a method. Reversed
+and self-metatable references follow the same rule. Method and type-name values
+are copied into live native roots; no mutator keeps a borrowed table slot across
+an unlock. Set-metatable uses ordered ownership too, including finalizer
+registration. Userdata value slots and metatable pointers are protected; opaque
+native payloads retain their own resource synchronization requirements.
+
+Object ownership ends before any selected metamethod executes. Native detach
+asserts this invariant in Debug builds. Errors release ownership before message
+construction can collect or execute a handler, and abandoned scope nodes are
+unlinked before longjmp while their native storage still exists. Protected
+boundaries retire their roots. Yielded metamethod continuations rely on their
+ordinary Lua stack values after native scopes unwind.
+
+The collector bypasses object ownership under world quiescence. This is required
+when emergency collection is initiated by an owner while another mutator waits
+for that very table. Structural resize also owns heap metadata because mutator
+barriers inspect object size. Unrelated object acquisition behind heap ownership
+is prohibited; collector quiescence and recursive ownership are explicit cases.
+
+Ten additional `parallel_vm_table_*` cases exercise both coroutines mutating one
+table, typed hot-slot replacement, array/hash growth, long and short keys,
+deletions, bulk constructors, raw/API access, length and iteration; reversed and
+self metatables; userdata values; reentrant, failing and yielding metamethods;
+and blocked metamethod/error handlers. The blocked cases require the other
+coroutine to finish mutations before the callback is released. A resize-failure
+case waits until the other coroutine is demonstrably parked on that table,
+forces emergency collection and failed retry, then requires correct recovery
+and continued use. The yield case collects between each of six metamethod
+continuations. Stopped, incremental and generational collection are covered.
+
+These fixtures extend the private feasibility evidence. Closure-array/C-capture
+mutation, debug and hook boundaries, native/module globals and resource affinity
+still need their full audit. Automatic scheduling, migration, carrier reuse,
+admission limits, compatibility and performance gates remain required.
 
 ## Lua-specific proof obligations
 

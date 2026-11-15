@@ -302,6 +302,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->poll_remaining = 1024;
   L->native_depth = L->world_depth = 0;
   L->heap_waiting = 0;
+  L->object_waiting = 0;
+  L->object_scopes = NULL;
   L->errorJmp = NULL;
   L->hook = NULL;
   L->hookmask = 0;

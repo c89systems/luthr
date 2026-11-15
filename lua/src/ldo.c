@@ -17,6 +17,8 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "laccess.h"
+#include "lroots.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -66,6 +68,7 @@ typedef struct lua_longjmp {
   LuaNativeRoot *native_roots;
   unsigned native_depth;
   LuaWorldScope world_scope;
+  LuaObjectScope *object_scopes;
 } lua_longjmp;
 
 
@@ -128,12 +131,14 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
+    luaA_unwind(L, L->errorJmp->object_scopes);
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */
   }
   else {  /* thread has no error handler */
     global_State *g = G(L);
     lua_State *mainth = mainthread(g);
+    luaA_unwind(L, NULL);
     L->native_roots = NULL;  /* every native scope on this thread is abandoned */
     {
       LuaWorldScope empty = {0, 0};
@@ -174,6 +179,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
     /* unroll error entries up to the first level */
     while (L->errorJmp->previous != NULL)
       L->errorJmp = L->errorJmp->previous;
+    luaA_unwind(L, L->errorJmp->object_scopes);
     L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
     L->native_roots = L->errorJmp->native_roots;
     luaW_restore(L, L->errorJmp->world_scope, L->errorJmp->native_depth);
@@ -193,6 +199,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
   lj.world_scope = luaW_scope(L);
+  lj.object_scopes = L->object_scopes;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
@@ -573,15 +580,17 @@ static void rethook (lua_State *L, CallInfo *ci, int nres) {
 **  Raise an error if this counter overflows.
 */
 static unsigned tryfuncTM (lua_State *L, StkId func, unsigned status) {
-  const TValue *tm;
+  LuaNativeRoot method;
   StkId p;
-  tm = luaT_gettmbyobj(L, s2v(func), TM_CALL);
-  if (l_unlikely(ttisnil(tm)))  /* no metamethod? */
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, s2v(func), TM_CALL, &method);
+  if (l_unlikely(ttisnil(&method.value)))  /* no metamethod? */
     luaG_callerror(L, s2v(func));
   for (p = L->top.p; p > func; p--)  /* open space for metamethod */
     setobjs2s(L, p, p-1);
   L->top.p++;  /* stack space pre-allocated by the caller */
-  setobj2s(L, func, tm);  /* metamethod is the new function to be called */
+  setobj2s(L, func, &method.value);  /* snapshot is the new function */
+  luaR_poproot(L, &method);
   if ((status & MAX_CCMT) == MAX_CCMT)  /* is counter full? */
     luaG_runerror(L, "'__call' chain too long");
   return status + (1u << CIST_CCMT);  /* increment counter */

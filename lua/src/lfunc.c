@@ -180,10 +180,12 @@ UpVal *luaF_findupval (lua_State *L, StkId level) {
 ** (This function assumes EXTRA_STACK.)
 */
 static void callclosemethod (lua_State *L, TValue *obj, TValue *err, int yy) {
+  LuaNativeRoot method;
   StkId top = L->top.p;
   StkId func = top;
-  const TValue *tm = luaT_gettmbyobj(L, obj, TM_CLOSE);
-  setobj2s(L, top++, tm);  /* will call metamethod... */
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, obj, TM_CLOSE, &method);
+  setobj2s(L, top++, &method.value);  /* will call metamethod... */
   setobj2s(L, top++, obj);  /* with 'self' as the 1st argument */
   if (err != NULL)  /* if there was an error... */
     setobj2s(L, top++, err);  /* then error object will be 2nd argument */
@@ -192,6 +194,7 @@ static void callclosemethod (lua_State *L, TValue *obj, TValue *err, int yy) {
     luaD_call(L, func, 0);
   else
     luaD_callnoyield(L, func, 0);
+  luaR_poproot(L, &method);
 }
 
 
@@ -200,13 +203,16 @@ static void callclosemethod (lua_State *L, TValue *obj, TValue *err, int yy) {
 ** an error if not.
 */
 static void checkclosemth (lua_State *L, StkId level) {
-  const TValue *tm = luaT_gettmbyobj(L, s2v(level), TM_CLOSE);
-  if (ttisnil(tm)) {  /* no metamethod? */
+  LuaNativeRoot method;
+  luaR_pushroot(L, &method);
+  luaT_gettmbyobj(L, s2v(level), TM_CLOSE, &method);
+  if (ttisnil(&method.value)) {  /* no metamethod? */
     int idx = cast_int(level - L->ci->func.p);  /* variable index */
     const char *vname = luaG_findlocal(L, L->ci, idx, NULL);
     if (vname == NULL) vname = "?";
     luaG_runerror(L, "variable '%s' got a non-closable value", vname);
   }
+  luaR_poproot(L, &method);
 }
 
 

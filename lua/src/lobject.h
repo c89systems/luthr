@@ -16,6 +16,10 @@
 #include "lua.h"
 #include "lgate.h"
 
+typedef struct LuaObjectLock {
+  pthread_t owner;
+  unsigned depth;
+} LuaObjectLock;
 
 /*
 ** Extra types for collectable non-values
@@ -494,6 +498,7 @@ typedef struct Udata {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
+  LuaObjectLock access;
   struct Table *metatable;
   GCObject *gclist;
   UValue uv[1];  /* user values */
@@ -513,6 +518,7 @@ typedef struct Udata0 {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
+  LuaObjectLock access;
   struct Table *metatable;
   union {LUAI_MAXALIGN;} bindata;
 } Udata0;
@@ -787,6 +793,7 @@ typedef struct Table {
   Node *node;
   struct Table *metatable;
   GCObject *gclist;
+  LuaObjectLock access;
 } Table;
 
 

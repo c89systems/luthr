@@ -17,6 +17,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -751,7 +752,12 @@ LUA_API int lua_pushthread (lua_State *L) {
 
 static int auxgetstr (lua_State *L, const TValue *t, const char *k) {
   lu_byte tag;
-  TString *str = luaS_new(L, k);
+  LuaNativeRoot object;
+  TString *str;
+  luaR_pushroot(L, &object);
+  luaR_setroot(L, &object, t);
+  t = &object.value;
+  str = luaS_new(L, k);
   luaV_fastget(t, str, s2v(L->top.p), luaH_getstr, tag);
   if (!tagisempty(tag))
     api_incr_top(L);
@@ -760,6 +766,7 @@ static int auxgetstr (lua_State *L, const TValue *t, const char *k) {
     api_incr_top(L);
     tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1, tag);
   }
+  luaR_poproot(L, &object);
   lua_unlock(L);
   return novariant(tag);
 }
@@ -772,7 +779,7 @@ static int auxgetstr (lua_State *L, const TValue *t, const char *k) {
 */
 static void getGlobalTable (lua_State *L, TValue *gt) {
   Table *registry = hvalue(&G(L)->l_registry);
-  lu_byte tag = luaH_getint(registry, LUA_RIDX_GLOBALS, gt);
+  lu_byte tag = luaH_getint(L, registry, LUA_RIDX_GLOBALS, gt);
   (void)tag;  /* avoid not-used warnings when checks are off */
   api_check(L, novariant(tag) == LUA_TTABLE, "global table must exist");
 }
@@ -845,7 +852,7 @@ LUA_API int lua_rawget (lua_State *L, int idx) {
   lua_lock(L);
   api_checkpop(L, 1);
   t = gettable(L, idx);
-  tag = luaH_get(t, s2v(L->top.p - 1), s2v(L->top.p - 1));
+  tag = luaH_get(L, t, s2v(L->top.p - 1), s2v(L->top.p - 1));
   L->top.p--;  /* pop key */
   return finishrawget(L, tag);
 }
@@ -867,7 +874,7 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
   lua_lock(L);
   t = gettable(L, idx);
   setpvalue(&k, cast_voidp(p));
-  return finishrawget(L, luaH_get(t, &k, s2v(L->top.p)));
+  return finishrawget(L, luaH_get(L, t, &k, s2v(L->top.p)));
 }
 
 
@@ -886,26 +893,18 @@ LUA_API void lua_createtable (lua_State *L, int narray, int nrec) {
 
 LUA_API int lua_getmetatable (lua_State *L, int objindex) {
   const TValue *obj;
-  Table *mt;
+  LuaNativeRoot mt;
   int res = 0;
   lua_lock(L);
   obj = index2value(L, objindex);
-  switch (ttype(obj)) {
-    case LUA_TTABLE:
-      mt = hvalue(obj)->metatable;
-      break;
-    case LUA_TUSERDATA:
-      mt = uvalue(obj)->metatable;
-      break;
-    default:
-      mt = G(L)->mt[ttype(obj)];
-      break;
-  }
-  if (mt != NULL) {
-    sethvalue2s(L, L->top.p, mt);
+  luaR_pushroot(L, &mt);
+  luaA_getmetatable(L, obj, &mt);
+  if (!ttisnil(&mt.value)) {
+    setobj2s(L, L->top.p, &mt.value);
     api_incr_top(L);
     res = 1;
   }
+  luaR_poproot(L, &mt);
   lua_unlock(L);
   return res;
 }
@@ -913,10 +912,12 @@ LUA_API int lua_getmetatable (lua_State *L, int objindex) {
 
 LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
   TValue *o;
+  LuaObjectScope scope;
   int t;
   lua_lock(L);
   o = index2value(L, idx);
   api_check(L, ttisfulluserdata(o), "full userdata expected");
+  luaA_begin(L, gcvalue(o), &scope);
   if (n <= 0 || n > uvalue(o)->nuvalue) {
     setnilvalue2s(L->top.p);
     t = LUA_TNONE;
@@ -925,6 +926,7 @@ LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
     setobj2s(L, L->top.p, &uvalue(o)->uv[n - 1].uv);
     t = ttype(s2v(L->top.p));
   }
+  luaA_end(L, &scope);
   api_incr_top(L);
   lua_unlock(L);
   return t;
@@ -940,11 +942,15 @@ LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
 */
 static void auxsetstr (lua_State *L, const TValue *t, const char *k) {
   int hres;
-  TString *str = luaS_new(L, k);
+  LuaNativeRoot object;
+  TString *str;
+  luaR_pushroot(L, &object);
+  luaR_setroot(L, &object, t);
+  t = &object.value;
+  str = luaS_new(L, k);
   api_checkpop(L, 1);
   luaV_fastset(t, str, s2v(L->top.p - 1), hres, luaH_psetstr);
   if (hres == HOK) {
-    luaV_finishfastset(L, t, s2v(L->top.p - 1));
     L->top.p--;  /* pop value */
   }
   else {
@@ -953,6 +959,7 @@ static void auxsetstr (lua_State *L, const TValue *t, const char *k) {
     luaV_finishset(L, t, s2v(L->top.p - 1), s2v(L->top.p - 2), hres);
     L->top.p -= 2;  /* pop value and key */
   }
+  luaR_poproot(L, &object);
   lua_unlock(L);  /* lock done by caller */
 }
 
@@ -972,9 +979,7 @@ LUA_API void lua_settable (lua_State *L, int idx) {
   api_checkpop(L, 2);
   t = index2value(L, idx);
   luaV_fastset(t, s2v(L->top.p - 2), s2v(L->top.p - 1), hres, luaH_pset);
-  if (hres == HOK)
-    luaV_finishfastset(L, t, s2v(L->top.p - 1));
-  else
+  if (hres != HOK)
     luaV_finishset(L, t, s2v(L->top.p - 2), s2v(L->top.p - 1), hres);
   L->top.p -= 2;  /* pop index and value */
   lua_unlock(L);
@@ -994,9 +999,7 @@ LUA_API void lua_seti (lua_State *L, int idx, lua_Integer n) {
   api_checkpop(L, 1);
   t = index2value(L, idx);
   luaV_fastseti(t, n, s2v(L->top.p - 1), hres);
-  if (hres == HOK)
-    luaV_finishfastset(L, t, s2v(L->top.p - 1));
-  else {
+  if (hres != HOK) {
     TValue temp;
     setivalue(&temp, n);
     luaV_finishset(L, t, &temp, s2v(L->top.p - 1), hres);
@@ -1012,8 +1015,6 @@ static void aux_rawset (lua_State *L, int idx, TValue *key, int n) {
   api_checkpop(L, n);
   t = gettable(L, idx);
   luaH_set(L, t, key, s2v(L->top.p - 1));
-  invalidateTMcache(t);
-  luaC_barrierback(L, obj2gco(t), s2v(L->top.p - 1));
   L->top.p -= n;
   lua_unlock(L);
 }
@@ -1037,7 +1038,6 @@ LUA_API void lua_rawseti (lua_State *L, int idx, lua_Integer n) {
   api_checkpop(L, 1);
   t = gettable(L, idx);
   luaH_setint(L, t, n, s2v(L->top.p - 1));
-  luaC_barrierback(L, obj2gco(t), s2v(L->top.p - 1));
   L->top.p--;
   lua_unlock(L);
 }
@@ -1055,28 +1055,7 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
     api_check(L, ttistable(s2v(L->top.p - 1)), "table expected");
     mt = hvalue(s2v(L->top.p - 1));
   }
-  switch (ttype(obj)) {
-    case LUA_TTABLE: {
-      hvalue(obj)->metatable = mt;
-      if (mt) {
-        luaC_objbarrier(L, gcvalue(obj), mt);
-        luaC_checkfinalizer(L, gcvalue(obj), mt);
-      }
-      break;
-    }
-    case LUA_TUSERDATA: {
-      uvalue(obj)->metatable = mt;
-      if (mt) {
-        luaC_objbarrier(L, uvalue(obj), mt);
-        luaC_checkfinalizer(L, gcvalue(obj), mt);
-      }
-      break;
-    }
-    default: {
-      G(L)->mt[ttype(obj)] = mt;
-      break;
-    }
-  }
+  luaA_setmetatable(L, obj, mt);
   L->top.p--;
   lua_unlock(L);
   return 1;
@@ -1085,11 +1064,13 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
 
 LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
   TValue *o;
+  LuaObjectScope scope;
   int res;
   lua_lock(L);
   api_checkpop(L, 1);
   o = index2value(L, idx);
   api_check(L, ttisfulluserdata(o), "full userdata expected");
+  luaA_begin(L, gcvalue(o), &scope);
   if (!(cast_uint(n) - 1u < cast_uint(uvalue(o)->nuvalue)))
     res = 0;  /* 'n' not in [1, uvalue(o)->nuvalue] */
   else {
@@ -1097,6 +1078,7 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
     luaC_barrierback(L, gcvalue(o), s2v(L->top.p - 1));
     res = 1;
   }
+  luaA_end(L, &scope);
   L->top.p--;
   lua_unlock(L);
   return res;

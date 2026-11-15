@@ -60,23 +60,25 @@ typedef enum {
 */
 #define notm(tm)	ttisnil(tm)
 
-#define checknoTM(mt,e)	((mt) == NULL || (mt)->flags & (1u<<(e)))
+#define checknoTM(mt,e) ((mt) == NULL || \
+  __atomic_load_n(&(mt)->flags, __ATOMIC_RELAXED) & (1u << (e)))
 
 #define gfasttm(g,mt,e)  \
-  (checknoTM(mt, e) ? NULL : luaT_gettm(mt, e, (g)->tmname[e]))
-
-#define fasttm(l,mt,e)	gfasttm(G(l), mt, e)
+  (checknoTM(mt, e) ? NULL : luaT_gettmunlocked(mt, e, (g)->tmname[e]))
 
 #define ttypename(x)	luaT_typenames_[(x) + 1]
 
 LUAI_DDEC(const char *const luaT_typenames_[LUA_TOTALTYPES];)
 
 
-LUAI_FUNC const char *luaT_objtypename (lua_State *L, const TValue *o);
+struct LuaNativeRoot;
+LUAI_FUNC const char *luaT_objtypename (lua_State *L, const TValue *o,
+                                       struct LuaNativeRoot *name);
 
-LUAI_FUNC const TValue *luaT_gettm (Table *events, TMS event, TString *ename);
-LUAI_FUNC const TValue *luaT_gettmbyobj (lua_State *L, const TValue *o,
-                                                       TMS event);
+/* Borrowed lookup is confined to collector quiescence. */
+LUAI_FUNC const TValue *luaT_gettmunlocked (Table *events, TMS event, TString *ename);
+LUAI_FUNC void luaT_gettmbyobj (lua_State *L, const TValue *o, TMS event,
+                               struct LuaNativeRoot *result);
 LUAI_FUNC void luaT_init (lua_State *L);
 
 LUAI_FUNC void luaT_callTM (lua_State *L, const TValue *f, const TValue *p1,

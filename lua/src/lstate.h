@@ -335,6 +335,8 @@ struct lua_State {
   unsigned native_depth;
   unsigned world_depth;
   unsigned heap_waiting;
+  unsigned object_waiting;
+  struct LuaObjectScope *object_scopes;
 };
 
 

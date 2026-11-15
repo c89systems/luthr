@@ -7,6 +7,7 @@
 #include "lprefix.h"
 
 #include "lapi.h"
+#include "laccess.h"
 #include "lgate.h"
 #include "lstate.h"
 #include "lworld.h"
@@ -199,6 +200,11 @@ void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native) {
 ** Protected unwinding restores the enclosing depth if a callback never returns. */
 LuaWorldScope luaW_detach (lua_State *L) {
   LuaWorldScope scope;
+#if defined(LUAI_ASSERT)
+  LuaObjectScope *object;
+  for (object = L->object_scopes; object != NULL; object = object->previous)
+    lua_assert(!object->held);  /* callbacks never inherit object ownership */
+#endif
   L->native_depth++;
   scope = luaW_suspend(L);
   lua_unlock(L);

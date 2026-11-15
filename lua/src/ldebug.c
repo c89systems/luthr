@@ -17,6 +17,8 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "laccess.h"
+#include "lroots.h"
 #include "lcode.h"
 #include "ldebug.h"
 #include "ldo.h"
@@ -745,7 +747,10 @@ static const char *varinfo (lua_State *L, const TValue *o) {
 */
 static l_noret typeerror (lua_State *L, const TValue *o, const char *op,
                           const char *extra) {
-  const char *t = luaT_objtypename(L, o);
+  LuaNativeRoot name;
+  const char *t;
+  luaR_pushroot(L, &name);
+  t = luaT_objtypename(L, o, &name);
   luaG_runerror(L, "attempt to %s a %s value%s", op, t, extra);
 }
 
@@ -774,8 +779,10 @@ l_noret luaG_callerror (lua_State *L, const TValue *o) {
 
 
 l_noret luaG_forerror (lua_State *L, const TValue *o, const char *what) {
+  LuaNativeRoot name;
+  luaR_pushroot(L, &name);
   luaG_runerror(L, "bad 'for' %s (number expected, got %s)",
-                   what, luaT_objtypename(L, o));
+                   what, luaT_objtypename(L, o, &name));
 }
 
 
@@ -805,8 +812,12 @@ l_noret luaG_tointerror (lua_State *L, const TValue *p1, const TValue *p2) {
 
 
 l_noret luaG_ordererror (lua_State *L, const TValue *p1, const TValue *p2) {
-  const char *t1 = luaT_objtypename(L, p1);
-  const char *t2 = luaT_objtypename(L, p2);
+  LuaNativeRoot name1, name2;
+  const char *t1, *t2;
+  luaR_pushroot(L, &name1);
+  luaR_pushroot(L, &name2);
+  t1 = luaT_objtypename(L, p1, &name1);
+  t2 = luaT_objtypename(L, p2, &name2);
   if (strcmp(t1, t2) == 0)
     luaG_runerror(L, "attempt to compare two %s values", t1);
   else
@@ -839,6 +850,8 @@ const char *luaG_addinfo (lua_State *L, const char *msg, TString *src,
 
 l_noret luaG_errormsg (lua_State *L) {
   if (L->errfunc != 0) {  /* is there an error handling function? */
+    luaA_release(L);
+    (void)luaW_suspend(L);
     StkId errfunc = restorestack(L, L->errfunc);
     lua_assert(ttisfunction(s2v(errfunc)));
     setobjs2s(L, L->top.p, L->top.p - 1);  /* move argument */
@@ -858,6 +871,10 @@ l_noret luaG_runerror (lua_State *L, const char *fmt, ...) {
   CallInfo *ci = L->ci;
   const char *msg;
   va_list argp;
+  /* Error construction may collect and run finalizers before the handler.
+  ** This operation cannot resume; retire ownership before any user code. */
+  luaA_release(L);
+  (void)luaW_suspend(L);
   luaC_checkGC(L);  /* error message uses memory */
   pushvfstring(L, argp, fmt, msg);
   if (isLua(ci)) {  /* Lua function? */

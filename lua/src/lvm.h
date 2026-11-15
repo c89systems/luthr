@@ -79,7 +79,7 @@ typedef enum {
 ** fast track for 'gettable'
 */
 #define luaV_fastget(t,k,res,f, tag) \
-  (tag = (!ttistable(t) ? LUA_VNOTABLE : f(hvalue(t), k, res)))
+  (tag = (!ttistable(t) ? LUA_VNOTABLE : f(L, hvalue(t), k, res)))
 
 
 /*
@@ -92,17 +92,11 @@ typedef enum {
 
 
 #define luaV_fastset(t,k,val,hres,f) \
-  (hres = (!ttistable(t) ? HNOTATABLE : f(hvalue(t), k, val)))
+  (hres = (!ttistable(t) ? HNOTATABLE : f(L, hvalue(t), k, val)))
 
 #define luaV_fastseti(t,k,val,hres) \
   if (!ttistable(t)) hres = HNOTATABLE; \
   else { luaH_fastseti(hvalue(t), k, val, hres); }
-
-
-/*
-** Finish a fast set operation (when fast set succeeds).
-*/
-#define luaV_finishfastset(L,t,v)	luaC_barrierback(L, gcvalue(t), v)
 
 
 /*
