@@ -1119,7 +1119,8 @@ void luaV_finishOp (lua_State *L) {
 
 
 
-#define updatetrap(ci)  (trap = ci->u.l.trap)
+#define updatetrap(ci) \
+  (trap = (ci)->u.l.trap | (gethookmask(L) & (LUA_MASKLINE | LUA_MASKCOUNT)))
 
 #define updatebase(ci)	(base = ci->func.p + 1)
 
@@ -1223,7 +1224,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #include "ljumptab.h"
 #endif
  startfunc:
-  trap = L->hookmask;
+  trap = gethookmask(L);
  returning:  /* trap already set */
   cl = ci_func(ci);
   k = cl->p->k;
@@ -1812,7 +1813,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         goto ret;
       }
       vmcase(OP_RETURN0) {
-        if (l_unlikely(L->hookmask)) {
+        if (l_unlikely(gethookmask(L))) {
           StkId ra = RA(i);
           L->top.p = ra;
           savepc(ci);
@@ -1829,7 +1830,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         goto ret;
       }
       vmcase(OP_RETURN1) {
-        if (l_unlikely(L->hookmask)) {
+        if (l_unlikely(gethookmask(L))) {
           StkId ra = RA(i);
           L->top.p = ra + 1;
           savepc(ci);

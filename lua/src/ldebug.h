@@ -18,7 +18,13 @@
 #define ci_func(ci)		(clLvalue(s2v((ci)->func.p)))
 
 
-#define resethookcount(L)	(L->hookcount = L->basehookcount)
+#define gethook(L) __atomic_load_n(&(L)->hook, __ATOMIC_SEQ_CST)
+#define gethookmask(L) __atomic_load_n(&(L)->hookmask, __ATOMIC_SEQ_CST)
+#define getbasehookcount(L) \
+  __atomic_load_n(&(L)->basehookcount, __ATOMIC_SEQ_CST)
+#define resethookcount(L) \
+  __atomic_store_n(&(L)->hookcount, cast_uint(getbasehookcount(L)), \
+                   __ATOMIC_SEQ_CST)
 
 /*
 ** mark for entries in 'lineinfo' array that has absolute information in

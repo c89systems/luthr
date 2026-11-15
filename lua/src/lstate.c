@@ -371,10 +371,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   api_incr_top(L);
   if (preinit_thread(L1, g) != 0)
     luaM_error(L);
-  L1->hookmask = L->hookmask;
-  L1->basehookcount = L->basehookcount;
-  L1->hook = L->hook;
-  resethookcount(L1);
+  lua_sethook(L1, gethook(L), gethookmask(L), getbasehookcount(L));
   /* initialize L1 extra space */
   memcpy(lua_getextraspace(L1), lua_getextraspace(mainthread(g)),
          LUA_EXTRASPACE);

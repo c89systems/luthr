@@ -126,8 +126,8 @@ struct lua_longjmp;  /* defined in ldo.c */
 
 
 /*
-** Atomic type (relative to signals) to better ensure that 'lua_sethook'
-** is thread safe
+** Type for VM trap flags. Hook configuration uses explicit lock-free atomics;
+** asynchronous setters no longer walk or modify active CallInfo records.
 */
 #if !defined(l_signalT)
 #include <signal.h>
@@ -313,14 +313,14 @@ struct lua_State {
   struct lua_State *twups;  /* list of threads with open upvalues */
   struct lua_longjmp *errorJmp;  /* current error recover point */
   CallInfo base_ci;  /* CallInfo for first level (C host) */
-  volatile lua_Hook hook;
+  lua_Hook hook;
   ptrdiff_t errfunc;  /* current error handling function (stack index) */
   l_uint32 nCcalls;  /* number of nested non-yieldable or C calls */
   int oldpc;  /* last pc traced */
   int nci;  /* number of items in 'ci' list */
   int basehookcount;
-  int hookcount;
-  volatile l_signalT hookmask;
+  unsigned hookcount;
+  l_signalT hookmask;
   struct {  /* info about transferred values (for call/return hooks) */
     int ftransfer;  /* offset of first value transferred */
     int ntransfer;  /* number of values transferred */

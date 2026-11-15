@@ -104,60 +104,42 @@ static int getcurrentline (CallInfo *ci) {
 }
 
 
-/*
-** Set 'trap' for all active Lua frames.
-** This function can be called during a signal, under "reasonable"
-** assumptions. A new 'ci' is completely linked in the list before it
-** becomes part of the "active" list, and we assume that pointers are
-** atomic; see comment in next function.
-** (A compiler doing interprocedural optimizations could, theoretically,
-** reorder memory writes in such a way that the list could be
-** temporarily broken while inserting a new element. We simply assume it
-** has no good reasons to do that.)
-*/
-static void settraps (CallInfo *ci) {
-  for (; ci != NULL; ci = ci->previous)
-    if (isLua(ci))
-      ci->u.l.trap = 1;
-}
+/* Signal handlers must not wait for a gate, allocate, or traverse live frames.
+** x86_64 targets must provide lock-free accesses for every published field. */
+_Static_assert(__atomic_always_lock_free(sizeof(lua_Hook), 0),
+               "hook pointers must be lock-free");
+_Static_assert(__atomic_always_lock_free(sizeof(int), 0) &&
+               __atomic_always_lock_free(sizeof(unsigned), 0) &&
+               __atomic_always_lock_free(sizeof(l_signalT), 0),
+               "hook counters and masks must be lock-free");
 
-
-/*
-** This function can be called during a signal, under "reasonable"
-** assumptions.
-** Fields 'basehookcount' and 'hookcount' (set by 'resethookcount')
-** are for debug only, and it is no problem if they get arbitrary
-** values (causes at most one wrong hook call). 'hookmask' is an atomic
-** value. We assume that pointers are atomic too (e.g., gcc ensures that
-** for all platforms where it runs). Moreover, 'hook' is always checked
-** before being called (see 'luaD_hook').
-*/
+/* Each configuration component is atomic. As with signal-time changes in
+** upstream Lua, an event already being selected may use earlier settings.
+** The VM observes new masks at its own branch/call/poll boundaries. */
 LUA_API void lua_sethook (lua_State *L, lua_Hook func, int mask, int count) {
   if (func == NULL || mask == 0) {  /* turn off hooks? */
     mask = 0;
     func = NULL;
   }
-  L->hook = func;
-  L->basehookcount = count;
+  __atomic_store_n(&L->hook, func, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&L->basehookcount, count, __ATOMIC_SEQ_CST);
   resethookcount(L);
-  L->hookmask = cast_byte(mask);
-  if (mask)
-    settraps(L->ci);  /* to trace inside 'luaV_execute' */
+  __atomic_store_n(&L->hookmask, cast_byte(mask), __ATOMIC_SEQ_CST);
 }
 
 
 LUA_API lua_Hook lua_gethook (lua_State *L) {
-  return L->hook;
+  return gethook(L);
 }
 
 
 LUA_API int lua_gethookmask (lua_State *L) {
-  return L->hookmask;
+  return gethookmask(L);
 }
 
 
 LUA_API int lua_gethookcount (lua_State *L) {
-  return L->basehookcount;
+  return getbasehookcount(L);
 }
 
 
@@ -966,7 +948,7 @@ int luaG_tracecall (lua_State *L) {
 */
 int luaG_traceexec (lua_State *L, const Instruction *pc) {
   CallInfo *ci = L->ci;
-  lu_byte mask = cast_byte(L->hookmask);
+  lu_byte mask = cast_byte(gethookmask(L));
   const Proto *p = ci_func(ci)->p;
   int counthook;
   if (!(mask & (LUA_MASKLINE | LUA_MASKCOUNT))) {  /* no hooks? */
@@ -975,7 +957,8 @@ int luaG_traceexec (lua_State *L, const Instruction *pc) {
   }
   pc++;  /* reference is always next instruction */
   ci->u.l.savedpc = pc;  /* save 'pc' */
-  counthook = (mask & LUA_MASKCOUNT) && (--L->hookcount == 0);
+  counthook = (mask & LUA_MASKCOUNT) &&
+    (__atomic_fetch_sub(&L->hookcount, 1u, __ATOMIC_SEQ_CST) == 1u);
   if (counthook)
     resethookcount(L);  /* reset count */
   else if (!(mask & LUA_MASKLINE))
@@ -1001,7 +984,7 @@ int luaG_traceexec (lua_State *L, const Instruction *pc) {
   }
   if (L->status == LUA_YIELD) {  /* did hook yield? */
     if (counthook)
-      L->hookcount = 1;  /* undo decrement to zero */
+      __atomic_store_n(&L->hookcount, 1u, __ATOMIC_SEQ_CST);
     ci->callstatus |= CIST_HOOKYIELD;  /* mark that it yielded */
     luaD_throw(L, LUA_YIELD);
   }

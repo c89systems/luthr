@@ -509,12 +509,12 @@ void luaD_shrinkstack (lua_State *L) {
 
 /*
 ** Call a hook for the given event. Make sure there is a hook to be
-** called. (Both 'L->hook' and 'L->hookmask', which trigger this
+** called. (Both the hook pointer and mask, which trigger this
 ** function, can be changed asynchronously by signals.)
 */
 void luaD_hook (lua_State *L, int event, int line,
                               int ftransfer, int ntransfer) {
-  lua_Hook hook = L->hook;
+  lua_Hook hook = gethook(L);
   if (hook && L->allowhook) {  /* make sure there is a hook */
     LuaWorldScope depth;
     CallInfo *ci = L->ci;
@@ -552,7 +552,7 @@ void luaD_hook (lua_State *L, int event, int line,
 */
 void luaD_hookcall (lua_State *L, CallInfo *ci) {
   L->oldpc = 0;  /* set 'oldpc' for new function */
-  if (L->hookmask & LUA_MASKCALL) {  /* is call hook on? */
+  if (gethookmask(L) & LUA_MASKCALL) {  /* is call hook on? */
     int event = (ci->callstatus & CIST_TAIL) ? LUA_HOOKTAILCALL
                                              : LUA_HOOKCALL;
     Proto *p = ci_func(ci)->p;
@@ -569,7 +569,7 @@ void luaD_hookcall (lua_State *L, CallInfo *ci) {
 ** is done even when return hooks are off.)
 */
 static void rethook (lua_State *L, CallInfo *ci, int nres) {
-  if (L->hookmask & LUA_MASKRET) {  /* is return hook on? */
+  if (gethookmask(L) & LUA_MASKRET) {  /* is return hook on? */
     StkId firstres = L->top.p - nres;  /* index of first result */
     int delta = 0;  /* correction for vararg functions */
     int ftransfer;
@@ -660,7 +660,7 @@ l_sinline void moveresults (lua_State *L, StkId res, int nres,
         L->ci->callstatus |= CIST_CLSRET;  /* in case of yields */
         res = luaF_close(L, res, CLOSEKTOP, 1);
         L->ci->callstatus &= ~CIST_CLSRET;
-        if (L->hookmask) {  /* if needed, call hook after '__close's */
+        if (gethookmask(L)) {  /* if needed, call hook after '__close's */
           ptrdiff_t savedres = savestack(L, res);
           rethook(L, L->ci, nres);
           res = restorestack(L, savedres);  /* hook can move stack */
@@ -683,7 +683,7 @@ l_sinline void moveresults (lua_State *L, StkId res, int nres,
 */
 void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
   l_uint32 fwanted = ci->callstatus & (CIST_TBC | CIST_NRESULTS);
-  if (l_unlikely(L->hookmask) && !(fwanted & CIST_TBC))
+  if (l_unlikely(gethookmask(L)) && !(fwanted & CIST_TBC))
     rethook(L, ci, nres);
   /* move results to proper place */
   moveresults(L, ci->func.p, nres, fwanted);
@@ -727,7 +727,7 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   L->ci = ci = prepCallInfo(L, func, status | CIST_C,
                                L->top.p + LUA_MINSTACK);
   lua_assert(ci->top.p <= L->stack_last.p);
-  if (l_unlikely(L->hookmask & LUA_MASKCALL)) {
+  if (l_unlikely(gethookmask(L) & LUA_MASKCALL)) {
     int narg = cast_int(L->top.p - func) - 1;
     luaD_hook(L, LUA_HOOKCALL, -1, 1, narg);
   }

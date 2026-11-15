@@ -473,8 +473,54 @@ Two `callback_config_*` cases require managed overlap, coherent callback/context
 pairs and continued allocation/collection while a warning callback is blocked.
 Fixtures retain contexts through VM closure and check allocation balance.
 
-These tests do not establish signal/debug-hook boundaries, native payload or
-module-global safety, or concurrent execution of one coroutine's native frames.
+The following experiment addresses asynchronous native hook configuration.
+Native payload/module-global safety and simultaneous execution of one
+coroutine's native frames remain separate obligations.
+
+## Asynchronous hook experiment
+
+Upstream hook installation traverses active call frames to set trap flags. That
+walk cannot run concurrently with frame insertion, reuse or collection. Simply
+taking the coroutine gate would also deadlock a signal handler that interrupted
+the gate's owner: the interpreter installs its interruption hook from a signal.
+[Lua's interpreter signal path](https://www.lua.org/source/5.5/lua.c.html#laction)
+
+Hook pointer, mask, base count and remaining count now use sequentially
+consistent compiler atomics. Compile-time checks require these accesses to be
+lock-free on the selected x86_64 targets. Installation and getters neither
+allocate nor wait for a coroutine gate. Remaining-count arithmetic uses unsigned
+values, including concurrent resets, to avoid signed overflow. The public count
+getter still returns the configured signed integer.
+[GCC atomic operations](https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html)
+
+Setters no longer inspect or modify call frames. The owning interpreter reads
+the mask at branch/call boundaries and its existing bounded instruction polls;
+stack relocation still sets frame traps under the existing ownership protocol.
+Hook dispatch, finalizer policy and child-coroutine inheritance use atomic reads
+too. No global bytecode lock or signal-time allocator/locking path is introduced.
+
+Each configuration component is atomic; installation and separate getters do
+not form a transactional settings tuple. As with upstream asynchronous hook
+changes, event selection already in progress can overlap replacement, and an
+in-flight callback can finish after replacement. Callers retain callback code
+and its native resources until such calls finish. This does not make borrowed
+activation records valid after their frames return; foreign stack inspection
+and multi-call debug-library operations still need task execution ownership.
+
+Six `parallel_hook_*` cases require actual managed overlap while replacing
+settings, calling/returning through Lua frames, allocating child coroutines and
+collecting in incremental and generational modes. Hooks inspect and modify a
+live local and reenter Lua with recursive hooks suppressed. A blocked hook must
+allow another coroutine to replace it, allocate and collect before release.
+A targeted OS signal installs an error-producing count hook while its target
+owns the stack gate; the handler must finish before that owner is released.
+Yielding count hooks resume correctly, and inherited positive, zero and negative
+count settings retain their public values. Progress handshakes ensure required
+callbacks, local modification and inheritance occur before fixture shutdown.
+The replacement phase continues through at least eight new child creations.
+
+Shared native payloads/module globals, embedding budgets/tracing, foreign debug
+transactions and task execution ownership still require their parallel audit.
 Scheduling, affinity, carrier limits, performance, streaming and module
 compatibility gates remain required before a public concurrent embedding
 contract.

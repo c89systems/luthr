@@ -47,8 +47,9 @@ implemented with explicit limits, including allocating coroutines, live and
 joined Lua/C captures, shared-table/metatable and registry operations, and forced
 GC at API ownership boundaries. Cross-state transfers, parent-call snapshots,
 carrier-local error forwarding and callback configuration have focused parallel
-regressions. The complete public API/native-resource audit and scheduler remain
-unfinished.
+regressions. Asynchronous native hook publication avoids walking live frames or
+waiting for the interrupted coroutine's gate. The complete public
+API/native-resource audit and scheduler remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

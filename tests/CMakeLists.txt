@@ -39,6 +39,15 @@ foreach(case IN ITEMS moves_incremental moves_generational moves_bulk move_wait_
   set_tests_properties(cross_api_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthrum_test_program(parallel_hook_test parallel_hook_test.c)
+set_target_properties(parallel_hook_test PROPERTIES C_STANDARD 99)
+target_compile_options(parallel_hook_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(parallel_hook_test PRIVATE luthrum_static)
+foreach(case IN ITEMS replace_incremental replace_generational blocked signal yield counts)
+  add_test(NAME parallel_hook_${case} COMMAND parallel_hook_test ${case})
+  set_tests_properties(parallel_hook_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthrum_test_program(callback_config_test callback_config_test.c)
 set_target_properties(callback_config_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_config_test PRIVATE -Wall -Wextra -Werror)

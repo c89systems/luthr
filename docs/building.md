@@ -77,6 +77,12 @@ These are [constrained VM tests](parallel-state-design.md#allocating-shared-vm-e
 with shared-table mutation and the full scheduler still outstanding. Static/shared
 C89 facade checks also cover external string keys and exactly-once buffer release.
 
+`parallel_hook_*` exercises asynchronous hook replacement/inheritance, native
+debug inspection, hook reentry, collection while a hook is blocked, hook yields,
+and a targeted signal interrupting a carrier that owns its coroutine gate.
+Hook configuration uses lock-free scalar atomics; this does not establish
+foreign debug transactions or the scheduler's execution-ownership contract.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.
