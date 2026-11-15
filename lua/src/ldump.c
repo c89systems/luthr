@@ -16,8 +16,10 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "ldo.h"
 #include "lgc.h"
 #include "lobject.h"
+#include "lroots.h"
 #include "lstate.h"
 #include "ltable.h"
 #include "lundump.h"
@@ -29,9 +31,11 @@ typedef struct {
   void *data;
   size_t offset;  /* current position relative to beginning of dump */
   int strip;
+  int managed;
   int status;
   Table *h;  /* table to track saved strings */
   lua_Unsigned nstr;  /* counter for counting saved strings */
+  LuaNativeRoot roots[2];  /* prototype and private string-index table */
 } DumpState;
 
 
@@ -52,11 +56,11 @@ typedef struct {
 static void dumpBlock (DumpState *D, const void *b, size_t size) {
   if (D->status == 0) {  /* do not write anything after an error */
     LuaWorldScope depth;
-    luaQ_beginnative(D->L);
+    if (!D->managed) luaQ_beginnative(D->L);
     depth = luaW_detach(D->L);
     D->status = (*D->writer)(D->L, b, size, D->data);
     luaW_attach(D->L, depth);
-    luaQ_endnative(D->L);
+    if (!D->managed) luaQ_endnative(D->L);
     D->offset += size;
   }
 }
@@ -67,6 +71,7 @@ static void dumpBlock (DumpState *D, const void *b, size_t size) {
 ** 'align'.
 */
 static void dumpAlign (DumpState *D, unsigned align) {
+  if (D->status != 0) return;
   unsigned padding = align - cast_uint(D->offset % align);
   if (padding < align) {  /* padding == align means no padding */
     static lua_Integer paddingContent = 0;
@@ -144,6 +149,7 @@ static void dumpInteger (DumpState *D, lua_Integer x) {
 ** so adding 1 to it cannot overflow a size_t.
 */
 static void dumpString (DumpState *D, TString *ts) {
+  if (D->status != 0) return;
   if (ts == NULL) {
     dumpVarint(D, 0);  /* will "reuse" NULL */
     dumpVarint(D, 0);  /* special index for NULL */
@@ -161,6 +167,7 @@ static void dumpString (DumpState *D, TString *ts) {
       const char *s = getlstr(ts, size);
       dumpSize(D, size + 1);
       dumpVector(D, s, size + 1);  /* include ending '\0' */
+      if (D->status != 0) return;
       D->nstr++;  /* one more saved string */
       setsvalue(D->L, &key, ts);  /* the string is the key */
       setivalue(&value, l_castU2S(D->nstr));  /* its index is the value */
@@ -185,7 +192,7 @@ static void dumpConstants (DumpState *D, const Proto *f) {
   int i;
   int n = f->sizek;
   dumpInt(D, n);
-  for (i = 0; i < n; i++) {
+  for (i = 0; i < n && D->status == 0; i++) {
     const TValue *o = &f->k[i];
     int tt = ttypetag(o);
     dumpByte(D, tt);
@@ -211,7 +218,7 @@ static void dumpProtos (DumpState *D, const Proto *f) {
   int i;
   int n = f->sizep;
   dumpInt(D, n);
-  for (i = 0; i < n; i++)
+  for (i = 0; i < n && D->status == 0; i++)
     dumpFunction(D, f->p[i]);
 }
 
@@ -219,7 +226,7 @@ static void dumpProtos (DumpState *D, const Proto *f) {
 static void dumpUpvalues (DumpState *D, const Proto *f) {
   int i, n = f->sizeupvalues;
   dumpInt(D, n);
-  for (i = 0; i < n; i++) {
+  for (i = 0; i < n && D->status == 0; i++) {
     dumpByte(D, f->upvalues[i].instack);
     dumpByte(D, f->upvalues[i].idx);
     dumpByte(D, f->upvalues[i].kind);
@@ -229,6 +236,7 @@ static void dumpUpvalues (DumpState *D, const Proto *f) {
 
 static void dumpDebug (DumpState *D, const Proto *f) {
   int i, n;
+  if (D->status != 0) return;
   n = (D->strip) ? 0 : f->sizelineinfo;
   dumpInt(D, n);
   if (f->lineinfo != NULL)
@@ -242,19 +250,21 @@ static void dumpDebug (DumpState *D, const Proto *f) {
   }
   n = (D->strip) ? 0 : f->sizelocvars;
   dumpInt(D, n);
-  for (i = 0; i < n; i++) {
+  for (i = 0; i < n && D->status == 0; i++) {
     dumpString(D, f->locvars[i].varname);
     dumpInt(D, f->locvars[i].startpc);
     dumpInt(D, f->locvars[i].endpc);
   }
   n = (D->strip) ? 0 : f->sizeupvalues;
   dumpInt(D, n);
-  for (i = 0; i < n; i++)
+  for (i = 0; i < n && D->status == 0; i++)
     dumpString(D, f->upvalues[i].name);
 }
 
 
 static void dumpFunction (DumpState *D, const Proto *f) {
+  if (D->status != 0) return;
+  luaD_checknativestack(D->L);
   dumpInt(D, f->linedefined);
   dumpInt(D, f->lastlinedefined);
   dumpByte(D, f->numparams);
@@ -289,22 +299,28 @@ static void dumpHeader (DumpState *D) {
 ** dump Lua function as precompiled chunk
 */
 int luaU_dump (lua_State *L, const Proto *f, lua_Writer w, void *data,
-               int strip) {
+               int strip, int managed) {
   DumpState D;
+  luaE_refreshnativestack(L);
+  luaR_pushroot(L, &D.roots[0]);
+  setgcovalue(L, &D.roots[0].value, obj2gco(f));
+  luaR_pushroot(L, &D.roots[1]);
   D.h = luaH_new(L);  /* aux. table to keep strings already dumped */
-  sethvalue2s(L, L->top.p, D.h);  /* anchor it */
-  L->top.p++;
+  sethvalue(L, &D.roots[1].value, D.h);
   D.L = L;
   D.writer = w;
   D.offset = 0;
   D.data = data;
   D.strip = strip;
+  D.managed = managed;
   D.status = 0;
   D.nstr = 0;
   dumpHeader(&D);
   dumpByte(&D, f->sizeupvalues);
   dumpFunction(&D, f);
   dumpBlock(&D, NULL, 0);  /* signal end of dump */
+  luaR_poproot(L, &D.roots[1]);
+  luaR_poproot(L, &D.roots[0]);
   return D.status;
 }
 

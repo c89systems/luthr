@@ -200,7 +200,23 @@ migration inside eleven long helpers with two occupied native slots. Cases
 include collection with saved buffers, literal and quoted formatting,
 zero-terminated scans, padding, format-only loops, an `__tostring` callback
 awaiting another task's result, pinned native reentry and error cleanup.
-String dumping and arithmetic metamethods still use native-call admission.
+
+`dump_library_*` verifies bytecode round-trips, stripped output, stable function
+identity, writer status/end signaling, allocation denial and private roots after
+debug argument replacement. A fixed full/stripped bytecode fixture from the
+verified preceding runtime checks exact Lua 5.5.1 x86_64 bytes independently of
+the current decoder. Public writers retain native admission and carrier
+identity; the runtime's bounded buffer writer stays managed. Writer failure must
+stop further callbacks and allocations and preserve the returned status, even
+when the allocator begins denying growth. A number-conversion boundary test
+replaces a string arithmetic operand and forces collection before parsing it.
+Deep dumping near a worker's native-stack limit must report a Lua error and
+retire its roots, with successful dumping after recovery. GNU Debug and musl
+use default worker stacks; GNU Release requests 128 KiB for this stack fixture.
+`native_scheduler_task_*dump*` checks byte-identical output under native-slot
+saturation, forced migration, saved-context GC, pinned native reentry and string
+arithmetic callbacks that await task results. Arbitrarily long numeric parsing
+still uses the existing parser and needs its own bounded-work feasibility gate.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

@@ -33,6 +33,7 @@
 #include "lfunc.h"
 #include "lgc.h"
 #include "lstring.h"
+#include "lundump.h"
 #include "lvm.h"
 
 
@@ -286,13 +287,12 @@ static int str_char (lua_State *L) {
 
 
 /*
-** Buffer to store the result of 'string.dump'. It must be initialized
-** after the call to 'lua_dump', to ensure that the function is on the
-** top of the stack when 'lua_dump' is called. ('luaL_buffinit' might
-** push stuff.)
+** Buffer to store the result of 'string.dump'. Initialized by the first
+** trusted writer call after selecting and rooting the dumped function.
 */
 struct str_Writer {
   int init;  /* true iff buffer has been initialized */
+  unsigned work;
   luaL_Buffer B;
 };
 
@@ -308,22 +308,24 @@ static int writer (lua_State *L, const void *b, size_t size, void *ud) {
     lua_replace(L, 1);  /* move it to reserved slot */
   }
   else
-    luaL_addlstring(&state->B, (const char *)b, size);
+    addstring(L, &state->work, &state->B, (const char *)b, size);
   return 0;
 }
 
 
 static int str_dump (lua_State *L) {
+  LuaNativeRoot function;
   struct str_Writer state;
   int strip = lua_toboolean(L, 2);
-  luaL_argcheck(L, lua_type(L, 1) == LUA_TFUNCTION && !lua_iscfunction(L, 1),
-                   1, "Lua function expected");
-  /* ensure function is on the top of the stack and vacate slot 1 */
-  lua_pushvalue(L, 1);
+  luaL_rootarg(L, 1, &function);
+  luaL_argcheck(L, ttisLclosure(&function.value), 1, "Lua function expected");
   state.init = 0;
-  lua_dump(L, writer, &state, strip);
+  state.work = 0;
+  lua_lock(L);
+  luaU_dump(L, clLvalue(&function.value)->p, writer, &state, strip, 1);
+  lua_unlock(L);
   lua_settop(L, 1);  /* leave final result on top */
-  return 1;
+  return luaL_rootresult(L, &function, 1, 1);
 }
 
 
@@ -345,16 +347,17 @@ static const luaL_Reg stringmetamethods[] = {
 
 #else		/* }{ */
 
-static int tonum (lua_State *L, int arg) {
-  if (lua_type(L, arg) == LUA_TNUMBER) {  /* already a number? */
-    lua_pushvalue(L, arg);
+static int tonum (lua_State *L, const LuaNativeRoot *value) {
+  if (ttisnumber(&value->value)) {  /* already a number? */
+    luaL_pushrooted(L, value);
     return 1;
   }
-  else {  /* check whether it is a numerical string */
+  else if (ttisstring(&value->value)) {
     size_t len;
-    const char *s = lua_tolstring(L, arg, &len);
-    return (s != NULL && lua_stringtonumber(L, s) == len + 1);
+    const char *s = getlstr(tsvalue(&value->value), len);
+    return lua_stringtonumber(L, s) == len + 1;
   }
+  return 0;
 }
 
 
@@ -377,11 +380,18 @@ static void trymt (lua_State *L, const char *mtkey, const char *opname) {
 
 
 static int arith (lua_State *L, int op, const char *mtname) {
-  if (tonum(L, 1) && tonum(L, 2))
+  LuaNativeRoot roots[2];
+  luaL_rootarg(L, 1, &roots[0]);
+  luaL_rootarg(L, 2, &roots[1]);
+  if (tonum(L, &roots[0]) && tonum(L, &roots[1]))
     lua_arith(L, op);  /* result will be on the top */
-  else
+  else {
+    lua_settop(L, 0);
+    luaL_pushrooted(L, &roots[0]);
+    luaL_pushrooted(L, &roots[1]);
     trymt(L, mtname, mtname + 2);
-  return 1;
+  }
+  return luaL_rootresult(L, roots, 2, 1);
 }
 
 
@@ -2184,9 +2194,14 @@ static const luaL_Reg strlib[] = {
 
 
 static void createmetatable (lua_State *L) {
+  const luaL_Reg *entry;
   /* table to be metatable for strings */
   luaL_newlibtable(L, stringmetamethods);
-  luaL_setfuncs(L, stringmetamethods, 0);
+  for (entry = stringmetamethods; entry->name != NULL; ++entry) {
+    if (entry->func != NULL) luaQ_pushmanaged(L, entry->func, 0);
+    else lua_pushboolean(L, 0);
+    lua_setfield(L, -2, entry->name);
+  }
   lua_pushliteral(L, "");  /* dummy string */
   lua_pushvalue(L, -2);  /* copy table */
   lua_setmetatable(L, -2);  /* set table as metatable for strings */
@@ -2204,10 +2219,7 @@ LUAMOD_API int luaopen_string (lua_State *L) {
   const luaL_Reg *entry;
   luaL_newlibtable(L, strlib);
   for (entry = strlib; entry->name != NULL; ++entry) {
-    if (entry->func != str_dump)
-      luaQ_pushmanaged(L, entry->func, 0);
-    else
-      lua_pushcfunction(L, entry->func);
+    luaQ_pushmanaged(L, entry->func, 0);
     lua_setfield(L, -2, entry->name);
   }
   createmetatable(L);

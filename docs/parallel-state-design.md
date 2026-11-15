@@ -1253,9 +1253,44 @@ before returning an external string; another collection during copying must
 retain both the owner and result. `native_scheduler_task_*strings*` requires
 migration in each of eleven long helpers, collection with saved contexts,
 unrelated progress at native saturation and an `__tostring` callback that awaits
-a task result. Native reentry remains carrier-pinned. Dump writers, string
-arithmetic metamethods, other libraries, required modules and the remaining
-scheduler acceptance gates are still unfinished.
+a task result. Native reentry remains carrier-pinned.
+
+## Managed dumping and string-arithmetic callbacks
+
+All string-library functions and arithmetic metamethods now use managed
+closures. Dumping explicitly distinguishes the runtime's bounded buffer writer
+from public/native writers. The latter retain native admission, carrier pinning,
+writer return codes and the final NULL-buffer signal. Serialization roots the
+prototype and its private string-index table independently of Lua stack slots;
+the public API and string helper also retain their selected closure. The public
+writer's stack remains stable throughout the callbacks. The private table is no
+longer exposed as an internal stack temporary.
+
+Writer failure now stops producer work before another string-index allocation
+can replace its error with an allocation failure or reach a failed alignment
+assertion. Recursive dumping checks the executing task/carrier's native-stack
+limit. String arithmetic snapshots both operands before numeric conversion or
+fallback, and its fallback callbacks can park and migrate without borrowing
+replaceable argument slots.
+
+`dump_library_*` compares re-dumped and stripped bytecode, changes arguments
+and collects during native and managed writing, checks writer admission and
+status propagation, and denies allocations at successive construction points.
+Exact full/stripped bytes for a fixed source are also retained from the verified
+`b703a61` Release runtime, providing a check independent of the current decoder.
+The numeric-conversion test collects after replacing the original operand at
+the real public API entry. A near-limit worker fixture requires a Lua stack
+error, scope retirement and successful subsequent dumping; it fails when only
+the dump-recursion guard is removed. `native_scheduler_task_*dump*` compares
+bytes while both native slots are occupied and requires migration inside the
+buffer writer, GC with saved contexts, pinned native callbacks and result waits
+inside arithmetic fallback callbacks.
+
+The shared numeric parser still contains whole-string scans and libc floating
+conversion. Bounded work for arbitrarily long numeric inputs remains unproven;
+managed arithmetic callback support does not establish that fairness gate.
+Loading/readers, other libraries, required modules and the remaining scheduler
+acceptance gates also remain unfinished.
 
 ## Lua-specific proof obligations
 

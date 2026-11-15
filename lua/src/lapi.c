@@ -1439,16 +1439,20 @@ LUA_API int lua_load (lua_State *L, lua_Reader reader, void *data,
 ** the stack returns with its original size.
 */
 LUA_API int lua_dump (lua_State *L, lua_Writer writer, void *data, int strip) {
+  LuaNativeRoot function;
   int status;
   ptrdiff_t otop;
   TValue *f;
   lua_lock(L);
   otop = savestack(L, L->top.p);
-  f = s2v(L->top.p - 1);
   api_checkpop(L, 1);
+  luaR_pushroot(L, &function);
+  luaR_setroot(L, &function, s2v(L->top.p - 1));
+  f = &function.value;
   api_check(L, isLfunction(f), "Lua function expected");
-  status = luaU_dump(L, clLvalue(f)->p, writer, data, strip);
+  status = luaU_dump(L, clLvalue(f)->p, writer, data, strip, 0);
   L->top.p = restorestack(L, otop);  /* restore top */
+  luaR_poproot(L, &function);
   lua_unlock(L);
   return status;
 }

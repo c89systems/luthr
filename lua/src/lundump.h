@@ -33,8 +33,9 @@
 LUAI_FUNC LClosure* luaU_undump (lua_State* L, ZIO* Z, Table *anchor,
                                  const char* name, int fixed);
 
-/* dump one chunk; from ldump.c */
+/* Dump one chunk. 'managed' is reserved for the trusted runtime buffer writer;
+** public/foreign writers always pass zero and retain native admission. */
 LUAI_FUNC int luaU_dump (lua_State* L, const Proto* f, lua_Writer w,
-                         void* data, int strip);
+                         void* data, int strip, int managed);
 
 #endif
