@@ -83,6 +83,12 @@ and a targeted signal interrupting a carrier that owns its coroutine gate.
 Hook configuration uses lock-free scalar atomics; this does not establish
 foreign debug transactions or the scheduler's execution-ownership contract.
 
+`parallel_policy_*` starts shared-VM workers from one C89 host invocation. It
+checks exact aggregate instruction accounting, trace replacement/removal and
+blocked-observer progress, coroutine wrapper/context access, warning pairs,
+allocation caps, and external-string failure cleanup. Constructor mutex failures
+have separate `synchronization_failure_facade_*` cleanup/recovery cases.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

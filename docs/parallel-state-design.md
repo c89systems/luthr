@@ -519,8 +519,61 @@ count settings retain their public values. Progress handshakes ensure required
 callbacks, local modification and inheritance occur before fixture shutdown.
 The replacement phase continues through at least eight new child creations.
 
-Shared native payloads/module globals, embedding budgets/tracing, foreign debug
-transactions and task execution ownership still require their parallel audit.
+The next experiment extends these boundaries through the C89 embedding policy.
+Shared native payloads/module globals, foreign debug transactions and task
+execution ownership remain separate obligations.
+
+## Parallel embedding policy experiment
+
+The C89 facade's instruction counter now consumes its shared budget with atomic
+compare/exchange, saturating at zero. Exhaustion remains sticky across protected
+calls and coroutine switches; only the next host invocation refreshes it.
+Configuration and exhaustion reads use the same atomic protocol. This changes
+neither the configured instruction boundary nor the strict C89 declarations.
+
+Line observers execute serially as one native resource per runtime. Waiting for
+that resource retains no Lua stack gate, heap ownership or collection
+participation. Callback/context selection occurs after acquiring the observer
+resource, so a queued event sees a preceding callback's replacement or removal.
+A short policy mutex protects configuration and callback-owner identity, and
+ends before Lua API calls or user callbacks. Reentry restrictions apply to the
+carrier inside the observer; another carrier does not acquire observer privileges
+merely because a callback is active. Unobserved work can allocate and collect
+while an observer is blocked. Tasks requiring that observer share its backpressure.
+
+Warning callback/context snapshots and replacement use the short policy scope;
+warning payload synchronization and in-flight context lifetime remain the
+embedder's responsibility. The lazy native coroutine-wrapper cache also uses
+that scope. Embedder context is published once in main-thread extra space and
+inherited by child creation; coroutine resume/wrap/close no longer rewrite the
+same pointer while another carrier can read it.
+
+The allocation-cap experiment exposed auxiliary-library buffer calls outside
+the VM allocator protocol. Buffer allocation/resizing/free now rejoin managed
+access and select/call the allocator under heap ownership. Buffer bytes retain
+their existing GC accounting and ownership transfer into external strings.
+External-string header failure also invokes its release callback under heap
+ownership. No extra allocator mutex or public allocator API is introduced.
+External strings retain their release callback/context until their data is
+released; replacing the VM allocator does not shorten that lifetime.
+
+Nine `parallel_policy_*` cases start two genuinely overlapping VM dispatchers
+inside one C89 host invocation and join both before that invocation returns.
+Budget cases count successful policy-hook returns and require exactly 3,999
+accepted instructions for a budget of 4,000 across both coroutines, including
+observer replacement/removal. They require exhaustion on both workers and fresh
+budget recovery on the next invocation. Other cases cover observer serialization,
+blocked-observer progress/collection and foreign setter rejection, concurrent
+coroutine wrappers/context reads, warning pairs, and a shared allocation cap
+with a legacy allocator that rejects overlapping callbacks. A forced external
+string-header failure requires two rejected allocations and exactly-once release
+under metadata ownership. Four `synchronization_failure_facade_*` cases require
+zero retained memory or synchronization objects after constructor failures,
+followed by successful construction/destruction.
+
+These tests do not authorize concurrent host operations on the facade handle or
+runtime destruction while tasks remain active. Native payload/module globals,
+foreign debug transactions and task execution ownership still require audit.
 Scheduling, affinity, carrier limits, performance, streaming and module
 compatibility gates remain required before a public concurrent embedding
 contract.

@@ -14,6 +14,7 @@
 
 #include "lua.h"
 
+#include "lapi.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lgc.h"
@@ -75,6 +76,19 @@ static void *firsttry (global_State *g, void *block, size_t os, size_t ns) {
 #else
 #define firsttry(g,block,os,ns)    callfrealloc(g, block, os, ns)
 #endif
+
+/* Native buffer work is detached. Rejoin before selecting/calling its
+** allocator, but preserve the auxiliary library's unaccounted buffer storage
+** and failure handling; it is not a collectable Lua allocation. */
+void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize, size_t nsize) {
+  void *replacement;
+  lua_lock(L);
+  luaW_heapenter(L);
+  replacement = callfrealloc(G(L), block, osize, nsize);
+  luaW_heapleave(L);
+  lua_unlock(L);
+  return replacement;
+}
 
 
 

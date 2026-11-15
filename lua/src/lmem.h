@@ -16,6 +16,10 @@
 
 #define luaM_error(L)	luaD_throw(L, LUA_ERRMEM)
 
+/* Auxiliary-library buffer storage is not charged to Lua's GC debt. */
+LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
+                                   size_t nsize);
+
 
 /*
 ** This macro tests whether it is safe to multiply 'n' by the size of

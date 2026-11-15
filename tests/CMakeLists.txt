@@ -48,6 +48,17 @@ foreach(case IN ITEMS replace_incremental replace_generational blocked signal yi
   set_tests_properties(parallel_hook_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthrum_test_program(parallel_policy_test parallel_policy_test.c)
+set_target_properties(parallel_policy_test PROPERTIES C_STANDARD 99)
+target_compile_options(parallel_policy_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(parallel_policy_test PRIVATE luthrum_static)
+target_link_options(parallel_policy_test PRIVATE -Wl,--wrap=lua_sethook)
+foreach(case IN ITEMS budget_incremental budget_generational budget_trace trace_replace
+    trace_blocked wrappers allocation_cap warning_pairs external_failure)
+  add_test(NAME parallel_policy_${case} COMMAND parallel_policy_test ${case})
+  set_tests_properties(parallel_policy_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthrum_test_program(callback_config_test callback_config_test.c)
 set_target_properties(callback_config_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_config_test PRIVATE -Wall -Wextra -Werror)
@@ -75,7 +86,8 @@ target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
 foreach(case IN ITEMS main_mutex main_condition world_mutex world_condition thread_mutex thread_condition
-    closed_capture open_capture)
+    closed_capture open_capture facade_policy_mutex facade_trace_mutex facade_state_mutex
+    facade_world_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()

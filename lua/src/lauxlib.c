@@ -18,14 +18,15 @@
 
 
 /*
-** This file uses only the official API of Lua.
-** Any function declared here could be written as an application function.
+** Most functions here use only Lua's public API. Owned buffer allocation also
+** uses a private entry to serialize legacy allocators with the VM heap.
 */
 
 #include "lua.h"
 
 #include "lauxlib.h"
 #include "llimits.h"
+#include "lmem.h"
 
 
 /*
@@ -486,9 +487,7 @@ static void *resizebox (lua_State *L, int idx, size_t newsize) {
   if (box->bsize == newsize)  /* not changing size? */
     return box->box;  /* keep the buffer */
   else {
-    void *ud;
-    lua_Alloc allocf = lua_getallocf(L, &ud);
-    void *temp = allocf(ud, box->box, box->bsize, newsize);
+    void *temp = luaM_reallocbuffer(L, box->box, box->bsize, newsize);
     if (l_unlikely(temp == NULL && newsize > 0)) {  /* allocation error? */
       lua_pushliteral(L, "not enough memory");
       lua_error(L);  /* raise a memory error */

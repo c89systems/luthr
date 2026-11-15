@@ -1,12 +1,18 @@
 #include "luthrum/lua_runtime.h"
 #include "luthrum_hook_policy.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
+
+/* Private scalar policy shared by the hook and its host invocation. */
+#define policy_load(field) __atomic_load_n(&(field), __ATOMIC_SEQ_CST)
+#define policy_store(field, value)                                             \
+  __atomic_store_n(&(field), (value), __ATOMIC_SEQ_CST)
 
 struct luthrum_lua_runtime_chunk {
   char *module_name;
@@ -32,6 +38,9 @@ struct luthrum_lua_runtime_c_module {
 
 struct luthrum_lua_runtime {
   lua_State *state;
+  pthread_mutex_t policy_mutex;
+  pthread_mutex_t trace_mutex;
+  pthread_t trace_owner;
   struct luthrum_lua_runtime_allocator allocator;
   char *last_error;
   void *context;
@@ -128,6 +137,27 @@ struct luthrum_lua_runtime_load_buffer_context {
 static int luthrum_lua_runtime_c_module_loader(lua_State *state);
 static int luthrum_lua_runtime_lua_module_loader(lua_State *state);
 
+static void policy_check(int status) {
+  if (status != 0) {
+    abort();
+  }
+}
+
+/* This is a callback reentry guard, not a global execution-active flag. */
+static int in_trace(luthrum_lua_runtime *runtime) {
+  int active;
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  active = runtime->trace_active &&
+           pthread_equal(runtime->trace_owner, pthread_self());
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  return active;
+}
+
+static void policy_destroy(luthrum_lua_runtime *runtime) {
+  policy_check(pthread_mutex_destroy(&runtime->trace_mutex));
+  policy_check(pthread_mutex_destroy(&runtime->policy_mutex));
+}
+
 static void luthrum_lua_runtime_native_warning(void *context,
                                                const char *message,
                                                int to_continue) {
@@ -136,8 +166,10 @@ static void luthrum_lua_runtime_native_warning(void *context,
   void *callback_context;
 
   runtime = (luthrum_lua_runtime *)context;
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
   callback = runtime->warning_callback;
   callback_context = runtime->warning_context;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   if (callback != NULL) {
     callback(callback_context, message, to_continue);
   }
@@ -443,36 +475,63 @@ static void luthrum_lua_runtime_instruction_hook(lua_State *state,
                                                  lua_Debug *debug) {
   luthrum_lua_runtime *runtime;
   luthrum_lua_runtime_trace_event event;
+  luthrum_lua_runtime_trace_fn callback;
+  void *context;
+  int remaining;
 
   runtime = luthrum_lua_runtime_from_state(state);
   if (runtime == NULL) {
     return;
   }
-  if (debug->event == LUA_HOOKCOUNT && runtime->instruction_limit > 0) {
-    if (!runtime->instruction_limit_hit && runtime->instruction_remaining > 0) {
-      runtime->instruction_remaining -= 1;
-      if (runtime->instruction_remaining > 0) {
-        return;
+  if (debug->event == LUA_HOOKCOUNT &&
+      policy_load(runtime->instruction_limit) > 0) {
+    remaining = policy_load(runtime->instruction_remaining);
+    while (!policy_load(runtime->instruction_limit_hit) && remaining > 0) {
+      if (__atomic_compare_exchange_n(&runtime->instruction_remaining,
+                                      &remaining, remaining - 1, 0,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        if (remaining > 1) {
+          return;
+        }
+        break;
       }
     }
-    runtime->instruction_limit_hit = 1;
+    policy_store(runtime->instruction_limit_hit, 1);
     luaL_error(state, "Lua instruction limit exceeded");
     return;
   }
-  if (debug->event != LUA_HOOKLINE || runtime->trace_callback == NULL ||
-      runtime->instruction_limit_hit || debug->currentline <= 0) {
+  if (debug->event != LUA_HOOKLINE ||
+      policy_load(runtime->instruction_limit_hit) || debug->currentline <= 0) {
+    return;
+  }
+  /* Observers are one native resource. Waiting here holds no Lua stack gate,
+   * heap scope or collection participation; unobserved work can continue. */
+  policy_check(pthread_mutex_lock(&runtime->trace_mutex));
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  callback = runtime->trace_callback;
+  context = runtime->trace_context;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  if (callback == NULL || policy_load(runtime->instruction_limit_hit)) {
+    policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
     return;
   }
   /* 'S' copies source metadata without pushing values or allocating in Lua. */
   if (!lua_getinfo(state, "S", debug)) {
+    policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
     return;
   }
   event.source = debug->source;
   event.source_size = debug->srclen;
   event.line = debug->currentline;
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  runtime->trace_owner = pthread_self();
   runtime->trace_active = 1;
-  runtime->trace_callback(runtime->trace_context, &event);
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  callback(context, &event);
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
   runtime->trace_active = 0;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
 }
 
 static void
@@ -482,15 +541,17 @@ luthrum_lua_runtime_apply_instruction_hook(luthrum_lua_runtime *runtime,
   if (runtime == NULL || state == NULL) {
     return;
   }
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
   mask = runtime->trace_callback != NULL ? LUA_MASKLINE : 0;
-  if (runtime->instruction_limit > 0) {
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  if (policy_load(runtime->instruction_limit) > 0) {
     /* One shared counter accounts for every thread, including short yields. */
     mask |= LUA_MASKCOUNT;
   }
   if (mask != 0) {
     lua_sethook(state, luthrum_lua_runtime_instruction_hook,
                 mask | LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS,
-                runtime->instruction_limit > 0 ? 1 : 0);
+                policy_load(runtime->instruction_limit) > 0 ? 1 : 0);
   } else {
     lua_sethook(state, NULL, 0, 0);
   }
@@ -507,11 +568,11 @@ static int luthrum_lua_runtime_guard_protected_call(lua_State *state,
   if (runtime == NULL || native == NULL) {
     return luaL_error(state, "missing protected-call runtime");
   }
-  if (runtime->instruction_limit_hit) {
+  if (policy_load(runtime->instruction_limit_hit)) {
     return luaL_error(state, "Lua instruction limit exceeded");
   }
   results = native(state);
-  if (runtime->instruction_limit_hit) {
+  if (policy_load(runtime->instruction_limit_hit)) {
     return luaL_error(state, "Lua instruction limit exceeded");
   }
   return results;
@@ -532,7 +593,7 @@ static int luthrum_lua_runtime_xpcall_error(lua_State *state) {
   }
   /* A hook error invokes this handler before Lua restores allowhook. Return
    * that error unchanged; the outer guard will terminate the host run. */
-  if (runtime->instruction_limit_hit) {
+  if (policy_load(runtime->instruction_limit_hit)) {
     return 1;
   }
   lua_pushvalue(state, lua_upvalueindex(1));
@@ -544,7 +605,7 @@ static int luthrum_lua_runtime_xpcall_error(lua_State *state) {
 static int luthrum_lua_runtime_xpcall(lua_State *state) {
   luthrum_lua_runtime *runtime;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime != NULL && runtime->instruction_limit > 0 &&
+  if (runtime != NULL && policy_load(runtime->instruction_limit) > 0 &&
       lua_type(state, 2) == LUA_TFUNCTION) {
     lua_pushvalue(state, 2);
     lua_pushcclosure(state, luthrum_lua_runtime_xpcall_error, 1);
@@ -640,7 +701,6 @@ static int luthrum_lua_runtime_coroutine_create(lua_State *state) {
   results = runtime->native_create(state);
   coroutine = lua_tothread(state, -1);
   if (coroutine != NULL) {
-    luthrum_lua_runtime_store_state(coroutine, runtime);
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   }
   return results;
@@ -655,7 +715,6 @@ static int luthrum_lua_runtime_coroutine_resume(lua_State *state) {
   }
   coroutine = lua_tothread(state, 1);
   if (coroutine != NULL) {
-    luthrum_lua_runtime_store_state(coroutine, runtime);
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   }
   return runtime->native_resume(state);
@@ -670,7 +729,6 @@ static int luthrum_lua_runtime_coroutine_close(lua_State *state) {
   }
   coroutine = lua_tothread(state, 1);
   if (coroutine != NULL) {
-    luthrum_lua_runtime_store_state(coroutine, runtime);
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   }
   return runtime->native_close(state);
@@ -679,21 +737,28 @@ static int luthrum_lua_runtime_coroutine_close(lua_State *state) {
 static int luthrum_lua_runtime_coroutine_auxwrap(lua_State *state) {
   lua_State *coroutine;
   luthrum_lua_runtime *runtime;
+  lua_CFunction native;
   coroutine = lua_tothread(state, lua_upvalueindex(1));
   runtime = luthrum_lua_runtime_from_state(state);
-  if (coroutine == NULL || runtime == NULL || runtime->native_auxwrap == NULL) {
+  if (coroutine == NULL || runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
-  luthrum_lua_runtime_store_state(coroutine, runtime);
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  native = runtime->native_auxwrap;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  if (native == NULL) {
+    return luaL_error(state, "missing coroutine runtime");
+  }
   luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   /* Native auxwrap expects only the coroutine in its first upvalue. */
-  return runtime->native_auxwrap(state);
+  return native(state);
 }
 
 static int luthrum_lua_runtime_coroutine_wrap(lua_State *state) {
   luthrum_lua_runtime *runtime;
   lua_State *coroutine;
   lua_CFunction native;
+  int valid;
   runtime = luthrum_lua_runtime_from_state(state);
   if (runtime == NULL || runtime->native_wrap == NULL) {
     return luaL_error(state, "missing coroutine runtime");
@@ -705,12 +770,16 @@ static int luthrum_lua_runtime_coroutine_wrap(lua_State *state) {
                       "unsupported native coroutine.wrap implementation");
   }
   coroutine = lua_tothread(state, -1);
-  if (coroutine == NULL ||
-      (runtime->native_auxwrap != NULL && runtime->native_auxwrap != native)) {
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  valid = coroutine != NULL && (runtime->native_auxwrap == NULL ||
+                                runtime->native_auxwrap == native);
+  if (valid) {
+    runtime->native_auxwrap = native;
+  }
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  if (!valid) {
     return luaL_error(state, "unsupported native coroutine wrapper");
   }
-  runtime->native_auxwrap = native;
-  luthrum_lua_runtime_store_state(coroutine, runtime);
   luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   /* Retain the thread, never the callable native wrapper, as the upvalue. */
   lua_remove(state, -2);
@@ -816,13 +885,14 @@ static luthrum_lua_runtime_status luthrum_lua_runtime_call_with_status(
   int previous_execution_active;
   luthrum_lua_runtime_status status;
 
-  previous_execution_active = runtime->execution_active;
-  runtime->execution_active = 1;
+  previous_execution_active = policy_load(runtime->execution_active);
+  policy_store(runtime->execution_active, 1);
   state = runtime->state;
   function_index = lua_gettop(state) - nargs;
   error_index = 0;
-  runtime->instruction_limit_hit = 0;
-  runtime->instruction_remaining = runtime->instruction_limit;
+  policy_store(runtime->instruction_limit_hit, 0);
+  policy_store(runtime->instruction_remaining,
+               policy_load(runtime->instruction_limit));
   luthrum_lua_runtime_apply_instruction_hook(runtime, state);
   runtime->allocator.failed = 0;
 
@@ -834,7 +904,7 @@ static luthrum_lua_runtime_status luthrum_lua_runtime_call_with_status(
 
   result = lua_pcall(state, nargs, nresults, error_index);
   if (result != LUA_OK) {
-    if (runtime->instruction_limit_hit) {
+    if (policy_load(runtime->instruction_limit_hit)) {
       status = LUTHRUM_LUA_RUNTIME_ERR_LIMIT;
     } else if (runtime->allocator.failed) {
       status = LUTHRUM_LUA_RUNTIME_ERR_ALLOC;
@@ -859,7 +929,7 @@ static luthrum_lua_runtime_status luthrum_lua_runtime_call_with_status(
     } else {
       lua_pop(state, 1);
     }
-    runtime->execution_active = previous_execution_active;
+    policy_store(runtime->execution_active, previous_execution_active);
     return status;
   }
 
@@ -872,16 +942,16 @@ static luthrum_lua_runtime_status luthrum_lua_runtime_call_with_status(
   }
 
   runtime->allocator.failed = 0;
-  if (runtime->instruction_limit_hit) {
+  if (policy_load(runtime->instruction_limit_hit)) {
     status =
         luthrum_lua_runtime_set_error(runtime, LUTHRUM_LUA_RUNTIME_ERR_LIMIT,
                                       "Lua instruction limit exceeded");
-    runtime->execution_active = previous_execution_active;
+    policy_store(runtime->execution_active, previous_execution_active);
     return status;
   }
 
   luthrum_lua_runtime_clear_error(runtime);
-  runtime->execution_active = previous_execution_active;
+  policy_store(runtime->execution_active, previous_execution_active);
   return LUTHRUM_LUA_RUNTIME_OK;
 }
 
@@ -1325,10 +1395,20 @@ luthrum_lua_runtime_status luthrum_lua_runtime_new_with_allocator(
   }
   memset(runtime, 0, sizeof(*runtime));
   runtime->allocator = allocator;
+  if (pthread_mutex_init(&runtime->policy_mutex, NULL) != 0) {
+    luthrum_lua_runtime_allocator_free(&allocator, runtime, sizeof(*runtime));
+    return LUTHRUM_LUA_RUNTIME_ERR_ALLOC;
+  }
+  if (pthread_mutex_init(&runtime->trace_mutex, NULL) != 0) {
+    policy_check(pthread_mutex_destroy(&runtime->policy_mutex));
+    luthrum_lua_runtime_allocator_free(&allocator, runtime, sizeof(*runtime));
+    return LUTHRUM_LUA_RUNTIME_ERR_ALLOC;
+  }
 
   state = lua_newstate(luthrum_lua_runtime_lua_alloc, &runtime->allocator, 0);
   if (state == NULL) {
     allocator = runtime->allocator;
+    policy_destroy(runtime);
     luthrum_lua_runtime_allocator_free(&allocator, runtime, sizeof(*runtime));
     return LUTHRUM_LUA_RUNTIME_ERR_ALLOC;
   }
@@ -1345,6 +1425,7 @@ luthrum_lua_runtime_status luthrum_lua_runtime_new_with_allocator(
         &runtime->allocator, runtime->last_error,
         runtime->last_error != NULL ? strlen(runtime->last_error) + 1 : 0);
     allocator = runtime->allocator;
+    policy_destroy(runtime);
     luthrum_lua_runtime_allocator_free(&allocator, runtime, sizeof(*runtime));
     return status;
   }
@@ -1360,17 +1441,18 @@ void luthrum_lua_runtime_free(luthrum_lua_runtime *runtime) {
   struct luthrum_lua_runtime_c_module *module;
   struct luthrum_lua_runtime_c_module *next;
 
-  if (runtime == NULL || runtime->trace_active) {
+  if (runtime == NULL || in_trace(runtime)) {
     return;
   }
   allocator = runtime->allocator;
 
   if (runtime->state != NULL) {
     /* Destruction is a separate host invocation with the configured budget. */
-    runtime->instruction_limit_hit = 0;
-    runtime->instruction_remaining = runtime->instruction_limit;
+    policy_store(runtime->instruction_limit_hit, 0);
+    policy_store(runtime->instruction_remaining,
+                 policy_load(runtime->instruction_limit));
     luthrum_lua_runtime_apply_instruction_hook(runtime, runtime->state);
-    runtime->execution_active = 1;
+    policy_store(runtime->execution_active, 1);
     lua_close(runtime->state);
   }
   luthrum_lua_runtime_clear_chunks(runtime);
@@ -1384,6 +1466,7 @@ void luthrum_lua_runtime_free(luthrum_lua_runtime *runtime) {
   luthrum_lua_runtime_allocator_free(
       &runtime->allocator, runtime->last_error,
       runtime->last_error != NULL ? strlen(runtime->last_error) + 1 : 0);
+  policy_destroy(runtime);
   luthrum_lua_runtime_allocator_free(&allocator, runtime, sizeof(*runtime));
 }
 
@@ -1391,8 +1474,10 @@ void luthrum_lua_runtime_free(luthrum_lua_runtime *runtime) {
  * <luthrum/lua_runtime.h>. */
 void luthrum_lua_runtime_set_context(luthrum_lua_runtime *runtime,
                                      void *context) {
-  if (runtime != NULL && !runtime->trace_active) {
+  if (runtime != NULL && !in_trace(runtime)) {
+    policy_check(pthread_mutex_lock(&runtime->policy_mutex));
     runtime->context = context;
+    policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   }
 }
 
@@ -1400,9 +1485,11 @@ void luthrum_lua_runtime_set_context(luthrum_lua_runtime *runtime,
 void luthrum_lua_runtime_set_warning_callback(
     luthrum_lua_runtime *runtime, luthrum_lua_runtime_warning_fn callback,
     void *context) {
-  if (runtime != NULL && !runtime->trace_active) {
+  if (runtime != NULL && !in_trace(runtime)) {
+    policy_check(pthread_mutex_lock(&runtime->policy_mutex));
     runtime->warning_callback = callback;
     runtime->warning_context = context;
+    policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   }
 }
 
@@ -1412,14 +1499,16 @@ luthrum_lua_runtime_set_trace_callback(luthrum_lua_runtime *runtime,
                                        luthrum_lua_runtime_trace_fn callback,
                                        void *context) {
   if (runtime == NULL || runtime->state == NULL ||
-      (runtime->execution_active && !runtime->trace_active)) {
+      (policy_load(runtime->execution_active) && !in_trace(runtime))) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
   runtime->trace_callback = callback;
   runtime->trace_context = callback != NULL ? context : NULL;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   /* During observation, keep the active thread's instruction count intact.
    * The dispatcher sees replacement/removal on its next line event. */
-  if (!runtime->trace_active) {
+  if (!in_trace(runtime)) {
     luthrum_lua_runtime_apply_instruction_hook(runtime, runtime->state);
   }
   return LUTHRUM_LUA_RUNTIME_OK;
@@ -1428,10 +1517,16 @@ luthrum_lua_runtime_set_trace_callback(luthrum_lua_runtime *runtime,
 /** Implements the public Lua runtime facade function declared in
  * <luthrum/lua_runtime.h>. */
 void *luthrum_lua_runtime_context(const luthrum_lua_runtime *runtime) {
+  luthrum_lua_runtime *owner;
+  void *context;
   if (runtime == NULL) {
     return NULL;
   }
-  return runtime->context;
+  owner = (luthrum_lua_runtime *)runtime;
+  policy_check(pthread_mutex_lock(&owner->policy_mutex));
+  context = runtime->context;
+  policy_check(pthread_mutex_unlock(&owner->policy_mutex));
+  return context;
 }
 
 /** Implements the public Lua runtime facade function declared in
@@ -1447,14 +1542,14 @@ void *luthrum_lua_runtime_context_from_state(void *lua_state) {
   if (runtime == NULL) {
     return NULL;
   }
-  return runtime->context;
+  return luthrum_lua_runtime_context(runtime);
 }
 
 /** Implements the public Lua runtime facade function declared in
  * <luthrum/lua_runtime.h>. */
 luthrum_lua_runtime_status
 luthrum_lua_runtime_openlibs(luthrum_lua_runtime *runtime) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active) {
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime)) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
 
@@ -1467,7 +1562,7 @@ luthrum_lua_runtime_status
 luthrum_lua_runtime_open_libs(luthrum_lua_runtime *runtime, int libs) {
   luthrum_lua_runtime_status status;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       libs < 0) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1543,7 +1638,7 @@ luthrum_lua_runtime_open_libs(luthrum_lua_runtime *runtime, int libs) {
  * <luthrum/lua_runtime.h>. */
 luthrum_lua_runtime_status
 luthrum_lua_runtime_set_traceback(luthrum_lua_runtime *runtime, int enabled) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active) {
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime)) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
   runtime->traceback_enabled = enabled != 0;
@@ -1556,11 +1651,11 @@ luthrum_lua_runtime_set_traceback(luthrum_lua_runtime *runtime, int enabled) {
 luthrum_lua_runtime_status
 luthrum_lua_runtime_set_instruction_limit(luthrum_lua_runtime *runtime,
                                           int instruction_count) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       instruction_count <= 0) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
-  runtime->instruction_limit = instruction_count;
+  policy_store(runtime->instruction_limit, instruction_count);
   luthrum_lua_runtime_apply_instruction_hook(runtime, runtime->state);
   luthrum_lua_runtime_clear_error(runtime);
   return LUTHRUM_LUA_RUNTIME_OK;
@@ -1570,11 +1665,11 @@ luthrum_lua_runtime_set_instruction_limit(luthrum_lua_runtime *runtime,
  * <luthrum/lua_runtime.h>. */
 luthrum_lua_runtime_status
 luthrum_lua_runtime_clear_instruction_limit(luthrum_lua_runtime *runtime) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active) {
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime)) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
-  runtime->instruction_limit = 0;
-  runtime->instruction_limit_hit = 0;
+  policy_store(runtime->instruction_limit, 0);
+  policy_store(runtime->instruction_limit_hit, 0);
   luthrum_lua_runtime_apply_instruction_hook(runtime, runtime->state);
   luthrum_lua_runtime_clear_error(runtime);
   return LUTHRUM_LUA_RUNTIME_OK;
@@ -1585,7 +1680,7 @@ luthrum_lua_runtime_clear_instruction_limit(luthrum_lua_runtime *runtime) {
 luthrum_lua_runtime_status
 luthrum_lua_runtime_set_package_path(luthrum_lua_runtime *runtime,
                                      const char *path) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       path == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1597,7 +1692,7 @@ luthrum_lua_runtime_set_package_path(luthrum_lua_runtime *runtime,
 luthrum_lua_runtime_status
 luthrum_lua_runtime_prepend_package_path(luthrum_lua_runtime *runtime,
                                          const char *path) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       path == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1609,7 +1704,7 @@ luthrum_lua_runtime_prepend_package_path(luthrum_lua_runtime *runtime,
 luthrum_lua_runtime_status
 luthrum_lua_runtime_set_package_cpath(luthrum_lua_runtime *runtime,
                                       const char *path) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       path == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1621,7 +1716,7 @@ luthrum_lua_runtime_set_package_cpath(luthrum_lua_runtime *runtime,
 luthrum_lua_runtime_status
 luthrum_lua_runtime_prepend_package_cpath(luthrum_lua_runtime *runtime,
                                           const char *path) {
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       path == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1635,7 +1730,7 @@ luthrum_lua_runtime_set_global_string(luthrum_lua_runtime *runtime,
                                       const char *name, const char *value) {
   struct luthrum_lua_runtime_global_string_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       name == NULL || value == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1653,7 +1748,7 @@ luthrum_lua_runtime_set_global_boolean(luthrum_lua_runtime *runtime,
                                        const char *name, int value) {
   struct luthrum_lua_runtime_global_boolean_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       name == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1671,7 +1766,7 @@ luthrum_lua_runtime_set_global_number(luthrum_lua_runtime *runtime,
                                       const char *name, double value) {
   struct luthrum_lua_runtime_global_number_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       name == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1689,7 +1784,7 @@ luthrum_lua_runtime_set_global_integer(luthrum_lua_runtime *runtime,
                                        const char *name, long value) {
   struct luthrum_lua_runtime_global_integer_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       name == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1709,7 +1804,7 @@ luthrum_lua_runtime_status luthrum_lua_runtime_register_c_module(
   struct luthrum_lua_runtime_c_module *module;
   luthrum_lua_runtime_status status;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       module_name == NULL || opener == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1746,7 +1841,7 @@ luthrum_lua_runtime_status luthrum_lua_runtime_register_lua_module(
   struct luthrum_lua_runtime_chunk *chunk;
   struct luthrum_lua_runtime_lua_module_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       module_name == NULL || source == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1810,7 +1905,7 @@ luthrum_lua_runtime_require(luthrum_lua_runtime *runtime,
   struct luthrum_lua_runtime_require_context context;
   luthrum_lua_runtime_status status;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       module_name == NULL) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1835,7 +1930,7 @@ luthrum_lua_runtime_run_file(luthrum_lua_runtime *runtime, const char *path,
   luthrum_lua_runtime_status status;
   struct luthrum_lua_runtime_load_file_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       path == NULL || argc < 0) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1879,7 +1974,7 @@ luthrum_lua_runtime_run_buffer(luthrum_lua_runtime *runtime,
   luthrum_lua_runtime_status status;
   struct luthrum_lua_runtime_load_buffer_context context;
 
-  if (runtime == NULL || runtime->state == NULL || runtime->trace_active ||
+  if (runtime == NULL || runtime->state == NULL || in_trace(runtime) ||
       source == NULL || argc < 0) {
     return LUTHRUM_LUA_RUNTIME_ERR_ARG;
   }
@@ -1927,7 +2022,7 @@ const char *luthrum_lua_runtime_error(const luthrum_lua_runtime *runtime) {
 /** Implements the public Lua runtime facade function declared in
  * <luthrum/lua_runtime.h>. */
 void luthrum_lua_runtime_clear_error(luthrum_lua_runtime *runtime) {
-  if (runtime == NULL || runtime->trace_active) {
+  if (runtime == NULL || in_trace(runtime)) {
     return;
   }
   luthrum_lua_runtime_allocator_free(

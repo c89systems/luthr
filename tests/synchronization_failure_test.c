@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <lauxlib.h>
 #include <lua.h>
+#include <luthrum/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,6 +81,46 @@ static int create_thread(lua_State *state) {
   return 1;
 }
 
+static void *facade_alloc(void *context, size_t size) {
+  return allocate(context, NULL, 0, size);
+}
+
+static void facade_free(void *context, void *pointer, size_t size) {
+  (void)allocate(context, pointer, size, 0);
+}
+
+static int facade_case(const char *name) {
+  luthrum_lua_runtime_allocator_config config;
+  luthrum_lua_runtime *runtime = NULL;
+  int failed;
+  memset(&config, 0, sizeof(config));
+  config.alloc_fn = facade_alloc;
+  config.realloc_fn = allocate;
+  config.free_fn = facade_free;
+  if (strcmp(name, "facade_policy_mutex") == 0)
+    fail_mutex = 1;
+  else if (strcmp(name, "facade_trace_mutex") == 0)
+    fail_mutex = 2;
+  else if (strcmp(name, "facade_state_mutex") == 0)
+    fail_mutex = 3;
+  else if (strcmp(name, "facade_world_mutex") == 0)
+    fail_mutex = 4;
+  else
+    return 1;
+  failed = luthrum_lua_runtime_new_with_allocator(&runtime, &config) !=
+               LUTHRUM_LUA_RUNTIME_ERR_ALLOC ||
+           runtime != NULL || failures != 1 || live_mutexes != 0 ||
+           live_conditions != 0 || live_bytes != 0;
+  fail_mutex = 0;
+  if (runtime != NULL)
+    luthrum_lua_runtime_free(runtime);
+  runtime = NULL;
+  failed |= luthrum_lua_runtime_new_with_allocator(&runtime, &config) !=
+            LUTHRUM_LUA_RUNTIME_OK;
+  luthrum_lua_runtime_free(runtime);
+  return failed || live_mutexes != 0 || live_conditions != 0 || live_bytes != 0;
+}
+
 static int run_case(const char *name) {
   lua_State *state;
   int status = LUA_OK;
@@ -87,6 +128,8 @@ static int run_case(const char *name) {
   int world_case = strncmp(name, "world_", 6) == 0;
   int main_case = strncmp(name, "main_", 5) == 0 || world_case;
   int condition_case = strstr(name, "condition") != NULL;
+  if (strncmp(name, "facade_", 7) == 0)
+    return facade_case(name);
   if (main_case) {
     fail_mutex = condition_case ? 0 : (world_case ? 2 : 1);
     fail_condition = condition_case ? (world_case ? 2 : 1) : 0;

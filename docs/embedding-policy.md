@@ -57,6 +57,9 @@ clock timeout or a security sandbox; trusted C modules can block, execute native
 code or alter VM policy. The counter is shared across all coroutine switches,
 including short yields. With a limit enabled, the VM calls the accounting hook
 for each instruction; unlimited execution does not install a count hook.
+The private parallel-policy experiment also verifies this shared counter across
+simultaneously executing coroutines, including observation and fresh-budget
+recovery. This does not authorize concurrent host operations on the handle.
 
 `luthrum_lua_runtime_set_trace_callback()` installs an optional line observer with
 caller-owned context. Each synchronous callback receives a borrowed snapshot of
@@ -82,6 +85,15 @@ Do not access its Lua state through another API from the callback. Callbacks
 must return normally; yielding, raising Lua errors and longjmp are unsupported.
 Record observer errors in caller-owned context and handle them after the host
 call returns. Runtime use remains serialized.
+
+Private parallel execution serializes observers as one native resource while
+leaving unrelated unobserved work runnable. Reentry restrictions identify the
+carrier inside that observer; another carrier cannot replace the observer
+during execution just because an observation is active elsewhere. Warning
+configuration is snapshotted separately and does not hold policy ownership
+through the user callback. Context lifetime and warning payload synchronization
+remain caller responsibilities. See the
+[parallel policy experiment](parallel-state-design.md#parallel-embedding-policy-experiment).
 
 Lua error handlers and finalizers are included in this policy. After exhaustion,
 the runtime's `xpcall` handler returns the limit error without calling the Lua

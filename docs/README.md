@@ -48,8 +48,10 @@ joined Lua/C captures, shared-table/metatable and registry operations, and force
 GC at API ownership boundaries. Cross-state transfers, parent-call snapshots,
 carrier-local error forwarding and callback configuration have focused parallel
 regressions. Asynchronous native hook publication avoids walking live frames or
-waiting for the interrupted coroutine's gate. The complete public
-API/native-resource audit and scheduler remain unfinished.
+waiting for the interrupted coroutine's gate. Parallel C89 policy experiments
+cover aggregate instruction budgets, observer dispatch, coroutine context and
+allocator ownership. The complete public API/native-resource audit and scheduler
+remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

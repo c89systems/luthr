@@ -65,6 +65,7 @@ add_library(luthrum_facade_objects OBJECT "${facade_source}" src/lua_runtime.c)
 add_dependencies(luthrum_facade_objects luthrum_facade_header)
 set_target_properties(luthrum_facade_objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
 luthrum_c89(luthrum_facade_objects)
+target_link_libraries(luthrum_facade_objects PRIVATE Threads::Threads)
 # Only implementations including native Lua headers need these native types.
 target_compile_options(luthrum_facade_objects PRIVATE -Wno-long-long)
 target_compile_definitions(luthrum_facade_objects PRIVATE
