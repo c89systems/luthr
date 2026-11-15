@@ -10,7 +10,6 @@
 #include "lprefix.h"
 
 
-#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,8 +62,8 @@
 /* chained list of long jump buffers */
 typedef struct lua_longjmp {
   struct lua_longjmp *previous;
-  pthread_t carrier;
-  jmp_buf b;
+  volatile pthread_t carrier;
+  intptr_t b[5];  /* compiler-owned stack context; no libc thread encoding */
   volatile TStatus status;  /* error code */
   lu_byte luthrum_stack_overflow;
   LuaNativeRoot *native_roots;
@@ -73,12 +72,27 @@ typedef struct lua_longjmp {
   LuaObjectScope *object_scopes;
 } lua_longjmp;
 
+/* A scheduler may move an intact runtime-owned stack only after relinquishing
+** its old carrier and reacquiring this state's gate on the new one. Foreign
+** C activations are excluded; their carrier and native TLS must stay attached. */
+void luaD_rebindcarrier (lua_State *L) {
+  lua_longjmp *boundary;
+  CallInfo *ci;
+  pthread_t carrier = pthread_self();
+  lua_assert(L->native_depth == 0 && L->world_depth == 0);
+  for (ci = L->ci; ci != &L->base_ci; ci = ci->previous)
+    lua_assert(isLua(ci));
+  for (boundary = L->errorJmp; boundary != NULL; boundary = boundary->previous)
+    boundary->carrier = carrier;
+  luaE_refreshnativestack(L);
+}
+
 
 /*
-** LUAI_THROW/LUAI_TRY define how Lua does exception handling. By
-** default, Lua handles errors with exceptions when compiling as
-** C++ code, with _longjmp/_setjmp when available (POSIX), and with
-** longjmp/setjmp otherwise.
+** LUAI_THROW/LUAI_TRY define how Lua does exception handling.
+** C++ source builds use exceptions. The supported C build uses the pinned
+** compiler's nonlocal-goto mechanism, keeping its recovery context on the
+** retained runtime stack rather than using a libc thread-specific jump buffer.
 */
 #if !defined(LUAI_THROW)				/* { */
 
@@ -101,17 +115,12 @@ static void LUAI_TRY (lua_State *L, lua_longjmp *c, Pfunc f, void *ud) {
 }
 
 
-#elif defined(LUA_USE_POSIX)				/* }{ */
-
-/* in POSIX, use _longjmp/_setjmp (more efficient) */
-#define LUAI_THROW(L,c)		_longjmp((c)->b, 1)
-#define LUAI_TRY(L,c,f,ud)	if (_setjmp((c)->b) == 0) ((f)(L, ud))
-
 #else							/* }{ */
 
-/* ISO C handling with long jumps */
-#define LUAI_THROW(L,c)		longjmp((c)->b, 1)
-#define LUAI_TRY(L,c,f,ud)	if (setjmp((c)->b) == 0) ((f)(L, ud))
+/* The throw lives in a function called below the matching protected entry. */
+#define LUAI_THROW(L,c) __builtin_longjmp(cast_voidp((c)->b), 1)
+#define LUAI_TRY(L,c,f,ud) \
+  if (__builtin_setjmp(cast_voidp((c)->b)) == 0) ((f)(L, ud))
 
 #endif							/* } */
 

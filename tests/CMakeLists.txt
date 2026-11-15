@@ -12,6 +12,24 @@ function(luthrum_test_program name source)
   endif()
 endfunction()
 
+find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
+  NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
+  "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(fiber_vm_test fiber_vm_test.c)
+target_sources(fiber_vm_test PRIVATE private/context.c private/context_x86_64.S)
+set_target_properties(fiber_vm_test PROPERTIES C_STANDARD 99)
+target_include_directories(fiber_vm_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
+target_compile_options(fiber_vm_test PRIVATE
+  "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
+target_link_libraries(fiber_vm_test PRIVATE luthrum_static)
+foreach(case IN ITEMS incremental generational)
+  add_test(NAME fiber_vm_${case} COMMAND fiber_vm_test ${case})
+  set_tests_properties(fiber_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
+endforeach()
+add_test(NAME fiber_stack_guards COMMAND fiber_vm_test guards)
+set_tests_properties(fiber_stack_guards PROPERTIES LABELS stack TIMEOUT 10)
+
 luthrum_test_program(parallel_vm_test parallel_vm_test.c)
 set_target_properties(parallel_vm_test PROPERTIES C_STANDARD 99)
 target_compile_options(parallel_vm_test PRIVATE -Wall -Wextra -Werror)

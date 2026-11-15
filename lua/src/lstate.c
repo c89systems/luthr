@@ -135,6 +135,18 @@ void luaE_shrinkCI (lua_State *L) {
 
 /* Cache native bounds per physical thread; refresh on outer VM entry. */
 LUAI_DDEF __thread NativeStackContext luaE_native_stack_context;
+static __thread NativeStackContext *native_stack_override;
+
+NativeStackContext *luaE_getnativestackcontext (void) {
+  return native_stack_override != NULL ? native_stack_override
+                                      : &luaE_native_stack_context;
+}
+
+NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context) {
+  NativeStackContext *previous = native_stack_override;
+  native_stack_override = context;
+  return previous;
+}
 
 uintptr_t luaE_initnativestack (void) {
   uintptr_t low = 0;

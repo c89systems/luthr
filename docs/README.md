@@ -50,8 +50,10 @@ carrier-local error forwarding and callback configuration have focused parallel
 regressions. Asynchronous native hook publication avoids walking live frames or
 waiting for the interrupted coroutine's gate. Parallel C89 policy experiments
 cover aggregate instruction budgets, observer dispatch, coroutine context and
-allocator ownership. The complete public API/native-resource audit and scheduler
-remain unfinished.
+allocator ownership. A private retained-stack experiment proves Lua-task
+migration and CPU handoff over two reused carriers, including GC and moved
+error boundaries. Native compensation, the complete public API/native-resource
+audit and the installed scheduler remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

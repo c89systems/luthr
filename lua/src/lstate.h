@@ -472,6 +472,8 @@ LUAI_FUNC void luaE_shrinkCI (lua_State *L);
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
 LUAI_DDEC(__thread NativeStackContext luaE_native_stack_context;)
 LUAI_FUNC uintptr_t luaE_initnativestack (void);
+LUAI_FUNC NativeStackContext *luaE_getnativestackcontext (void);
+LUAI_FUNC NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context);
 LUAI_FUNC void luaE_nativestackerror (lua_State *L, uintptr_t position);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);

@@ -1,0 +1,80 @@
+#define _GNU_SOURCE
+#include "context.h"
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <valgrind.h>
+
+_Static_assert(offsetof(struct test_context, rsp) == 0, "rsp offset");
+_Static_assert(offsetof(struct test_context, rbx) == 8, "rbx offset");
+_Static_assert(offsetof(struct test_context, rbp) == 16, "rbp offset");
+_Static_assert(offsetof(struct test_context, r12) == 24, "r12 offset");
+_Static_assert(offsetof(struct test_context, r13) == 32, "r13 offset");
+_Static_assert(offsetof(struct test_context, r14) == 40, "r14 offset");
+_Static_assert(offsetof(struct test_context, r15) == 48, "r15 offset");
+_Static_assert(offsetof(struct test_context, mxcsr) == 56, "mxcsr offset");
+_Static_assert(offsetof(struct test_context, control) == 60, "x87 offset");
+
+int test_fiber_create(struct test_fiber *fiber, void (*entry)(void *),
+                      void *argument) {
+  long page = sysconf(_SC_PAGESIZE);
+  uintptr_t *start;
+  if (page <= 0)
+    return EINVAL;
+  memset(fiber, 0, sizeof(*fiber));
+  fiber->stack_size = 128U * 1024U;
+  fiber->mapping_size = fiber->stack_size + 2U * (size_t)page;
+  fiber->mapping = mmap(NULL, fiber->mapping_size, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (fiber->mapping == MAP_FAILED) {
+    fiber->mapping = NULL;
+    return errno;
+  }
+  fiber->stack = (char *)fiber->mapping + page;
+  if (mprotect(fiber->stack, fiber->stack_size, PROT_READ | PROT_WRITE) != 0) {
+    int error = errno;
+    (void)munmap(fiber->mapping, fiber->mapping_size);
+    fiber->mapping = NULL;
+    return error;
+  }
+  fiber->entry = entry;
+  fiber->argument = argument;
+  fiber->native.limit = (uintptr_t)fiber->stack + 32768U;
+  fiber->valgrind_stack =
+      VALGRIND_STACK_REGISTER(fiber->stack, fiber->stack + fiber->stack_size);
+  start = (uintptr_t *)(fiber->stack + fiber->stack_size - 16U);
+  start[0] = (uintptr_t)test_context_boot;
+  start[1] = 0; /* bootstrap never returns */
+  fiber->context.rsp = (uintptr_t)start;
+  fiber->context.r12 = (uintptr_t)fiber;
+  __asm__ volatile("stmxcsr %0" : "=m"(fiber->context.mxcsr));
+  __asm__ volatile("fnstcw %0" : "=m"(fiber->context.control));
+  return 0;
+}
+
+void test_fiber_destroy(struct test_fiber *fiber) {
+  VALGRIND_STACK_DEREGISTER(fiber->valgrind_stack);
+  if (munmap(fiber->mapping, fiber->mapping_size) != 0)
+    abort();
+  fiber->mapping = NULL;
+}
+
+void test_fiber_resume(struct test_fiber *fiber, struct test_context *caller) {
+  NativeStackContext *previous;
+  fiber->caller = caller;
+  previous = luaE_setnativestackcontext(&fiber->native);
+  test_context_switch(caller, &fiber->context);
+  (void)luaE_setnativestackcontext(previous);
+}
+
+void test_fiber_pause(struct test_fiber *fiber) {
+  /* No carrier/TLS address may be used after returning on another carrier. */
+  test_context_switch(&fiber->context, fiber->caller);
+}
+
+void test_fiber_entry(struct test_fiber *fiber) {
+  fiber->entry(fiber->argument);
+  abort();
+}

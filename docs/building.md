@@ -7,7 +7,10 @@ source download or patch application during configure and build.
 
 Required workstation tools are Bash 4.4 or later, Make, CMake 3.25 or later,
 Ninja, Python 3 for the declared C89 source generator, pkg-config, rg, and
-clang-format. Valgrind is required for `make memcheck` and `make racecheck`;
+clang-format. Valgrind client headers are required to build the private stack
+experiments; CMake copies that header into the owned build tree, so target
+compilation does not search host system headers. Valgrind is required for
+`make memcheck` and `make racecheck`;
 clangd is used for editor verification. The activated lifecycle skill supplies
 its toolchain resolver.
 Run operations serially against a stable checkout and stable prepared tools.
@@ -88,6 +91,13 @@ checks exact aggregate instruction accounting, trace replacement/removal and
 blocked-observer progress, coroutine wrapper/context access, warning pairs,
 allocation caps, and external-string failure cleanup. Constructor mutex failures
 have separate `synchronization_failure_facade_*` cleanup/recovery cases.
+
+`fiber_vm_*` verifies eight Lua tasks over two reused carriers, forced migration
+without Lua yields, CPU fairness, parked-stack relocation, register/FPU state,
+error recovery, allocation failure, native stack exhaustion and binding affinity.
+`fiber_stack_guards` faults both inaccessible guard pages in child processes.
+The context code is private test support; native compensation and the installed
+scheduler are not established by these cases.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

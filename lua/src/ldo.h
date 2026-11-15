@@ -78,7 +78,7 @@ l_sinline uintptr_t luaD_nativeposition (void) {
 }
 
 #define luaE_refreshnativestack(L) \
-  { NativeStackContext *context = &luaE_native_stack_context; \
+  { NativeStackContext *context = luaE_getnativestackcontext(); \
     __asm__ ("" : "+r" (context)); \
     uintptr_t limit = context->limit; \
     if (l_unlikely(limit == 0 || limit == UINTPTR_MAX)) \
@@ -114,12 +114,15 @@ LUAI_FUNC TStatus luaD_pcall (lua_State *L, Pfunc func, void *u,
                                         ptrdiff_t oldtop, ptrdiff_t ef);
 LUAI_FUNC void luaD_poscall (lua_State *L, CallInfo *ci, int nres);
 LUAI_FUNC int luaD_reallocstack (lua_State *L, int newsize, int raiseerror);
+LUAI_FUNC void luaD_rebindcarrier (lua_State *L);
 LUAI_FUNC int luaD_growstack (lua_State *L, int n, int raiseerror);
 LUAI_FUNC void luaD_shrinkstack (lua_State *L);
 LUAI_FUNC int luaD_checkminstack (lua_State *L);
 LUAI_FUNC void luaD_anchorobj (lua_State *L, Table *anchor, GCObject *obj);
 
-LUAI_FUNC l_noret luaD_throw (lua_State *L, TStatus errcode);
+/* Compiler nonlocal jumps must execute below, not inline into, their receiver. */
+LUAI_FUNC l_noret luaD_throw (lua_State *L, TStatus errcode)
+  __attribute__((noinline));
 LUAI_FUNC l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode);
 LUAI_FUNC TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud);
 

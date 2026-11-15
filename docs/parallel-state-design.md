@@ -578,6 +578,61 @@ Scheduling, affinity, carrier limits, performance, streaming and module
 compatibility gates remain required before a public concurrent embedding
 contract.
 
+## Retained-stack migration experiment
+
+`tests/private/context*` implements a private System V x86_64 stack switch.
+It saves the callee-saved registers, stack pointer, MXCSR and x87 control word.
+Each task has a 128 KiB stack reservation with inaccessible guard pages at both
+ends. Context publication occurs on the outgoing carrier's own stack, after
+the complete task context has been saved. Another carrier may resume it only
+after taking ownership through the fixture's synchronized runnable set.
+[System V x86_64 ABI](https://gitlab.com/x86-psABIs/x86-64-ABI/-/blob/master/x86-64-ABI/low-level-sys-info.tex)
+
+Lua's native-stack context can now be bound to a runtime-owned stack for an
+entry, then restored to the carrier's ordinary stack context. The override is
+looked up through a function boundary; a task does not retain an address into
+an old carrier's TLS. At an eligible poll, the task detaches from managed
+execution and releases its Lua stack gate before returning the carrier. Its
+native pin and roots remain live while parked. After another carrier resumes
+the same retained stack and reacquires Lua ownership, it rebinds the protected
+error chain and native-stack context before executing further Lua code.
+
+The supported C build uses the pinned compiler's nonlocal-goto buffers for Lua's
+private protected boundaries, avoiding libc jump-buffer thread encoding. The
+throw is explicitly kept out of its receiver's function, as the compiler
+requires. These are not replacements for a native binding's own jump buffers.
+Foreign C activations remain attached to their carrier.
+[GCC nonlocal-goto contract](https://gcc.gnu.org/onlinedocs/gcc/Nonlocal-Gotos.html)
+
+The two `fiber_vm_*` cases run eight task functions on two reused, affinity-bound
+carriers in one shared VM. They alternate carriers at every eligible poll,
+allocate, share a mutable table and closed capture, and execute without a Lua
+yield. Two CPU-bound tasks wait for work queued behind them, making continued
+handoff necessary for completion. A managed barrier proves overlapping VM
+execution. Before further execution, all tasks park and a forced collection
+must relocate every Lua stack; execution and subsequent collection then resume.
+An otherwise unreachable userdata on each task must survive through a sole
+native root on its retained stack, including after errors unwind inner frames.
+
+Every migration checks independent register sentinels and directly reads both
+hardware rounding-control words. Lua errors, allocation failure and native stack
+exhaustion must recover through the moved protected boundary. Nested Lua inside
+a C binding records skipped migrations and preserves its OS thread/TLS. All
+states must remain usable afterward on the host's ordinary stack. Removing
+error-owner rebinding makes the fixture abort at the foreign-boundary check.
+`fiber_stack_guards` separately requires actual faults at both task-stack guards.
+Valgrind client requests register/deregister the test stacks.
+[Valgrind stack requests](https://valgrind.org/docs/manual/manual-core-adv.html)
+
+The stack switch and runnable-set driver are test support, not an installed
+scheduler or frozen ABI. Two carriers and 128 KiB reservations are fixture
+parameters, not the automatic sizing policy. The current proof covers baseline
+System V context state, not CET shadow-stack continuation or sanitizer fiber
+adapters. Native admission/compensation, nested and foreign callback routing,
+task lifetime/cancellation, resource affinity, streaming and module compatibility
+remain required. In particular, skipping migration inside a native frame does
+not establish fairness or runnable-task progress when that frame blocks.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

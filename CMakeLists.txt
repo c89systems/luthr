@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 if(NOT CMAKE_TOOLCHAIN_FILE)
   message(FATAL_ERROR "Luthrum requires CMAKE_TOOLCHAIN_FILE=cmake/toolchains/bootlin.cmake; use make configure")
 endif()
-project(luthrum VERSION 0.1.0 LANGUAGES C)
+project(luthrum VERSION 0.1.0 LANGUAGES C ASM)
 
 if(NOT LUTHRUM_BOOTLIN_READY OR NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
     NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR
