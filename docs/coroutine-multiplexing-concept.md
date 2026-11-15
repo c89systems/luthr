@@ -120,6 +120,12 @@ synchronization, explicit roots and coordinated collection pauses. The
 from free-threaded CPython, private implementation evidence and remaining
 acceptance gates. Public scheduler interfaces remain unfrozen.
 
+The CPython precedent is its free-threaded shared-object runtime: replacing
+GIL protection with object synchronization, lifetime safety and collection
+coordination. It informs shared-heap correctness. Go's task/carrier separation
+informs multiplexing and native-call handoff. Both responsibilities must be
+satisfied; neither free threading alone nor scheduling alone supplies the other.
+
 ## What to borrow from Go
 
 Go separates a goroutine, the OS thread carrying it, and runtime execution

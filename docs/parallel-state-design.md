@@ -15,6 +15,14 @@ bounded carriers and explicit native-resource affinity and ownership.
 
 ## What free-threaded CPython contributes
 
+The relevant precedent is CPython's free-threaded shared-object runtime from
+PEP 703. Its separate per-interpreter-GIL work isolates interpreter state and
+does not provide Luthrum's required shared globals and object identity.
+[PEP 684](https://peps.python.org/pep-0684/)
+Free-threaded CPython became officially supported, while remaining optional,
+in Python 3.14; this is not universal removal of the GIL from Python builds.
+[PEP 779](https://peps.python.org/pep-0779/)
+
 Free-threaded CPython replaces the GIL's shared-state protection with several
 coordinated mechanisms: container/object locks; biased and deferred reference
 counting plus immortal objects to reduce accounting contention; coordinated
@@ -22,6 +30,13 @@ collection pauses; and attached/detached thread states. Optimistic container
 reads also require safe reclamation and allocator support. Removing the
 execution mutex alone would leave these responsibilities unsatisfied.
 [PEP 703](https://peps.python.org/pep-0703/)
+
+The current implementation also uses quiescent-state-based reclamation (QSBR)
+to defer freeing storage that optimistic readers may still access. This is a
+lifetime protocol, not merely an atomic-load optimization. It can increase
+retained memory. Luthrum's initial object-protected accesses and explicit roots
+avoid taking on this additional reclamation mechanism without measured need.
+[CPython free-threading memory management](https://docs.python.org/3.14/howto/free-threading-python.html#qsbr-can-delay-freeing-of-memory)
 
 Current extension guidance requires care with borrowed references, direct field
 access, module globals and blocking native work. Its critical sections may
@@ -34,6 +49,14 @@ Lua already uses tracing collection. Introducing CPython's reference-counting
 design would add a second lifetime model. The useful lessons for Lua are scoped
 object protection, explicit native attachment, stable roots, and collection
 coordination. This is an inference from those mechanisms and the local Lua code.
+
+Free threading permits multiple OS threads to execute Python simultaneously;
+it does not supply Go-style coroutine multiplexing or migrate arbitrary native
+C activations. Luthrum therefore needs both the shared-heap safety protocol
+informed by CPython and the separate task/carrier/permit protocol informed by
+Go below. A native wait must release managed execution capacity even when its
+C activation must remain on its original carrier. Object-level safety also
+does not make a sequence of application operations an atomic transaction.
 
 ## What Go contributes
 
