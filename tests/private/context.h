@@ -15,6 +15,7 @@ struct test_fiber {
   struct test_context context;
   struct test_context *caller;
   NativeStackContext native;
+  LuaExecution execution;
   void *mapping;
   size_t mapping_size;
   char *stack;

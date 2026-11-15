@@ -52,8 +52,10 @@ waiting for the interrupted coroutine's gate. Parallel C89 policy experiments
 cover aggregate instruction budgets, observer dispatch, coroutine context and
 allocator ownership. A private retained-stack experiment proves Lua-task
 migration and CPU handoff over two reused carriers, including GC and moved
-error boundaries. Native compensation, the complete public API/native-resource
-audit and the installed scheduler remain unfinished.
+error boundaries. A bounded native-call experiment proves queued Lua and nested
+callback progress while unchanged bindings occupy both native slots, including
+instruction budgets and observer admission. Foreign-thread callbacks, resource
+waits, the complete native-resource audit and installed scheduler remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

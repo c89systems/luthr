@@ -465,6 +465,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->strt.hash = NULL;
   setnilvalue(&g->l_registry);
   g->panic = NULL;
+  g->managed_hook = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;
   g->gcstopem = 0;
@@ -511,9 +512,12 @@ void luaE_warning (lua_State *L, const char *msg, int tocont) {
   context = G(L)->ud_warn;
   luaW_heapleave(L);
   if (wf != NULL) {
-    LuaWorldScope depth = luaW_detach(L);
+    LuaWorldScope depth;
+    luaQ_beginnative(L);
+    depth = luaW_detach(L);
     wf(context, msg, tocont);
     luaW_attach(L, depth);
+    luaQ_endnative(L);
   }
 }
 

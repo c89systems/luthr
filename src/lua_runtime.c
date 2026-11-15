@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <lauxlib.h>
+#include <lexec.h>
 #include <lua.h>
 #include <lualib.h>
 
@@ -504,6 +505,14 @@ static void luthrum_lua_runtime_instruction_hook(lua_State *state,
       policy_load(runtime->instruction_limit_hit) || debug->currentline <= 0) {
     return;
   }
+  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
+  callback = runtime->trace_callback;
+  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
+  if (callback == NULL) {
+    return;
+  }
+  /* Admission precedes ownership of any observer mutex. */
+  luaQ_beginnative(state);
   /* Observers are one native resource. Waiting here holds no Lua stack gate,
    * heap scope or collection participation; unobserved work can continue. */
   policy_check(pthread_mutex_lock(&runtime->trace_mutex));
@@ -513,11 +522,13 @@ static void luthrum_lua_runtime_instruction_hook(lua_State *state,
   policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   if (callback == NULL || policy_load(runtime->instruction_limit_hit)) {
     policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
+    luaQ_endnative(state);
     return;
   }
   /* 'S' copies source metadata without pushing values or allocating in Lua. */
   if (!lua_getinfo(state, "S", debug)) {
     policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
+    luaQ_endnative(state);
     return;
   }
   event.source = debug->source;
@@ -532,6 +543,7 @@ static void luthrum_lua_runtime_instruction_hook(lua_State *state,
   runtime->trace_active = 0;
   policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
   policy_check(pthread_mutex_unlock(&runtime->trace_mutex));
+  luaQ_endnative(state);
 }
 
 static void
@@ -1414,6 +1426,7 @@ luthrum_lua_runtime_status luthrum_lua_runtime_new_with_allocator(
   }
 
   runtime->state = state;
+  luaQ_setmanagedhook(state, luthrum_lua_runtime_instruction_hook);
   lua_setwarnf(state, luthrum_lua_runtime_native_warning, runtime);
   status = luthrum_lua_runtime_protected_call(
       runtime, luthrum_lua_runtime_store_state_protected, runtime, 0,

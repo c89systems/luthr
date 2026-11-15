@@ -42,6 +42,7 @@ int test_fiber_create(struct test_fiber *fiber, void (*entry)(void *),
   fiber->entry = entry;
   fiber->argument = argument;
   fiber->native.limit = (uintptr_t)fiber->stack + 32768U;
+  fiber->native.execution = &fiber->execution;
   fiber->valgrind_stack =
       VALGRIND_STACK_REGISTER(fiber->stack, fiber->stack + fiber->stack_size);
   start = (uintptr_t *)(fiber->stack + fiber->stack_size - 16U);

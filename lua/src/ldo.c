@@ -62,6 +62,9 @@
 /* chained list of long jump buffers */
 typedef struct lua_longjmp {
   struct lua_longjmp *previous;
+  struct lua_longjmp *execution_previous;
+  LuaExecution *execution;
+  unsigned execution_native_depth;
   volatile pthread_t carrier;
   intptr_t b[5];  /* compiler-owned stack context; no libc thread encoding */
   volatile TStatus status;  /* error code */
@@ -72,19 +75,16 @@ typedef struct lua_longjmp {
   LuaObjectScope *object_scopes;
 } lua_longjmp;
 
-/* A scheduler may move an intact runtime-owned stack only after relinquishing
-** its old carrier and reacquiring this state's gate on the new one. Foreign
-** C activations are excluded; their carrier and native TLS must stay attached. */
-void luaD_rebindcarrier (lua_State *L) {
+/* Only this logical execution owns these retained native stack locations.
+** A state encountered by a nested API call can belong to another execution. */
+void luaD_rebindexecution (LuaExecution *execution) {
   lua_longjmp *boundary;
-  CallInfo *ci;
   pthread_t carrier = pthread_self();
-  lua_assert(L->native_depth == 0 && L->world_depth == 0);
-  for (ci = L->ci; ci != &L->base_ci; ci = ci->previous)
-    lua_assert(isLua(ci));
-  for (boundary = L->errorJmp; boundary != NULL; boundary = boundary->previous)
+  lua_assert(execution != NULL && execution->native_depth == 0 &&
+             execution->managed_depth == 0);
+  for (boundary = execution->protected; boundary != NULL;
+       boundary = boundary->execution_previous)
     boundary->carrier = carrier;
-  luaE_refreshnativestack(L);
 }
 
 
@@ -142,7 +142,8 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
-    if (!pthread_equal(L->errorJmp->carrier, pthread_self())) {
+    if (L->errorJmp->execution != luaQ_current() ||
+        !pthread_equal(L->errorJmp->carrier, pthread_self())) {
       fputs("Luthrum error crossed a foreign carrier's protected boundary\n", stderr);
       abort();
     }
@@ -170,6 +171,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
       source = luaW_detach(L);
       lua_lock(mainth);
       if (mainth->errorJmp != NULL &&
+          mainth->errorJmp->execution == luaQ_current() &&
           pthread_equal(mainth->errorJmp->carrier, pthread_self())) {
         LuaWorldScope depth;
         setobj2s(mainth, mainth->top.p++, &error.value);
@@ -222,6 +224,13 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
     luaE_refreshnativestack(L);
   lj.status = LUA_OK;
   lj.carrier = pthread_self();
+  lj.execution = luaQ_current();
+  lj.execution_native_depth = lj.execution != NULL
+                              ? lj.execution->native_depth : 0;
+  lj.execution_previous = lj.execution != NULL
+                           ? lj.execution->protected : NULL;
+  if (lj.execution != NULL)
+    lj.execution->protected = &lj;
   lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
@@ -230,7 +239,11 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
+  /* Retire the jump buffer before any cleanup callback can park this stack. */
+  if (lj.execution != NULL)
+    lj.execution->protected = lj.execution_previous;
   if (lj.status != LUA_OK) {
+    luaQ_restorenative(lj.execution, L, lj.execution_native_depth);
     L->native_roots = lj.native_roots;  /* native scopes have unwound */
     luaW_restore(L, lj.world_scope, lj.native_depth);
   }
@@ -525,11 +538,14 @@ void luaD_hook (lua_State *L, int event, int line,
                               int ftransfer, int ntransfer) {
   lua_Hook hook = gethook(L);
   if (hook && L->allowhook) {  /* make sure there is a hook */
+    int foreign = !luaQ_ismanagedhook(L, hook);
     LuaWorldScope depth;
     CallInfo *ci = L->ci;
     ptrdiff_t top = savestack(L, L->top.p);  /* preserve original 'top' */
     ptrdiff_t ci_top = savestack(L, ci->top.p);  /* idem for 'ci->top' */
     lua_Debug ar;
+    if (foreign)
+      luaQ_beginnative(L);
     ar.event = event;
     ar.currentline = line;
     ar.i_ci = ci;
@@ -545,6 +561,8 @@ void luaD_hook (lua_State *L, int event, int line,
     depth = luaW_detach(L);
     (*hook)(L, &ar);
     luaW_attach(L, depth);
+    if (foreign)
+      luaQ_endnative(L);
     lua_assert(!L->allowhook);
     L->allowhook = 1;
     ci->top.p = restorestack(L, ci_top);
@@ -732,6 +750,9 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   int n;  /* number of returns */
   LuaWorldScope depth;
   CallInfo *ci;
+  ptrdiff_t function = savestack(L, func);
+  luaQ_beginnative(L);
+  func = restorestack(L, function);
   checkstackp(L, LUA_MINSTACK, func);  /* ensure minimum stack size */
   L->ci = ci = prepCallInfo(L, func, status | CIST_C,
                                L->top.p + LUA_MINSTACK);
@@ -743,6 +764,7 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   depth = luaW_detach(L);
   n = (*f)(L);  /* do the actual call */
   luaW_attach(L, depth);
+  luaQ_endnative(L);
   api_checknelems(L, n);
   luaD_poscall(L, ci, n);
   return n;
@@ -942,9 +964,11 @@ static void finishCcall (lua_State *L, CallInfo *ci) {
     if (ci->callstatus & CIST_YPCALL)   /* was inside a 'lua_pcallk'? */
       status = finishpcallk(L, ci);  /* finish it */
     adjustresults(L, LUA_MULTRET);  /* finish 'lua_callk' */
+    luaQ_beginnative(L);
     depth = luaW_detach(L);
     n = (*kf)(L, APIstatus(status), ci->u.c.ctx);  /* call continuation */
     luaW_attach(L, depth);
+    luaQ_endnative(L);
     api_checknelems(L, n);
   }
   luaD_poscall(L, ci, n);  /* finish 'luaD_call' */
@@ -1026,9 +1050,12 @@ static void resume (lua_State *L, void *ud) {
     }
     else {  /* 'common' yield */
       if (ci->u.c.k != NULL) {  /* does it have a continuation function? */
-        LuaWorldScope depth = luaW_detach(L);
+        LuaWorldScope depth;
+        luaQ_beginnative(L);
+        depth = luaW_detach(L);
         n = (*ci->u.c.k)(L, LUA_YIELD, ci->u.c.ctx); /* call continuation */
         luaW_attach(L, depth);
+        luaQ_endnative(L);
         api_checknelems(L, n);
       }
       luaD_poscall(L, ci, n);  /* finish 'luaD_call' */

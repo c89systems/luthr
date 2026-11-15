@@ -118,7 +118,8 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
 
 static int migratable(lua_State *state) {
   CallInfo *frame;
-  if (state->native_depth != 0 || state->world_depth != 0)
+  if (luaQ_current()->native_depth != 0 || state->native_depth != 0 ||
+      state->world_depth != 0)
     return 0;
   for (frame = state->ci; frame != &state->base_ci; frame = frame->previous)
     if (!isLua(frame))
@@ -150,8 +151,8 @@ static void poll(lua_State *state, void *user) {
   }
   task->world = luaW_detach(state);
   check(test_register_pause(&task->fiber));
+  luaD_rebindexecution(&task->fiber.execution);
   luaW_attach(state, task->world);
-  luaD_rebindcarrier(state);
   if (state->luthrum_stack_context != &task->fiber.native)
     abort();
   verify_rounding(task->rounding);
@@ -440,11 +441,65 @@ static int exercise_guards(void) {
   return 0;
 }
 
+struct boundary_fixture {
+  struct test_fiber owner, intruder;
+  struct test_context carrier;
+  lua_State *state;
+  int parked;
+};
+static void park_boundary(lua_State *state, void *argument) {
+  struct boundary_fixture *fixture = argument;
+  (void)luaW_detach(state);
+  fixture->parked = 1;
+  test_fiber_pause(&fixture->owner);
+  _exit(92);
+}
+static void boundary_owner(void *argument) {
+  struct boundary_fixture *fixture = argument;
+  luaX_lockstate(fixture->state);
+  (void)luaD_rawrunprotected(fixture->state, park_boundary, fixture);
+  /* Reaching here means a different execution stole this jump buffer. */
+  _exit(91);
+}
+static void boundary_intruder(void *argument) {
+  struct boundary_fixture *fixture = argument;
+  lua_pushliteral(fixture->state, "foreign task error");
+  (void)lua_error(fixture->state);
+  _exit(93);
+}
+static int exercise_execution_boundary(void) {
+  struct rlimit cores = {0, 0};
+  pid_t child;
+  int status;
+  check(setrlimit(RLIMIT_CORE, &cores));
+  child = fork();
+  if (child == 0) {
+    struct boundary_fixture fixture;
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.state = luaL_newstate();
+    if (fixture.state == NULL)
+      _exit(94);
+    check(test_fiber_create(&fixture.owner, boundary_owner, &fixture));
+    check(test_fiber_create(&fixture.intruder, boundary_intruder, &fixture));
+    test_fiber_resume(&fixture.owner, &fixture.carrier);
+    if (!fixture.parked)
+      _exit(95);
+    /* Same physical carrier, distinct logical executions and native stacks. */
+    test_fiber_resume(&fixture.intruder, &fixture.carrier);
+    _exit(96);
+  }
+  if (child < 0 || waitpid(child, &status, 0) != child)
+    abort();
+  return !WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2)
     return 2;
   if (strcmp(argv[1], "guards") == 0)
     return exercise_guards();
+  if (strcmp(argv[1], "execution_boundary") == 0)
+    return exercise_execution_boundary();
   if (strcmp(argv[1], "incremental") == 0)
     return exercise_vm(0);
   if (strcmp(argv[1], "generational") == 0)

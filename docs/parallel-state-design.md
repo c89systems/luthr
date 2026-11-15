@@ -594,8 +594,8 @@ looked up through a function boundary; a task does not retain an address into
 an old carrier's TLS. At an eligible poll, the task detaches from managed
 execution and releases its Lua stack gate before returning the carrier. Its
 native pin and roots remain live while parked. After another carrier resumes
-the same retained stack and reacquires Lua ownership, it rebinds the protected
-error chain and native-stack context before executing further Lua code.
+the same retained stack, it rebinds its execution-owned protected error chain
+before reacquiring Lua ownership. The native-stack context follows that stack.
 
 The supported C build uses the pinned compiler's nonlocal-goto buffers for Lua's
 private protected boundaries, avoiding libc jump-buffer thread encoding. The
@@ -628,10 +628,64 @@ The stack switch and runnable-set driver are test support, not an installed
 scheduler or frozen ABI. Two carriers and 128 KiB reservations are fixture
 parameters, not the automatic sizing policy. The current proof covers baseline
 System V context state, not CET shadow-stack continuation or sanitizer fiber
-adapters. Native admission/compensation, nested and foreign callback routing,
-task lifetime/cancellation, resource affinity, streaming and module compatibility
-remain required. In particular, skipping migration inside a native frame does
-not establish fairness or runnable-task progress when that frame blocks.
+adapters. The bounded native-call experiment below extends this proof; foreign
+callback routing, task lifetime/cancellation, resource affinity, streaming and
+module compatibility remain required.
+
+## Bounded native-call experiment
+
+`lua/src/lexec.*` adds a private logical execution context to the retained-stack
+binding. It counts managed entries and foreign native activations across all
+Lua coroutines entered by that task. Managed admission precedes stack-gate
+reservation and world participation; release follows the final world leave and
+does not access a possibly reclaimed state. Foreign admission precedes the
+actual C activation. This allows parking while admission is unavailable without
+migrating a foreign C frame. Function stack locations are saved as offsets across
+that admission point because collection can relocate a detached stack.
+
+Ordinary C calls, continuations, hooks, readers, writers and warnings report
+native entry/return. Protected errors restore the enclosing execution depth,
+including a nested callback which retains its outer native slot. Protected jump
+buffers belong to the logical execution as well as the physical carrier; moving
+one task updates only its own buffers, including across nested Lua states. A
+different task on the same reused carrier cannot take over an error boundary.
+`fiber_execution_boundary` tries that transfer between two retained stacks on
+one OS thread and requires rejection before a jump into the parked owner.
+
+The C89 instruction-accounting dispatcher is registered by function identity as
+runtime-owned code. Counting instructions does not consume a foreign slot. Its
+user line observer still requires native admission, before taking the observer
+mutex. A removed observer returns before admission even if a stale line mask
+remains. Arbitrary replacement hooks retain ordinary foreign-call accounting.
+
+Six `native_scheduler_*` cases use one managed permit, two native-call slots and
+three prestarted reusable carriers. These are fixture parameters. A FIFO queue
+serves both runnable task entries and pinned native callbacks. A pinned callback
+waits for a permit on its existing carrier; a task without foreign activations
+parks its retained stack and returns the carrier. Outgoing contexts are fully
+saved before publication. Nested native calls reuse the task's admitted slot.
+
+Two unchanged bindings block behind native gates. While both slots remain
+occupied, a queued Lua computation and a nested callback from one blocked
+binding must finish. The callback resumes a child Lua coroutine, catches a Lua
+error, dumps/reloads bytecode, and issues a warning while preserving OS thread
+and native TLS. A third task waits for native admission. Observer variants make
+that wait occur before an observer mutex; unobserved Lua work must still finish.
+Budget variants require instruction accounting to progress at saturation, then
+exhaust the aggregate budget after the bindings return. Classifying accounting
+as foreign work instead makes the saturation test stall (negative control).
+
+Both GC modes collect while the bindings retain raw userdata pointers, then
+check exactly-once finalization after retirement. Native errors, an erroring
+foreign hook, and a yielded C continuation must leave no native slots, managed
+permits or protected buffers behind. Limits and required parking are asserted.
+
+This is private feasibility support, not an installed scheduler or a measured
+default policy. It does not yet park state/object/heap waiters through the task
+scheduler, route callbacks arriving on foreign threads, define external-thread
+admission, or prove arbitrary native resource affinity. Allocator callbacks keep
+their existing short, nonblocking metadata contract. Cancellation, shutdown,
+streaming/backpressure, module acceptance and performance/sizing gates remain.
 
 ## Lua-specific proof obligations
 

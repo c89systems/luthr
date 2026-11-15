@@ -96,8 +96,12 @@ have separate `synchronization_failure_facade_*` cleanup/recovery cases.
 without Lua yields, CPU fairness, parked-stack relocation, register/FPU state,
 error recovery, allocation failure, native stack exhaustion and binding affinity.
 `fiber_stack_guards` faults both inaccessible guard pages in child processes.
-The context code is private test support; native compensation and the installed
-scheduler are not established by these cases.
+`native_scheduler_*` uses one managed permit, two native-call slots and three
+reused carriers. Unchanged blocking bindings retain their carrier/TLS while
+queued Lua work and a nested callback complete before either binding is released.
+Cases cover saturated admission, observer mutex ordering, instruction budgets,
+GC roots, errors and yielded continuations. These are private experiments;
+foreign-thread routing, resource waits and the installed scheduler remain open.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

@@ -11,6 +11,7 @@
 #include "lua.h"
 #include "lgate.h"
 #include "lworld.h"
+#include "lexec.h"
 
 
 /* Some header files included here need this definition */
@@ -286,6 +287,7 @@ struct CallInfo {
 typedef struct NativeStackContext {
   uintptr_t limit;
   lu_byte overflow;
+  LuaExecution *execution;
 } NativeStackContext;
 
 /* Temporary values owned by a native scope, independently of Lua stack slots.
@@ -355,6 +357,7 @@ typedef struct LX {
 typedef struct global_State {
   LuaWorld world;
   lua_Alloc frealloc;  /* function to reallocate memory */
+  lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */

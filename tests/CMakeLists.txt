@@ -29,6 +29,21 @@ foreach(case IN ITEMS incremental generational)
 endforeach()
 add_test(NAME fiber_stack_guards COMMAND fiber_vm_test guards)
 set_tests_properties(fiber_stack_guards PROPERTIES LABELS stack TIMEOUT 10)
+add_test(NAME fiber_execution_boundary COMMAND fiber_vm_test execution_boundary)
+set_tests_properties(fiber_execution_boundary PROPERTIES LABELS runtime TIMEOUT 10)
+
+luthrum_test_program(native_scheduler_test native_scheduler_test.c)
+target_sources(native_scheduler_test PRIVATE private/context.c private/context_x86_64.S)
+set_target_properties(native_scheduler_test PROPERTIES C_STANDARD 99)
+target_include_directories(native_scheduler_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
+target_compile_options(native_scheduler_test PRIVATE
+  "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
+target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
+foreach(case IN ITEMS incremental generational budget_incremental budget_generational
+    trace_incremental trace_generational)
+  add_test(NAME native_scheduler_${case} COMMAND native_scheduler_test ${case})
+  set_tests_properties(native_scheduler_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
+endforeach()
 
 luthrum_test_program(parallel_vm_test parallel_vm_test.c)
 set_target_properties(parallel_vm_test PROPERTIES C_STANDARD 99)

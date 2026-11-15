@@ -76,6 +76,7 @@ static void release (lua_State *L) {
 }
 
 void luaX_lockstate (lua_State *L) {
+  luaQ_entermanaged(L);
   reserve(L);
   luaW_enter(L);
 }
@@ -85,12 +86,14 @@ void luaX_unlockstate (lua_State *L) {
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L);
   luaW_leave(L);
+  luaQ_leavemanaged();  /* no state accesses after the final world leave */
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation
 ** must not count as a mutator or prevent the other owner from collecting.
 ** No managed stack/CI pointer is borrowed until both reservations are ready. */
 void luaX_lockpair (lua_State *first, lua_State *second) {
+  luaQ_entermanaged(first);
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
     lua_State *swap = first;
     first = second;
@@ -110,6 +113,7 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
   if (second != first) release(second);
   release(first);
   luaW_leave(first);
+  luaQ_leavemanaged();
 }
 
 l_uint32 luaX_parentcalls (lua_State *from) {
@@ -124,6 +128,7 @@ l_uint32 luaX_parentcalls (lua_State *from) {
 
 void luaX_poll (lua_State *L) {
   LuaWorldScope depth;
+  luaQ_poll(L);
   /* Internal poll handlers execute as managed VM code, with stack ownership.
   ** They are not ordinary C bindings and do not detach automatically. */
   if (L->state_poll != NULL)
