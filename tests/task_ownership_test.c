@@ -27,8 +27,25 @@ struct fixture {
   size_t live;
   unsigned finalized, closed, failures;
   int deny, entered, release, armed, collect_status, status, results;
+  int waiting, second_code, second_status, second_results;
+  int notified;
+  LuaWaiter *waiter;
 };
 static struct fixture *active;
+static __thread int host_awaiting;
+int __real_pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+int __wrap_pthread_cond_wait(pthread_cond_t *condition,
+                             pthread_mutex_t *mutex) {
+  if (host_awaiting && condition == &G(active->main)->world.changed) {
+    require(mutex == &G(active->main)->world.mutex);
+    require(active->tasks[0].phase == LUA_TASK_COLLECTING);
+    require(pthread_mutex_lock(&active->mutex) == 0);
+    active->waiting = 1;
+    require(pthread_cond_broadcast(&active->changed) == 0);
+    require(pthread_mutex_unlock(&active->mutex) == 0);
+  }
+  return __real_pthread_cond_wait(condition, mutex);
+}
 static void hold(void) {
   require(pthread_mutex_lock(&active->mutex) == 0);
   active->entered = 1;
@@ -42,6 +59,10 @@ int __wrap_lua_checkstack(lua_State *state, int count) {
   int result = __real_lua_checkstack(state, count);
   if (active->armed && state == active->receivers[0]) {
     active->armed = 0;
+    if (strstr(active->mode, "rollback") != NULL) {
+      require(result == 0 && active->failures != 0);
+      active->deny = 0;
+    }
     hold();
   }
   return result;
@@ -256,6 +277,57 @@ static void *collector_entry(void *context) {
                                        &test->status, &test->results);
   return NULL;
 }
+static void host_wait(LuaExecution *execution, pthread_mutex_t *mutex,
+                      LuaWaiter *waiter) {
+  struct fixture *test = execution->context;
+  require(pthread_mutex_lock(&test->mutex) == 0);
+  test->waiter = waiter;
+  test->waiting = 1;
+  require(pthread_mutex_unlock(mutex) == 0);
+  require(pthread_cond_broadcast(&test->changed) == 0);
+  while (!test->notified)
+    require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
+  require(pthread_mutex_unlock(&test->mutex) == 0);
+}
+static void host_wake(LuaExecution *execution, LuaWaiter *waiter) {
+  struct fixture *test = execution->context;
+  require(pthread_mutex_lock(&test->mutex) == 0);
+  require(test->waiter == waiter && !test->notified);
+  test->notified = 1;
+  require(pthread_cond_broadcast(&test->changed) == 0);
+  require(pthread_mutex_unlock(&test->mutex) == 0);
+}
+static void *awaiter_entry(void *context) {
+  struct fixture *test = context;
+  LuaExecution execution = {0};
+  NativeStackContext native = {0, 0, NULL, NULL}, *previous = NULL;
+  int logical = strstr(test->mode, "notify") != NULL;
+  test->second_status = test->second_results = 777;
+  if (logical) {
+    execution.context = test;
+    execution.wait = host_wait;
+    execution.wake = host_wake;
+    execution.native_depth = 1;
+    native.execution = &execution;
+    previous = luaE_setnativestackcontext(&native);
+  }
+  host_awaiting = !logical;
+  test->second_code = luaTK_await(test->receivers[1], &test->tasks[0],
+                                  &test->second_status, &test->second_results);
+  host_awaiting = 0;
+  if (logical) {
+    require(execution.native_depth == 1 && execution.managed_depth == 0 &&
+            execution.protected == NULL && native.coroutine_scopes == NULL);
+    luaE_setnativestackcontext(previous);
+  }
+  return NULL;
+}
+static int collect_result(lua_State *state, LuaTaskRoot *task, int *status,
+                          int *results) {
+  if (strstr(active->mode, "await") != NULL)
+    return luaTK_await(state, task, status, results);
+  return luaTK_collect(state, task, status, results);
+}
 static void verify_result(lua_State *state, int status, int results) {
   if (strstr(active->mode, "selfclose") != NULL)
     require(status == LUA_OK && results == 0);
@@ -293,12 +365,24 @@ static void release_hold(void) {
   require(pthread_cond_broadcast(&active->changed) == 0);
   require(pthread_mutex_unlock(&active->mutex) == 0);
 }
+static int fill_receiver(lua_State *receiver) {
+  int padding;
+  require(lua_checkstack(receiver, 128));
+  luaX_lockstate(receiver);
+  padding = (int)(receiver->stack_last.p - (receiver->ci->func.p + 1)) - 1;
+  luaX_unlockstate(receiver);
+  require(lua_checkstack(receiver, padding));
+  lua_settop(receiver, padding);
+  return padding;
+}
 static void *run(void *context) {
   struct fixture *test = context;
-  pthread_t owner, collector;
+  pthread_t owner, collector, awaiter;
   LuaTaskRoot other = {0};
   LuaCallback callback;
+  lua_State *first_result;
   int index, status = 777, results = 777;
+  int rollback = strstr(test->mode, "rollback") != NULL;
   int facade = strstr(test->mode, "facade") != NULL;
   int early_gc = strstr(test->mode, "oom") != NULL ||
                  strstr(test->mode, "selfclose") != NULL;
@@ -389,10 +473,14 @@ static void *run(void *context) {
   require(pthread_join(owner, NULL) == 0);
   require(luaTK_collect(test->tasks[0].thread, &test->tasks[0], &status,
                         &results) == LUA_TK_INVALID);
+  require(luaTK_await(test->tasks[0].thread, &test->tasks[0], &status,
+                      &results) == LUA_TK_INVALID);
   {
     lua_State *other_vm = lua_newstate(allocate, test, 0);
     require(other_vm != NULL);
     require(luaTK_collect(other_vm, &test->tasks[0], &status, &results) ==
+            LUA_TK_INVALID);
+    require(luaTK_await(other_vm, &test->tasks[0], &status, &results) ==
             LUA_TK_INVALID);
     lua_close(other_vm);
   }
@@ -405,19 +493,14 @@ static void *run(void *context) {
     busy(index);
   test->receivers[0] = lua_newthread(test->main);
   test->receivers[1] = lua_newthread(test->main);
+  first_result = test->receivers[0];
   if (strstr(test->mode, "retry") != NULL) {
     lua_State *receiver = test->receivers[0];
-    int padding;
+    int padding = fill_receiver(receiver);
     struct snapshot before;
-    require(lua_checkstack(receiver, 128));
-    luaX_lockstate(receiver);
-    padding = (int)(receiver->stack_last.p - (receiver->ci->func.p + 1)) - 1;
-    luaX_unlockstate(receiver);
-    require(lua_checkstack(receiver, padding));
-    lua_settop(receiver, padding);
     snapshot(test->tasks[0].thread, &before, 0);
     test->deny = 1;
-    require(luaTK_collect(receiver, &test->tasks[0], &status, &results) ==
+    require(collect_result(receiver, &test->tasks[0], &status, &results) ==
             LUA_TK_STACK);
     test->deny = 0;
     require(test->failures != 0 && lua_gettop(receiver) == padding);
@@ -426,33 +509,62 @@ static void *run(void *context) {
     require(test->finalized == 0);
     lua_settop(receiver, 0);
   }
-  if (strstr(test->mode, "race") != NULL) {
+  if (strstr(test->mode, "race") != NULL ||
+      strstr(test->mode, "notify") != NULL) {
+    if (rollback) {
+      (void)fill_receiver(test->receivers[0]);
+      test->deny = 1;
+    }
     test->entered = test->release = 0;
+    test->status = test->results = 777;
     test->armed = 1;
     require(pthread_create(&collector, NULL, collector_entry, test) == 0);
     await_hold();
     require(luaTK_collect(test->receivers[1], &test->tasks[0], &status,
                           &results) == LUA_TK_PENDING);
     require(lua_gettop(test->receivers[1]) == 0);
+    if (strstr(test->mode, "await") != NULL) {
+      require(pthread_create(&awaiter, NULL, awaiter_entry, test) == 0);
+      require(pthread_mutex_lock(&test->mutex) == 0);
+      while (!test->waiting)
+        require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
+      require(pthread_mutex_unlock(&test->mutex) == 0);
+    }
     busy(0);
     collect_gc();
     require(test->finalized == 0);
     release_hold();
     require(pthread_join(collector, NULL) == 0);
-    require(test->collect_status == LUA_OK);
-    status = test->status;
-    results = test->results;
+    if (strstr(test->mode, "await") != NULL) {
+      require(pthread_join(awaiter, NULL) == 0);
+      if (rollback) {
+        require(test->second_code == LUA_OK && test->second_status == LUA_OK &&
+                test->second_results == 3);
+        first_result = test->receivers[1];
+      } else
+        require(test->second_code == LUA_TK_COLLECTED &&
+                test->second_status == 777 && test->second_results == 777);
+    }
+    require(test->collect_status == (rollback ? LUA_TK_STACK : LUA_OK));
+    if (rollback) {
+      require(test->status == 777 && test->results == 777);
+      status = test->second_status;
+      results = test->second_results;
+    } else {
+      status = test->status;
+      results = test->results;
+    }
   } else
-    require(luaTK_collect(test->receivers[0], &test->tasks[0], &status,
-                          &results) == LUA_OK);
-  verify_result(test->receivers[0], status, results);
+    require(collect_result(test->receivers[0], &test->tasks[0], &status,
+                           &results) == LUA_OK);
+  verify_result(first_result, status, results);
   collect_gc();
   require(test->finalized == (early_gc ? 2U : 0U));
   require(luaTK_collect(test->main, &test->tasks[0], &status, &results) ==
           LUA_TK_COLLECTED);
   busy(1);
-  require(luaTK_collect(test->receivers[1], &test->tasks[1], &status,
-                        &results) == LUA_OK);
+  require(collect_result(test->receivers[1], &test->tasks[1], &status,
+                         &results) == LUA_OK);
   verify_result(test->receivers[1], status, results);
   require(G(test->main)->tasks == NULL);
   require(test->executions[0].task == NULL && test->executions[1].task == NULL);

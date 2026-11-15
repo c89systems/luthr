@@ -150,6 +150,15 @@ competing collectors, stack-growth retry, cross-VM rejection and execution reuse
 The scheduler's Lua tasks use the same records through migration, native-call
 saturation, callbacks and streaming. Public task lifecycle remains unfinished.
 
+`task_ownership_*await*` adds completed-result waiting, failed-stack retry and
+waiters queued behind an active collector, including retry notification.
+`native_scheduler_task_*` runs eight tasks over four carriers with two managed
+permits and two occupied native slots. It checks simultaneous VM participation
+on selected allowed CPUs, task parking, forced migration, early notification,
+unrelated-task progress, nested native callbacks, self-wait rejection and cleanup.
+Driver variants await before their first Lua entry. CPU IDs are printed by the
+fixture; throughput, automatic sizing and public task lifecycle remain open.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

@@ -20,10 +20,12 @@ luthrum_test_program(task_ownership_test task_ownership_test.c)
 set_target_properties(task_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(task_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(task_ownership_test PRIVATE luthrum_static)
-target_link_options(task_ownership_test PRIVATE -Wl,--wrap=lua_checkstack)
+target_link_options(task_ownership_test PRIVATE -Wl,--wrap=lua_checkstack
+  -Wl,--wrap=pthread_cond_wait)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
-    foreach(case IN ITEMS normal active yield error finish_error cleanup_error selfclose oom retry race)
+    foreach(case IN ITEMS normal active yield error finish_error cleanup_error selfclose oom retry race
+        await_ready await_retry await_race await_notify await_notify_rollback)
       add_test(NAME task_ownership_${backend}_${case}_${gc}
         COMMAND task_ownership_test ${backend}_${case}_${gc})
       set_tests_properties(task_ownership_${backend}_${case}_${gc}
@@ -105,6 +107,17 @@ target_include_directories(native_scheduler_test PRIVATE "${CMAKE_CURRENT_BINARY
 target_compile_options(native_scheduler_test PRIVATE
   "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
 target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS normal migrate early error callback callback_migrate callback_error
+        driver driver_migrate)
+      add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
+        COMMAND native_scheduler_test task_${backend}_${case}_${gc})
+      set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
+    endforeach()
+  endforeach()
+endforeach()
 foreach(case IN ITEMS incremental generational budget_incremental budget_generational
     trace_incremental trace_generational wait_object_incremental wait_object_generational
     wait_gate_incremental wait_gate_generational wait_gc_incremental wait_gc_generational

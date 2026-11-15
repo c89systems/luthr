@@ -1012,7 +1012,7 @@ does not wait for an executing task and cannot move values across VMs or into
 the task's own stack. Pending/invalid results leave the caller's output fields
 unchanged. Raw embedding API sequences still require owner serialization.
 
-Forty `task_ownership_*` cases use raw/C89 entrypoints, both collectors and
+Sixty `task_ownership_*` cases use raw/C89 entrypoints, both collectors and
 default worker stacks. They force collection with application references dropped
 before execution and after the owner pthread exits, preserve target values under
 competing Lua calls, cover native and cleanup waits, errors and memory denial,
@@ -1024,10 +1024,64 @@ contract. The tests fail when ownership, root marking, collector
 reservation, error cleanup, retry rollback, return-state validation or foreign
 entry exclusion is removed. Those negative edits are restored for final checks.
 
-These interfaces remain private. Task waiting, cancellation (including tasks
+These interfaces remain private. Public task waiting, cancellation (including tasks
 that never started), shutdown, affinity, module acceptance and the public task
 API still require their own lifecycle gates. Hosts must collect all admitted
 records before destroying their storage or closing the VM.
+
+## Task waiting and parallel execution permits
+
+`luaTK_await` first crosses a balanced managed boundary, releasing capacity that
+an initial driver dispatch may already own. It attempts ordinary result
+collection, then checks the readiness predicate and registers a waiter under
+the same world mutex. Completion, collection and receiving-stack failure notify
+the record's waiters. Collection remains exclusive and preserves object identity;
+an unsuccessful stack-growth attempt keeps its outcome available to another
+waiter or a later retry. Caller status/result fields remain unchanged on an
+admission failure. Awaiting one's own execution is rejected, including from a
+different Lua child entered by that execution's native callback.
+
+Waiting uses the existing VM condition variable and a per-record logical waiter
+list. A scheduled managed caller parks its retained stack through the existing
+resource-wait hooks. A caller inside foreign C keeps its physical carrier while
+releasing managed execution capacity; a plain host uses the condition-variable
+fallback. The caller keeps its receiving coroutine rooted and all entered calls
+retain the record's storage. No coroutine gate, collector participation or heap
+metadata ownership remains held across the wait. Public cancellation, deadlines,
+cyclic dependency handling and shutdown still need their lifecycle contract.
+
+Twenty await variants of `task_ownership_*` check completed outcomes, allocation
+denial/retry, waiting behind another collector, plain-host and logical waiters,
+and notification when the first collector's stack growth fails. The logical
+waiter tests require an explicit notification even if unrelated condition
+variable broadcasts occur.
+
+Thirty-six `native_scheduler_task_*` cases combine raw/C89 entrypoints and both
+GC modes with two managed permits, two blocked native slots and four owned
+carriers. Eight task records retain their Lua states after application references
+are dropped. Two carriers select distinct CPUs from the process affinity mask
+when available; their observed CPU IDs are printed. A barrier inside VM
+safepoints observes two active mutators simultaneously. Forced migration starts
+after that observation so the fixture cannot pin both barrier participants to
+one carrier. This establishes simultaneous managed participation; measured
+throughput and default carrier sizing remain outstanding.
+
+Producers then wait on bounded pipes while other tasks await their outcomes.
+An unrelated allocating Lua task completes before either native holder or
+producer is released. Forced GC preserves the queued values. Competing awaiters
+consume each outcome once; the others observe collection without changing their
+outputs. Other cases cover notification before outgoing-context publication,
+error cleanup, a same-carrier nested native callback awaiting at saturation and
+a driver awaiting before its first Lua entry. Foreign C retains its TLS/carrier;
+eligible managed waiters migrate between the two managed carriers.
+
+The driver checks Lua-state invariants before publishing completion, because
+another task can collect its final root immediately afterward. It performs no
+further Lua-state access before saving its completed context. The tests reject
+missing completion/collection/retry notifications, a retained initial execution
+permit, callback self-wait and serialized managed capacity. All negative edits
+are restored for normal verification. These remain private runtime/driver
+interfaces; affinity, module compatibility and the public scheduler remain open.
 
 ## Lua-specific proof obligations
 

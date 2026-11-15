@@ -70,7 +70,9 @@ Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.
 Private scheduled-task records now reserve coroutines and retain their results
 through collection, including allocation-failure retry and error cleanup.
-The public task API, cancellation and shutdown remain unfinished.
+Private awaiting now parks managed tasks or preserves a native caller's carrier,
+including simultaneous Lua execution with two managed permits while two native
+slots are blocked. The public task API, cancellation and shutdown remain unfinished.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

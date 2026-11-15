@@ -17,6 +17,7 @@ typedef struct LuaTaskRoot {
   struct global_State *global;
   lua_State *thread;
   LuaExecution *execution;
+  LuaWaiter *waiters;
   int phase;
   int status;
   int results;
@@ -24,7 +25,8 @@ typedef struct LuaTaskRoot {
 
 /* The record and execution are initially zeroed and outlive all entered calls,
 ** including collection. Immutable global/thread/execution pointers remain as
-** identities after collection; phase/outcome/list links use the world mutex.
+** identities after collection; phase/outcome/list links/waiters use the world
+** mutex.
 ** Admission uses a fresh/yielded child owned by the embedding caller. The VM
 ** outlives every operation, and the caller retains a Lua root until admission.
 ** No allocation or function/result copying is needed. */
@@ -42,5 +44,10 @@ LUAI_FUNC int luaTK_finish (LuaTaskRoot *task, int *status, int *results);
 ** success no Lua state pointer retained by this record may be dereferenced. */
 LUAI_FUNC int luaTK_collect (lua_State *L, LuaTaskRoot *task,
                              int *status, int *results);
+/* Wait outside state gates, releasing managed capacity until completion or a
+** collector changes the outcome. A task cannot await its own execution.
+** The receiver remains rooted by its caller throughout the entered call. */
+LUAI_FUNC int luaTK_await (lua_State *L, LuaTaskRoot *task,
+                           int *status, int *results);
 
 #endif

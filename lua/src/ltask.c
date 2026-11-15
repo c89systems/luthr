@@ -107,6 +107,7 @@ int luaTK_finish (LuaTaskRoot *task, int *status, int *results) {
   task->status = *status;
   task->results = *results;
   task->phase = LUA_TASK_FINISHED;
+  luaQ_wake(&world->changed, &task->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   return LUA_OK;
 }
@@ -131,6 +132,7 @@ int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   if (!lua_checkstack(L, count)) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     task->phase = LUA_TASK_FINISHED;
+    luaQ_wake(&world->changed, &task->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     return LUA_TK_STACK;
   }
@@ -143,8 +145,30 @@ int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   task->link = NULL;
   task->phase = LUA_TASK_COLLECTED;
   __atomic_store_n(&task->execution->task, NULL, __ATOMIC_RELEASE);
+  luaQ_wake(&world->changed, &task->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   *status = outcome;
   *results = count;
   return LUA_OK;
+}
+
+int luaTK_await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+  LuaWorld *world = &G(L)->world;
+  int result;
+  if (task->global != G(L) || task->thread == L ||
+      task->execution == luaQ_current() || status == NULL || results == NULL)
+    return LUA_TK_INVALID;
+  /* Retire capacity granted to an initial driver dispatch, too. Ordinary Lua
+  ** C activations already publish their roots and detach before this call. */
+  lua_lock(L);
+  lua_unlock(L);
+  for (;;) {
+    result = luaTK_collect(L, task, status, results);
+    if (result != LUA_TK_PENDING) return result;
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    while (task->phase != LUA_TASK_FINISHED &&
+           task->phase != LUA_TASK_COLLECTED)
+      luaQ_wait(L, &world->mutex, &world->changed, &task->waiters);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  }
 }
