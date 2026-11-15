@@ -929,6 +929,53 @@ These changes are restored before normal verification. This proves the tested
 control paths; task admission/lifecycle ownership, cancellation, resource
 affinity and the remaining libraries/modules still require their own gates.
 
+## Whole coroutine operations
+
+`lua/src/lcoroscope.c` owns each standard-library resume/close operation from
+before argument transfer until results and error cleanup have been withdrawn.
+An overlapping `resume` returns false without changing the target stack;
+`wrap` and `close` raise the existing busy-coroutine errors on their caller.
+`coroutine.status` reports an owned target as normal, including the otherwise
+ambiguous preparation and result-transfer intervals. Raw resume/close execution
+flags also cover internal yield and close-handler intervals.
+
+Scopes use logical native-stack contexts, so ownership survives parking and
+migration without retaining a physical mutex. A short world-mutex scope protects
+admission, the target owner, source-operation counts and an intrusive GC root
+list. That list retains both states independently of application references.
+Protected receivers snapshot the context's scope chain. Errors retire abandoned
+claims before handlers run and unlink their roots before native storage unwinds;
+an inner protected failure preserves surviving outer claims. A held operation
+cannot be abandoned by self-close, and a close handler cannot recursively close
+the state it is already closing. A reentrant callback cannot self-close an older
+state across another state's operation or another execution's protected receiver.
+Busy self-close uses a fixed error string without allocating.
+
+Seventy-two `coroutine_operation_*` cases run raw/C89 entrypoints in both GC
+modes on default worker stacks. Controlled barriers pause before argument
+transfer, after results are ready, before/after close, inside a close handler,
+and during raw resume's yield recovery. Competing calls must leave stack values
+and status unchanged. The original operation must finish, allow subsequent
+legal use and close exactly once. Other cases force collection when an operation
+alone owns its child, exercise error handlers that recover or themselves fail,
+deny allocation during busy reporting or abandonment, and reject destructive
+self-close without allocating. A callback chain through three states rejects
+self-close across the middle state's operation even when the original state
+owns no operations. Nested VM construction injects allocation errors while
+preserving an outer VM's operation.
+
+The existing migrated/saturated control pipelines now exercise these scopes
+and assert that completed execution contexts retain none. Removing the claim,
+root marking, unwind retirement, nested-boundary preservation or self-close
+guard makes its negative control fail; those edits are restored for normal
+verification. The callback-chain regression also fails without the self-close
+boundary check.
+
+This is ownership for the tested synchronous adapters. Raw host API sequences
+still require caller serialization. Persistent scheduled-task ownership must
+extend through result collection, with cancellation, affinity, module acceptance
+and public scheduler lifecycle gates still outstanding.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

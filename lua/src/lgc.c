@@ -16,6 +16,7 @@
 
 #include "laccess.h"
 #include "lcallback.h"
+#include "lcoroscope.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -414,6 +415,13 @@ static void reallymarkobject (global_State *g, GCObject *o) {
 static void markmt (global_State *g) {
   int i;
   CClosure *function;
+  LuaCoroutineScope *scope;
+  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  for (scope = g->coroutine_scopes; scope != NULL; scope = scope->next) {
+    markobject(g, scope->source);
+    markobject(g, scope->target);
+  }
+  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   for (function = g->managed_functions; function != NULL;
        function = function->managed_next)
     markobject(g, function);

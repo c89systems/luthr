@@ -290,6 +290,8 @@ static void f_luaopen (lua_State *L, void *ud) {
   luaS_init(L);
   luaT_init(L);
   luaX_init(L);
+  g->operation_error = luaS_newliteral(L, "cannot close a coroutine with active operations");
+  luaC_fix(L, obj2gco(g->operation_error));
   g->gcstp = 0;  /* allow gc */
   setnilvalue(&g->nilvalue);  /* now state is complete */
   luai_userstateopen(L);
@@ -312,6 +314,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->native_roots = NULL;
   L->callback_owner = NULL;
   L->callback_active = 0;
+  L->operation = NULL;
+  L->owned_operations = L->resume_active = L->close_active = 0;
   L->state_poll = NULL;
   L->state_poll_context = NULL;
   L->poll_remaining = 1024;
@@ -425,6 +429,7 @@ TStatus luaE_resetthread (lua_State *L, TStatus status) {
 
 LUA_API int lua_closethread (lua_State *L, lua_State *from) {
   TStatus status;
+  int crossing;
   l_uint32 calls = luaX_parentcalls(from);
   lua_lock(L);
   if (L->callback_active != 0) {
@@ -434,8 +439,20 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
     lua_unlock(L);
     return LUA_ERRRUN;
   }
+  crossing = L == from && !luaD_canselfclose(L);
+  luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+  if (L->owned_operations != 0 || L->close_active != 0 || crossing) {
+    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+    setsvalue2s(L, L->top.p++, G(L)->operation_error);
+    if (L->ci->top.p < L->top.p) L->ci->top.p = L->top.p;
+    lua_unlock(L);
+    return LUA_ERRRUN;
+  }
+  luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+  L->close_active = 1;
   L->nCcalls = calls;
   status = luaE_resetthread(L, L->status);
+  L->close_active = 0;
   if (L == from)  /* closing itself? */
     luaD_throwbaselevel(L, status);
   lua_unlock(L);
@@ -479,6 +496,8 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->callbacks = NULL;
   g->pipe_meta = NULL;
   g->managed_functions = NULL;
+  g->coroutine_scopes = NULL;
+  g->operation_error = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;
   g->gcstopem = 0;

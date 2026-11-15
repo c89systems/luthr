@@ -113,7 +113,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
                  void (*function)(lua_State *, void *), void *context,
                  char *error, size_t error_size) {
   LuaExecution *current = luaQ_current();
-  NativeStackContext native = {0, 0, NULL};
+  NativeStackContext native = {0, 0, NULL, NULL};
   NativeStackContext *previous = NULL;
   struct Invocation call;
   lua_State *L;
@@ -186,7 +186,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
   luaX_checksync(pthread_mutex_unlock(&callback->mutex));
   if (attached) {
     lua_assert(execution->managed_depth == 0 && execution->native_depth == 1 &&
-               execution->protected == NULL);
+               execution->protected == NULL && native.coroutine_scopes == NULL);
     execution->native_depth = 0;
     luaE_setnativestackcontext(previous);
   }

@@ -845,6 +845,7 @@ const char *luaG_addinfo (lua_State *L, const char *msg, TString *src,
 
 
 l_noret luaG_errormsg (lua_State *L) {
+  luaD_releaseoperations(L);
   if (L->errfunc != 0) {  /* is there an error handling function? */
     luaA_release(L);
     (void)luaW_suspend(L);
@@ -869,6 +870,7 @@ l_noret luaG_runerror (lua_State *L, const char *fmt, ...) {
   va_list argp;
   /* Error construction may collect and run finalizers before the handler.
   ** This operation cannot resume; retire ownership before any user code. */
+  luaD_releaseoperations(L);
   luaA_release(L);
   (void)luaW_suspend(L);
   luaC_checkGC(L);  /* error message uses memory */

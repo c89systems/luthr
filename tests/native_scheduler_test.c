@@ -291,6 +291,10 @@ static void task_entry(void *argument) {
   require(task->fiber.execution.managed_depth == 0);
   require(task->fiber.execution.native_depth == 0);
   require(task->fiber.execution.protected == NULL);
+  require(task->fiber.native.coroutine_scopes == NULL);
+  require(task->state == NULL ||
+          (task->state->owned_operations == 0 &&
+           task->state->resume_active == 0 && task->state->close_active == 0));
   lock(task->pool);
   if (task->permit)
     release_permit(task); /* A private probe may finish without a Lua entry. */

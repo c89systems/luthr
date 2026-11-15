@@ -56,6 +56,8 @@ int test_fiber_create(struct test_fiber *fiber, void (*entry)(void *),
 }
 
 void test_fiber_destroy(struct test_fiber *fiber) {
+  if (fiber->native.coroutine_scopes != NULL)
+    abort();
   VALGRIND_STACK_DEREGISTER(fiber->valgrind_stack);
   if (munmap(fiber->mapping, fiber->mapping_size) != 0)
     abort();

@@ -288,6 +288,7 @@ typedef struct NativeStackContext {
   uintptr_t limit;
   lu_byte overflow;
   LuaExecution *execution;
+  struct LuaCoroutineScope *coroutine_scopes;
 } NativeStackContext;
 
 /* Temporary values owned by a native scope, independently of Lua stack slots.
@@ -332,6 +333,10 @@ struct lua_State {
   LuaNativeRoot *native_roots;
   struct LuaCallback *callback_owner;
   unsigned callback_active;
+  struct LuaCoroutineScope *operation;  /* world mutex protects operation metadata */
+  unsigned owned_operations;
+  unsigned resume_active;
+  unsigned close_active;
   LuaStackGate stack_gate;
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
@@ -363,6 +368,8 @@ typedef struct global_State {
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */
   CClosure *managed_functions;  /* stable identities for zero-capture code */
+  struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
+  TString *operation_error;
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */

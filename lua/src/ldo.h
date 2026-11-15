@@ -115,6 +115,8 @@ LUAI_FUNC TStatus luaD_pcall (lua_State *L, Pfunc func, void *u,
 LUAI_FUNC void luaD_poscall (lua_State *L, CallInfo *ci, int nres);
 LUAI_FUNC int luaD_reallocstack (lua_State *L, int newsize, int raiseerror);
 LUAI_FUNC void luaD_rebindexecution (LuaExecution *execution);
+LUAI_FUNC void luaD_releaseoperations (lua_State *L);
+LUAI_FUNC int luaD_canselfclose (lua_State *L);
 LUAI_FUNC int luaD_growstack (lua_State *L, int n, int raiseerror);
 LUAI_FUNC void luaD_shrinkstack (lua_State *L);
 LUAI_FUNC int luaD_checkminstack (lua_State *L);

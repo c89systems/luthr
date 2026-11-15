@@ -66,6 +66,9 @@ they do not establish streaming compatibility for the required modules.
 Owned base/coroutine control functions and C89 policy wrappers now support these
 parking/migration paths, with stable function identity on reopening and rooted
 wrapped-coroutine snapshots. The remaining libraries still require their audit.
+Resume/close operation scopes now reject overlap through argument/result
+transfer and cleanup, retaining both states through GC and protected unwinding.
+Persistent task admission and ownership through result collection remain open.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

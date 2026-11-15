@@ -19,6 +19,7 @@
 #include "llimits.h"
 #include "lexec.h"
 #include "lcontrol.h"
+#include "lcoroscope.h"
 
 
 static lua_State *getco (lua_State *L) {
@@ -58,8 +59,15 @@ static int auxresume (lua_State *L, lua_State *co, int narg) {
 
 int luaB_coresume (lua_State *L) {
   lua_State *co = getco(L);
+  LuaCoroutineScope scope;
   int r;
+  if (!luaO_begin(L, co, &scope)) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "cannot resume non-suspended coroutine");
+    return 2;
+  }
   r = auxresume(L, co, lua_gettop(L) - 1);
+  luaO_end(&scope);
   if (l_unlikely(r < 0)) {
     lua_pushboolean(L, 0);
     lua_insert(L, -2);
@@ -75,7 +83,11 @@ int luaB_coresume (lua_State *L) {
 
 int luaB_wrapresume (lua_State *L, int narg) {
   lua_State *co = getco(L);  /* stack argument retains the snapshot */
-  int r = auxresume(L, co, narg);
+  LuaCoroutineScope scope;
+  int r;
+  if (!luaO_begin(L, co, &scope))
+    return luaL_error(L, "cannot resume non-suspended coroutine");
+  r = auxresume(L, co, narg);
   if (l_unlikely(r < 0)) {  /* error? */
     int stat = lua_status(co);
     if (stat != LUA_OK && stat != LUA_YIELD) {  /* error in the coroutine? */
@@ -89,8 +101,10 @@ int luaB_wrapresume (lua_State *L, int narg) {
       lua_insert(L, -2);
       lua_concat(L, 2);
     }
+    luaO_end(&scope);
     return lua_error(L);  /* propagate error */
   }
+  luaO_end(&scope);
   return r;
 }
 
@@ -125,10 +139,10 @@ static int luaB_yield (lua_State *L) {
 }
 
 
-#define COS_RUN		0
-#define COS_DEAD	1
-#define COS_YIELD	2
-#define COS_NORM	3
+#define COS_RUN LUA_CO_RUNNING
+#define COS_DEAD LUA_CO_DEAD
+#define COS_YIELD LUA_CO_SUSPENDED
+#define COS_NORM LUA_CO_NORMAL
 
 
 static const char *const statname[] =
@@ -136,24 +150,7 @@ static const char *const statname[] =
 
 
 static int auxstatus (lua_State *L, lua_State *co) {
-  if (L == co) return COS_RUN;
-  else {
-    switch (lua_status(co)) {
-      case LUA_YIELD:
-        return COS_YIELD;
-      case LUA_OK: {
-        lua_Debug ar;
-        if (lua_getstack(co, 0, &ar))  /* does it have frames? */
-          return COS_NORM;  /* it is running */
-        else if (lua_gettop(co) == 0)
-            return COS_DEAD;
-        else
-          return COS_YIELD;  /* initial state */
-      }
-      default:  /* some error occurred */
-        return COS_DEAD;
-    }
-  }
+  return luaO_status(L, co);
 }
 
 
@@ -185,32 +182,30 @@ static int luaB_corunning (lua_State *L) {
 
 int luaB_close (lua_State *L) {
   lua_State *co = getoptco(L);
-  int status = auxstatus(L, co);
-  switch (status) {
-    case COS_DEAD: case COS_YIELD: {
-      status = lua_closethread(co, L);
-      if (status == LUA_OK) {
-        lua_pushboolean(L, 1);
-        return 1;
-      }
-      else {
-        lua_pushboolean(L, 0);
-        lua_xmove(co, L, 1);  /* move error message */
-        return 2;
-      }
+  LuaCoroutineScope scope;
+  int status;
+  if (co != L) {
+    if (!luaO_begin(L, co, &scope))
+      return luaL_error(L, "cannot close a normal coroutine");
+    status = lua_closethread(co, L);
+    if (status != LUA_OK) {
+      lua_pushboolean(L, 0);
+      lua_xmove(co, L, 1);
     }
-    case COS_NORM:
-      return luaL_error(L, "cannot close a %s coroutine", statname[status]);
-    case COS_RUN:
-      lua_geti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);  /* get main */
-      if (lua_tothread(L, -1) == co)
-        return luaL_error(L, "cannot close main thread");
-      lua_closethread(co, L);  /* close itself */
-      /* previous call does not return *//* FALLTHROUGH */
-    default:
-      lua_assert(0);
-      return 0;
+    luaO_end(&scope);
+    if (status == LUA_OK) {
+      lua_pushboolean(L, 1);
+      return 1;
+    }
+    return 2;
   }
+  lua_geti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+  if (lua_tothread(L, -1) == co)
+    return luaL_error(L, "cannot close main thread");
+  status = lua_closethread(co, L);  /* ordinarily does not return */
+  if (status != LUA_OK) return lua_error(L);
+  lua_assert(0);
+  return 0;
 }
 
 

@@ -19,6 +19,7 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lroots.h"
+#include "lcoroscope.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -73,6 +74,7 @@ typedef struct lua_longjmp {
   unsigned native_depth;
   LuaWorldScope world_scope;
   LuaObjectScope *object_scopes;
+  LuaCoroutineScope *coroutine_scopes;
 } lua_longjmp;
 
 /* Only this logical execution owns these retained native stack locations.
@@ -147,6 +149,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
       fputs("Luthrum error crossed a foreign carrier's protected boundary\n", stderr);
       abort();
     }
+    luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */
@@ -155,6 +158,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
     global_State *g = G(L);
     lua_State *mainth = mainthread(g);
     lua_CFunction panicf;
+    luaO_unwind(NULL);
     luaA_unwind(L, NULL);
     L->native_roots = NULL;  /* every native scope on this thread is abandoned */
     {
@@ -202,11 +206,26 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
 }
 
 
+/* A reentrant self-close must not jump over another state's live operation
+** or return into a protected receiver owned by another execution/carrier. */
+int luaD_canselfclose (lua_State *L) {
+  NativeStackContext *context = luaE_getnativestackcontext();
+  lua_longjmp *base = L->errorJmp;
+  if (base == NULL) return context->coroutine_scopes == NULL;
+  while (base->previous != NULL) base = base->previous;
+  return L->luthrum_stack_context == context &&
+         base->execution == context->execution &&
+         pthread_equal(base->carrier, pthread_self()) &&
+         base->coroutine_scopes == context->coroutine_scopes;
+}
+
+
 l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {
     /* unroll error entries up to the first level */
     while (L->errorJmp->previous != NULL)
       L->errorJmp = L->errorJmp->previous;
+    luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
     L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
     L->native_roots = L->errorJmp->native_roots;
@@ -236,6 +255,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.native_depth = L->native_depth;
   lj.world_scope = luaW_scope(L);
   lj.object_scopes = L->object_scopes;
+  lj.coroutine_scopes = luaE_getnativestackcontext()->coroutine_scopes;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
@@ -257,6 +277,11 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   if (l_unlikely(status != LUA_OK))
     L->luthrum_stack_context->overflow = lj.luthrum_stack_overflow;
   return status;
+}
+
+/* Retain outer operations when a nested receiver catches an error. */
+void luaD_releaseoperations (lua_State *L) {
+  luaO_release(L->errorJmp != NULL ? L->errorJmp->coroutine_scopes : NULL);
 }
 
 /* }====================================================== */
@@ -1112,6 +1137,7 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   if (getCcalls(L) >= LUAI_MAXCCALLS)
     return resume_error(L, "C stack overflow", nargs);
   L->nCcalls++;
+  L->resume_active = 1;
   luai_userstateresume(L, nargs);
   api_checkpop(L, (L->status == LUA_OK) ? nargs + 1 : nargs);
   status = luaD_rawrunprotected(L, resume, &nargs);
@@ -1126,6 +1152,7 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   }
   *nresults = (status == LUA_YIELD) ? L->ci->u2.nyield
                                     : cast_int(L->top.p - (L->ci->func.p + 1));
+  L->resume_active = 0;
   lua_unlock(L);
   return APIstatus(status);
 }

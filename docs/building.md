@@ -134,6 +134,14 @@ continuations, nested coroutine wrappers and to-be-closed handlers to the
 bounded pipeline, including migration and native saturation. C89 variants keep
 instruction policy active. Other library/module migration remains unproven.
 
+`coroutine_operation_*` adds controlled overlap at argument/result transfer,
+close cleanup and yield recovery. Busy calls must preserve the target stack;
+GC, nested/error-handler failures, allocation denial and nested VM construction
+must retire ownership correctly. Raw and C89 entrypoints use both collectors
+on default workers. Reentrant callback chains must reject self-close across
+another state's operation. Migrated control pipelines also assert scope retirement
+before their retained stacks can be destroyed.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

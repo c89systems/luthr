@@ -16,6 +16,24 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(coroutine_operation_test coroutine_operation_test.c)
+set_target_properties(coroutine_operation_test PROPERTIES C_STANDARD 99)
+target_compile_options(coroutine_operation_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(coroutine_operation_test PRIVATE luthrum_static)
+target_link_options(coroutine_operation_test PRIVATE -Wl,--wrap=lua_checkstack
+  -Wl,--wrap=lua_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS resume_prepare resume_prepare_oom resume_result wrap_prepare wrap_result
+        close_prepare close_result close_cleanup close_reentrant active_yield root_normal root_recover
+        root_error root_handler_error root_oom root_selfclose root_construction bridge_close)
+      add_test(NAME coroutine_operation_${backend}_${case}_${gc}
+        COMMAND coroutine_operation_test ${backend}_${case}_${gc})
+      set_tests_properties(coroutine_operation_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(control_snapshot_test control_snapshot_test.c)
 set_target_properties(control_snapshot_test PROPERTIES C_STANDARD 99)
 target_compile_options(control_snapshot_test PRIVATE -Wall -Wextra -Werror)
