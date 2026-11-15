@@ -1162,9 +1162,10 @@ int main(int argc, char **argv) {
                   ? fixture.actors[1].state->object_waiting
                   : fixture.actors[1].state->heap_waiting) == 0)
         check(pthread_cond_wait(&world->changed, &world->mutex));
-      failed |= world->active != 1 || world->heap_depth == 0 ||
-                fixture.actors[1].state->native_depth == 0 ||
-                !pthread_equal(world->heap_owner, fixture.failure_carrier);
+      failed |=
+          world->active != 1 || world->heap_depth == 0 ||
+          fixture.actors[1].state->native_depth == 0 ||
+          !pthread_equal(world->heap_owner.carrier, fixture.failure_carrier);
       fixture.waiter_observed = 1;
       check(pthread_mutex_unlock(&world->mutex));
       check(pthread_mutex_lock(&fixture.mutex));

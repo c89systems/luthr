@@ -22,6 +22,7 @@ int luaX_initgate (LuaStackGate *gate) {
   int status;
   gate->ready = gate->owned = 0;
   gate->next_ticket = gate->serving = 0;
+  gate->waiters = NULL;
   status = pthread_mutex_init(&gate->mutex, NULL);
   if (status != 0)
     return status;
@@ -37,7 +38,8 @@ int luaX_initgate (LuaStackGate *gate) {
 void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
-  lua_assert(!gate->owned && gate->next_ticket == gate->serving);
+  lua_assert(!gate->owned && gate->next_ticket == gate->serving &&
+             gate->waiters == NULL);
   luaX_checksync(pthread_cond_destroy(&gate->changed));
   luaX_checksync(pthread_mutex_destroy(&gate->mutex));
   gate->ready = 0;
@@ -48,15 +50,15 @@ static void reserve (lua_State *L) {
   unsigned long ticket;
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
   /* Recursive entry is an internal boundary error, not a wait for ourselves. */
-  if (gate->owned && pthread_equal(gate->owner, pthread_self())) {
+  if (gate->owned && luaQ_isowner(&gate->owner)) {
     fputs("Luthrum recursive coroutine stack gate entry\n", stderr);
     abort();
   }
   ticket = gate->next_ticket++;
   while (ticket != gate->serving)
-    luaX_checksync(pthread_cond_wait(&gate->changed, &gate->mutex));
+    luaQ_wait(L, &gate->mutex, &gate->changed, &gate->waiters);
   lua_assert(!gate->owned);
-  gate->owner = pthread_self();
+  luaQ_setowner(&gate->owner);
   gate->owned = 1;
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
 }
@@ -65,13 +67,13 @@ static void release (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
   lua_assert(L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
-  if (!gate->owned || !pthread_equal(gate->owner, pthread_self())) {
+  if (!gate->owned || !luaQ_isowner(&gate->owner)) {
     fputs("Luthrum coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
   gate->owned = 0;
   gate->serving++;
-  luaX_checksync(pthread_cond_broadcast(&gate->changed));
+  luaQ_wake(&gate->changed, &gate->waiters);
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
 }
 

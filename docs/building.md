@@ -100,8 +100,13 @@ error recovery, allocation failure, native stack exhaustion and binding affinity
 reused carriers. Unchanged blocking bindings retain their carrier/TLS while
 queued Lua work and a nested callback complete before either binding is released.
 Cases cover saturated admission, observer mutex ordering, instruction budgets,
-GC roots, errors and yielded continuations. These are private experiments;
-foreign-thread routing, resource waits and the installed scheduler remain open.
+GC roots, errors and yielded continuations. `native_scheduler_wait_*` additionally
+checks task parking at coroutine, object, metadata and collection waits; one
+carrier must remain reusable, and two-carrier variants force ownership migration.
+Early notifications precede outgoing context publication and collection.
+`native_scheduler_resource_*` keeps native callbacks pinned while their runtime
+waits release execution capacity. These are private experiments; foreign-thread
+routing, native resource affinity and the installed scheduler remain open.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

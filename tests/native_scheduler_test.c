@@ -1,7 +1,10 @@
 #define _GNU_SOURCE
 #include "private/context.h"
+#include <laccess.h>
 #include <lauxlib.h>
 #include <ldo.h>
+#include <lgc.h>
+#include <ltable.h>
 #include <lualib.h>
 #include <luthrum/lua_runtime.h>
 #include <pthread.h>
@@ -12,7 +15,8 @@
 #include <unistd.h>
 
 enum { MANAGED = 1, NATIVE = 2, WORKERS = MANAGED + NATIVE, TASKS = 6 };
-enum reason { READY, NATIVE_WAIT, DONE };
+enum reason { READY, NATIVE_WAIT, RESOURCE_WAIT, DONE };
+enum wait_kind { OBJECT_WAIT, GATE_WAIT, GC_WAIT, EARLY_WAIT };
 struct pool;
 struct task {
   struct pool *pool;
@@ -21,8 +25,14 @@ struct task {
   struct task *next;
   enum reason reason;
   int permit, native, pinned, finished, status, results, id;
+  int worker, target;
   unsigned parks, migrations, pinned_waits;
   long last_carrier;
+  LuaWaiter *waiter;
+  int notified, published, wait_pinned;
+  unsigned resource_waits, pinned_resource_waits, early_wakes;
+  void (*run)(struct task *);
+  void (*before_wait)(struct task *);
 };
 struct worker {
   struct pool *pool;
@@ -42,6 +52,9 @@ struct pool {
   unsigned done, entered, callback_done, release[2], finalized;
   int callback_request, stop, budget, trace;
   unsigned observed;
+  Table *shared;
+  enum wait_kind wait_kind;
+  int force_migrate, stage, native_resource;
 };
 static __thread int native_marker;
 static struct pool *fixture;
@@ -107,6 +120,8 @@ static void release_permit(struct task *task) {
 static void park(struct task *task, enum reason reason) {
   long previous = syscall(SYS_gettid);
   task->reason = reason;
+  if (task->pool->force_migrate)
+    task->target = 1 - task->worker;
   task->parks++;
   test_fiber_pause(&task->fiber);
   luaD_rebindexecution(&task->fiber.execution);
@@ -211,16 +226,70 @@ static void poll(LuaExecution *execution, lua_State *state) {
     park(task, READY);
   luaW_attach(state, scope);
 }
+static void resource_wait(LuaExecution *execution, pthread_mutex_t *mutex,
+                          LuaWaiter *waiter) {
+  struct task *task = execution->context;
+  struct pool *pool = task->pool;
+  lock(pool);
+  require(task->waiter == NULL && !task->permit);
+  task->waiter = waiter;
+  task->notified = task->published = 0;
+  task->resource_waits++;
+  task->wait_pinned = execution->native_depth != 0;
+  check(pthread_mutex_unlock(mutex));
+  signal_change(pool);
+  if (task->wait_pinned) {
+    task->pinned_resource_waits++;
+    while (!task->notified)
+      wait_change(pool);
+    task->waiter = NULL;
+    unlock(pool);
+  } else {
+    unlock(pool);
+    if (task->before_wait != NULL)
+      task->before_wait(task);
+    park(task, RESOURCE_WAIT);
+    lock(pool);
+    require(task->notified);
+    task->waiter = NULL;
+    unlock(pool);
+  }
+}
+static void resource_wake(LuaExecution *execution, LuaWaiter *waiter) {
+  struct task *task = execution->context;
+  struct pool *pool = task->pool;
+  lock(pool);
+  require(task->waiter == waiter && !task->notified);
+  task->notified = 1;
+  if (!task->wait_pinned) {
+    if (task->published) {
+      task->published = 0;
+      append(&pool->requests, &pool->requests_tail, task);
+      grant(pool);
+    } else
+      task->early_wakes++;
+  }
+  signal_change(pool);
+  unlock(pool);
+}
 static void task_entry(void *argument) {
   struct task *task = argument;
-  task->status =
-      lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
-  if (task->id == 4 && task->status == LUA_YIELD)
-    task->status = lua_resume(task->state, NULL, 0, &task->results);
+  if (task->run != NULL)
+    task->run(task);
+  else {
+    task->status =
+        lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
+    if (task->id == 4 && task->status == LUA_YIELD)
+      task->status = lua_resume(task->state, NULL, 0, &task->results);
+  }
   require(task->fiber.execution.managed_depth == 0);
   require(task->fiber.execution.native_depth == 0);
   require(task->fiber.execution.protected == NULL);
-  require(!task->permit && !task->native);
+  lock(task->pool);
+  if (task->permit)
+    release_permit(task); /* A private probe may finish without a Lua entry. */
+  require(!task->native && task->waiter == NULL);
+  unlock(task->pool);
   task->reason = DONE;
   test_fiber_pause(&task->fiber);
   abort();
@@ -229,15 +298,31 @@ static void *worker_entry(void *argument) {
   struct worker *worker = argument;
   struct pool *pool = worker->pool;
   for (;;) {
-    struct task *task;
+    struct task *task = NULL;
     lock(pool);
-    while (!pool->stop && pool->ready == NULL)
-      wait_change(pool);
+    while (!pool->stop && task == NULL) {
+      struct task **link = &pool->ready, *previous = NULL;
+      while (*link != NULL) {
+        if ((*link)->target < 0 ||
+            (*link)->target == (int)(worker - pool->workers)) {
+          task = *link;
+          *link = task->next;
+          if (pool->ready_tail == task)
+            pool->ready_tail = previous;
+          task->next = NULL;
+          break;
+        }
+        previous = *link;
+        link = &(*link)->next;
+      }
+      if (task == NULL)
+        wait_change(pool);
+    }
     if (pool->stop) {
       unlock(pool);
       return NULL;
     }
-    task = take(&pool->ready, &pool->ready_tail);
+    task->worker = (int)(worker - pool->workers);
     unlock(pool);
     worker->dispatches++;
     test_fiber_resume(&task->fiber, &worker->context);
@@ -254,6 +339,11 @@ static void *worker_entry(void *argument) {
         append(&pool->requests, &pool->requests_tail, task);
       } else
         append(&pool->native_wait, &pool->native_tail, task);
+    } else if (task->reason == RESOURCE_WAIT) {
+      if (task->notified)
+        append(&pool->requests, &pool->requests_tail, task);
+      else
+        task->published = 1;
     } else
       append(&pool->requests, &pool->requests_tail, task);
     grant(pool);
@@ -314,6 +404,7 @@ static int continuation(lua_State *state, int status, lua_KContext context) {
 static int yielding_binding(lua_State *state) {
   return lua_yieldk(state, 0, 123, continuation);
 }
+static int warmup(lua_State *state) { return lua_yield(state, 0); }
 static void failing_hook(lua_State *state, lua_Debug *record) {
   require(record->event == LUA_HOOKCOUNT);
   require(luaQ_current()->native_depth != 0);
@@ -350,15 +441,253 @@ static void submit(struct pool *pool, int id) {
   grant(pool);
   unlock(pool);
 }
-int main(int argc, char **argv) {
+static void init_task(struct pool *pool, struct task *task, int id,
+                      void (*run)(struct task *)) {
+  task->pool = pool;
+  task->id = id;
+  task->target = -1;
+  task->run = run;
+  check(test_fiber_create(&task->fiber, task_entry, task));
+  task->fiber.execution.context = task;
+  task->fiber.execution.managed_enter = managed_enter;
+  task->fiber.execution.managed_leave = managed_leave;
+  task->fiber.execution.native_enter = native_enter;
+  task->fiber.execution.native_leave = native_leave;
+  task->fiber.execution.native_restore = native_restore;
+  task->fiber.execution.poll = poll;
+  task->fiber.execution.wait = resource_wait;
+  task->fiber.execution.wake = resource_wake;
+}
+static void resource_body(lua_State *state, void *argument) {
+  struct task *task = argument;
+  struct pool *pool = task->pool;
+  LuaObjectScope scope;
+  TValue value;
+  if (pool->wait_kind == GC_WAIT) {
+    luaC_fullgc(state, 0);
+    luaD_throw(state,
+               LUA_ERRMEM); /* moved protected receiver must still work */
+  }
+  luaA_begin(state, obj2gco(pool->shared), &scope);
+  if (task->id == 0) {
+    luaW_heapenter(state); /* Retain object ownership while metadata is busy. */
+    setivalue(&value, 11);
+    luaH_setint(state, pool->shared, 1, &value);
+    luaW_heapleave(state);
+  } else {
+    require(luaH_getint(state, pool->shared, 1, &value) == LUA_VNUMINT);
+    require(ivalue(&value) == 11);
+    setivalue(&value, 22);
+    luaH_setint(state, pool->shared, 1, &value);
+  }
+  luaA_end(state, &scope);
+}
+static void run_resource_task(struct task *task) {
+  struct pool *pool = task->pool;
+  if ((task->id == 2 || (task->id == 1 && pool->wait_kind == EARLY_WAIT)) &&
+      pool->wait_kind != GC_WAIT) {
+    task->status = lua_resume(task->state, NULL, 0, &task->results);
+    return;
+  }
+  if (task->id == 2 && pool->wait_kind == GC_WAIT) {
+    LuaWorld *world = &G(pool->main)->world;
+    check(pthread_mutex_lock(&world->mutex));
+    require(world->stopped && world->heap_depth != 0);
+    require(!luaQ_isowner(&world->heap_owner));
+    require(!luaQ_isowner(&world->collector));
+    check(pthread_mutex_unlock(&world->mutex));
+    task->status = LUA_OK;
+    return;
+  }
+  if (task->id == 1 && pool->wait_kind == GATE_WAIT) {
+    lua_pushinteger(pool->tasks[0].state, 55);
+    task->results = lua_gettop(pool->tasks[0].state);
+    task->status = LUA_OK;
+    return;
+  }
+  if (task->id == 1 && pool->wait_kind == GC_WAIT) {
+    task->status = lua_resume(task->state, NULL, 0, &task->results);
+    return;
+  }
+  luaX_lockstate(task->state);
+  task->status = luaD_rawrunprotected(task->state, resource_body, task);
+  luaX_unlockstate(task->state);
+}
+static void before_wait(struct task *task) {
+  struct pool *pool = task->pool;
+  lock(pool);
+  if (pool->stage == 0) {
+    pool->stage = 1;
+    signal_change(pool);
+    while (pool->stage != 2)
+      wait_change(pool);
+  }
+  unlock(pool);
+}
+static int exercise_resource_wait(const char *name) {
   struct pool *pool = calloc(1, sizeof(*pool));
+  pthread_t workers[2];
+  uintptr_t stacks[2];
+  int id, count, carriers;
+  require(pool != NULL);
+  fixture = pool;
+  pool->wait_kind = strstr(name, "early") != NULL  ? EARLY_WAIT
+                    : strstr(name, "gate") != NULL ? GATE_WAIT
+                    : strstr(name, "gc") != NULL   ? GC_WAIT
+                                                   : OBJECT_WAIT;
+  pool->force_migrate = strstr(name, "migrate") != NULL;
+  carriers = pool->force_migrate ? 2 : 1;
+  count = pool->wait_kind == EARLY_WAIT ? 2 : 3;
+  check(pthread_mutex_init(&pool->mutex, NULL));
+  check(pthread_cond_init(&pool->changed, NULL));
+  pool->main = luaL_newstate();
+  require(pool->main != NULL);
+  lua_pushcfunction(pool->main, warmup);
+  lua_setglobal(pool->main, "warm");
+  if (strstr(name, "generational") != NULL)
+    (void)lua_gc(pool->main, LUA_GCGEN);
+  (void)lua_gc(pool->main, LUA_GCSTOP);
+  if (pool->wait_kind != GC_WAIT) {
+    unsigned *payload;
+    lua_newtable(pool->main);
+    pool->shared = (Table *)lua_topointer(pool->main, -1);
+    lua_pushinteger(pool->main, 0);
+    lua_rawseti(pool->main, -2, 1);
+    payload = lua_newuserdatauv(pool->main, sizeof(*payload), 0);
+    *payload = 12345U;
+    lua_newtable(pool->main);
+    lua_pushcfunction(pool->main, finalize);
+    lua_setfield(pool->main, -2, "__gc");
+    lua_setmetatable(pool->main, -2);
+    lua_rawseti(pool->main, -2, 2);
+  }
+  for (id = 0; id < count; ++id) {
+    struct task *task = &pool->tasks[id];
+    task->state = lua_newthread(pool->main);
+    if (id == count - 1 || (id == 1 && pool->wait_kind == GC_WAIT)) {
+      require(luaL_loadstring(
+                  task->state,
+                  "warm(); local n=0; for i=1,1000 do n=n+i end; return n") ==
+              LUA_OK);
+      require(lua_resume(task->state, NULL, 0, &task->results) == LUA_YIELD);
+    }
+    init_task(pool, task, id, run_resource_task);
+    task->state->poll_remaining = 1;
+  }
+  if (pool->wait_kind == EARLY_WAIT)
+    pool->tasks[0].before_wait = before_wait;
+  if (pool->wait_kind != GC_WAIT)
+    lua_remove(pool->main,
+               1); /* Only retained operation scopes keep the table. */
+  luaX_lockstate(pool->main);
+  if (pool->wait_kind != GC_WAIT)
+    luaW_heapenter(pool->main);
+  for (id = 0; id < carriers; ++id) {
+    pool->workers[id].pool = pool;
+    check(pthread_create(&workers[id], NULL, worker_entry, &pool->workers[id]));
+  }
+  submit(pool, 0);
+  lock(pool);
+  if (pool->wait_kind == EARLY_WAIT) {
+    while (pool->stage != 1)
+      wait_change(pool);
+    unlock(pool);
+    luaW_heapleave(pool->main);
+    luaX_unlockstate(pool->main);
+    /* Wake and collect while registration exists but context is not published.
+     */
+    (void)lua_gc(pool->main, LUA_GCCOLLECT);
+    require(pool->finalized == 0);
+    lock(pool);
+    require(pool->tasks[0].early_wakes != 0);
+    pool->stage = 2;
+    signal_change(pool);
+    while (!pool->tasks[0].finished)
+      wait_change(pool);
+    unlock(pool);
+    submit(pool, 1);
+  } else {
+    while (!pool->tasks[0].published)
+      wait_change(pool);
+    unlock(pool);
+    submit(pool, 1);
+    lock(pool);
+    while (!pool->tasks[1].published)
+      wait_change(pool);
+    require(!pool->tasks[0].finished && !pool->tasks[1].finished);
+    unlock(pool);
+    submit(pool, 2);
+    lock(pool);
+    while (!pool->tasks[2].finished)
+      wait_change(pool);
+    require(!pool->tasks[0].finished && !pool->tasks[1].finished);
+    unlock(pool);
+    if (pool->wait_kind != GC_WAIT) {
+      stacks[0] = (uintptr_t)pool->tasks[0].state->stack.p;
+      stacks[1] = (uintptr_t)pool->tasks[1].state->stack.p;
+      luaC_fullgc(pool->main, 0);
+      require(pool->finalized == 0);
+      require(stacks[0] == (uintptr_t)pool->tasks[0].state->stack.p);
+      if (pool->wait_kind == OBJECT_WAIT)
+        require(stacks[1] == (uintptr_t)pool->tasks[1].state->stack.p);
+      luaW_heapleave(pool->main);
+    }
+    luaX_unlockstate(pool->main);
+  }
+  lock(pool);
+  while (pool->done != (unsigned)count)
+    wait_change(pool);
+  pool->stop = 1;
+  signal_change(pool);
+  unlock(pool);
+  for (id = 0; id < carriers; ++id)
+    check(pthread_join(workers[id], NULL));
+  require(pool->managed == 0 && pool->native == 0);
+  require(pool->tasks[0].resource_waits != 0);
+  if (pool->force_migrate)
+    require(pool->tasks[0].migrations != 0);
+  for (id = 0; id < count; ++id) {
+    struct task *task = &pool->tasks[id];
+    require(task->status ==
+            (id == 0 && pool->wait_kind == GC_WAIT ? LUA_ERRMEM : LUA_OK));
+    require(task->state->native_depth == 0 && task->state->world_depth == 0);
+    require(task->state->heap_waiting == 0 && task->state->object_waiting == 0);
+    require(task->state->native_roots == NULL &&
+            task->state->object_scopes == NULL);
+    require(task->waiter == NULL);
+    if (pool->wait_kind == GATE_WAIT && id == 1)
+      require(task->results == 1);
+    if (pool->wait_kind != GC_WAIT && id == count - 1)
+      require(task->results == 1 && lua_tointeger(task->state, -1) == 500500);
+    (void)lua_closethread(task->state, NULL);
+    lua_settop(task->state, 0);
+    test_fiber_destroy(&task->fiber);
+  }
+  (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->finalized == (pool->wait_kind == GC_WAIT ? 0U : 1U));
+  lua_close(pool->main);
+  check(pthread_cond_destroy(&pool->changed));
+  check(pthread_mutex_destroy(&pool->mutex));
+  printf("resource wait %s: bounded carriers reused, roots and ownership "
+         "preserved\n",
+         name);
+  free(pool);
+  return 0;
+}
+int main(int argc, char **argv) {
+  struct pool *pool;
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
-  require(pool != NULL && argc == 2);
+  require(argc == 2);
+  if (strncmp(argv[1], "wait_", 5) == 0)
+    return exercise_resource_wait(argv[1]);
+  pool = calloc(1, sizeof(*pool));
+  require(pool != NULL);
   generational = strstr(argv[1], "generational") != NULL;
   pool->budget = strstr(argv[1], "budget") != NULL;
   pool->trace = strstr(argv[1], "trace") != NULL;
+  pool->native_resource = strstr(argv[1], "resource") != NULL;
   fixture = pool;
   check(pthread_mutex_init(&pool->mutex, NULL));
   check(pthread_cond_init(&pool->changed, NULL));
@@ -389,13 +718,18 @@ int main(int argc, char **argv) {
   lua_setglobal(pool->main, "fail");
   lua_pushcfunction(pool->main, yielding_binding);
   lua_setglobal(pool->main, "pause");
+  lua_pushcfunction(pool->main, warmup);
+  lua_setglobal(pool->main, "warm");
   if (generational)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < TASKS; ++id) {
     struct task *task = &pool->tasks[id];
     const char *source =
-        id < 2         ? "return block(...)"
-        : id == 2      ? "local n=0; for i=1,1000 do n=n+i end; return n"
+        id < 2 ? "return block(...)"
+        : id == 2
+            ? (pool->native_resource
+                   ? "warm(); local n=0; for i=1,1000 do n=n+i end; return n"
+                   : "local n=0; for i=1,1000 do n=n+i end; return n")
         : id == 3      ? (pool->trace ? "return 1+2" : "return fail()")
         : id == 4      ? "return pause()"
         : pool->budget ? "while true do end"
@@ -410,6 +744,8 @@ int main(int argc, char **argv) {
                   lua_gethookmask(task->state) & ~LUA_MASKLINE,
                   lua_gethookcount(task->state));
     require(luaL_loadstring(task->state, source) == LUA_OK);
+    if (pool->native_resource && id == 2)
+      require(lua_resume(task->state, NULL, 0, &task->results) == LUA_YIELD);
     if (id < 2) {
       unsigned *payload;
       lua_pushinteger(task->state, id);
@@ -420,14 +756,7 @@ int main(int argc, char **argv) {
       lua_setfield(task->state, -2, "__gc");
       lua_setmetatable(task->state, -2);
     }
-    check(test_fiber_create(&task->fiber, task_entry, task));
-    task->fiber.execution.context = task;
-    task->fiber.execution.managed_enter = managed_enter;
-    task->fiber.execution.managed_leave = managed_leave;
-    task->fiber.execution.native_enter = native_enter;
-    task->fiber.execution.native_leave = native_leave;
-    task->fiber.execution.native_restore = native_restore;
-    task->fiber.execution.poll = poll;
+    init_task(pool, task, id, NULL);
     task->state->poll_remaining = 1;
   }
   for (id = 0; id < WORKERS; ++id) {
@@ -441,11 +770,23 @@ int main(int argc, char **argv) {
     wait_change(pool);
   require(pool->native == NATIVE);
   unlock(pool);
+  if (pool->native_resource) {
+    luaX_lockstate(pool->main);
+    luaW_heapenter(pool->main);
+  }
   submit(pool, 3); /* Cannot enter its C body until a native slot retires. */
   submit(pool, 2);
   lock(pool);
   pool->callback_request = 1;
   signal_change(pool);
+  if (pool->native_resource) {
+    while (!pool->tasks[2].finished || !pool->tasks[0].pinned_resource_waits)
+      wait_change(pool);
+    unlock(pool);
+    luaW_heapleave(pool->main);
+    luaX_unlockstate(pool->main);
+    lock(pool);
+  }
   while (!pool->tasks[2].finished || !pool->callback_done ||
          !pool->native_waits)
     wait_change(pool);

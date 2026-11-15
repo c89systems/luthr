@@ -73,3 +73,51 @@ void luaQ_setmanagedhook (lua_State *L, lua_Hook hook) {
 int luaQ_ismanagedhook (lua_State *L, lua_Hook hook) {
   return hook == __atomic_load_n(&G(L)->managed_hook, __ATOMIC_SEQ_CST);
 }
+
+void luaQ_setowner (LuaOwner *owner) {
+  owner->execution = luaQ_current();
+  owner->carrier = pthread_self();
+}
+
+int luaQ_isowner (const LuaOwner *owner) {
+  LuaExecution *execution = luaQ_current();
+  return owner->execution == execution &&
+         (execution != NULL || pthread_equal(owner->carrier, pthread_self()));
+}
+
+/* The caller has published roots and withdrawn collection participation where
+** necessary. Registration and wake selection share the predicate's mutex.
+** The wait callback handles notification before outgoing context publication.
+** Reacquire execution capacity without retaining the predicate mutex. */
+void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
+                 LuaWaiter **waiters) {
+  LuaExecution *execution = luaQ_current();
+  if (execution != NULL && execution->wait != NULL && execution->wake != NULL) {
+    LuaWaiter waiter;
+    unsigned depth = execution->managed_depth;
+    lua_assert(depth != 0);
+    waiter.execution = execution;
+    waiter.next = *waiters;
+    *waiters = &waiter;
+    execution->managed_depth = 0;
+    if (execution->managed_leave != NULL)
+      execution->managed_leave(execution);
+    execution->wait(execution, mutex, &waiter);
+    luaQ_entermanaged(L);
+    execution->managed_depth = depth;
+    luaX_checksync(pthread_mutex_lock(mutex));
+  }
+  else
+    luaX_checksync(pthread_cond_wait(changed, mutex));
+}
+
+void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters) {
+  LuaWaiter *waiter = *waiters;
+  *waiters = NULL;
+  luaX_checksync(pthread_cond_broadcast(changed));
+  while (waiter != NULL) {
+    LuaWaiter *next = waiter->next;
+    waiter->execution->wake(waiter->execution, waiter);
+    waiter = next;
+  }
+}

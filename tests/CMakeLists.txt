@@ -40,7 +40,11 @@ target_compile_options(native_scheduler_test PRIVATE
   "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
 target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
 foreach(case IN ITEMS incremental generational budget_incremental budget_generational
-    trace_incremental trace_generational)
+    trace_incremental trace_generational wait_object_incremental wait_object_generational
+    wait_gate_incremental wait_gate_generational wait_gc_incremental wait_gc_generational
+    wait_early_incremental wait_early_generational wait_migrate_object_incremental
+    wait_migrate_object_generational wait_migrate_gc_incremental wait_migrate_gc_generational
+    resource_incremental resource_generational)
   add_test(NAME native_scheduler_${case} COMMAND native_scheduler_test ${case})
   set_tests_properties(native_scheduler_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
 endforeach()

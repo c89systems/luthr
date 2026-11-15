@@ -17,7 +17,7 @@
 #include "lgate.h"
 
 typedef struct LuaObjectLock {
-  pthread_t owner;
+  LuaOwner owner;
   unsigned depth;
 } LuaObjectLock;
 

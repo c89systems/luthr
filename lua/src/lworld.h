@@ -7,12 +7,14 @@
 
 #include <pthread.h>
 #include "llimits.h"
+#include "lexec.h"
 
 typedef struct LuaWorld {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  pthread_t collector;
-  pthread_t heap_owner;
+  LuaOwner collector;
+  LuaOwner heap_owner;
+  LuaWaiter *waiters;
   unsigned heap_depth;
   unsigned active;
   int stopped;

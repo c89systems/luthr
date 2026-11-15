@@ -16,6 +16,7 @@ int luaW_init (LuaWorld *world) {
   int status;
   world->ready = world->stopped = 0;
   world->active = world->heap_depth = 0;
+  world->waiters = NULL;
   status = pthread_mutex_init(&world->mutex, NULL);
   if (status != 0)
     return status;
@@ -30,7 +31,7 @@ int luaW_init (LuaWorld *world) {
 
 void luaW_destroy (LuaWorld *world) {
   lua_assert(world->ready && !world->stopped && world->active == 0 &&
-             world->heap_depth == 0);
+             world->heap_depth == 0 && world->waiters == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
@@ -42,7 +43,7 @@ void luaW_enter (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   while (world->stopped)
-    luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
+    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   world->active++;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -53,7 +54,7 @@ void luaW_leave (lua_State *L) {
   lua_assert(world->active != 0);
   world->active--;
   if (world->active == 0)
-    luaX_checksync(pthread_cond_broadcast(&world->changed));
+    luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -70,12 +71,12 @@ void luaW_stop (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
   world->stopped = 1;
-  world->collector = pthread_self();
-  luaX_checksync(pthread_cond_broadcast(&world->changed));
+  luaQ_setowner(&world->collector);
+  luaQ_wake(&world->changed, &world->waiters);
   lua_assert(world->active != 0);
   world->active--;
   while (world->active != 0)
-    luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
+    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -87,22 +88,22 @@ void luaW_start (lua_State *L) {
     return;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(world->stopped && world->active == 0 &&
-             pthread_equal(world->collector, pthread_self()));
+             luaQ_isowner(&world->collector));
   world->active = 1;  /* the collector resumes as an ordinary mutator */
   world->stopped = 0;
-  luaX_checksync(pthread_cond_broadcast(&world->changed));
+  luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaW_heapleave(L);
 }
 
-/* Reentrant on the physical carrier, including collector operations on another
-** coroutine's stack. A blocked metadata waiter is pinned but not a mutator.
+/* Reentrant within one execution (or unmanaged carrier), including operations
+** on another coroutine's stack. A metadata waiter is pinned but not a mutator.
 ** The outermost acquisition must be a GC-safe boundary, before mutation. */
 void luaW_heapenter (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (world->heap_depth != 0 &&
-      pthread_equal(world->heap_owner, pthread_self())) {
+      luaQ_isowner(&world->heap_owner)) {
     world->heap_depth++;
   }
   else {
@@ -111,15 +112,15 @@ void luaW_heapenter (lua_State *L) {
       L->native_depth++;
       L->heap_waiting++;
       world->active--;
-      luaX_checksync(pthread_cond_broadcast(&world->changed));
+      luaQ_wake(&world->changed, &world->waiters);
       do {
-        luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
+        luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
       } while (world->heap_depth != 0 || world->stopped);
       world->active++;
       L->heap_waiting--;
       L->native_depth--;
     }
-    world->heap_owner = pthread_self();
+    luaQ_setowner(&world->heap_owner);
     world->heap_depth = 1;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -129,9 +130,9 @@ void luaW_heapleave (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(world->heap_depth != 0 &&
-             pthread_equal(world->heap_owner, pthread_self()));
+             luaQ_isowner(&world->heap_owner));
   if (--world->heap_depth == 0)
-    luaX_checksync(pthread_cond_broadcast(&world->changed));
+    luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -140,7 +141,7 @@ static unsigned heapdepth (lua_State *L) {
   unsigned depth;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   depth = (world->heap_depth != 0 &&
-           pthread_equal(world->heap_owner, pthread_self()))
+           luaQ_isowner(&world->heap_owner))
           ? world->heap_depth : 0;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   return depth;

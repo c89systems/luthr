@@ -37,31 +37,31 @@ void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   /* A collector reads/mutates objects under quiescence, including ones whose
   ** owner is pinned at an allocation boundary. It must not wait on that owner. */
-  if (!(world->stopped && pthread_equal(world->collector, pthread_self()))) {
+  if (!(world->stopped && luaQ_isowner(&world->collector))) {
     if (isLua(L->ci) && L->top.p < L->ci->top.p) {
       scope->saved_top = savestack(L, L->top.p);
       L->top.p = L->ci->top.p;  /* publish all registers before a possible wait */
     }
-    if (lock->depth != 0 && pthread_equal(lock->owner, pthread_self()))
+    if (lock->depth != 0 && luaQ_isowner(&lock->owner))
       lock->depth++;
     else {
       if (lock->depth != 0 || world->stopped) {
         /* Never acquire an unrelated object behind metadata ownership. */
         lua_assert(world->heap_depth == 0 ||
-                   !pthread_equal(world->heap_owner, pthread_self()));
+                   !luaQ_isowner(&world->heap_owner));
         lua_assert(world->active != 0);
         L->native_depth++;
         L->object_waiting++;
         world->active--;
-        luaX_checksync(pthread_cond_broadcast(&world->changed));
+        luaQ_wake(&world->changed, &world->waiters);
         do {
-          luaX_checksync(pthread_cond_wait(&world->changed, &world->mutex));
+          luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
         } while (lock->depth != 0 || world->stopped);
         world->active++;
         L->object_waiting--;
         L->native_depth--;
       }
-      lock->owner = pthread_self();
+      luaQ_setowner(&lock->owner);
       lock->depth = 1;
     }
     scope->held = 1;
@@ -74,10 +74,10 @@ static void releasescope (lua_State *L, LuaObjectScope *scope) {
     LuaWorld *world = &G(L)->world;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     lua_assert(scope->lock->depth != 0 &&
-               pthread_equal(scope->lock->owner, pthread_self()));
+               luaQ_isowner(&scope->lock->owner));
     scope->held = 0;
     if (--scope->lock->depth == 0)
-      luaX_checksync(pthread_cond_broadcast(&world->changed));
+      luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
 }

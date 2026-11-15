@@ -219,14 +219,15 @@ these boundaries and the scheduler are complete.
 
 ## Allocating shared-VM experiment
 
-The world coordinator now also owns a short heap-metadata scope, reentrant on
-the physical carrier. Allocation callbacks and debt accounting, object-list
-insertion, short-string interning/cache updates, open-upvalue registration and
-collector barriers use it. It is not retained during ordinary bytecode dispatch
-or native binding execution. A collection request first acquires this ownership,
-so it cannot interrupt another carrier's partially completed metadata operation.
-An allocation failure can collect while retaining its own enclosing metadata
-scope; emergency collection preserves the existing no-shrink constraints.
+The world coordinator also owns a short heap-metadata scope, now reentrant on
+the logical execution (or carrier for unmanaged entries). Allocation callbacks,
+debt accounting, object-list insertion, short-string interning/cache updates,
+open-upvalue registration and collector barriers use it. It is not retained
+during ordinary bytecode dispatch or native binding execution. A collection
+request first acquires this ownership, so it cannot interrupt another
+execution's partially completed metadata operation. An allocation failure can
+collect while retaining its own enclosing metadata scope; emergency collection
+preserves the existing no-shrink constraints.
 
 A metadata waiter pins its coroutine, retains its stack gate, and leaves managed
 participation before waiting. Its entry resumes atomically with ownership, after
@@ -446,11 +447,12 @@ authorize simultaneously executing two protected/native call chains on the
 same coroutine; logical task exclusivity and foreign callback routing remain
 scheduler obligations.
 
-Protected error boundaries record their carrier. An unprotected child error
-can forward to a main-thread handler only when that handler belongs to the
-current carrier, inspected under the main coroutine's gate. Otherwise it uses
-the configured panic path on the error's carrier. Attempting to unwind a
-foreign carrier's protected boundary aborts with a diagnostic instead of
+Protected error boundaries record their carrier and logical execution. An
+unprotected child error can forward to a main-thread handler only when it
+belongs to the same execution on the current carrier, inspected under the main
+coroutine's gate. Otherwise it uses the configured panic path on the error's
+carrier. Attempting to unwind a foreign execution's or carrier's protected
+boundary aborts with a diagnostic instead of
 performing an invalid cross-thread native-stack jump. Error cleanup pins the
 source coroutine through allocating close methods and roots the error while
 transferring it. Abandoned scopes and pins retire before panic or forwarding.
@@ -681,11 +683,61 @@ foreign hook, and a yielded C continuation must leave no native slots, managed
 permits or protected buffers behind. Limits and required parking are asserted.
 
 This is private feasibility support, not an installed scheduler or a measured
-default policy. It does not yet park state/object/heap waiters through the task
-scheduler, route callbacks arriving on foreign threads, define external-thread
-admission, or prove arbitrary native resource affinity. Allocator callbacks keep
-their existing short, nonblocking metadata contract. Cancellation, shutdown,
-streaming/backpressure, module acceptance and performance/sizing gates remain.
+default policy. The experiment below adds runtime resource waits. Routing
+callbacks arriving on foreign threads, external-thread admission and arbitrary
+native resource affinity remain open. Allocator callbacks keep their existing
+short, nonblocking metadata contract. Cancellation, shutdown, streaming and
+backpressure, module acceptance and performance/sizing gates remain.
+
+## Runtime wait parking experiment
+
+Coroutine gates, heap metadata, shared-object access and collection rendezvous
+now register task waiters under the same mutex that protects their predicate.
+Each registration lives on the task's retained stack and requires no allocation.
+The waiter releases managed execution capacity before yielding its carrier.
+Notification removes registrations under that mutex and arranges resumption;
+notification callbacks cannot enter Lua or switch the notifier's stack. The
+driver distinguishes notification before and after outgoing context publication.
+It only dispatches a fully saved context, once for each registration.
+
+On resumption, a waiter reacquires execution capacity before taking the predicate
+mutex and rechecking its condition. Shared world notifications can be spurious;
+the original predicate loops and FIFO coroutine tickets remain authoritative.
+Metadata and object waiters retain their existing roots, collection pins and
+stack-shrink exclusions. A foreign activation releases its managed permit while
+waiting, but waits on its physical carrier; its C stack and TLS do not migrate.
+Embedding entries without a task wait handler retain ordinary condition waits.
+
+Logical execution identity now owns coroutine gates, object locks, metadata and
+the collection pause. An unmanaged entry uses its physical carrier instead.
+This prevents a newly dispatched task on a reused thread from treating another
+task's retained lock as recursive ownership, and lets the owner resume on a new
+thread. Physical mutexes still protect short bookkeeping operations; ownership
+of the protected runtime resource can outlive those mutex acquisitions.
+
+Twelve `native_scheduler_wait_*` cases exercise both GC modes. A single carrier
+must run queued Lua computation while earlier tasks wait on a shared object or
+coroutine gate behind held metadata. Collection while they wait must preserve
+their operation roots and borrowed stack locations, followed by exactly-once
+userdata finalization after retirement. Collection-request cases park a real
+collector, reuse its carrier for a distinct task and a stopped-world entrant,
+then finish collection and unwind through the protected receiver. Forced
+migration variants use two carriers and require the waiting owner to change
+carriers, including while it owns metadata for collection.
+
+Early-notification cases release metadata and collect before the outgoing task
+context has been published, then require continued execution. Two additional
+`native_scheduler_resource_*` cases saturate native slots, make a nested native
+callback wait for metadata, and require queued Lua computation to finish before
+the metadata owner releases it. OS thread/TLS checks remain in the binding.
+Restoring physical-thread-only ownership makes the shared-object fixture read
+the wrong value; restoring ordinary blocking waits stalls its only carrier.
+Both negative controls fail the fixture as intended.
+
+The waiter and driver interfaces remain private. Registered waits cannot yet be
+abandoned by cancellation; task and VM lifetimes must retain all queued storage.
+External callback routing, application/resource synchronization, streaming,
+shutdown, compatibility, performance and installed-API gates remain required.
 
 ## Lua-specific proof obligations
 

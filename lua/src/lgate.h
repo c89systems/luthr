@@ -7,11 +7,13 @@
 
 #include <pthread.h>
 #include "llimits.h"
+#include "lexec.h"
 
 typedef struct LuaStackGate {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  pthread_t owner;
+  LuaOwner owner;
+  LuaWaiter *waiters;
   unsigned long next_ticket;
   unsigned long serving;
   int owned;
