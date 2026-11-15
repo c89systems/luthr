@@ -31,6 +31,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   CClosure *c = gco2ccl(o);
   c->access.depth = 0;
   c->managed = 0;
+  c->managed_next = NULL;
   c->nupvalues = cast_byte(nupvals);
   return c;
 }

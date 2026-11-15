@@ -16,6 +16,15 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(control_snapshot_test control_snapshot_test.c)
+set_target_properties(control_snapshot_test PROPERTIES C_STANDARD 99)
+target_compile_options(control_snapshot_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(control_snapshot_test PRIVATE luthrum_static)
+target_link_options(control_snapshot_test PRIVATE -Wl,--wrap=lua_tothread)
+foreach(case IN ITEMS raw_incremental raw_generational facade_incremental facade_generational)
+  add_test(NAME control_snapshot_${case} COMMAND control_snapshot_test ${case})
+  set_tests_properties(control_snapshot_${case} PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)
+endforeach()
 luthrum_test_program(pipe_contract_test pipe_contract_test.c)
 set_target_properties(pipe_contract_test PROPERTIES C_STANDARD 99)
 target_compile_options(pipe_contract_test PRIVATE -Wall -Wextra -Werror)
@@ -23,10 +32,12 @@ target_link_libraries(pipe_contract_test PRIVATE luthrum_static)
 target_link_options(pipe_contract_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init)
 foreach(case IN ITEMS managed contract transfer_oom corrupt create_oom mutex condition
-    roots_incremental roots_generational)
+    roots_incremental roots_generational identity_incremental identity_generational)
   add_test(NAME pipe_contract_${case} COMMAND pipe_contract_test ${case})
   set_tests_properties(pipe_contract_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
 endforeach()
+set_tests_properties(pipe_contract_identity_incremental pipe_contract_identity_generational
+  PROPERTIES LABELS "parallel;runtime;memcheck")
 luthrum_test_program(callback_entry_test callback_entry_test.c)
 set_target_properties(callback_entry_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_entry_test PRIVATE -Wall -Wextra -Werror)
@@ -77,7 +88,15 @@ foreach(case IN ITEMS incremental generational budget_incremental budget_generat
     stream_abort_send_migrate_incremental stream_abort_send_migrate_generational
     stream_abort_recv_incremental stream_abort_recv_generational
     stream_close_send_incremental stream_close_send_generational
-    stream_close_recv_incremental stream_close_recv_generational)
+    stream_close_recv_incremental stream_close_recv_generational
+    stream_control_incremental stream_control_generational
+    stream_control_migrate_incremental stream_control_migrate_generational
+    stream_control_native_incremental stream_control_native_generational
+    stream_control_facade_incremental stream_control_facade_generational
+    stream_control_facade_migrate_incremental stream_control_facade_migrate_generational
+    stream_control_facade_native_incremental stream_control_facade_native_generational
+    stream_control_closing_migrate_incremental stream_control_closing_migrate_generational
+    stream_control_facade_closing_native_incremental stream_control_facade_closing_native_generational)
   add_test(NAME native_scheduler_${case} COMMAND native_scheduler_test ${case})
   set_tests_properties(native_scheduler_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
 endforeach()

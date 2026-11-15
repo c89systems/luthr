@@ -125,6 +125,15 @@ forced migration, native saturation, a foreign producer, and close/finalization
 of entered waits. These are private feasibility gates, not installed APIs or
 proof of the required modules' streaming behavior.
 
+`control_snapshot_*` replaces a wrapped coroutine's capture and forces GC before
+the child's first API entry. Raw and C89 wrappers must retain and execute the
+original snapshot. `pipe_contract_identity_*` verifies canonical zero-capture
+runtime functions during concurrent creation and GC. The
+`native_scheduler_stream_control_*` cases add protected calls, yielded
+continuations, nested coroutine wrappers and to-be-closed handlers to the
+bounded pipeline, including migration and native saturation. C89 variants keep
+instruction policy active. Other library/module migration remains unproven.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

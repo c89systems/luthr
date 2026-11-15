@@ -17,6 +17,8 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lexec.h"
+#include "lcontrol.h"
 
 
 static lua_State *getco (lua_State *L) {
@@ -54,7 +56,7 @@ static int auxresume (lua_State *L, lua_State *co, int narg) {
 }
 
 
-static int luaB_coresume (lua_State *L) {
+int luaB_coresume (lua_State *L) {
   lua_State *co = getco(L);
   int r;
   r = auxresume(L, co, lua_gettop(L) - 1);
@@ -71,9 +73,9 @@ static int luaB_coresume (lua_State *L) {
 }
 
 
-static int luaB_auxwrap (lua_State *L) {
-  lua_State *co = lua_tothread(L, lua_upvalueindex(1));
-  int r = auxresume(L, co, lua_gettop(L));
+int luaB_wrapresume (lua_State *L, int narg) {
+  lua_State *co = getco(L);  /* stack argument retains the snapshot */
+  int r = auxresume(L, co, narg);
   if (l_unlikely(r < 0)) {  /* error? */
     int stat = lua_status(co);
     if (stat != LUA_OK && stat != LUA_YIELD) {  /* error in the coroutine? */
@@ -93,7 +95,15 @@ static int luaB_auxwrap (lua_State *L) {
 }
 
 
-static int luaB_cocreate (lua_State *L) {
+int luaB_auxwrap (lua_State *L) {
+  int narg = lua_gettop(L);
+  lua_pushvalue(L, lua_upvalueindex(1));
+  lua_insert(L, 1);  /* stable root below arguments/results */
+  return luaB_wrapresume(L, narg);
+}
+
+
+int luaB_cocreate (lua_State *L) {
   lua_State *NL;
   luaL_checktype(L, 1, LUA_TFUNCTION);
   NL = lua_newthread(L);
@@ -103,9 +113,9 @@ static int luaB_cocreate (lua_State *L) {
 }
 
 
-static int luaB_cowrap (lua_State *L) {
+int luaB_cowrap (lua_State *L) {
   luaB_cocreate(L);
-  lua_pushcclosure(L, luaB_auxwrap, 1);
+  luaQ_pushmanaged(L, luaB_auxwrap, 1);
   return 1;
 }
 
@@ -173,7 +183,7 @@ static int luaB_corunning (lua_State *L) {
 }
 
 
-static int luaB_close (lua_State *L) {
+int luaB_close (lua_State *L) {
   lua_State *co = getoptco(L);
   int status = auxstatus(L, co);
   switch (status) {
@@ -219,7 +229,13 @@ static const luaL_Reg co_funcs[] = {
 
 
 LUAMOD_API int luaopen_coroutine (lua_State *L) {
-  luaL_newlib(L, co_funcs);
+  const luaL_Reg *entry;
+  luaL_checkversion(L);
+  luaL_newlibtable(L, co_funcs);
+  for (entry = co_funcs; entry->name != NULL; ++entry) {
+    luaQ_pushmanaged(L, entry->func, 0);
+    lua_setfield(L, -2, entry->name);
+  }
   return 1;
 }
 

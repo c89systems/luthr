@@ -198,6 +198,62 @@ static void managed_contract(lua_State *state) {
           execution.protected == NULL && active->native_calls == calls);
   require(luaE_setnativestackcontext(previous) == &context);
 }
+struct identity_actor {
+  lua_State *state;
+  pthread_barrier_t *start;
+  const void *identity;
+};
+static int identity_probe(lua_State *state) {
+  lua_pushinteger(state, 42);
+  return 1;
+}
+static void *identity_entry(void *context) {
+  struct identity_actor *actor = context;
+  int result = pthread_barrier_wait(actor->start);
+  unsigned i;
+  require(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+  for (i = 0; i < 100; ++i) {
+    luaQ_pushmanaged(actor->state, identity_probe, 0);
+    if (i == 0)
+      actor->identity = lua_topointer(actor->state, -1);
+    require(lua_topointer(actor->state, -1) == actor->identity);
+    lua_pop(actor->state, 1);
+  }
+  return NULL;
+}
+static void managed_identity(lua_State *state, int generational) {
+  struct identity_actor actors[2];
+  pthread_t workers[2];
+  pthread_barrier_t start;
+  int i;
+  require(pthread_barrier_init(&start, NULL, 2) == 0);
+  for (i = 0; i < 2; ++i) {
+    actors[i].state = lua_newthread(state);
+    actors[i].start = &start;
+  }
+  for (i = 0; i < 2; ++i)
+    require(pthread_create(&workers[i], NULL, identity_entry, &actors[i]) == 0);
+  for (i = 0; i < 2; ++i)
+    require(pthread_join(workers[i], NULL) == 0);
+  require(actors[0].identity == actors[1].identity);
+  lua_settop(state, 0);
+  if (generational)
+    (void)lua_gc(state, LUA_GCGEN);
+  (void)lua_gc(state, LUA_GCCOLLECT);
+  (void)lua_gc(state, LUA_GCCOLLECT);
+  luaQ_pushmanaged(state, identity_probe, 0);
+  require(lua_topointer(state, -1) == actors[0].identity);
+  luaQ_pushmanaged(state, identity_probe, 0);
+  require(lua_rawequal(state, -1, -2));
+  lua_pushinteger(state, 1);
+  luaQ_pushmanaged(state, identity_probe, 1);
+  lua_pushinteger(state, 1);
+  luaQ_pushmanaged(state, identity_probe, 1);
+  require(
+      !lua_rawequal(state, -1, -2)); /* Captures retain instance identity. */
+  lua_settop(state, 0);
+  require(pthread_barrier_destroy(&start) == 0);
+}
 static void *run(void *context) {
   struct fixture *test = context;
   lua_State *state = lua_newstate(allocate, test, 0);
@@ -209,7 +265,9 @@ static void *run(void *context) {
   lua_setglobal(state, "deny");
   luaQ_pushmanaged(state, same_string, 0);
   lua_setglobal(state, "same");
-  if (strcmp(test->mode, "managed") == 0)
+  if (strncmp(test->mode, "identity_", 9) == 0)
+    managed_identity(state, strstr(test->mode, "generational") != NULL);
+  else if (strcmp(test->mode, "managed") == 0)
     managed_contract(state);
   else if (strcmp(test->mode, "contract") == 0)
     execute(

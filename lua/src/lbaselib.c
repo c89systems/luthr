@@ -20,6 +20,8 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lexec.h"
+#include "lcontrol.h"
 
 
 static int luaB_print (lua_State *L) {
@@ -285,7 +287,7 @@ static int pairscont (lua_State *L, int status, lua_KContext k) {
 static int luaB_pairs (lua_State *L) {
   luaL_checkany(L, 1);
   if (luaL_getmetafield(L, 1, "__pairs") == LUA_TNIL) {  /* no metamethod? */
-    lua_pushcfunction(L, luaB_next);  /* will return generator and */
+    luaQ_pushmanaged(L, luaB_next, 0);  /* will return generator and */
     lua_pushvalue(L, 1);  /* state */
     lua_pushnil(L);  /* initial value */
     lua_pushnil(L);  /* to-be-closed object */
@@ -315,7 +317,7 @@ static int ipairsaux (lua_State *L) {
 */
 static int luaB_ipairs (lua_State *L) {
   luaL_checkany(L, 1);
-  lua_pushcfunction(L, ipairsaux);  /* iteration function */
+  luaQ_pushmanaged(L, ipairsaux, 0);  /* iteration function */
   lua_pushvalue(L, 1);  /* state */
   lua_pushinteger(L, 0);  /* initial value */
   return 3;
@@ -472,7 +474,7 @@ static int finishpcall (lua_State *L, int status, lua_KContext extra) {
 }
 
 
-static int luaB_pcall (lua_State *L) {
+int luaB_pcall (lua_State *L) {
   int status;
   luaL_checkany(L, 1);
   lua_pushboolean(L, 1);  /* first result if no errors */
@@ -487,7 +489,7 @@ static int luaB_pcall (lua_State *L) {
 ** stack will have <f, err, true, f, [args...]>; so, the function passes
 ** 2 to 'finishpcall' to skip the 2 first values when returning results.
 */
-static int luaB_xpcall (lua_State *L) {
+int luaB_xpcall (lua_State *L) {
   int status;
   int n = lua_gettop(L);
   luaL_checktype(L, 2, LUA_TFUNCTION);  /* check error function */
@@ -538,9 +540,19 @@ static const luaL_Reg base_funcs[] = {
 
 
 LUAMOD_API int luaopen_base (lua_State *L) {
+  const luaL_Reg *entry;
   /* open lib into global table */
   lua_pushglobaltable(L);
-  luaL_setfuncs(L, base_funcs, 0);
+  for (entry = base_funcs; entry->name != NULL; ++entry) {
+    if (entry->func == NULL)
+      lua_pushboolean(L, 0);
+    else if (entry->func == luaB_print || entry->func == luaB_loadfile ||
+             entry->func == luaB_load || entry->func == luaB_dofile)
+      lua_pushcfunction(L, entry->func);  /* opaque I/O/reader paths */
+    else
+      luaQ_pushmanaged(L, entry->func, 0);
+    lua_setfield(L, -2, entry->name);
+  }
   /* set global _G */
   lua_pushvalue(L, -1);
   lua_setfield(L, -2, LUA_GNAME);

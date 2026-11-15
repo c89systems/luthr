@@ -710,6 +710,7 @@ typedef struct UpVal {
 typedef struct CClosure {
   ClosureHeader;
   lu_byte managed;  /* immutable runtime-owned implementation/continuations */
+  struct CClosure *managed_next;  /* canonical zero-capture runtime functions */
   lua_CFunction f;
   LuaObjectLock access;
   TValue upvalue[1];  /* list of upvalues */

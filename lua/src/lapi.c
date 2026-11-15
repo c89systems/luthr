@@ -868,7 +868,29 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
 }
 
 void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
-  pushcclosure(L, fn, n, 1);
+  if (n != 0)
+    pushcclosure(L, fn, n, 1);
+  else {
+    CClosure *function;
+    lua_lock(L);
+    luaW_heapenter(L);
+    for (function = G(L)->managed_functions; function != NULL;
+         function = function->managed_next) {
+      if (function->f == fn) break;
+    }
+    if (function == NULL) {
+      function = luaF_newCclosure(L, 0);
+      function->f = fn;
+      function->managed = 1;
+      function->managed_next = G(L)->managed_functions;
+      G(L)->managed_functions = function;
+    }
+    setclCvalue(L, s2v(L->top.p), function);
+    api_incr_top(L);
+    luaW_heapleave(L);
+    luaC_checkGC(L);
+    lua_unlock(L);
+  }
 }
 
 

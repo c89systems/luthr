@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <lauxlib.h>
+#include <lcontrol.h>
 #include <lexec.h>
 #include <lua.h>
 #include <lualib.h>
@@ -57,13 +58,6 @@ struct luthrum_lua_runtime {
   int instruction_limit;
   int instruction_limit_hit;
   int instruction_remaining;
-  lua_CFunction native_pcall;
-  lua_CFunction native_xpcall;
-  lua_CFunction native_create;
-  lua_CFunction native_resume;
-  lua_CFunction native_close;
-  lua_CFunction native_wrap;
-  lua_CFunction native_auxwrap;
 };
 
 struct luthrum_lua_runtime_open_lib {
@@ -569,21 +563,21 @@ luthrum_lua_runtime_apply_instruction_hook(luthrum_lua_runtime *runtime,
   }
 }
 
-/* Native base functions have no upvalues. Calling them in this same C frame
+/* Owned base functions have no upvalues. Calling them in this same C frame
  * preserves their yielding continuations without exposing a Lua-callable
  * bypass. */
 static int luthrum_lua_runtime_guard_protected_call(lua_State *state,
-                                                    lua_CFunction native) {
+                                                    lua_CFunction owned) {
   luthrum_lua_runtime *runtime;
   int results;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime == NULL || native == NULL) {
+  if (runtime == NULL) {
     return luaL_error(state, "missing protected-call runtime");
   }
   if (policy_load(runtime->instruction_limit_hit)) {
     return luaL_error(state, "Lua instruction limit exceeded");
   }
-  results = native(state);
+  results = owned(state);
   if (policy_load(runtime->instruction_limit_hit)) {
     return luaL_error(state, "Lua instruction limit exceeded");
   }
@@ -591,10 +585,7 @@ static int luthrum_lua_runtime_guard_protected_call(lua_State *state,
 }
 
 static int luthrum_lua_runtime_pcall(lua_State *state) {
-  luthrum_lua_runtime *runtime;
-  runtime = luthrum_lua_runtime_from_state(state);
-  return luthrum_lua_runtime_guard_protected_call(
-      state, runtime != NULL ? runtime->native_pcall : NULL);
+  return luthrum_lua_runtime_guard_protected_call(state, luaB_pcall);
 }
 
 static int luthrum_lua_runtime_xpcall_error(lua_State *state) {
@@ -620,12 +611,11 @@ static int luthrum_lua_runtime_xpcall(lua_State *state) {
   if (runtime != NULL && policy_load(runtime->instruction_limit) > 0 &&
       lua_type(state, 2) == LUA_TFUNCTION) {
     lua_pushvalue(state, 2);
-    lua_pushcclosure(state, luthrum_lua_runtime_xpcall_error, 1);
+    luaQ_pushmanaged(state, luthrum_lua_runtime_xpcall_error, 1);
     lua_insert(state, 2);
     lua_remove(state, 3);
   }
-  return luthrum_lua_runtime_guard_protected_call(
-      state, runtime != NULL ? runtime->native_xpcall : NULL);
+  return luthrum_lua_runtime_guard_protected_call(state, luaB_xpcall);
 }
 
 static int luthrum_lua_runtime_wrap_protected_calls(lua_State *state) {
@@ -640,8 +630,7 @@ static int luthrum_lua_runtime_wrap_protected_calls(lua_State *state) {
   native_pcall = lua_tocfunction(state, -1);
   if (native_pcall == NULL || lua_getupvalue(state, -1, 1) != NULL ||
       (native_pcall != luthrum_lua_runtime_pcall &&
-       runtime->native_pcall != NULL &&
-       native_pcall != runtime->native_pcall)) {
+       native_pcall != luaB_pcall)) {
     return luaL_error(state, "unsupported native pcall implementation");
   }
   lua_pop(state, 1);
@@ -649,20 +638,13 @@ static int luthrum_lua_runtime_wrap_protected_calls(lua_State *state) {
   native_xpcall = lua_tocfunction(state, -1);
   if (native_xpcall == NULL || lua_getupvalue(state, -1, 1) != NULL ||
       (native_xpcall != luthrum_lua_runtime_xpcall &&
-       runtime->native_xpcall != NULL &&
-       native_xpcall != runtime->native_xpcall)) {
+       native_xpcall != luaB_xpcall)) {
     return luaL_error(state, "unsupported native xpcall implementation");
   }
   lua_pop(state, 1);
-  if (native_pcall != luthrum_lua_runtime_pcall) {
-    runtime->native_pcall = native_pcall;
-  }
-  if (native_xpcall != luthrum_lua_runtime_xpcall) {
-    runtime->native_xpcall = native_xpcall;
-  }
-  lua_pushcfunction(state, luthrum_lua_runtime_pcall);
+  luaQ_pushmanaged(state, luthrum_lua_runtime_pcall, 0);
   lua_setglobal(state, "pcall");
-  lua_pushcfunction(state, luthrum_lua_runtime_xpcall);
+  luaQ_pushmanaged(state, luthrum_lua_runtime_xpcall, 0);
   lua_setglobal(state, "xpcall");
   return 0;
 }
@@ -707,10 +689,10 @@ static int luthrum_lua_runtime_coroutine_create(lua_State *state) {
   lua_State *coroutine;
   int results;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime == NULL || runtime->native_create == NULL) {
+  if (runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
-  results = runtime->native_create(state);
+  results = luaB_cocreate(state);
   coroutine = lua_tothread(state, -1);
   if (coroutine != NULL) {
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
@@ -722,86 +704,74 @@ static int luthrum_lua_runtime_coroutine_resume(lua_State *state) {
   luthrum_lua_runtime *runtime;
   lua_State *coroutine;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime == NULL || runtime->native_resume == NULL) {
+  if (runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
   coroutine = lua_tothread(state, 1);
   if (coroutine != NULL) {
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   }
-  return runtime->native_resume(state);
+  return luaB_coresume(state);
 }
 
 static int luthrum_lua_runtime_coroutine_close(lua_State *state) {
   luthrum_lua_runtime *runtime;
   lua_State *coroutine;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime == NULL || runtime->native_close == NULL) {
+  if (runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
   coroutine = lua_tothread(state, 1);
   if (coroutine != NULL) {
     luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   }
-  return runtime->native_close(state);
+  return luaB_close(state);
 }
 
 static int luthrum_lua_runtime_coroutine_auxwrap(lua_State *state) {
   lua_State *coroutine;
   luthrum_lua_runtime *runtime;
-  lua_CFunction native;
-  coroutine = lua_tothread(state, lua_upvalueindex(1));
+  int nargs;
+  nargs = lua_gettop(state);
+  lua_pushvalue(state, lua_upvalueindex(1));
+  lua_insert(state, 1);
+  coroutine = lua_tothread(state, 1);
   runtime = luthrum_lua_runtime_from_state(state);
   if (coroutine == NULL || runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
-  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
-  native = runtime->native_auxwrap;
-  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
-  if (native == NULL) {
-    return luaL_error(state, "missing coroutine runtime");
-  }
   luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
-  /* Native auxwrap expects only the coroutine in its first upvalue. */
-  return native(state);
+  return luaB_wrapresume(state, nargs);
 }
 
 static int luthrum_lua_runtime_coroutine_wrap(lua_State *state) {
   luthrum_lua_runtime *runtime;
   lua_State *coroutine;
   lua_CFunction native;
-  int valid;
   runtime = luthrum_lua_runtime_from_state(state);
-  if (runtime == NULL || runtime->native_wrap == NULL) {
+  if (runtime == NULL) {
     return luaL_error(state, "missing coroutine runtime");
   }
-  runtime->native_wrap(state);
+  luaB_cowrap(state);
   native = lua_tocfunction(state, -1);
-  if (native == NULL || lua_getupvalue(state, -1, 1) == NULL) {
+  if (native != luaB_auxwrap || lua_getupvalue(state, -1, 1) == NULL) {
     return luaL_error(state,
                       "unsupported native coroutine.wrap implementation");
   }
   coroutine = lua_tothread(state, -1);
-  policy_check(pthread_mutex_lock(&runtime->policy_mutex));
-  valid = coroutine != NULL && (runtime->native_auxwrap == NULL ||
-                                runtime->native_auxwrap == native);
-  if (valid) {
-    runtime->native_auxwrap = native;
-  }
-  policy_check(pthread_mutex_unlock(&runtime->policy_mutex));
-  if (!valid) {
+  if (coroutine == NULL) {
     return luaL_error(state, "unsupported native coroutine wrapper");
   }
   luthrum_lua_runtime_apply_instruction_hook(runtime, coroutine);
   /* Retain the thread, never the callable native wrapper, as the upvalue. */
   lua_remove(state, -2);
-  lua_pushcclosure(state, luthrum_lua_runtime_coroutine_auxwrap, 1);
+  luaQ_pushmanaged(state, luthrum_lua_runtime_coroutine_auxwrap, 1);
   return 1;
 }
 
 static void luthrum_lua_runtime_wrap_coroutine_function(
     luthrum_lua_runtime *runtime, const char *name, lua_CFunction wrapper,
-    lua_CFunction *native_slot) {
+    lua_CFunction expected) {
   lua_State *state;
   lua_CFunction native;
   state = runtime->state;
@@ -811,14 +781,12 @@ static void luthrum_lua_runtime_wrap_coroutine_function(
     lua_pop(state, 1);
     return;
   }
-  if (native == NULL || lua_getupvalue(state, -1, 1) != NULL ||
-      (*native_slot != NULL && native != *native_slot)) {
+  if (native != expected || lua_getupvalue(state, -1, 1) != NULL) {
     luaL_error(state, "unsupported native coroutine entrypoint");
     return;
   }
-  *native_slot = native;
   lua_pop(state, 1);
-  lua_pushcfunction(state, wrapper);
+  luaQ_pushmanaged(state, wrapper, 0);
   lua_setfield(state, -2, name);
 }
 
@@ -838,17 +806,13 @@ luthrum_lua_runtime_wrap_coroutine_library(luthrum_lua_runtime *runtime) {
   }
 
   luthrum_lua_runtime_wrap_coroutine_function(
-      runtime, "create", luthrum_lua_runtime_coroutine_create,
-      &runtime->native_create);
+      runtime, "create", luthrum_lua_runtime_coroutine_create, luaB_cocreate);
   luthrum_lua_runtime_wrap_coroutine_function(
-      runtime, "resume", luthrum_lua_runtime_coroutine_resume,
-      &runtime->native_resume);
+      runtime, "resume", luthrum_lua_runtime_coroutine_resume, luaB_coresume);
   luthrum_lua_runtime_wrap_coroutine_function(
-      runtime, "close", luthrum_lua_runtime_coroutine_close,
-      &runtime->native_close);
+      runtime, "close", luthrum_lua_runtime_coroutine_close, luaB_close);
   luthrum_lua_runtime_wrap_coroutine_function(
-      runtime, "wrap", luthrum_lua_runtime_coroutine_wrap,
-      &runtime->native_wrap);
+      runtime, "wrap", luthrum_lua_runtime_coroutine_wrap, luaB_cowrap);
   lua_pop(state, 1);
 }
 

@@ -478,6 +478,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->managed_hook = NULL;
   g->callbacks = NULL;
   g->pipe_meta = NULL;
+  g->managed_functions = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;
   g->gcstopem = 0;

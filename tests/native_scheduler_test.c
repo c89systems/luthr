@@ -1078,6 +1078,44 @@ static int check_chunk(lua_State *state) {
   lua_pushboolean(state, id == 1);
   return 1;
 }
+static int check_managed(lua_State *state) {
+  (void)state;
+  require(luaQ_current() != NULL && luaQ_current()->native_depth == 0);
+  return 0;
+}
+static const char *control_script(lua_State *state, const char *body,
+                                  int close_path) {
+  const char *source;
+  if (close_path)
+    source = lua_pushfstring(
+        state,
+        "local result; local co=coroutine.create(function() "
+        "local token <close> =setmetatable({}, {__close=function() "
+        "audit_base(); result=(function() %s end)() end}); "
+        "coroutine.yield('ready') end); "
+        "local ok,value=coroutine.resume(co); assert(ok and value=='ready'); "
+        "check_managed(); assert(coroutine.close(co)); return result",
+        body);
+  else
+    source = lua_pushfstring(
+        state,
+        "return coroutine.wrap(function() check_managed(); "
+        "local co=coroutine.create(function() "
+        "local ok,result=pcall(function() "
+        "coroutine.yield('ready'); local ok,value=xpcall(function() "
+        "local pass,n=pcall(function() audit_base(); "
+        "return (function() %s end)() end); assert(pass,n); "
+        "error({result=n}) end, function(err) check_managed(); return err "
+        "end); "
+        "assert(not ok and type(value)=='table'); return value.result end); "
+        "assert(ok,result); return result end); "
+        "local ok,value=coroutine.resume(co); assert(ok and value=='ready'); "
+        "ok,value=coroutine.resume(co); assert(ok,value); "
+        "assert(coroutine.status(co)=='dead'); assert(coroutine.close(co)); "
+        "return value end)()",
+        body);
+  return source;
+}
 static void run_stream_task(struct task *task) {
   task->status =
       lua_resume(task->state, NULL, task->id < 2 ? 2 : 0, &task->results);
@@ -1136,6 +1174,9 @@ static int exercise_stream(const char *name) {
   int abort_recv = strstr(name, "recv") != NULL;
   int aborting = abort_send || abort_recv;
   int finalizing = strstr(name, "close") == NULL;
+  int control = strstr(name, "control") != NULL;
+  int facade = strstr(name, "facade") != NULL;
+  int closing_control = strstr(name, "closing") != NULL;
   int carriers, consumers, expected_done;
   unsigned sum = 0;
   require(pool != NULL);
@@ -1152,8 +1193,54 @@ static int exercise_stream(const char *name) {
     expected_done += 2;
   check(pthread_mutex_init(&pool->mutex, NULL));
   check(pthread_cond_init(&pool->changed, NULL));
-  pool->main = lua_newstate(stream_allocate, pool, 0);
+  if (facade) {
+    static const unsigned char capture[] = "require('fixture')";
+    require(luthrum_lua_runtime_new_with_limit(
+                &pool->runtime, STREAM_HEAP_LIMIT) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                  open_fixture) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_run_buffer(
+                pool->runtime, capture, sizeof(capture) - 1, "stream-control",
+                0, NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  } else
+    pool->main = lua_newstate(stream_allocate, pool, 0);
   require(pool->main != NULL);
+  if (control && !facade)
+    luaL_openlibs(pool->main);
+  luaQ_pushmanaged(pool->main, check_managed, 0);
+  lua_setglobal(pool->main, "check_managed");
+  if (control) {
+    require(
+        luaL_loadstring(
+            pool->main,
+            "function audit_base() check_managed(); local t={11,22}; "
+            "rawset(t,'x',tonumber('17')); assert(rawget(t,'x')==17); "
+            "assert(rawlen(t)==2 and rawequal(t,t)); "
+            "assert(select('#',1,2,3)==3 and select(-1,1,2,3)==3); "
+            "assert(tonumber('1a',16)==26 and next(t)~=nil); "
+            "local sum=0; for _,v in ipairs(t) do sum=sum+v end; "
+            "assert(sum==33); "
+            "local proxy=setmetatable({}, {__metatable='protected', "
+            "__tostring=function() check_managed(); return 'owned' end, "
+            "__pairs=function() check_managed(); return next,t,nil end}); "
+            "assert(tostring(proxy)=='owned' and "
+            "getmetatable(proxy)=='protected'); "
+            "sum=0; for _,v in pairs(proxy) do sum=sum+v end; assert(sum==50); "
+            "sum=0; for _,v in pairs(t) do sum=sum+v end; assert(sum==50); "
+            "local co,main=coroutine.running(); assert(type(co)=='thread' and "
+            "not main); "
+            "assert(coroutine.status(co)=='running'); "
+            "assert(type(coroutine.isyieldable())=='boolean'); "
+            "assert(type(collectgarbage('count'))=='number'); "
+            "assert(type(collectgarbage('step',0))=='boolean'); end") ==
+        LUA_OK);
+    require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  }
   lua_pushcfunction(pool->main, block_binding);
   lua_setglobal(pool->main, "block");
   luaQ_pushmanaged(pool->main, make_chunk, 0);
@@ -1181,7 +1268,11 @@ static int exercise_stream(const char *name) {
              : abort_recv ? "return p:recv()"
                           : consumer;
     task->state = lua_newthread(pool->main);
+    if (control && id >= 2)
+      script = control_script(pool->main, script, closing_control);
     require(luaL_loadstring(task->state, script) == LUA_OK);
+    if (control && id >= 2)
+      lua_pop(pool->main, 1);
     if (id < 2) {
       unsigned *payload;
       lua_pushinteger(task->state, id);
@@ -1333,12 +1424,17 @@ static int exercise_stream(const char *name) {
     require(lua_tointeger(pool->main, -2) <= LUA_PIPE_CHUNK_MAX);
     require(lua_tointeger(pool->main, -1) == 0);
   }
-  lua_close(pool->main);
+  if (facade)
+    luthrum_lua_runtime_free(pool->runtime);
+  else
+    lua_close(pool->main);
   require(pool->stream_live == 0 && pool->stream_peak <= STREAM_HEAP_LIMIT);
   check(pthread_cond_destroy(&pool->changed));
   check(pthread_mutex_destroy(&pool->mutex));
-  printf("chunk stream %s: %u chunks, %zu peak Lua bytes, %d owned carriers\n",
-         name, pool->consumed, pool->stream_peak, carriers);
+  printf("chunk stream %s: %u chunks, %zu Lua-byte %s, %d owned carriers\n",
+         name, pool->consumed,
+         facade ? (size_t)STREAM_HEAP_LIMIT : pool->stream_peak,
+         facade ? "cap" : "peak", carriers);
   free(pool);
   return 0;
 }

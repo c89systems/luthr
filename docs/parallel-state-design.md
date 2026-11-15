@@ -825,8 +825,8 @@ continuations. Those calls keep the normal coroutine pin/native-stack lifetime
 protocol while bypassing foreign-call admission. Ordinary C functions, including
 closures with captures, remain conservatively foreign. A managed closure must
 not retain carrier TLS across a Lua boundary or perform opaque blocking work.
-This classification is private and does not yet audit standard library control
-functions, C89 wrappers or arbitrary modules for migration.
+This classification is private; the owned control-call audit below extends it
+to selected library functions and C89 policy wrappers.
 
 The resource-wait boundary also accepts a detached runtime activation with zero
 managed-entry depth. It still registers/wakes atomically under the predicate
@@ -873,7 +873,61 @@ the normal checks.
 These gates establish bounded producer-to-consumer chunk flow, not complete
 streaming module compatibility or a public channel API. General cancellation,
 shutdown, resource affinity, standard-library control-call migration, measured
-sizing and installed scheduler/module acceptance remain open.
+sizing and installed scheduler/module acceptance remain open. The control-call
+work below addresses the standard-library control paths in that list.
+
+## Owned library control calls
+
+Owned base functions now use managed closures, except `print`, `load`, `loadfile`
+and `dofile`, whose I/O or reader paths still require their separate audit.
+Coroutine-library functions and the closure returned by `coroutine.wrap` are
+managed, as are the generated `pairs`/`ipairs` iterators. Actual foreign bindings,
+warning handlers and trace observers retain their native transitions. Calling
+owned code from a foreign activation preserves the enclosing carrier constraint.
+This does not classify the table, string, math, debug, package, I/O and OS
+libraries as safe for migration.
+
+The C89 policy now calls validated owned entrypoints declared privately in
+`lua/src/lcontrol.h`. It no longer caches arbitrary function pointers from the
+first library table it sees. Protected-call/coroutine wrappers and their error
+handlers use the same managed classification, while keeping instruction checks
+and child-hook propagation. Public SDK interfaces and installed symbols are
+unchanged.
+
+Zero-capture runtime functions have one canonical closure per implementation
+per VM. A metadata-owned chain roots these constants through collection and
+preserves function identity when libraries are reopened. Its implementations
+and code must live for the VM's lifetime. Captured closures retain independent
+identity and ordinary GC lifetimes. Concurrent construction, collection and
+reopening regressions verify those distinctions.
+
+`coroutine.wrap` first copies its mutable capture onto the caller's Lua stack.
+That root retains the chosen child before any child API entry or C89 hook
+configuration, and remains below the transferred arguments/results. The shared
+resume helper uses that snapshot throughout the operation instead of reading
+the capture again. A bad replacement capture raises a Lua error.
+
+Four `control_snapshot_*` cases pause immediately after reading the child but
+before it starts. Another carrier replaces the wrapper's capture and forces
+collection twice. The original child must remain alive, return its original
+token/result, and finalize its token exactly once after release. Raw and C89
+entrypoints run in both collector modes on default worker stacks.
+
+Sixteen `native_scheduler_stream_control_*` cases wrap the bounded pipeline in
+protected calls, error handlers, coroutine creation/resumption/wrapping and
+yielded continuations. Fresh nested protected calls remain on the retained C
+stack while the pipe parks. Close variants execute the pipeline from a yielded
+coroutine's to-be-closed handler. Single-carrier, forced-migration and saturated
+native variants require completion without consuming another native slot.
+C89 variants also retain instruction accounting while these operations run.
+Each pipeline checks the audited pure base operations, iterators, metamethod
+callbacks, coroutine introspection and GC operations under the same limits.
+
+Making `pcall` foreign again, reading either wrapper capture before rooting it,
+or omitting canonical-function root marking makes its negative control fail.
+These changes are restored before normal verification. This proves the tested
+control paths; task admission/lifecycle ownership, cancellation, resource
+affinity and the remaining libraries/modules still require their own gates.
 
 ## Lua-specific proof obligations
 

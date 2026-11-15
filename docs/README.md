@@ -63,6 +63,9 @@ admission, native-resource affinity, shutdown and installed scheduling remain un
 Audited runtime closures and bounded chunk pipes now have private streaming
 proofs for backpressure, migration, native saturation and foreign callbacks;
 they do not establish streaming compatibility for the required modules.
+Owned base/coroutine control functions and C89 policy wrappers now support these
+parking/migration paths, with stable function identity on reopening and rooted
+wrapped-coroutine snapshots. The remaining libraries still require their audit.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under
