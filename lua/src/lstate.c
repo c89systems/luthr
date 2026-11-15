@@ -413,8 +413,9 @@ TStatus luaE_resetthread (lua_State *L, TStatus status) {
 
 LUA_API int lua_closethread (lua_State *L, lua_State *from) {
   TStatus status;
+  l_uint32 calls = luaX_parentcalls(from);
   lua_lock(L);
-  L->nCcalls = (from) ? getCcalls(from) : 0;
+  L->nCcalls = calls;
   status = luaE_resetthread(L, L->status);
   if (L == from)  /* closing itself? */
     luaD_throwbaselevel(L, status);
@@ -494,8 +495,12 @@ LUA_API void lua_close (lua_State *L) {
 
 
 void luaE_warning (lua_State *L, const char *msg, int tocont) {
-  lua_WarnFunction wf = G(L)->warnf;
-  void *context = G(L)->ud_warn;
+  lua_WarnFunction wf;
+  void *context;
+  luaW_heapenter(L);
+  wf = G(L)->warnf;
+  context = G(L)->ud_warn;
+  luaW_heapleave(L);
   if (wf != NULL) {
     LuaWorldScope depth = luaW_detach(L);
     wf(context, msg, tocont);

@@ -43,7 +43,7 @@ void luaX_destroygate (LuaStackGate *gate) {
   gate->ready = 0;
 }
 
-void luaX_lockstate (lua_State *L) {
+static void reserve (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
   unsigned long ticket;
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
@@ -59,10 +59,9 @@ void luaX_lockstate (lua_State *L) {
   gate->owner = pthread_self();
   gate->owned = 1;
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
-  luaW_enter(L);
 }
 
-void luaX_unlockstate (lua_State *L) {
+static void release (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
   lua_assert(L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
@@ -74,9 +73,53 @@ void luaX_unlockstate (lua_State *L) {
   gate->serving++;
   luaX_checksync(pthread_cond_broadcast(&gate->changed));
   luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+}
+
+void luaX_lockstate (lua_State *L) {
+  reserve(L);
+  luaW_enter(L);
+}
+
+void luaX_unlockstate (lua_State *L) {
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
+  release(L);
   luaW_leave(L);
+}
+
+/* Reserve both stacks before joining managed execution. A blocked reservation
+** must not count as a mutator or prevent the other owner from collecting.
+** No managed stack/CI pointer is borrowed until both reservations are ready. */
+void luaX_lockpair (lua_State *first, lua_State *second) {
+  if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
+    lua_State *swap = first;
+    first = second;
+    second = swap;
+  }
+  reserve(first);
+  if (second != first) reserve(second);
+  luaW_enter(first);
+}
+
+void luaX_unlockpair (lua_State *first, lua_State *second) {
+  if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
+    lua_State *swap = first;
+    first = second;
+    second = swap;
+  }
+  if (second != first) release(second);
+  release(first);
+  luaW_leave(first);
+}
+
+l_uint32 luaX_parentcalls (lua_State *from) {
+  l_uint32 calls = 0;
+  if (from != NULL) {
+    luaX_lockstate(from);
+    calls = getCcalls(from);
+    luaX_unlockstate(from);
+  }
+  return calls;
 }
 
 void luaX_poll (lua_State *L) {

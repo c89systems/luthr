@@ -22,6 +22,9 @@ LUAI_FUNC int luaX_initgate (LuaStackGate *gate);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);
+LUAI_FUNC void luaX_lockpair (lua_State *first, lua_State *second);
+LUAI_FUNC void luaX_unlockpair (lua_State *first, lua_State *second);
+LUAI_FUNC l_uint32 luaX_parentcalls (lua_State *from);
 LUAI_FUNC void luaX_checksync (int status);
 LUAI_FUNC void luaX_poll (lua_State *L);
 

@@ -424,11 +424,60 @@ two full collections on the other carrier. Conversion cases drop temporary
 references and step collection before reading the string back from its capture.
 Stopped automatic, incremental and generational collection are covered.
 
-These tests do not establish the remaining cross-coroutine move/resume and
-signal/debug-hook boundaries, shared native callback/configuration state, or
-native payload/module-global safety. Scheduling, affinity, carrier limits,
-performance, streaming and module compatibility gates remain required before a
-public concurrent embedding contract.
+The next experiment addresses cross-coroutine move/resume and callback
+configuration. Signal/debug-hook boundaries and native payload/module-global
+safety remain separate obligations.
+
+## Cross-state API and callback configuration experiment
+
+Stack moves reserve both coroutine gates in address order before joining
+managed execution. A reservation waiting for the second gate does not count as
+an active mutator, so the other owner can collect. Neither stack is inspected
+until both reservations and managed participation are established. Collection
+may relocate an inactive reserved stack in the meantime. The transfer copies
+complete values while owning both stacks and ends participation only after
+releasing both physical gates. Host handles must remain rooted, as for other
+embedding calls.
+
+Resume and close snapshot their parent's native-call depth under the parent
+gate before acquiring the target gate. This avoids retaining target execution
+participation while waiting for a parent that needs collection. It does not
+authorize simultaneously executing two protected/native call chains on the
+same coroutine; logical task exclusivity and foreign callback routing remain
+scheduler obligations.
+
+Protected error boundaries record their carrier. An unprotected child error
+can forward to a main-thread handler only when that handler belongs to the
+current carrier, inspected under the main coroutine's gate. Otherwise it uses
+the configured panic path on the error's carrier. Attempting to unwind a
+foreign carrier's protected boundary aborts with a diagnostic instead of
+performing an invalid cross-thread native-stack jump. Error cleanup pins the
+source coroutine through allocating close methods and roots the error while
+transferring it. Abandoned scopes and pins retire before panic or forwarding.
+
+Allocator callback/context and warning callback/context are read and replaced
+as pairs under heap metadata ownership; panic replacement and selection use
+the same ownership. Warning callbacks run after releasing that ownership and
+detaching managed execution. This protects configuration, not arbitrary callback
+payloads: embedders retain callback contexts until in-flight calls finish and
+provide synchronization for their mutable native resources.
+
+Eight `cross_api_*` cases check opposite-direction single/bulk transfers,
+incremental/generational collection, exact value identity and finalization,
+and parent/move waiters during forced stack relocation. A foreign-carrier error
+must reach panic while the unrelated main protected call completes normally.
+A same-carrier error forwards through an allocating Lua close method after
+all ordinary child references are removed; actual collection must occur and
+the child, error and resource must survive until their required cleanup.
+Two `callback_config_*` cases require managed overlap, coherent callback/context
+pairs and continued allocation/collection while a warning callback is blocked.
+Fixtures retain contexts through VM closure and check allocation balance.
+
+These tests do not establish signal/debug-hook boundaries, native payload or
+module-global safety, or concurrent execution of one coroutine's native frames.
+Scheduling, affinity, carrier limits, performance, streaming and module
+compatibility gates remain required before a public concurrent embedding
+contract.
 
 ## Lua-specific proof obligations
 

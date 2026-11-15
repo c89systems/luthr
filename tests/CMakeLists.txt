@@ -28,6 +28,26 @@ foreach(case IN ITEMS closed open api cycle blocked allocate_stopped allocate_in
   set_tests_properties(parallel_vm_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthrum_test_program(cross_api_test cross_api_test.c)
+set_target_properties(cross_api_test PROPERTIES C_STANDARD 99)
+target_compile_options(cross_api_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(cross_api_test PRIVATE luthrum_static)
+target_link_options(cross_api_test PRIVATE -Wl,--wrap=pthread_cond_wait)
+foreach(case IN ITEMS moves_incremental moves_generational moves_bulk move_wait_gc
+    resume_parent_gc close_parent_gc foreign_error forward_close_gc)
+  add_test(NAME cross_api_${case} COMMAND cross_api_test ${case})
+  set_tests_properties(cross_api_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
+luthrum_test_program(callback_config_test callback_config_test.c)
+set_target_properties(callback_config_test PROPERTIES C_STANDARD 99)
+target_compile_options(callback_config_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(callback_config_test PRIVATE luthrum_static)
+foreach(case IN ITEMS replace blocked)
+  add_test(NAME callback_config_${case} COMMAND callback_config_test ${case})
+  set_tests_properties(callback_config_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthrum_test_program(gc_rendezvous_test gc_rendezvous_test.c)
 set_target_properties(gc_rendezvous_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_rendezvous_test PRIVATE -Wall -Wextra -Werror)

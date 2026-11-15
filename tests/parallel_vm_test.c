@@ -745,11 +745,8 @@ static int native_fail(lua_State *state) {
 }
 
 static int native_allocate_ready(lua_State *state) {
-  struct fixture *fixture;
-  void *user;
+  struct fixture *fixture = lua_touserdata(state, lua_upvalueindex(1));
   int role = (int)lua_tointeger(state, 1);
-  (void)lua_getallocf(state, &user);
-  fixture = user;
   check(pthread_mutex_lock(&fixture->mutex));
   if (fixture->inject_failure && role == 2) {
     while (!fixture->allocator_blocked)
@@ -881,7 +878,9 @@ static int prepare(lua_State *main, struct fixture *fixture, const char *name) {
   lua_setglobal(main, "fixture_intern");
   lua_pushcfunction(main, native_fail);
   lua_setglobal(main, "fixture_fail");
-  lua_pushcfunction(main, native_allocate_ready);
+  /* This rendezvous runs while the allocator is deliberately blocked. */
+  lua_pushlightuserdata(main, fixture);
+  lua_pushcclosure(main, native_allocate_ready, 1);
   lua_setglobal(main, "fixture_allocate_ready");
   luaL_newmetatable(main, "parallel.resource");
   lua_pushcfunction(main, finalize_resource);

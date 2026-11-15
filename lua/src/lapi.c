@@ -214,24 +214,26 @@ LUA_API int lua_checkstack (lua_State *L, int n) {
 LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
   int i;
   if (from == to) return;
-  lua_lock(to);
-  api_checkpop(from, n);
   api_check(from, G(from) == G(to), "moving among independent states");
+  luaX_lockpair(from, to);
+  api_checkpop(from, n);
   api_check(from, to->ci->top.p - to->top.p >= n, "stack overflow");
   from->top.p -= n;
   for (i = 0; i < n; i++) {
     setobjs2s(to, to->top.p, from->top.p + i);
     to->top.p++;  /* stack already checked by previous 'api_check' */
   }
-  lua_unlock(to);
+  luaX_unlockpair(from, to);
 }
 
 
 LUA_API lua_CFunction lua_atpanic (lua_State *L, lua_CFunction panicf) {
   lua_CFunction old;
   lua_lock(L);
+  luaW_heapenter(L);
   old = G(L)->panic;
   G(L)->panic = panicf;
+  luaW_heapleave(L);
   lua_unlock(L);
   return old;
 }
@@ -1599,8 +1601,10 @@ LUA_API void lua_len (lua_State *L, int idx) {
 LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
   lua_Alloc f;
   lua_lock(L);
+  luaW_heapenter(L);
   if (ud) *ud = G(L)->ud;
   f = G(L)->frealloc;
+  luaW_heapleave(L);
   lua_unlock(L);
   return f;
 }
@@ -1608,16 +1612,20 @@ LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
 
 LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud) {
   lua_lock(L);
+  luaW_heapenter(L);
   G(L)->ud = ud;
   G(L)->frealloc = f;
+  luaW_heapleave(L);
   lua_unlock(L);
 }
 
 
 void lua_setwarnf (lua_State *L, lua_WarnFunction f, void *ud) {
   lua_lock(L);
+  luaW_heapenter(L);
   G(L)->ud_warn = ud;
   G(L)->warnf = f;
+  luaW_heapleave(L);
   lua_unlock(L);
 }
 

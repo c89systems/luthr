@@ -11,6 +11,7 @@
 
 
 #include <setjmp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +63,7 @@
 /* chained list of long jump buffers */
 typedef struct lua_longjmp {
   struct lua_longjmp *previous;
+  pthread_t carrier;
   jmp_buf b;
   volatile TStatus status;  /* error code */
   lu_byte luthrum_stack_overflow;
@@ -131,6 +133,10 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
+    if (!pthread_equal(L->errorJmp->carrier, pthread_self())) {
+      fputs("Luthrum error crossed a foreign carrier's protected boundary\n", stderr);
+      abort();
+    }
     luaA_unwind(L, L->errorJmp->object_scopes);
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */
@@ -138,38 +144,49 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
   else {  /* thread has no error handler */
     global_State *g = G(L);
     lua_State *mainth = mainthread(g);
+    lua_CFunction panicf;
     luaA_unwind(L, NULL);
     L->native_roots = NULL;  /* every native scope on this thread is abandoned */
     {
       LuaWorldScope empty = {0, 0};
-      luaW_restore(L, empty, 0);
+      luaW_restore(L, empty, 1);  /* retain this state while closing frames */
     }
     errcode = luaE_resetthread(L, errcode);  /* close all upvalues */
     L->status = errcode;
-    if (mainth->errorJmp) {  /* main thread has a handler? */
-      if (L != mainth) {
+    if (L != mainth) {
+      LuaNativeRoot error;
+      LuaWorldScope source;
+      luaR_pushroot(L, &error);
+      luaR_setroot(L, &error, s2v(L->top.p - 1));
+      source = luaW_detach(L);
+      lua_lock(mainth);
+      if (mainth->errorJmp != NULL &&
+          pthread_equal(mainth->errorJmp->carrier, pthread_self())) {
         LuaWorldScope depth;
-        (void)luaW_detach(L);  /* retain the source until the copy is rooted */
-        lua_lock(mainth);
-        setobjs2s(L, mainth->top.p++, L->top.p - 1);
+        setobj2s(mainth, mainth->top.p++, &error.value);
         depth = luaW_detach(mainth);
         lua_lock(L);
-        lua_assert(L->native_depth == 1);
-        L->native_depth--;
+        lua_assert(L->native_depth == 2);
+        luaR_poproot(L, &error);
+        L->native_depth -= 2;  /* detach pin and error-cleanup pin */
         lua_unlock(L);  /* no more source-state accesses after this leave */
         luaW_attach(mainth, depth);
+        luaD_throw(mainth, errcode);
       }
-      else
-        setobjs2s(L, mainth->top.p++, L->top.p - 1);
-      luaD_throw(mainth, errcode);  /* re-throw in main thread */
+      lua_unlock(mainth);
+      luaW_attach(L, source);
+      luaR_poproot(L, &error);
     }
-    else {  /* no handler at all; abort */
-      if (g->panic) {  /* panic function? */
-        lua_unlock(L);
-        g->panic(L);  /* call panic function (last chance to jump out) */
-      }
-      abort();
+    luaW_heapenter(L);
+    panicf = g->panic;
+    luaW_heapleave(L);
+    lua_assert(L->native_depth == 1);
+    L->native_depth--;  /* all abandoned runtime scopes retire before panic */
+    if (panicf != NULL) {
+      lua_unlock(L);
+      panicf(L);  /* last chance to jump out on this carrier */
     }
+    abort();
   }
 }
 
@@ -195,6 +212,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   if (L->errorJmp == NULL)
     luaE_refreshnativestack(L);
   lj.status = LUA_OK;
+  lj.carrier = pthread_self();
   lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
@@ -1033,6 +1051,7 @@ static TStatus precover (lua_State *L, TStatus status) {
 LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
                                       int *nresults) {
   TStatus status;
+  l_uint32 calls = luaX_parentcalls(from);
   lua_lock(L);
   if (L->status == LUA_OK) {  /* may be starting a coroutine */
     if (L->ci != &L->base_ci)  /* not in base level? */
@@ -1042,7 +1061,7 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   }
   else if (L->status != LUA_YIELD)  /* ended with errors? */
     return resume_error(L, "cannot resume dead coroutine", nargs);
-  L->nCcalls = (from) ? getCcalls(from) : 0;
+  L->nCcalls = calls;
   if (l_unlikely(L->errorJmp != NULL))
     luaE_refreshnativestack(L);
   if (getCcalls(L) >= LUAI_MAXCCALLS)
