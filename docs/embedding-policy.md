@@ -22,9 +22,13 @@ Error handlers receive reserved stack headroom; exhausting that reserve reports
 an error in error handling.
 
 Stack bounds are discovered once per OS thread and copied on outer entry, so a
-Lua state can move between threads between completed host operations. Native
-thread stack mappings must remain fixed for the OS thread's lifetime. Recursive
-checks sample the stack pointer and compare a cached limit. They add no
+Lua state can move between threads between completed host operations. Worker
+stack mappings and the main thread's stack resource limit must remain fixed for
+the OS thread's lifetime. On Linux/musl, initial-thread discovery accounts for
+permitted stack growth using its resource limit and the preceding mapping;
+musl's reported current mapping alone is not its available main stack. Default
+and explicit worker stacks, including a forked worker, keep their pthread bounds.
+Recursive checks sample the stack pointer and compare a cached limit. They add no
 per-protected-call allocation or VM instruction hook. Linux x86_64 builds use TLS descriptors for
 the cache, including when Lua is loaded dynamically. Upstream public declarations
 are unchanged; callers do not need larger thread stacks or private Lua headers.

@@ -39,6 +39,15 @@ foreach(case IN ITEMS empty ordinary fallback managed mixed spurious early signa
   set_tests_properties(execution_wait_${case}
     PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 30)
 endforeach()
+luthrum_test_program(main_stack_test main_stack_test.c)
+set_target_properties(main_stack_test PROPERTIES C_STANDARD 99)
+target_compile_options(main_stack_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(main_stack_test PRIVATE luthrum_static)
+foreach(case IN ITEMS main limit worker fork_worker)
+  add_test(NAME main_stack_${case} COMMAND main_stack_test ${case})
+  set_tests_properties(main_stack_${case} PROPERTIES LABELS "stack;memcheck" TIMEOUT 30)
+endforeach()
+
 luthrum_test_program(carrier_pin_test carrier_pin_test.c)
 set_target_properties(carrier_pin_test PROPERTIES C_STANDARD 99)
 target_compile_options(carrier_pin_test PRIVATE -Wall -Wextra -Werror)

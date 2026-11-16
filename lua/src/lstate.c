@@ -19,6 +19,13 @@
 #include <stddef.h>
 #include <string.h>
 #include <pthread.h>
+#if defined(__linux__) && !defined(__GLIBC__)
+#include <inttypes.h>
+#include <stdio.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include "lua.h"
 
@@ -149,6 +156,46 @@ NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context) {
   return previous;
 }
 
+#if defined(__linux__) && !defined(__GLIBC__)
+/* musl reports only the initial thread's mapped pages. Linux can grow that
+** stack to its resource limit, bounded by the preceding mapping. Do not
+** extend a pthread stack inherited by a child forked from a worker. */
+static uintptr_t mainstacklow (uintptr_t mappedlow) {
+  struct rlimit limit;
+  FILE *maps;
+  char line[128];
+  uintptr_t previous = 0, result = mappedlow;
+  uintptr_t position = luaD_nativeposition();
+  if (syscall(SYS_gettid) != getpid() || getrlimit(RLIMIT_STACK, &limit) != 0)
+    return result;
+  maps = fopen("/proc/self/maps", "re");
+  if (maps == NULL)
+    return result;
+  while (fgets(line, sizeof(line), maps) != NULL) {
+    uintptr_t from, to;
+    int valid = sscanf(line, "%" SCNxPTR "-%" SCNxPTR, &from, &to) == 2;
+    int mainstack = strstr(line, "[stack]") != NULL;
+    if (strchr(line, '\n') == NULL) {
+      int c;
+      do { c = fgetc(maps); } while (c != '\n' && c != EOF);
+    }
+    if (!valid)
+      continue;
+    if (from <= position && position < to) {
+      if (mainstack) {
+        uintptr_t low = limit.rlim_cur >= to ? 0 : to - limit.rlim_cur;
+        if (low < previous) low = previous;
+        if (low < result) result = low;
+      }
+      break;
+    }
+    previous = to;
+  }
+  fclose(maps);
+  return result;
+}
+#endif
+
 uintptr_t luaE_initnativestack (void) {
   uintptr_t low = 0;
   size_t size = 0;
@@ -173,8 +220,17 @@ uintptr_t luaE_initnativestack (void) {
 #else
 #error Unsupported Luthrum Lua native stack platform
 #endif
-  if (size > 32768 && low <= UINTPTR_MAX - size)
-    return low + 32768;
+  if (low <= UINTPTR_MAX - size) {
+#if defined(__linux__) && !defined(__GLIBC__)
+    if (size != 0) {
+      uintptr_t high = low + size;
+      low = mainstacklow(low);
+      size = high - low;
+    }
+#endif
+    if (size > 32768)
+      return low + 32768;
+  }
   return UINTPTR_MAX;  /* retry failed discovery on the next outer entry */
 }
 
