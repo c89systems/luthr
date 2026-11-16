@@ -337,7 +337,7 @@ struct lua_State {
   struct LuaTaskRoot *task_owner;  /* persistent scheduled-task reservation */
   unsigned owned_operations;
   unsigned resume_active;
-  unsigned close_active;
+  unsigned close_active;  /* nesting depth, including recursive self-close */
   LuaStackGate stack_gate;
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;

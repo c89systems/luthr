@@ -442,7 +442,8 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
   }
   crossing = L == from && !luaD_canselfclose(L);
   luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
-  if (L->owned_operations != 0 || L->close_active != 0 || crossing) {
+  if (L->owned_operations != 0 || (L->close_active != 0 && L != from) ||
+      crossing) {
     luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
     setsvalue2s(L, L->top.p++, G(L)->operation_error);
     if (L->ci->top.p < L->top.p) L->ci->top.p = L->top.p;
@@ -450,10 +451,10 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
     return LUA_ERRRUN;
   }
   luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
-  L->close_active = 1;
+  L->close_active++;
   L->nCcalls = calls;
   status = luaE_resetthread(L, L->status);
-  L->close_active = 0;
+  L->close_active--;
   if (L == from)  /* closing itself? */
     luaD_throwbaselevel(L, status);
   lua_unlock(L);

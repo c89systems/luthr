@@ -441,13 +441,12 @@ static void *run(void *context) {
       if (strstr(test->mode, "handler_error") == NULL)
         require(lua_tointeger(result, -1) == 42);
     } else if (close) {
-      int failure = strstr(test->mode, "result") != NULL ||
-                    strstr(test->mode, "reentrant") != NULL;
+      int failure = strstr(test->mode, "result") != NULL;
       require(lua_toboolean(result, 1) == !failure);
       if (strstr(test->mode, "result") != NULL)
         require(strstr(lua_tostring(result, -1), "close expected") != NULL);
       if (strstr(test->mode, "reentrant") != NULL)
-        require(strstr(lua_tostring(result, -1), "active operations") != NULL);
+        require(test->results == 1);
     } else
       require(lua_tointeger(result, -1) == 11);
   }

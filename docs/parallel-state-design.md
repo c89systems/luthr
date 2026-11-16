@@ -969,8 +969,9 @@ list. That list retains both states independently of application references.
 Protected receivers snapshot the context's scope chain. Errors retire abandoned
 claims before handlers run and unlink their roots before native storage unwinds;
 an inner protected failure preserves surviving outer claims. A held operation
-cannot be abandoned by self-close, and a close handler cannot recursively close
-the state it is already closing. A reentrant callback cannot self-close an older
+cannot be abandoned by self-close. A close handler can recursively close its
+own coroutine, as upstream Lua permits; close depth remains active until the
+outer close finishes. A reentrant callback cannot self-close an older
 state across another state's operation or another execution's protected receiver.
 Busy self-close uses a fixed error string without allocating.
 
@@ -982,7 +983,8 @@ and status unchanged. The original operation must finish, allow subsequent
 legal use and close exactly once. Other cases force collection when an operation
 alone owns its child, exercise error handlers that recover or themselves fail,
 deny allocation during busy reporting or abandonment, and reject destructive
-self-close without allocating. A callback chain through three states rejects
+self-close without allocating. Recursive self-close must finish successfully
+and close values exactly once. A callback chain through three states rejects
 self-close across the middle state's operation even when the original state
 owns no operations. Nested VM construction injects allocation errors while
 preserving an outer VM's operation.
