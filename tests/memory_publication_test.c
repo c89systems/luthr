@@ -39,7 +39,9 @@ struct allocator {
 
 static struct handoff *handoff;
 static LuaWorld *watched;
+static pthread_mutex_t *watched_gate;
 static __thread unsigned measured, world_locks, polls, entries;
+static __thread unsigned stack_locks;
 static __thread int role;
 static struct {
   lua_State *owner, *collector;
@@ -82,6 +84,8 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
 }
 
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  if (measured && mutex == watched_gate)
+    stack_locks++;
   if (measured && watched != NULL && mutex == &watched->mutex)
     world_locks++;
   return __real_pthread_mutex_lock(mutex);
@@ -163,6 +167,46 @@ static void no_requests(lua_State *state) {
       "request-free admission/polling: %u entries, %u polls, %u world locks\n",
       entries, polls, world_locks);
   watched = NULL;
+}
+
+static void stack_admission(lua_State *state) {
+  unsigned i;
+  lua_gc(state, LUA_GCSTOP);
+  watched_gate = &state->stack_gate.mutex;
+  stack_locks = 0;
+  measured++;
+  for (i = 0; i < 100; i++) {
+    lua_pushinteger(state, i);
+    require(lua_gettop(state) == 1 && lua_tointeger(state, -1) == i);
+    lua_pop(state, 1);
+  }
+  measured--;
+  fprintf(stderr, "uncontended stack admission: %u OS mutex locks\n",
+          stack_locks);
+  require(stack_locks == 0);
+  watched_gate = NULL;
+}
+
+static void *stack_increment(void *context) {
+  lua_State *state = context;
+  unsigned i;
+  for (i = 0; i < 1000; i++) {
+    luaX_lockstate(state);
+    setivalue(s2v(state->top.p - 1), ivalue(s2v(state->top.p - 1)) + 1);
+    luaX_unlockstate(state);
+  }
+  return NULL;
+}
+
+static void stack_contention(lua_State *state) {
+  pthread_t peers[4];
+  unsigned i;
+  lua_pushinteger(state, 0);
+  for (i = 0; i < 4; i++)
+    require(pthread_create(&peers[i], NULL, stack_increment, state) == 0);
+  for (i = 0; i < 4; i++)
+    require(pthread_join(peers[i], NULL) == 0);
+  require(lua_gettop(state) == 1 && lua_tointeger(state, -1) == 4000);
 }
 
 static void intern_hits(lua_State *state) {
@@ -723,6 +767,10 @@ int main(int argc, char **argv) {
   require(state != NULL);
   if (strcmp(argv[1], "no_requests") == 0)
     no_requests(state);
+  else if (strcmp(argv[1], "stack_admission") == 0)
+    stack_admission(state);
+  else if (strcmp(argv[1], "stack_contention") == 0)
+    stack_contention(state);
   else if (strcmp(argv[1], "intern_hits") == 0)
     intern_hits(state);
   else if (strcmp(argv[1], "ordinary_operations") == 0)

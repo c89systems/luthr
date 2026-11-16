@@ -17,7 +17,6 @@ typedef struct LuaStackGate {
   unsigned long next_ticket;
   unsigned long serving;
   unsigned waiting;  /* atomic request count, read by no-request safepoints */
-  int owned;
   int ready;
 } LuaStackGate;
 

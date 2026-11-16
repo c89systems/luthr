@@ -22,7 +22,8 @@ void luaX_checksync (int status) {
 
 int luaX_initgate (LuaStackGate *gate) {
   int status;
-  gate->ready = gate->owned = 0;
+  gate->ready = 0;
+  gate->owner.token = NULL;
   gate->next_ticket = gate->serving = 0;
   gate->waiting = 0;
   gate->waiters = NULL;
@@ -41,7 +42,7 @@ int luaX_initgate (LuaStackGate *gate) {
 void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
-  lua_assert(!gate->owned && gate->next_ticket == gate->serving &&
+  lua_assert(gate->owner.token == NULL && gate->next_ticket == gate->serving &&
              gate->waiters == NULL);
   luaX_checksync(pthread_cond_destroy(&gate->changed));
   luaX_checksync(pthread_mutex_destroy(&gate->mutex));
@@ -50,39 +51,43 @@ void luaX_destroygate (LuaStackGate *gate) {
 
 static void reserve (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
+  void *token = luaQ_ownertoken();
   unsigned long ticket;
-  luaX_checksync(pthread_mutex_lock(&gate->mutex));
   /* Recursive entry is an internal boundary error, not a wait for ourselves. */
-  if (gate->owned && luaQ_isowner(&gate->owner)) {
+  if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) == token) {
     fputs("Luthr recursive coroutine stack gate entry\n", stderr);
     abort();
   }
-  ticket = gate->next_ticket++;
-  if (ticket != gate->serving) {
-    __atomic_fetch_add(&gate->waiting, 1, __ATOMIC_RELEASE);
-    do {
+  ticket = __atomic_fetch_add(&gate->next_ticket, 1, __ATOMIC_RELAXED);
+  if (ticket != __atomic_load_n(&gate->serving, __ATOMIC_ACQUIRE)) {
+    luaX_checksync(pthread_mutex_lock(&gate->mutex));
+    __atomic_fetch_add(&gate->waiting, 1, __ATOMIC_SEQ_CST);
+    while (ticket != __atomic_load_n(&gate->serving, __ATOMIC_SEQ_CST)) {
       luaQ_wait(L, &gate->mutex, &gate->changed, &gate->waiters);
-    } while (ticket != gate->serving);
-    __atomic_fetch_sub(&gate->waiting, 1, __ATOMIC_RELEASE);
+    }
+    __atomic_fetch_sub(&gate->waiting, 1, __ATOMIC_SEQ_CST);
+    luaX_checksync(pthread_mutex_unlock(&gate->mutex));
   }
-  lua_assert(!gate->owned);
-  luaQ_setowner(&gate->owner);
-  gate->owned = 1;
-  luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+  lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
+  __atomic_store_n(&gate->owner.token, token, __ATOMIC_RELEASE);
 }
 
 static void release (lua_State *L) {
   LuaStackGate *gate = &L->stack_gate;
   lua_assert(L->world_depth == 0);
-  luaX_checksync(pthread_mutex_lock(&gate->mutex));
-  if (!gate->owned || !luaQ_isowner(&gate->owner)) {
+  if (!luaQ_isowner(&gate->owner)) {
     fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
-  gate->owned = 0;
-  gate->serving++;
-  luaQ_wake(&gate->changed, &gate->waiters);
-  luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+  __atomic_store_n(&gate->owner.token, NULL, __ATOMIC_RELEASE);
+  /* Either a waiter sees its turn before parking, or this observer check
+  ** sees its registration and wakes it. Uncontended entry/exit stays local. */
+  __atomic_fetch_add(&gate->serving, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&gate->waiting, __ATOMIC_SEQ_CST) != 0) {
+    luaX_checksync(pthread_mutex_lock(&gate->mutex));
+    luaQ_wake(&gate->changed, &gate->waiters);
+    luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+  }
 }
 
 void luaX_lockstate (lua_State *L) {

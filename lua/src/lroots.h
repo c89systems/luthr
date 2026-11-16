@@ -7,6 +7,7 @@
 #define lroots_h
 
 #include "lstate.h"
+#include "lgc.h"
 
 /* These private operations do not allocate. The caller owns the Lua state and
 ** supplies stable native storage in LIFO order. The source of a snapshot must
@@ -18,9 +19,22 @@
 ** An unprotected throw abandons this state's scopes before forwarding/panic.
 ** A continuation needing longer ownership requires separate task/operation
 ** roots, not nodes added to this temporary chain during its invocation. */
-LUAI_FUNC void luaR_pushroot (lua_State *L, LuaNativeRoot *root);
-LUAI_FUNC void luaR_setroot (lua_State *L, LuaNativeRoot *root,
-                          const TValue *value);
-LUAI_FUNC void luaR_poproot (lua_State *L, LuaNativeRoot *root);
+l_sinline void luaR_pushroot (lua_State *L, LuaNativeRoot *root) {
+  setnilvalue(&root->value);
+  root->table_view = NULL;
+  root->previous = L->native_roots;
+  L->native_roots = root;
+}
+
+l_sinline void luaR_setroot (lua_State *L, LuaNativeRoot *root,
+                            const TValue *value) {
+  root->table_view = NULL;
+  setobj(L, &root->value, value);
+}
+
+l_sinline void luaR_poproot (lua_State *L, LuaNativeRoot *root) {
+  lua_assert(L->native_roots == root);
+  L->native_roots = root->previous;
+}
 
 #endif
