@@ -56,11 +56,12 @@ typedef struct {
 static void dumpBlock (DumpState *D, const void *b, size_t size) {
   if (D->status == 0) {  /* do not write anything after an error */
     LuaWorldScope depth;
-    if (!D->managed) luaQ_beginnative(D->L);
+    LuaCallScope call;
+    luaQ_begincall(D->L, D->managed, &call);
     depth = luaW_detach(D->L);
     D->status = (*D->writer)(D->L, b, size, D->data);
     luaW_attach(D->L, depth);
-    if (!D->managed) luaQ_endnative(D->L);
+    luaQ_endcall(D->L, &call);
     D->offset += size;
   }
 }

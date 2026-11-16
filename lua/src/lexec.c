@@ -101,6 +101,27 @@ void luaQ_endnative (lua_State *L) {
   }
 }
 
+void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
+  LuaExecution *execution = luaQ_current();
+  scope->execution = execution;
+  scope->managed = managed;
+  if (!managed) luaQ_beginnative(L);
+  else if (execution != NULL) {
+    scope->previous = execution->trusted;
+    scope->native_depth = execution->native_depth;
+    execution->trusted = scope;
+  }
+}
+
+void luaQ_endcall (lua_State *L, LuaCallScope *scope) {
+  if (!scope->managed) luaQ_endnative(L);
+  else if (scope->execution != NULL) {
+    lua_assert(scope->execution == luaQ_current() &&
+               scope->execution->trusted == scope);
+    scope->execution->trusted = scope->previous;
+  }
+}
+
 void luaQ_restorenative (LuaExecution *execution, lua_State *L, unsigned depth) {
   if (execution != NULL) {
     unsigned previous = execution->native_depth;

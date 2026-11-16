@@ -138,7 +138,7 @@ void __wrap_luaCT_pause(LuaFiber *fiber) {
 }
 
 static void init(struct fixture *f, unsigned slots) {
-  LuaSchedulerConfig config = {slots, slots + 1, 1, 1};
+  LuaSchedulerConfig config = {slots, slots + 1, 1, 1, 1};
   fixture = f;
   f->main = luaL_newstate();
   require(f->main != NULL);
@@ -515,7 +515,7 @@ static void *backing(void *context, void *block, size_t old, size_t size) {
 }
 
 static void startup_failures(struct fixture *f) {
-  LuaSchedulerConfig config = {2, 3, 1, 1};
+  LuaSchedulerConfig config = {2, 3, 1, 1, 1};
   LuaScheduler other = {0};
   unsigned i;
   fixture = f;

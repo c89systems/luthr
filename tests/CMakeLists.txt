@@ -35,6 +35,18 @@ foreach(case IN ITEMS fairness parallel no_requests early_incremental early_gene
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(native_lifecycle_test native_lifecycle_test.c)
+set_target_properties(native_lifecycle_test PROPERTIES C_STANDARD 99)
+target_compile_options(native_lifecycle_test PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
+target_link_libraries(native_lifecycle_test PRIVATE luthr_static)
+foreach(case IN ITEMS affinity affinity_cancel opaque_wait opaque_cancel nested wait
+    shutdown revoke marshal_error oom late retained_slot foreign_fairness opaque_fairness stream
+    stream_cancel stream_shutdown)
+  add_test(NAME native_lifecycle_${case} COMMAND native_lifecycle_test ${case})
+  set_tests_properties(native_lifecycle_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
+
 luthr_test_program(capture_cells_test capture_cells_test.c)
 set_target_properties(capture_cells_test PROPERTIES C_STANDARD 99)
 target_compile_options(capture_cells_test PRIVATE -Wall -Wextra -Werror)
@@ -673,7 +685,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test scheduler_test)
+  capture_cells_test memory_publication_test scheduler_test native_lifecycle_test)
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

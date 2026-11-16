@@ -36,6 +36,12 @@ typedef struct LuaTaskRoot {
 ** No allocation or function/result copying is needed. */
 LUAI_FUNC int luaTK_admit (lua_State *L, LuaTaskRoot *task,
                            LuaExecution *execution);
+/* A registered foreign callback participates in the same cancellation/root
+** registry, without owning the callback coroutine's resume/close interface.
+** Begin under state ownership inside its protected invocation. End after the
+** protected boundary has returned and every wait/notice borrow has retired. */
+LUAI_FUNC void luaTK_begincallback (lua_State *, LuaTaskRoot *, LuaExecution *);
+LUAI_FUNC void luaTK_endcallback (LuaTaskRoot *);
 /* Only the task's quiescent driver may resume/finish. Negative results describe
 ** admission, never a Lua error on the protected target. Raw embedding API
 ** sequences still require owner serialization. */

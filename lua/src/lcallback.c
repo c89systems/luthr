@@ -10,6 +10,7 @@
 #include "ldo.h"
 #include "lstate.h"
 #include "lstring.h"
+#include "ltask.h"
 
 static void createthread (lua_State *L, void *context) {
   LuaCallback *callback = cast(LuaCallback *, context);
@@ -81,6 +82,11 @@ static int invoke (lua_State *L) {
   struct Invocation *call = cast(struct Invocation *, lua_touserdata(L, 1));
   lua_pushvalue(L, 2);
   call->invoke(L, call->context);
+  /* Provider marshalling can itself be opaque work. A stop requested while
+  ** it blocks is delivered only after that activation returns on its owner. */
+  lua_lock(L);
+  luaTK_checkstop(L);
+  lua_unlock(L);
   return 0;
 }
 
@@ -132,6 +138,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
     NativeStackContext *source = luaE_getnativestackcontext();
     if (execution == NULL || execution->managed_depth != 0 ||
         execution->native_depth != 0 || execution->pin_depth != 0 ||
+        execution->trusted != NULL ||
         execution->protected != NULL ||
         __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE) != NULL)
       return LUA_CB_INVALID;
@@ -191,7 +198,9 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
   luaX_checksync(pthread_mutex_unlock(&callback->mutex));
   if (attached) {
     lua_assert(execution->managed_depth == 0 && execution->native_depth == 1 &&
-               execution->protected == NULL && native.coroutine_scopes == NULL);
+               execution->protected == NULL && execution->pin_depth == 0 &&
+               execution->trusted == NULL &&
+               native.coroutine_scopes == NULL);
     execution->native_depth = 0;
     luaE_setnativestackcontext(previous);
   }

@@ -19,6 +19,55 @@ static void notifywait (LuaWorld *world, LuaStopWait *wait) {
   /* No access to wait after its final borrow is published. */
 }
 
+static void registertask (lua_State *L, LuaTaskRoot *task,
+                          LuaExecution *execution, int phase) {
+  task->global = G(L);
+  task->thread = L;
+  task->execution = execution;
+  task->phase = phase;
+  task->next = G(L)->tasks;
+  task->link = &G(L)->tasks;
+  if (task->next != NULL) task->next->link = &task->next;
+  G(L)->tasks = task;
+}
+
+static void unregistertask (LuaTaskRoot *task) {
+  *task->link = task->next;
+  if (task->next != NULL) task->next->link = task->link;
+  task->next = NULL;
+  task->link = NULL;
+  task->phase = LUA_TASK_COLLECTED;
+  __atomic_store_n(&task->execution->task, NULL, __ATOMIC_RELEASE);
+}
+
+void luaTK_begincallback (lua_State *L, LuaTaskRoot *task,
+                          LuaExecution *execution) {
+  LuaWorld *world = &G(L)->world;
+  lua_assert(task->phase == LUA_TASK_UNUSED && execution == luaQ_current() &&
+    L->errorJmp != NULL && L->errorJmp == execution->protected);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(__atomic_load_n(&execution->task, __ATOMIC_RELAXED) == NULL);
+  __atomic_store_n(&execution->task, task, __ATOMIC_RELEASE);
+  registertask(L, task, execution, LUA_TASK_RUNNING);
+  /* An entry admitted by the scheduler before shutdown can reach this
+  ** protected boundary after the admission gate closes. It must still unwind
+  ** through its own carrier, with a live cancellation/root record. */
+  __atomic_store_n(&task->stop_requested, G(L)->task_admission_closed,
+                   __ATOMIC_RELEASE);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void luaTK_endcallback (LuaTaskRoot *task) {
+  LuaWorld *world;
+  if (task->phase == LUA_TASK_UNUSED) return;
+  world = &task->global->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(task->phase == LUA_TASK_RUNNING && task->stop_wait == NULL &&
+    task->execution->protected == NULL && task->execution->pin_depth == 0);
+  unregistertask(task);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
 int luaTK_requeststop (LuaTaskRoot *task) {
   LuaWorld *world;
   LuaStopWait *wait = NULL;
@@ -100,7 +149,7 @@ static int driver (LuaTaskRoot *task) {
   return execution == task->execution && execution != NULL &&
          __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE) == task &&
          execution->managed_depth == 0 && execution->native_depth == 0 &&
-         execution->protected == NULL &&
+         execution->protected == NULL && execution->trusted == NULL &&
          luaE_getnativestackcontext()->coroutine_scopes == NULL;
 }
 
@@ -125,7 +174,7 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
   if (task->phase != LUA_TASK_UNUSED || execution == NULL ||
       execution->managed_depth != 0 || execution->native_depth != 0 ||
       execution->pin_depth != 0 ||
-      execution->protected != NULL)
+      execution->protected != NULL || execution->trusted != NULL)
     return status;
   lua_lock(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
@@ -144,14 +193,7 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
       lua_unlock(L);
       return LUA_TK_INVALID;
     }
-    task->global = G(L);
-    task->thread = L;
-    task->execution = execution;
-    task->phase = LUA_TASK_ADMITTED;
-    task->next = G(L)->tasks;
-    task->link = &G(L)->tasks;
-    if (task->next != NULL) task->next->link = &task->next;
-    G(L)->tasks = task;
+    registertask(L, task, execution, LUA_TASK_ADMITTED);
     L->task_owner = task;
     status = LUA_OK;
   }
@@ -245,12 +287,7 @@ int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   lua_xmove(task->thread, L, count);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   task->thread->task_owner = NULL;
-  *task->link = task->next;
-  if (task->next != NULL) task->next->link = task->link;
-  task->next = NULL;
-  task->link = NULL;
-  task->phase = LUA_TASK_COLLECTED;
-  __atomic_store_n(&task->execution->task, NULL, __ATOMIC_RELEASE);
+  unregistertask(task);
   luaQ_wake(&world->changed, &task->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   *status = outcome;

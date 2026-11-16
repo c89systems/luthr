@@ -26,11 +26,12 @@ int luaZ_fill (ZIO *z) {
   lua_State *L = z->L;
   const char *buff;
   LuaWorldScope depth;
-  if (!z->managed) luaQ_beginnative(L);
+  LuaCallScope call;
+  luaQ_begincall(L, z->managed, &call);
   depth = luaW_detach(L);
   buff = z->reader(L, z->data, &size);
   luaW_attach(L, depth);
-  if (!z->managed) luaQ_endnative(L);
+  luaQ_endcall(L, &call);
   if (buff == NULL || size == 0) {
     z->n = 0; z->p = NULL;
     return EOZ;

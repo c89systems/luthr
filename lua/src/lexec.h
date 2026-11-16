@@ -16,8 +16,16 @@ typedef struct LuaAllocationCache {
   struct LuaAllocPage *pages[LUA_ALLOC_BINS];
 } LuaAllocationCache;
 
+typedef struct LuaCallScope {
+  struct LuaCallScope *previous;
+  struct LuaExecution *execution;
+  unsigned native_depth;
+  int managed;
+} LuaCallScope;
+
 typedef struct LuaExecution {
   void *context;
+  struct LuaScheduler *scheduler;  /* production routing, NULL for host drivers */
   void (*managed_enter)(struct LuaExecution *, lua_State *);
   /* Release only: this may run under a resource bookkeeping mutex. */
   void (*managed_leave)(struct LuaExecution *);
@@ -43,6 +51,7 @@ typedef struct LuaExecution {
   unsigned pin_depth;
   pthread_t pinned_carrier;
   LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
+  LuaCallScope *trusted;  /* runtime-owned C frames, including nested callbacks */
 } LuaExecution;
 
 enum { LUA_PIN_INVALID = -1, LUA_PIN_UNAVAILABLE = -2, LUA_PIN_OVERFLOW = -3 };
@@ -92,6 +101,8 @@ LUAI_FUNC void luaQ_entermanaged (lua_State *L);
 LUAI_FUNC void luaQ_leavemanaged (void);
 LUAI_FUNC void luaQ_beginnative (lua_State *L);
 LUAI_FUNC void luaQ_endnative (lua_State *L);
+LUAI_FUNC void luaQ_begincall (lua_State *, int managed, LuaCallScope *);
+LUAI_FUNC void luaQ_endcall (lua_State *, LuaCallScope *);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,
                                   unsigned depth);
 LUAI_FUNC void luaQ_poll (lua_State *L);
