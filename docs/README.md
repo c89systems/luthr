@@ -79,6 +79,9 @@ still needs its separate fairness proof.
 Loading from memory and Lua reader callbacks now supports managed execution,
 with private parser/fragment roots and checkpoints during input consumption.
 Public reader callbacks and file I/O retain native admission.
+Package `require` and its preload searcher now support managed orchestration,
+with private snapshots across loader callbacks and bounded search-error copying.
+File and dynamic-library searchers keep their native boundaries.
 Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.

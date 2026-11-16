@@ -232,6 +232,18 @@ both native slots occupied, requires migration during input consumption, collect
 with saved parser state and exercises nested loads and reader callbacks awaiting
 another task's result. File loading and other library/module gates remain open.
 
+`package_library_*` checks cache/loader-data semantics, nested loads, numeric and
+embedded-NUL names, table metamethods, callback errors, allocation denial and
+native admission. Snapshot cases replace the package capture, registry cache and
+debug-visible name during a loader, then collect the selected tables, loader,
+external name and loader data. Concurrent misses must reach both loaders without
+a module-wide lock; cache lookup, loading and publication remain separate table
+operations. The result may reflect a peer's cache publication. File searchers,
+path probing and dynamic-library loading must still consume native admission.
+`native_scheduler_task_*package*` requires completion under native saturation,
+nested preloads, task-result waits, moved contexts, GC and pinned native reentry.
+This is package orchestration evidence, not native-module compatibility proof.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

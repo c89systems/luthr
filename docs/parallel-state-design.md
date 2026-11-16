@@ -1320,6 +1320,40 @@ These checks do not establish bounded work for every parser/metadata pass or
 arbitrarily long numeric conversion. File I/O, other libraries, required modules
 and the remaining scheduler acceptance gates remain unfinished.
 
+## Managed package orchestration
+
+`require` and the preload searcher now use managed closures. The module name,
+C-string lookup key, selected package capture, loaded/searcher tables, loader,
+loader data and result use private roots. Capture selection obeys C-closure
+ownership, and registry selection obeys heap ownership. Rooted table lookups and
+publication preserve metamethod behavior without using mutable debug-visible
+stack slots as long-lived ownership. Searcher error fragments are copied in
+bounded chunks with work checkpoints; the ordinary final error is materialized.
+
+The name passed to the loader and the C-string key passed to searchers/cache
+retain upstream numeric and embedded-NUL behavior. Truthy cache hits return one
+value; fresh loads return the module and loader data. Nil and false results,
+loader cache assignment, nested loads and error identity retain their ordinary
+rules. Lookup, loader execution and cache publication remain separate operations:
+concurrent misses can run two loaders and a returned value can reflect another
+call's cache publication. No module initialization transaction is introduced.
+
+`package_library_*` covers those semantics, table metamethods, raw function
+reconstruction, invalid captures, moving allocation and denial, native admission,
+and concurrent misses. A snapshot replaces the active package capture, registry
+cache and debug-visible argument during the loader, forces collection and checks
+the original objects remain live until their private snapshots retire.
+`native_scheduler_task_*package*` requires progress with both native slots held,
+bounded-copy migration, saved-context collection, nested loaders, Lua loader
+waits and pinned foreign reentry in raw and C89 modes under both collectors.
+
+Actual native loaders and searchers keep ordinary native admission. File and
+dynamic-library searchers, `package.searchpath` and `package.loadlib` remain
+native. Shared module globals, dynamic-library lifetime/initialization policy,
+resource affinity and installed module workflows still require their own gates;
+this change does not establish their compatibility or bounded work throughout
+every package/core formatting and string operation.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

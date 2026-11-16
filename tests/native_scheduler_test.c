@@ -455,6 +455,7 @@ static int block_binding(lua_State *state) {
                     "if audit_strings then audit_strings(0) end; "
                     "if audit_dump then audit_dump(0) end; "
                     "if audit_load then audit_load(0) end; "
+                    "if audit_package then audit_package(0) end; "
                     "return await_checked(2)"
                   : "local n=0; for i=1,4000 do n=n+i end; "
                     "local bytes=string.dump(function() return 42 end); "
@@ -2036,6 +2037,53 @@ static void install_load_audit(struct pool *pool) {
   require(luaL_loadstring(state, source) == LUA_OK);
   require(lua_pcall(state, 0, 0, 0) == LUA_OK);
 }
+static void install_package_audit(struct pool *pool) {
+  static const char source[] =
+      "local preload=package.searchers[1]; "
+      "setmetatable(package.preload,{__index=function(t,n) check_managed(); "
+      "if n:sub(1,5)=='meta_' then return function() check_managed(); "
+      "collectgarbage('collect'); return 42 end end end}); "
+      "local missing=string.rep('missing ',512); "
+      "package.searchers={function(n) check_managed(); return missing end, "
+      "preload, function(n) check_managed(); "
+      "if n:sub(1,7)=='custom_' then local data={answer=42}; "
+      "return function(name,d) check_managed(); assert(name==n and d==data); "
+      "collectgarbage('collect'); return d end,data end end}; "
+      "function audit_package(id) check_managed(); "
+      "local key='owned_'..id; local nested='nested_'..id; "
+      "package.preload[nested]=function(n,d) check_managed(); "
+      "assert(n==nested and d==':preload:'); return 7 end; "
+      "package.preload[key]=function(n,d) check_managed(); "
+      "assert(n==key and d==':preload:'); assert(require(nested)==7); "
+      "collectgarbage('collect'); "
+      "if id==2 then assert(await_checked(3)==42) end; "
+      "return {answer=42} end; "
+      "local before=helper_ticks(1); local m,d=require(key); "
+      "assert(helper_ticks(1)>before and m.answer==42 and d==':preload:'); "
+      "assert(require(key)==m and select('#',require(key))==1); "
+      "local custom='custom_'..id; local a,b=require(custom); "
+      "assert(a==b and a.answer==42); "
+      "assert(require('meta_'..id)==42); "
+      "local token={}; local bad='bad_'..id; "
+      "package.preload[bad]=function() check_managed(); error(token) end; "
+      "local ok,e=pcall(require,bad); assert(not ok and e==token); "
+      "package.preload[bad]=function() check_managed(); return 42 end; "
+      "assert(require(bad)==42); "
+      "ok,e=pcall(require,'absent_'..id); "
+      "assert(not ok and type(e)=='string'); check_managed() end";
+  lua_State *state = pool->main;
+  pool->helper_count = 1;
+  luaQ_pushmanaged(state, helper_ticks, 0);
+  lua_setglobal(state, "helper_ticks");
+  luaQ_pushmanaged(state, helper_managed, 0);
+  lua_setglobal(state, "check_managed");
+  lua_getglobal(state, "require");
+  pool->helper_work[0] = lua_tocfunction(state, -1);
+  require(pool->helper_work[0] != NULL);
+  lua_pop(state, 1);
+  require(luaL_loadstring(state, source) == LUA_OK);
+  require(lua_pcall(state, 0, 0, 0) == LUA_OK);
+}
 static int exercise_task_wait(const char *name) {
   struct pool *pool = calloc(1, sizeof(*pool));
   pthread_t workers[MAX_WORKERS];
@@ -2052,7 +2100,8 @@ static int exercise_task_wait(const char *name) {
   int strings = strstr(name, "strings") != NULL;
   int dump = strstr(name, "dump") != NULL;
   int load = strstr(name, "load") != NULL;
-  int helpers = utf8 || pattern || strings || dump || load;
+  int package = strstr(name, "package") != NULL;
+  int helpers = utf8 || pattern || strings || dump || load || package;
   int movealloc = strstr(name, "movealloc") != NULL;
   static const char producer[] =
       "local token,id=...; return function() "
@@ -2066,6 +2115,7 @@ static int exercise_task_wait(const char *name) {
       "if audit_strings then audit_strings(id) end; "
       "if audit_dump then audit_dump(id) end; "
       "if audit_load then audit_load(id) end; "
+      "if audit_package then audit_package(id) end; "
       "if id==2 then gate2:recv() else gate3:recv() end; "
       "if id==3 and failing then error(token) end; "
       "return token,function() return shared end,42 end";
@@ -2159,6 +2209,8 @@ static int exercise_task_wait(const char *name) {
     install_dump_audit(pool);
   if (load)
     install_load_audit(pool);
+  if (package)
+    install_package_audit(pool);
   if (strstr(name, "generational") != NULL)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < MAX_TASKS; ++id) {
@@ -2251,7 +2303,7 @@ static int exercise_task_wait(const char *name) {
   }
   while (!pool->await_ready[0] || !pool->await_ready[1] ||
          !pool->tasks[2].published || !pool->tasks[3].published ||
-         ((library || pattern || strings || dump || load) &&
+         ((library || pattern || strings || dump || load || package) &&
           !pool->tasks[2].await_waits)) {
     require(!pool->tasks[2].finished && !pool->tasks[3].finished);
     wait_change(pool);
@@ -2307,7 +2359,9 @@ static int exercise_task_wait(const char *name) {
   require(pool->await_winners[0] == 1 && pool->await_winners[1] == 1);
   require(pool->await_losers[0] == (callback ? 2U : 1U) &&
           pool->await_losers[1] ==
-              ((library || pattern || strings || dump || load) ? 1U : 0U));
+              ((library || pattern || strings || dump || load || package)
+                   ? 1U
+                   : 0U));
   pool->release[0] = pool->release[1] = 1;
   signal_change(pool);
   while (pool->done != MAX_TASKS)
@@ -2337,7 +2391,7 @@ static int exercise_task_wait(const char *name) {
       if (pool->force_migrate)
         require(task->migrations != 0);
     }
-    if ((library || pattern || strings || dump || load) && id == 2) {
+    if ((library || pattern || strings || dump || load || package) && id == 2) {
       require(task->await_waits != 0 && task->pinned_resource_waits == 0);
       if (pool->force_migrate)
         require(task->migrations != 0);

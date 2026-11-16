@@ -16,6 +16,24 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(package_library_test package_library_test.c)
+set_target_properties(package_library_test PROPERTIES C_STANDARD 99)
+target_compile_options(package_library_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(package_library_test PRIVATE luthrum_static)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS semantics errors metamethods bindings snapshot admission parallel oom)
+      add_test(NAME package_library_${backend}_${case}_${gc}
+        COMMAND package_library_test ${backend}_${case}_${gc})
+      set_tests_properties(package_library_${backend}_${case}_${gc}
+        PROPERTIES LABELS "runtime;memcheck" TIMEOUT 120)
+      if(case STREQUAL "parallel")
+        set_tests_properties(package_library_${backend}_${case}_${gc}
+          PROPERTIES LABELS "parallel;runtime;memcheck")
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(load_library_test load_library_test.c)
 set_target_properties(load_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(load_library_test PRIVATE -Wall -Wextra -Werror)
@@ -214,12 +232,13 @@ foreach(backend IN ITEMS raw facade)
         pattern pattern_migrate pattern_callback pattern_movealloc_callback pattern_error
         strings strings_migrate strings_callback strings_movealloc_callback strings_error
         dump dump_migrate dump_callback dump_movealloc_callback dump_error
-        load load_migrate load_callback load_movealloc_callback load_error)
+        load load_migrate load_callback load_movealloc_callback load_error
+        package package_migrate package_callback package_movealloc_callback package_error)
       add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
         COMMAND native_scheduler_test task_${backend}_${case}_${gc})
       set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
         PROPERTIES LABELS "parallel;memcheck" TIMEOUT 60)
-      if(case MATCHES "^(utf8|pattern|strings|dump|load)")
+      if(case MATCHES "^(utf8|pattern|strings|dump|load|package)")
         # Forced carrier switches and large result sets under Valgrind.
         set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
           PROPERTIES TIMEOUT 180)
