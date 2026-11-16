@@ -37,6 +37,47 @@ set_target_properties(compat_fixture PROPERTIES PREFIX "" C_STANDARD 99)
 target_include_directories(compat_fixture PRIVATE "${reference_dir}")
 target_compile_options(compat_fixture PRIVATE -Wall -Wextra -Werror)
 
+set(suite_archive "${PROJECT_SOURCE_DIR}/.cache/vendor/lua-5.5.1-tests.tar.gz")
+if(NOT EXISTS "${suite_archive}")
+  message(FATAL_ERROR "Official Lua 5.5.1 test archive missing. Run make prepare (or bash tools/prepare_lua_reference.sh).")
+endif()
+file(SHA256 "${suite_archive}" suite_digest)
+if(NOT suite_digest STREQUAL "da07b543872dc0bb2ff12aabd0c248578d78df3eb6b67efdc537a46d455c7f31")
+  message(FATAL_ERROR "Official Lua 5.5.1 test archive checksum mismatch")
+endif()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${suite_archive}")
+set(suite_source "${CMAKE_CURRENT_BINARY_DIR}/official-source/lua-5.5.1-tests")
+if(NOT EXISTS "${suite_source}/all.lua")
+  file(ARCHIVE_EXTRACT INPUT "${suite_archive}"
+    DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/official-source")
+  file(GLOB suite_native_inputs "${suite_source}/libs/*.c")
+  file(TOUCH ${suite_native_inputs})
+endif()
+set(suite_modules "${CMAKE_CURRENT_BINARY_DIR}/official-libs")
+foreach(module IN ITEMS lib1 lib11 lib2 lib21 lib2-v2)
+  set(module_source "${module}")
+  if(module STREQUAL "lib2-v2")
+    set(module_source lib22)
+  endif()
+  add_library(lua_suite_${module} MODULE "${suite_source}/libs/${module_source}.c")
+  set_target_properties(lua_suite_${module} PROPERTIES PREFIX "" OUTPUT_NAME "${module}"
+    C_STANDARD 99 LIBRARY_OUTPUT_DIRECTORY "${suite_modules}")
+  target_include_directories(lua_suite_${module} PRIVATE "${reference_dir}")
+endforeach()
+foreach(runtime IN ITEMS upstream luthrum)
+  if(runtime STREQUAL "upstream")
+    set(suite_runtime upstream_lua)
+  else()
+    set(suite_runtime luthrum_test_host)
+  endif()
+  add_test(NAME lua_official_${runtime} COMMAND "${CMAKE_COMMAND}"
+    "-Druntime=$<TARGET_FILE:${suite_runtime}>" "-Darchive=${suite_archive}"
+    "-Dmodule_dir=${suite_modules}" "-Dtarget=${LUTHRUM_TARGET}"
+    "-Dwork_dir=${CMAKE_CURRENT_BINARY_DIR}/official-${runtime}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/OfficialLua.cmake")
+  set_tests_properties(lua_official_${runtime} PROPERTIES LABELS "runtime;compatibility" TIMEOUT 900)
+endforeach()
+
 set(benchmark_arguments
   "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthrum=$<TARGET_FILE:luthrum_test_host>"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/benchmark.lua"
@@ -56,7 +97,7 @@ add_test(NAME lua_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${benchmark_argumen
   -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkSmoke.cmake")
 set_tests_properties(lua_benchmark_smoke PROPERTIES LABELS "runtime;compatibility" TIMEOUT 30)
 
-foreach(case IN ITEMS language native files_modules metatables diagnostics coroutine_close hooks coroutine_pipeline)
+foreach(case IN ITEMS language native files_modules metatables diagnostics coroutine_close hooks locale coroutine_pipeline)
   foreach(collector IN ITEMS incremental generational)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${case}-${collector}/direct")
     add_test(NAME lua_e2e_${case}_${collector} COMMAND luthrum_test_host

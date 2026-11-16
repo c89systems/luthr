@@ -1,8 +1,10 @@
 # Luthrum
 
-Luthrum is the shared Lua runtime being developed for the C89 stack, including
-Vectis and libknurl. It will own the Lua implementation, the strict C89 facade
-currently in cpkt, and coroutine scheduling over OS threads.
+Luthrum is Lua 5.5.1 without a global execution lock, with shared-VM scheduling
+under development. Ordinary language, library, interpreter and native API
+behavior must remain compatible with upstream Lua. Luthrum owns its runtime
+and strict C89 SDK. Independent Lua module projects own their builds and
+integration tests; they are not runtime dependencies or specialization targets.
 
 The project follows the C/CMake lifecycle: Make exposes commands, Bash handles
 sequencing, CMake owns the build graph, and CTest owns verification. Initial
@@ -11,8 +13,8 @@ until the runtime is established on this architecture.
 
 The initial products are static and shared runtime libraries, a strict C89 SDK,
 an interpreter, and a bytecode compiler. This phase changes only Luthrum and
-verifies consumers against its installed SDK. Cutover changes in cpkt, Vectis,
-and libknurl follow later.
+verifies consumers against its installed SDK. Independent consumers own their
+migrations to that SDK.
 
 The execution model separates a task, its carrier OS thread, and permission to
 execute Lua. Lua bytecode must execute in parallel across cores within one
@@ -62,7 +64,7 @@ saturation, live captures and revocation with retained roots. General external
 admission, native-resource affinity, shutdown and installed scheduling remain unfinished.
 Audited runtime closures and bounded chunk pipes now have private streaming
 proofs for backpressure, migration, native saturation and foreign callbacks;
-they do not establish streaming compatibility for the required modules.
+independent module projects own their integration tests against those guarantees.
 Owned base/coroutine control functions and C89 policy wrappers now support these
 parking/migration paths, with stable function identity on reopening and rooted
 wrapped-coroutine snapshots. Math/table helpers and auxiliary-buffer cleanup now

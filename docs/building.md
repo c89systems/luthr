@@ -33,11 +33,11 @@ acquisition entrypoint; missing prerequisites fail instead of falling back.
 
 Luthrum builds its runtime from the vendored Lua sources. Standard tests also
 build unmodified upstream Lua 5.5.1 as the compatibility reference. `make prepare`
-prepares its checksum-pinned official source archive in `.cache/vendor/`; the
-reference source is extracted into each owned build tree. Configure and build
-never download it. `bash tools/prepare_lua_reference.sh` prepares only that
-archive when the compiler is already available. Product-only CMake builds can
-disable `BUILD_TESTING`; Make's development targets enable it.
+prepares its checksum-pinned official source and test-suite archives in
+`.cache/vendor/`; the reference source is extracted into each owned build tree.
+Configure and build never download them. `bash tools/prepare_lua_reference.sh`
+prepares those archives when the compiler is already available. Product-only
+CMake builds can disable `BUILD_TESTING`; Make's development targets enable it.
 
 Independent Lua module projects are not build or test dependencies. Generic
 native-binding fixtures and relocated installed-SDK consumers establish the
@@ -53,6 +53,23 @@ The native fixture is built against upstream headers and loaded unchanged by
 both interpreters. These cases establish a growing regression baseline, not
 an exhaustive proof for all Lua programs. Concurrency-specific tests separately
 verify capabilities upstream Lua does not provide.
+
+The same compatibility label includes `lua_official_upstream` and
+`lua_official_luthrum`. Each runs the official Lua 5.5.1 suite in a
+fresh working directory, including large programs, CLI subprocesses, I/O and
+native-module loading. The suite's five native modules are compiled against
+upstream headers and loaded unchanged by both interpreters. Stdin is an empty
+pipe, as required by the suite's seek test. Each run must exit successfully and
+print the final completion marker; random seeds, addresses, memory counts and
+timings make its full text unsuitable for an exact stdout comparison. No `_U`,
+`_soft` or `_port` exclusions are set. GNU uses unchanged scripts. The pinned
+musl fails the suite's Portuguese-locale assumptions even with pristine Lua;
+both musl working copies disable only those two locale blocks. The portable
+`locale.lua` test compares actual libc collation, character classes and numeric
+behavior between runtimes instead. CLI, native-module and I/O tests remain
+enabled. The upstream `testC` instrumentation is absent in both builds, and the
+suite reports those internal tests as skipped.
+Source and checksum details are in [Lua provenance](lua-source.md).
 
 `make benchmark CONFIG=Release` runs the same Lua workloads on both runtimes
 sequentially, with two warmups and five measured samples per workload and

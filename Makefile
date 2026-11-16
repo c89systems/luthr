@@ -11,7 +11,7 @@ BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 
 .PHONY: help prepare configure build test benchmark memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|test|benchmark|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: prepare the pinned toolchain and pristine Lua 5.5.1 test reference' 'make benchmark CONFIG=Release: identical-code upstream/Luthrum CPU and wall-time comparisons' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|test|benchmark|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: prepare the pinned toolchain, pristine Lua 5.5.1 reference and official tests' 'make benchmark CONFIG=Release: identical-code upstream/Luthrum CPU and wall-time comparisons' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
 	bash "$(ROOT)/tools/prepare_lua_reference.sh"
