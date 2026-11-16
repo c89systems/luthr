@@ -70,6 +70,7 @@ Lua workloads for both runtimes:
 make benchmark
 make benchmark-parallel
 make benchmark-scheduler
+make benchmark-gc                    # collector work, coordination and stopped-GC controls
 ```
 
 Benchmark targets default to Release builds. `make benchmark` prints a comparison

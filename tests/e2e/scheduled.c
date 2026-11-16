@@ -12,6 +12,9 @@
 #include <luthr/tasks.h>
 #include <poll.h>
 #endif
+#ifdef LUTHR_BENCH_GC_PROBE
+#include "gc_probe.h"
+#endif
 
 #define require(c)                                                             \
   do {                                                                         \
@@ -32,6 +35,9 @@ struct job {
   uint64_t latency;
 #ifdef LUTHR_BENCH_SCHEDULER
   luthr_lua_task *task;
+#endif
+#ifdef LUTHR_BENCH_GC_PROBE
+  GcProbe probe;
 #endif
 };
 static unsigned delay_us;
@@ -139,7 +145,10 @@ int main(int argc, char **argv) {
   lua_Integer expected;
   unsigned slots, native, tasks, iterations, samples, warmups;
   unsigned selected_slots = 1, selected_carriers = 0, selected_native = 0;
-  int failed = 0;
+  int failed = 0, stopped;
+#ifdef LUTHR_BENCH_GC_PROBE
+  GcProbe host_probe = {0};
+#endif
 #ifdef LUTHR_BENCH_SCHEDULER
   luthr_lua_scheduler *scheduler;
   luthr_lua_scheduler_config config = {0};
@@ -158,20 +167,22 @@ int main(int argc, char **argv) {
     puts("}");
     return 0;
   }
-  if (argc != 11 || !number(argv[4], 0, 64, &slots) ||
+  if ((argc != 11 && argc != 12) || !number(argv[4], 0, 64, &slots) ||
       !number(argv[5], 0, 64, &native) || !number(argv[6], 1, 4096, &tasks) ||
       !number(argv[7], 1, 1000000, &iterations) ||
       !number(argv[8], 1, 1000, &samples) ||
       !number(argv[9], 0, 1000, &warmups) ||
       !number(argv[10], 0, 1000000, &delay_us) ||
       (strcmp(argv[3], "incremental") != 0 &&
-       strcmp(argv[3], "generational") != 0)) {
+       strcmp(argv[3], "generational") != 0) ||
+      (argc == 12 && strcmp(argv[11], "stopped") != 0)) {
     fprintf(stderr,
             "usage: %s script workload collector slots native_limit "
-            "tasks iterations samples warmups delay_us\n",
+            "tasks iterations samples warmups delay_us [stopped]\n",
             argv[0]);
     return 2;
   }
+  stopped = argc == 12;
 #ifndef LUTHR_BENCH_SCHEDULER
   if (slots != 1 || native != 0) {
     fputs("upstream reference requires slots=1 and native_limit=0\n", stderr);
@@ -216,6 +227,9 @@ int main(int argc, char **argv) {
   require(jobs != NULL && latencies != NULL);
   for (unsigned i = 0; i < tasks; ++i)
     jobs[i].state = lua_newthread(L);
+#ifdef LUTHR_BENCH_GC_PROBE
+  gc_probe_bind(L, &host_probe);
+#endif
 #ifdef LUTHR_BENCH_SCHEDULER
   config.parallelism = slots;
   config.native_limit = native;
@@ -231,6 +245,9 @@ int main(int argc, char **argv) {
     uint64_t cpu_start, released, wall, cpu, live, peak, retained, checksum = 0;
     unsigned done = 0, native_peak = 0;
     struct resident usage;
+#ifdef LUTHR_BENCH_GC_PROBE
+    GcProbe total = {0};
+#endif
     if (call(L, 2)) {
       failed = 1;
       break;
@@ -244,12 +261,29 @@ int main(int argc, char **argv) {
     lua_gc(L, LUA_GCCOLLECT);
     live = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
     __atomic_store_n(&memory.peak, live, __ATOMIC_RELAXED);
+    if (stopped)
+      lua_gc(L, LUA_GCSTOP);
+#ifdef LUTHR_BENCH_GC_PROBE
+    memset(&host_probe, 0, sizeof(host_probe));
+    host_probe.enabled = 1;
+    for (unsigned i = 0; i < tasks; ++i) {
+      memset(&jobs[i].probe, 0, sizeof(jobs[i].probe));
+      jobs[i].probe.enabled = 1;
+    }
+#endif
     cpu_start = now(CLOCK_PROCESS_CPUTIME_ID);
     released = now(CLOCK_MONOTONIC);
 #ifdef LUTHR_BENCH_SCHEDULER
-    for (unsigned i = 0; i < tasks; ++i)
-      require(luthr_lua_task_submit(scheduler, jobs[i].state, 1, NULL,
+    for (unsigned i = 0; i < tasks; ++i) {
+      const luthr_lua_task_options *settings = NULL;
+#ifdef LUTHR_BENCH_GC_PROBE
+      luthr_lua_task_options options = {0};
+      options.context = &jobs[i].probe;
+      settings = &options;
+#endif
+      require(luthr_lua_task_submit(scheduler, jobs[i].state, 1, settings,
                                     &jobs[i].task) == LUTHR_LUA_RUNTIME_OK);
+    }
     while (done != tasks) {
       require(luthr_lua_scheduler_snapshot(scheduler, &stats) ==
               LUTHR_LUA_RUNTIME_OK);
@@ -312,6 +346,16 @@ int main(int argc, char **argv) {
 #endif
     wall = now(CLOCK_MONOTONIC) - released;
     cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
+#ifdef LUTHR_BENCH_GC_PROBE
+    host_probe.enabled = 0;
+    gc_probe_add(&total, &host_probe);
+    for (unsigned i = 0; i < tasks; ++i) {
+      jobs[i].probe.enabled = 0;
+      gc_probe_add(&total, &jobs[i].probe);
+    }
+#endif
+    if (stopped)
+      lua_gc(L, LUA_GCRESTART);
     peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
     for (unsigned i = 0; i < tasks; ++i) {
       latencies[i] = jobs[i].latency;
@@ -348,6 +392,10 @@ int main(int argc, char **argv) {
     field("native_limit", selected_native);
     field("observed_native_peak", native_peak);
     field("completed", done);
+    field("automatic_gc_stopped", stopped);
+#ifdef LUTHR_BENCH_GC_PROBE
+    gc_probe_emit(&total);
+#endif
     capacity(&cpus);
     puts("}");
   }

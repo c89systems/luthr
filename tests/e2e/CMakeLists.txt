@@ -101,6 +101,58 @@ set(scheduled_arguments
   "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
   "-Dsanitizer=${LUTHR_THREAD_SANITIZER}"
   "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+
+# Diagnostic executables share the exact production objects. Linker wrapping
+# adds invocation-local counters only to the probe; the static control exposes
+# measurement overhead without changing collector algorithms or public APIs.
+foreach(mode IN ITEMS control profile)
+  luthr_test_program(scheduled_gc_${mode} scheduled.c)
+  target_sources(scheduled_gc_${mode} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
+  set_target_properties(scheduled_gc_${mode} PROPERTIES C_STANDARD 99)
+  target_compile_options(scheduled_gc_${mode} PRIVATE -Wall -Wextra -Werror)
+  target_compile_definitions(scheduled_gc_${mode} PRIVATE LUTHR_BENCH_SCHEDULER)
+  target_link_libraries(scheduled_gc_${mode} PRIVATE luthr_static)
+endforeach()
+target_sources(scheduled_gc_profile PRIVATE gc_probe.c)
+target_compile_definitions(scheduled_gc_profile PRIVATE LUTHR_BENCH_GC_PROBE)
+foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_heapleave
+    luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers
+    luaM_reclaimpages luaQ_wait)
+  target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
+endforeach()
+set(gc_arguments
+  "-Dupstream=$<TARGET_FILE:scheduled_upstream>" "-Dshared=$<TARGET_FILE:scheduled_luthr>"
+  "-Dcontrol=$<TARGET_FILE:scheduled_gc_control>" "-Dprofile=$<TARGET_FILE:scheduled_gc_profile>"
+  "-Dlibrary=$<TARGET_FILE:luthr_static>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
+  "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+  "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
+  "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+add_custom_target(benchmark_gc
+  COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
+    "${CMAKE_COMMAND}" ${gc_arguments}
+    "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/gc"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkGc.cmake"
+  DEPENDS scheduled_upstream scheduled_luthr scheduled_gc_control scheduled_gc_profile
+  VERBATIM USES_TERMINAL)
+add_test(NAME lua_gc_probe_smoke COMMAND "${CMAKE_COMMAND}" ${gc_arguments}
+  -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=16 "-Dlevels=1;2"
+  "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/gc-probe-smoke"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/GcProbeSmoke.cmake")
+set_tests_properties(lua_gc_probe_smoke PROPERTIES
+  LABELS "runtime;benchmark;parallel;gc_profile" TIMEOUT 120)
+foreach(collector IN ITEMS incremental generational)
+  foreach(mode IN ITEMS running stopped)
+    set(extra)
+    if(mode STREQUAL "stopped")
+      set(extra stopped)
+    endif()
+    add_test(NAME gc_probe_${collector}_${mode} COMMAND scheduled_gc_profile
+      "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" independent_tables
+      "${collector}" 2 1 8 4096 1 0 0 ${extra})
+    set_tests_properties(gc_probe_${collector}_${mode} PROPERTIES
+      LABELS "runtime;benchmark;parallel;memcheck;gc_profile" TIMEOUT 30)
+  endforeach()
+endforeach()
 add_custom_target(benchmark_scheduler
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
     "${CMAKE_COMMAND}" ${scheduled_arguments}

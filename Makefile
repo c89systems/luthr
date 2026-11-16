@@ -4,16 +4,16 @@ SHELL := bash
 .SHELLFLAGS := -eu -o pipefail -c
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 TARGET ?= x86_64-linux-gnu
-CONFIG ?= $(if $(filter benchmark benchmark-parallel benchmark-scheduler,$(MAKECMDGOALS)),Release,Debug)
+CONFIG ?= $(if $(filter benchmark benchmark-parallel benchmark-scheduler benchmark-gc,$(MAKECMDGOALS)),Release,Debug)
 JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 RACE_BUILD_DIR := $(ROOT)/build/$(TARGET)/ThreadSanitizer
 RACE_FALLBACK_DIR := $(ROOT)/build/$(TARGET)/Debug
 
-.PHONY: help prepare configure build unit test benchmark benchmark-parallel benchmark-scheduler memcheck racecheck install format format-check clean
+.PHONY: help prepare configure build unit test benchmark benchmark-parallel benchmark-scheduler benchmark-gc memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|unit|test|benchmark|benchmark-parallel|benchmark-scheduler|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'Benchmark targets default to Release; other targets default to Debug. CONFIG overrides either.' 'make unit: short, non-exhaustive implementation checks and affected product builds' 'make test, benchmark, memcheck, racecheck: final stabilization after runtime integration' 'make prepare: prepare the pinned toolchain, pristine Lua 5.5.1 reference and official tests' 'make benchmark: upstream/Luthr comparison table, raw samples and medians' 'make benchmark-parallel: shared-VM host-pool scaling, latency and memory' 'make benchmark-scheduler: public task scheduling and native compensation' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|unit|test|benchmark|benchmark-parallel|benchmark-scheduler|benchmark-gc|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'Benchmark targets default to Release; other targets default to Debug. CONFIG overrides either.' 'make unit: short, non-exhaustive implementation checks and affected product builds' 'make test, benchmark, memcheck, racecheck: final stabilization after runtime integration' 'make prepare: prepare the pinned toolchain, pristine Lua 5.5.1 reference and official tests' 'make benchmark: upstream/Luthr comparison table, raw samples and medians' 'make benchmark-parallel: shared-VM host-pool scaling, latency and memory' 'make benchmark-scheduler: public task scheduling and native compensation' 'make benchmark-gc: collector work, coordination and stopped-GC controls' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
 	bash "$(ROOT)/tools/prepare_lua_reference.sh"
@@ -32,6 +32,8 @@ benchmark-parallel: configure
 	cmake --build "$(BUILD_DIR)" --target benchmark_parallel --parallel "$(JOBS)"
 benchmark-scheduler: configure
 	cmake --build "$(BUILD_DIR)" --target benchmark_scheduler --parallel "$(JOBS)"
+benchmark-gc: configure
+	cmake --build "$(BUILD_DIR)" --target benchmark_gc --parallel "$(JOBS)"
 memcheck: build
 	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L memcheck --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 racecheck:

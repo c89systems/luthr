@@ -38,10 +38,18 @@ local workloads={
     end
     return sum
   end,
+  allocation_only=function()
+    local sum=0
+    for i=1,n do
+      local row={i,i+1,i+2,tag='row'}
+      sum=sum+row[2]
+    end
+    return sum
+  end,
 }
 local work=assert(workloads[kind],'unknown workload')
 if kind=='independent_tables' then total=total*3 end
-if kind=='allocation_gc' then total=total+n end
+if kind=='allocation_gc' or kind=='allocation_only' then total=total+n end
 local function prepare()
   if kind=='shared_table' then
     for i=1,n*tasks do shared[i]=0 end

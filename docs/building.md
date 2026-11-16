@@ -93,6 +93,7 @@ panic/longjmp case runs under Helgrind instead. It is not suppressed or omitted.
 make benchmark
 make benchmark-parallel
 make benchmark-scheduler
+make benchmark-gc
 ```
 
 The serial benchmark compares identical Lua workloads on pristine Lua and
@@ -107,6 +108,23 @@ work, completion latency, carrier limits and allocator/RSS observations.
 Drivers validate results and retain raw samples and summaries under
 `build/<target>/<config>/benchmarks/`. Interpret results with the recorded
 affinity, CPU quota and configuration; automatic sizing remains provisional.
+
+The GC diagnostic compares pristine upstream, the shared library, an unwrapped
+static control and a linker-wrapped static probe. It uses the same production
+objects and does not change the collector. Raw samples, medians and input hashes
+are saved under `build/<target>/<config>/benchmarks/gc/`. The workloads separate
+integer work, live tables and short-lived allocations at 1/2/4/8 managed slots.
+Both collectors run with automatic collection enabled and stopped. The stopped
+control retains GC dispatch, barriers and metadata coordination; it is not a
+zero-coordination configuration. Peak memory is recorded because collection is
+stopped only during the bounded timed workload.
+
+Probe counters are invocation-local, including across carrier movement.
+Collector-body time excludes coordination and page reclamation. Coordination
+includes nested publication, drain and wait measurements, so those columns must
+not be added together. Wait times sum across logical tasks and can exceed wall
+time. Compare the probe with its unwrapped control to assess instrumentation
+overhead; neither timing breakdown nor collector choice alone proves causality.
 
 ## SDK installation
 
