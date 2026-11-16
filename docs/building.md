@@ -40,7 +40,7 @@ make prepare                         # pinned toolchain and pristine Lua test re
 make test                            # GNU Debug, one build worker
 make test TARGET=x86_64-linux-musl    # native musl, default worker stacks
 make memcheck                        # GNU Debug behavioral memory checks
-make racecheck                       # GNU Debug private VM paths under Helgrind
+make racecheck                       # GNU ThreadSanitizer; libc panic case uses Helgrind
 make format-check
 make install                         # local SDK under build/sdk/<target>/<config>
 ```

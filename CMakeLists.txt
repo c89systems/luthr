@@ -22,6 +22,22 @@ configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(CTest)
 include(cmake/LocalRuntime.cmake)
+option(LUTHR_THREAD_SANITIZER "Instrument GNU runtime and tests for race checking" OFF)
+if(LUTHR_THREAD_SANITIZER)
+  if(NOT LUTHR_TARGET STREQUAL "x86_64-linux-gnu" OR
+      NOT CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR "ThreadSanitizer requires the pinned x86_64-linux-gnu compiler")
+  endif()
+  execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libtsan.so
+    RESULT_VARIABLE sanitizer_result OUTPUT_VARIABLE sanitizer_library
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT sanitizer_result EQUAL 0 OR NOT EXISTS "${sanitizer_library}")
+    message(FATAL_ERROR "The pinned compiler's ThreadSanitizer runtime is unavailable")
+  endif()
+  get_filename_component(sanitizer_runtime_dir "${sanitizer_library}" DIRECTORY)
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:-fsanitize=thread;-fno-omit-frame-pointer>")
+  add_link_options(-fsanitize=thread "LINKER:-rpath,${sanitizer_runtime_dir}")
+endif()
 add_compile_options(
   "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}=."
   "-ffile-prefix-map=${CMAKE_CURRENT_BINARY_DIR}=build"
@@ -128,7 +144,7 @@ install(FILES "${facade_header}" include/luthr/lua_runtime.h include/luthr/tasks
 install(FILES lua/src/lua.h lua/src/luaconf.h lua/src/lauxlib.h
   lua/src/lualib.h lua/src/lua.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/docs)
-install(FILES README.md DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr)
+install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr)
 install(DIRECTORY lua/doc/ DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua/doc)
 install(FILES lua/README DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua)
 install(FILES lua/src/lua.h DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua/src)

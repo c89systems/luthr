@@ -12,6 +12,17 @@ function(luthr_test_program name source)
   endif()
 endfunction()
 
+if(LUTHR_THREAD_SANITIZER)
+  luthr_test_program(race_detector_test race_detector_test.c)
+  set_target_properties(race_detector_test PROPERTIES C_STANDARD 99)
+  target_compile_options(race_detector_test PRIVATE -Wall -Wextra -Werror)
+  target_link_libraries(race_detector_test PRIVATE luthr_shared)
+  add_test(NAME race_detector COMMAND "${CMAKE_COMMAND}"
+    "-Dprogram=$<TARGET_FILE:race_detector_test>"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/ExpectRace.cmake")
+  set_tests_properties(race_detector PROPERTIES LABELS "parallel;unit" TIMEOUT 25)
+endif()
+
 luthr_test_program(cpu_capacity_test cpu_capacity_test.c)
 target_sources(cpu_capacity_test PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
 set_target_properties(cpu_capacity_test PROPERTIES C_STANDARD 99)
@@ -22,7 +33,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/CapacityFixtures.cmake")
 luthr_test_program(public_tasks_test public_tasks_test.c)
 luthr_c89(public_tasks_test)
 target_link_libraries(public_tasks_test PRIVATE luthr_static)
-foreach(case IN ITEMS results prepared budget raw_policy traces blocked_trace defaults nested shutdown
+foreach(case IN ITEMS results prepared parallel_load budget raw_policy traces blocked_trace defaults nested shutdown
     callback callback_budget callback_shutdown callback_oom pin pin_cancel oom collect_oom automatic load_error raw_vm)
   add_test(NAME public_tasks_${case} COMMAND public_tasks_test ${case})
   set_tests_properties(public_tasks_${case}
@@ -720,6 +731,9 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test memory_publication_test scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
+if(TARGET race_detector_test)
+  add_dependencies(unit_build race_detector_test)
+endif()
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

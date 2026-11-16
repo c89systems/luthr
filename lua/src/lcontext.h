@@ -22,6 +22,10 @@ typedef struct LuaFiber {
   unsigned valgrind_stack;
   void (*entry)(void *);
   void *argument;
+#if defined(__SANITIZE_THREAD__)
+  void *sanitizer_context;
+  void *sanitizer_caller;
+#endif
 } LuaFiber;
 
 LUAI_FUNC int luaCT_create (LuaFiber *, void (*)(void *), void *);

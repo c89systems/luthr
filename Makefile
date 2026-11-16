@@ -8,6 +8,8 @@ CONFIG ?= Debug
 JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
+RACE_BUILD_DIR := $(ROOT)/build/$(TARGET)/ThreadSanitizer
+RACE_FALLBACK_DIR := $(ROOT)/build/$(TARGET)/Debug
 
 .PHONY: help prepare configure build unit test benchmark benchmark-parallel memcheck racecheck install format format-check clean
 help:
@@ -16,7 +18,7 @@ prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
 	bash "$(ROOT)/tools/prepare_lua_reference.sh"
 configure:
-	cmake -S "$(ROOT)" -B "$(BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHR_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE="$(CONFIG)" -DBUILD_TESTING=ON
+	cmake -S "$(ROOT)" -B "$(BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHR_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE="$(CONFIG)" -DBUILD_TESTING=ON -DLUTHR_THREAD_SANITIZER=OFF
 build: configure
 	cmake --build "$(BUILD_DIR)" --parallel "$(JOBS)"
 unit: configure
@@ -30,8 +32,15 @@ benchmark-parallel: configure
 	cmake --build "$(BUILD_DIR)" --target benchmark_parallel --parallel "$(JOBS)"
 memcheck: build
 	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L memcheck --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
-racecheck: build
-	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L parallel --overwrite 'MemoryCheckCommandOptions=--tool=helgrind --error-exitcode=1 --history-level=approx --fair-sched=yes' --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
+racecheck:
+	cmake -S "$(ROOT)" -B "$(RACE_BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHR_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DLUTHR_THREAD_SANITIZER=ON
+	cmake --build "$(RACE_BUILD_DIR)" --parallel "$(JOBS)"
+	$(MAKE) configure CONFIG=Debug
+	cmake --build "$(RACE_FALLBACK_DIR)" --target cross_api_test --parallel "$(JOBS)"
+# The pinned libtsan cannot recover libc jump buffers (also fails without Lua).
+# Keep this panic/longjmp case under Helgrind; do not suppress its race checks.
+	ctest --test-dir "$(RACE_FALLBACK_DIR)" -T MemCheck -R '^cross_api_foreign_error$$' --overwrite 'MemoryCheckCommandOptions=--tool=helgrind --error-exitcode=1 --history-level=approx --fair-sched=yes' --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
+	ctest --test-dir "$(RACE_BUILD_DIR)" -L parallel -E '^cross_api_foreign_error$$' --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 install: build
 	cmake --install "$(BUILD_DIR)" --prefix "$(ROOT)/build/sdk/$(TARGET)/$(CONFIG)"
 format:

@@ -8,6 +8,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <valgrind.h>
+#if defined(__SANITIZE_THREAD__)
+#include <sanitizer/tsan_interface.h>
+#endif
 
 _Static_assert(offsetof(LuaContext, rsp) == 0, "rsp offset");
 _Static_assert(offsetof(LuaContext, rbx) == 8, "rbx offset");
@@ -46,6 +49,9 @@ int luaCT_create(LuaFiber *fiber, void (*entry)(void *), void *argument) {
   fiber->native.execution = &fiber->execution;
   fiber->valgrind_stack =
       VALGRIND_STACK_REGISTER(fiber->stack, fiber->stack + fiber->stack_size);
+#if defined(__SANITIZE_THREAD__)
+  fiber->sanitizer_context = __tsan_create_fiber(0);
+#endif
   start = (uintptr_t *)(fiber->stack + fiber->stack_size - 16U);
   start[0] = (uintptr_t)luaCT_boot;
   start[1] = 0; /* bootstrap never returns */
@@ -60,6 +66,9 @@ void luaCT_destroy(LuaFiber *fiber) {
   if (fiber->native.coroutine_scopes != NULL)
     abort();
   VALGRIND_STACK_DEREGISTER(fiber->valgrind_stack);
+#if defined(__SANITIZE_THREAD__)
+  __tsan_destroy_fiber(fiber->sanitizer_context);
+#endif
   if (munmap(fiber->mapping, fiber->mapping_size) != 0)
     abort();
   fiber->mapping = NULL;
@@ -69,12 +78,21 @@ void luaCT_resume(LuaFiber *fiber, LuaContext *caller) {
   NativeStackContext *previous;
   fiber->caller = caller;
   previous = luaE_setnativestackcontext(&fiber->native);
+#if defined(__SANITIZE_THREAD__)
+  fiber->sanitizer_caller = __tsan_get_current_fiber();
+  /* The physical stack transfer is synchronous: preserve the caller's
+   * program order as well as the scheduler's cross-carrier publication. */
+  __tsan_switch_to_fiber(fiber->sanitizer_context, 0);
+#endif
   luaCT_switch(caller, &fiber->context);
   (void)luaE_setnativestackcontext(previous);
 }
 
 void luaCT_pause(LuaFiber *fiber) {
   /* No carrier/TLS address may be used after returning on another carrier. */
+#if defined(__SANITIZE_THREAD__)
+  __tsan_switch_to_fiber(fiber->sanitizer_caller, 0);
+#endif
   luaCT_switch(&fiber->context, fiber->caller);
 }
 

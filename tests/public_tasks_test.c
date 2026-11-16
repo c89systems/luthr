@@ -288,6 +288,31 @@ static void results(struct fixture *f) {
   finish(f);
 }
 
+static void parallel_load(struct fixture *f) {
+  unsigned i;
+  const char *source =
+      "block(); for i=1,80 do "
+      "local f=assert(load('local global = ...; return global+1')); "
+      "assert(f(i)==i+1) end; return 42";
+  init(f, 0);
+  submit(f, 0, source, NULL);
+  submit(f, 1, source, NULL);
+  lock(f);
+  while (f->entered != 2)
+    change(f);
+  unlock(f);
+  release_block(f);
+  for (i = 0; i < 2; ++i) {
+    luthr_lua_task_result result = await(f, i, LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_task_collect(f->tasks[i], f->state, &result) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(result.result_count == 1 && integer(f->state, -1) == 42);
+    luthr_lua_pop(f->state, 1);
+    require(luthr_lua_task_free(f->tasks[i]) == LUTHR_LUA_RUNTIME_OK);
+  }
+  finish(f);
+}
+
 static void prepared(struct fixture *f) {
   luthr_lua_state *child;
   luthr_lua_task_result result;
@@ -665,6 +690,8 @@ int main(int argc, char **argv) {
     results(f);
   else if (strcmp(argv[1], "prepared") == 0)
     prepared(f);
+  else if (strcmp(argv[1], "parallel_load") == 0)
+    parallel_load(f);
   else if (strcmp(argv[1], "budget") == 0)
     budget(f, 0);
   else if (strcmp(argv[1], "raw_policy") == 0)
