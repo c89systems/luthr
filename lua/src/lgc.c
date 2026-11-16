@@ -1885,7 +1885,17 @@ static void incstep (lua_State *L, global_State *g) {
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
   int reclaim = 0;
+  if (__atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) > 0) return;
+  /* Another collector can service this request while metadata access waits.
+  ** Revalidate under metadata ownership before requesting global quiescence.
+  ** Explicit API steps set their debt while already owning the collector. */
+  luaW_heapenter(L);
+  if (__atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) > 0) {
+    luaW_heapleave(L);
+    return;
+  }
   luaW_stop(L);
+  luaW_heapleave(L);  /* retain exactly the ownership acquired by luaW_stop */
   lua_assert(!g->gcemergency);
   if (!gcrunning(g)) {  /* not running? */
     if (g->gcstp & GCSTPUSR)  /* stopped by the user? */

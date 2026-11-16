@@ -496,6 +496,53 @@ static void *return_from_peer(void *context) {
   return NULL;
 }
 
+static void *stale_step(void *context) {
+  lua_State *state = context;
+  luaX_lockstate(state);
+  luaC_step(state);
+  luaX_unlockstate(state);
+  return NULL;
+}
+
+static void coalesced_gc(lua_State *state) {
+  lua_State *waiter;
+  LuaWorld *world = &G(state)->world;
+  pthread_t peer;
+  execute(state, "keep={}; for i=1,4000 do keep[i]={i} end");
+  lua_gc(state, LUA_GCINC);
+  lua_gc(state, LUA_GCCOLLECT);
+  waiter = lua_newthread(state);
+  luaX_lockstate(state);
+  luaW_heapenter(state);
+  luaE_setdebt(G(state), 0);
+  require(pthread_create(&peer, NULL, stale_step, waiter) == 0);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  while (waiter->heap_waiting == 0)
+    luaQ_wait(state, &world->mutex, &world->changed, &world->waiters);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+  /* Service the request while the other mutator waits for metadata access. */
+  luaC_fullgc(state, 0);
+  require(G(state)->gcstate == GCSpause && G(state)->GCdebt > 64);
+  luaW_heapleave(state);
+  luaX_unlockstate(state);
+  require(pthread_join(peer, NULL) == 0);
+  luaX_lockstate(state);
+  fprintf(stderr, "collector state after a stale request: %u\n",
+          G(state)->gcstate);
+  require(G(state)->gcstate == GCSpause);
+  luaX_unlockstate(state);
+  /* Explicit zero-byte steps still force work, even with positive debt. */
+  lua_gc(state, LUA_GCSTEP, (size_t)0);
+  luaX_lockstate(state);
+  require(G(state)->gcstate != GCSpause);
+  luaX_unlockstate(state);
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_gc(state, LUA_GCSTEP, (size_t)64);
+  luaX_lockstate(state);
+  require(G(state)->gcstate == GCSpause);
+  luaX_unlockstate(state);
+}
+
 static void marking_cache(lua_State *state) {
   void *block;
   lua_gc(state, LUA_GCSTOP);
@@ -682,6 +729,8 @@ int main(int argc, char **argv) {
     ordinary_operations(state);
   else if (strcmp(argv[1], "marking_cache") == 0)
     marking_cache(state);
+  else if (strcmp(argv[1], "coalesced_gc") == 0)
+    coalesced_gc(state);
   else if (strcmp(argv[1], "handoff") == 0 ||
            strcmp(argv[1], "paired_handoff") == 0)
     gate_handoff(state, strcmp(argv[1], "paired_handoff") == 0);

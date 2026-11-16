@@ -112,7 +112,7 @@ target_link_libraries(memory_publication_test PRIVATE luthr_static)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_free_)
-foreach(case IN ITEMS no_requests intern_hits ordinary_operations allocation_cache marking_cache handoff paired_handoff late waiting
+foreach(case IN ITEMS no_requests intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
   set_tests_properties(memory_publication_${case}
