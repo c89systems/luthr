@@ -7,6 +7,10 @@ specification, an approved API, or a claim of implemented behavior.
 
 ## Accepted project decisions
 
+- Luthrum is Lua 5.5.1 without a global execution lock, with shared-VM parallel
+  execution and runtime-owned scheduling. Ordinary Lua language and library
+  behavior must remain compatible with upstream. Additional concurrency does
+  not authorize downstream-module specialization or changed serial semantics.
 - Lua 5.5.1 source lives directly under the repository's top-level `lua/` and is
   modified in place under Git ownership, without a patch series.
 - Parallel Lua bytecode execution across CPU cores within the shared VM is
@@ -31,7 +35,7 @@ specification, an approved API, or a claim of implemented behavior.
 These decisions supersede the corresponding open questions below. Remaining
 runtime mechanisms and public scheduling operations require feasibility evidence.
 
-## Required baseline and module compatibility
+## Required baseline and compatibility boundary
 
 Luthrum is based on the latest stable Lua 5.5 release. At this draft's research
 date that is **Lua 5.5.1**, as confirmed by the
@@ -39,25 +43,28 @@ date that is **Lua 5.5.1**, as confirmed by the
 upstream source and digest for each implementation candidate; advancing to a
 later 5.5 maintenance release requires fresh verification.
 
-Support for the existing C89-stack Lua modules is a product requirement. This
-includes **curl, MDF/libmdf, Softline, LoneJSON and liblockdc**; the list is
-representative, not permission to omit the rest of the supported stack.
+Luthrum's compatibility boundary is ordinary Lua 5.5.1 behavior and the public
+Lua/native SDK. Identical portable E2E Lua code must run against both pristine
+upstream Lua and Luthrum, with matching observable results. Scheduling and shared
+VM concurrency have separate tests for capabilities absent from upstream.
+Independent projects consume that runtime; they own their
+module builds, integration policy and compatibility tests against the installed
+SDK. Those projects are not Luthrum implementation targets or development
+dependencies. Luthrum must build and verify without their sources or SDKs.
 
-Compatibility means preserving documented Lua APIs and ordinary call sites,
-native integration, result/error behavior, callbacks, streaming, userdata
-ownership, finalizers and cleanup. It must hold when eligible operations run
-from scheduled coroutines, including during native waits and callback reentry.
-Successful module loading is insufficient evidence. Native module artifacts
-must use the same compatible Lua runtime; compatibility with unchanged existing
-binaries is a separate ABI question to verify, not an assumption.
+The runtime owns generic guarantees for Lua APIs, native entry, callbacks,
+streaming, userdata lifetime, finalizers, cleanup, synchronization and carrier
+affinity. Its tests use local fixtures and installed SDK consumers to prove
+those guarantees, including native waits and callback reentry. Downstream
+findings should become minimal generic runtime regressions when they expose a
+runtime defect. Module-specific initialization guards, handle policies and
+adapters belong to their owning projects.
 
-The runtime and binding strategy must accommodate these modules' documented
-resource serialization and thread-affinity rules. Compatibility does not make
-simultaneous use of one native handle valid when its library forbids it.
-Preserve legal module usage through affinity, synchronization or explicit
-integration metadata, rather than silently dropping capabilities or requiring
-an alternative async module namespace. A required module that cannot meet its
-contract blocks acceptance of the chosen runtime design.
+Native module artifacts must use one compatible runtime. Compatibility with
+unchanged existing binaries remains a separate ABI question, not an assumption.
+Runtime synchronization does not make a native handle reentrant or remove a
+library's thread-affinity requirements; generic runtime mechanisms must expose
+enough control for binding owners to uphold those contracts.
 
 ## Intent
 
@@ -345,12 +352,11 @@ to establish ordering.
    sharing. Include task cancellation, shutdown and a deliberately stuck call.
 8. Withhold the end of a streaming input until downstream progress is observed.
    Prove bounded retained memory and backpressure in both directions.
-9. Run behavioral compatibility tests for the C89-stack Lua modules on the
-   selected Lua 5.5 baseline. Include curl transfers and callbacks; MDF and
-   Softline output/input and owner-thread behavior; LoneJSON incremental
-   parsing/serialization and callback ownership; and liblockdc transactions,
-   leases, jobs and error/cleanup paths. Check legal concurrent use of independent
-   resources and preserved rejection or serialization of conflicting use.
+9. Build and run standalone installed-SDK consumers for static and shared
+   linkage, strict C89 entry points and ordinary native module loading. Keep
+   runtime regressions independent of downstream project sources, SDKs and
+   module-specific adapters. Downstream projects own their behavioral
+   compatibility suites against the installed runtime.
 
 Memory, race and stack checks must cover the actual runtime and binding paths,
 not just a scheduler fixture. A successful mutex experiment is evidence for one
@@ -359,8 +365,9 @@ mechanism, not certification of arbitrary third-party bindings.
 ## Decisions deliberately left open
 
 - Runtime modification surface, supported architectures and treatment of
-  existing binary modules. Latest stable Lua 5.5 and behavioral support for the
-  C89-stack Lua modules are fixed requirements, not open alternatives.
+  existing binary modules. The selected Lua baseline and ordinary Lua/native
+  compatibility are fixed requirements; downstream integration remains owned
+  by independent projects.
 - Coroutine stack representation, safe-point implementation and limits on
   migration in the presence of C activations.
 - Native-binding admission categories, default compatibility policy and where

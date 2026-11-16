@@ -30,69 +30,6 @@ target_link_libraries(native_fixture PRIVATE luthrum::shared)
 add_test(NAME shared_native_module COMMAND consumer_shared "$<TARGET_FILE_DIR:native_fixture>")
 set_tests_properties(shared_native_module PROPERTIES TIMEOUT 10)
 
-# Compile the released binding through the relocated SDK's native headers.
-set(json_source "${LUTHRUM_SOURCE_DIR}/.cache/modules/lonejson-0.50.0")
-set(json_sdk "${LUTHRUM_SOURCE_DIR}/.cache/modules/liblonejson-0.50.0-${LUTHRUM_TARGET}")
-find_package(lonejson 0.50.0 EXACT CONFIG REQUIRED
-  PATHS "${json_sdk}/lib/cmake/lonejson" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-get_target_property(lua_includes luthrum::shared INTERFACE_INCLUDE_DIRECTORIES)
-add_library(lonejson_native MODULE "${json_source}/src/lua/lonejson_lua.c")
-set_target_properties(lonejson_native PROPERTIES PREFIX "" OUTPUT_NAME core
-  C_STANDARD 90 LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules/lonejson")
-target_include_directories(lonejson_native PRIVATE ${lua_includes})
-target_compile_options(lonejson_native PRIVATE -Wall -Wextra -Werror)
-# Lua symbols resolve from the embedding host's one runtime, for both linkages.
-target_link_libraries(lonejson_native PRIVATE lonejson::lonejson_static m)
-add_test(NAME lonejson_runtime_provider COMMAND "${CMAKE_COMMAND}"
-  "-Dmodule=$<TARGET_FILE:lonejson_native>" "-Dnm=${CMAKE_NM}"
-  -Dopener=luaopen_lonejson_core
-  "-Dreadelf=${CMAKE_READELF}" -P "${LUTHRUM_SOURCE_DIR}/tests/modules/ModuleRuntime.cmake")
-set_tests_properties(lonejson_runtime_provider PROPERTIES TIMEOUT 10)
-foreach(linkage IN ITEMS static shared)
-  add_executable(lonejson_${linkage} module_host.c)
-  target_compile_options(lonejson_${linkage} PRIVATE
-    -std=c89 -Wall -Wextra -Wpedantic -pedantic-errors -Werror)
-  target_link_libraries(lonejson_${linkage} PRIVATE luthrum::${linkage})
-  if(linkage STREQUAL "static")
-    target_link_options(lonejson_${linkage} PRIVATE -Wl,--export-dynamic)
-  endif()
-  luthrum_local_runtime(lonejson_${linkage})
-  add_test(NAME lonejson_installed_${linkage} COMMAND lonejson_${linkage}
-    "${json_source}/lua" "${CMAKE_CURRENT_BINARY_DIR}/modules"
-    "${LUTHRUM_SOURCE_DIR}/tests/modules/lonejson_semantics.lua")
-  set_tests_properties(lonejson_installed_${linkage} PROPERTIES TIMEOUT 30)
-endforeach()
-
-set(mdf_source "${LUTHRUM_SOURCE_DIR}/.cache/modules/libmdf-lua-0.23.1")
-set(mdf_sdk "${LUTHRUM_SOURCE_DIR}/.cache/modules/libmdf-0.23.1-${LUTHRUM_TARGET}")
-find_package(libmdf 0.23.1 EXACT CONFIG REQUIRED
-  PATHS "${mdf_sdk}/lib/cmake/libmdf" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-add_library(mdf_native MODULE "${mdf_source}/lua/libmdf_core.c")
-set_target_properties(mdf_native PROPERTIES PREFIX "" OUTPUT_NAME core
-  C_STANDARD 90 LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules/libmdf")
-target_include_directories(mdf_native PRIVATE ${lua_includes})
-target_compile_options(mdf_native PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(mdf_native PRIVATE libmdf::mdf_shared m)
-add_test(NAME mdf_runtime_provider COMMAND "${CMAKE_COMMAND}"
-  "-Dmodule=$<TARGET_FILE:mdf_native>" "-Dnm=${CMAKE_NM}"
-  "-Dreadelf=${CMAKE_READELF}" -Dopener=luaopen_libmdf_core
-  -P "${LUTHRUM_SOURCE_DIR}/tests/modules/ModuleRuntime.cmake")
-set_tests_properties(mdf_runtime_provider PROPERTIES TIMEOUT 10)
-foreach(linkage IN ITEMS static shared)
-  add_executable(mdf_${linkage} module_host.c)
-  target_compile_options(mdf_${linkage} PRIVATE
-    -std=c89 -Wall -Wextra -Wpedantic -pedantic-errors -Werror)
-  target_link_libraries(mdf_${linkage} PRIVATE luthrum::${linkage})
-  if(linkage STREQUAL "static")
-    target_link_options(mdf_${linkage} PRIVATE -Wl,--export-dynamic)
-  endif()
-  luthrum_local_runtime(mdf_${linkage})
-  add_test(NAME mdf_installed_${linkage} COMMAND mdf_${linkage}
-    "${mdf_source}/lua" "${CMAKE_CURRENT_BINARY_DIR}/modules"
-    "${LUTHRUM_SOURCE_DIR}/tests/modules/mdf_semantics.lua")
-  set_tests_properties(mdf_installed_${linkage} PROPERTIES TIMEOUT 30)
-endforeach()
-
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LUTHRUM_PC REQUIRED luthrum=0.1.0)
 pkg_get_variable(pc_target luthrum target)

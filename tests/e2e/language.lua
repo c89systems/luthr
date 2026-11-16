@@ -1,0 +1,82 @@
+local function equal(actual, expected)
+  assert(actual == expected)
+end
+equal(math.maxinteger + 1, math.mininteger)
+equal((0xff & 0x39) ~ 0x10, 0x29)
+equal(7 // 3, 2)
+equal(-7 // 3, -3)
+local mt = {__add=function(a,b) return a.value+b.value end,
+  __index=function(_,key) return key..'!' end,
+  __len=function() return 42 end}
+local object = setmetatable({value=20},mt)
+equal(object+setmetatable({value=22},mt),42)
+equal(object.missing,'missing!')
+equal(#object,42)
+local packed = table.pack(nil,42,nil)
+equal(packed.n,3)
+local a,b,c = table.unpack(packed,1,3)
+assert(a==nil and b==42 and c==nil)
+
+local closed, marker = {}, {}
+local function resource(id)
+  return setmetatable({}, {__close=function(_,err)
+    closed[#closed+1]=id
+    if id == 'outer' then assert(err == marker) end
+  end})
+end
+local ok, failure = pcall(function()
+  local outer <close> = resource('outer')
+  do local inner <close> = resource('inner') end
+  error(marker)
+end)
+assert(not ok and failure == marker)
+equal(table.concat(closed,','),'inner,outer')
+local co = coroutine.create(function(initial)
+  local held <close> = resource('coroutine')
+  local value = coroutine.yield(initial+1,nil,'paused')
+  return value*2
+end)
+local resumed, first, second, third = coroutine.resume(co,20)
+assert(resumed and first==21 and second==nil and third=='paused')
+resumed, first = coroutine.resume(co,21)
+assert(resumed and first==42 and coroutine.status(co)=='dead')
+equal(closed[#closed],'coroutine')
+local pending = coroutine.create(function()
+  local held <close> = resource('cancelled')
+  coroutine.yield()
+end)
+assert(coroutine.resume(pending))
+assert(coroutine.close(pending))
+equal(closed[#closed],'cancelled')
+
+equal(string.gsub('alpha=12 beta=21','(%a+)=(%d+)',function(k,v)
+  return k..'='..tonumber(v)*2
+end),'alpha=24 beta=42')
+equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
+equal(utf8.len('å中🙂'),3)
+local bytes = string.pack('<i8I2',-42,65535)
+local signed, unsigned, position = string.unpack('<i8I2',bytes)
+assert(signed==-42 and unsigned==65535 and position==#bytes+1)
+local fragments = {'local n=', '0; for i=1,100 do ', 'n=n+i end; return n'}
+local reads=0
+local loaded = assert(load(function()
+  reads=reads+1
+  return fragments[reads]
+end,'fragmented-source','t',{}))
+equal(loaded(),5050)
+equal(assert(load(string.dump(loaded,true),'roundtrip','b',{}))(),5050)
+local hooks=0
+debug.sethook(function() hooks=hooks+1 end,'',7)
+local sum=0
+for n=1,100 do sum=sum+n end
+debug.sethook()
+assert(hooks>0 and sum==5050)
+local finalized=0
+do
+  local cycle=setmetatable({}, {__gc=function() finalized=finalized+1 end})
+  cycle.self=cycle
+end
+collectgarbage('collect')
+collectgarbage('collect')
+equal(finalized,1)
+print('language: integers, metamethods, closures, coroutines, close, strings, load, hooks, GC passed')

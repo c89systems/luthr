@@ -100,23 +100,22 @@ registrations and notifier borrows before delivery, including forced carrier
 migration and early notification. General cancellation, deadlines and shutdown
 still need their remaining gates.
 
-Private admission shutdown now closes task admission and retains outcomes until
+Private admission shutdown closes task admission and retains outcomes until
 collection. Private carrier-affinity regions keep scoped native resource
 create/use/close on their carrier while allowing parked carriers to be reused.
-The first [actual module acceptance](module-compatibility.md) uses released
-LoneJSON sources and C SDKs for concurrent receivers, callback ownership,
-errors/OOM, stop/shutdown, bounded input/output and relocated SDK consumers.
-Auxiliary reference allocation/freeing now uses table-owned transactions so
-parallel native bindings cannot receive the same live registry reference.
-Other module workflows, resource adapters and public scheduling/sizing remain
-unproven.
+Auxiliary reference allocation/freeing uses table-owned transactions so
+parallel Lua API callers cannot receive the same live registry reference.
+Generic tests cover competing calls, GC, allocation-failure recovery and hooks.
 
-Released MDF acceptance adds source/sink/trace callbacks, document lifecycle,
-error cleanup and bounded rendering. A forced lazy-owner-map race requires
-private constructor serialization; queued cancellation and owner stop prove
-that integration without changing module sources. Relocated C89 consumers load
-the binding through static and shared hosts. This does not freeze a public
-module metadata API or establish general shared-handle/resource policy.
+Luthrum is Lua 5.5.1 with shared-VM parallel execution and runtime-owned
+scheduling. Ordinary Lua behavior remains the upstream compatibility contract.
+Standard E2E tests run identical Lua code on Luthrum and pristine upstream Lua,
+compare results and cross-execute each compiler's bytecode. Concurrency-specific
+tests separately prove Luthrum's additional scheduling capabilities.
+Independent Lua module projects own their integration tests against the installed
+runtime and SDK. Module-specific adapters and dependencies do not belong in
+Luthrum's implementation or test lifecycle. Public scheduling, resource lifetime
+policy and sizing remain open.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

@@ -1,0 +1,38 @@
+function(run_lua runtime source output_name)
+  execute_process(COMMAND "${runtime}" "${entry}" "${module_dir}" "${source}" "${collector}" "${work_dir}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Lua E2E failed (${result}): ${runtime} ${source}\n${output}${error}")
+  endif()
+  set(${output_name} "${output}" PARENT_SCOPE)
+  set(${output_name}_error "${error}" PARENT_SCOPE)
+endfunction()
+
+file(MAKE_DIRECTORY "${work_dir}")
+run_lua("${upstream}" "${source}" expected)
+run_lua("${luthrum}" "${source}" actual)
+if(NOT actual STREQUAL expected OR NOT actual_error STREQUAL expected_error)
+  message(FATAL_ERROR "Upstream/Luthrum output differs\nupstream: ${expected}${expected_error}\nLuthrum: ${actual}${actual_error}")
+endif()
+
+# Both compilers' bytecode must execute through the other runtime unchanged.
+foreach(origin IN ITEMS upstream luthrum)
+  if(origin STREQUAL "upstream")
+    set(compiler "${upstream_compiler}")
+    set(runtime "${luthrum}")
+  else()
+    set(compiler "${luthrum_compiler}")
+    set(runtime "${upstream}")
+  endif()
+  set(bytecode "${work_dir}/${origin}.luac")
+  execute_process(COMMAND "${loader}" --library-path "${runtime_libraries}"
+    "${compiler}" -o "${bytecode}" "${source}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Lua compiler failed (${origin}, ${result})\n${output}${error}")
+  endif()
+  run_lua("${runtime}" "${bytecode}" actual)
+  if(NOT actual STREQUAL expected OR NOT actual_error STREQUAL expected_error)
+    message(FATAL_ERROR "Cross-runtime bytecode output differs (${origin})\nexpected: ${expected}${expected_error}\nactual: ${actual}${actual_error}")
+  endif()
+endforeach()

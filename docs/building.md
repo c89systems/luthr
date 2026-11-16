@@ -16,7 +16,7 @@ its toolchain resolver.
 Run operations serially against a stable checkout and stable prepared tools.
 
 ```sh
-make prepare                         # explicit pinned toolchain preparation
+make prepare                         # pinned toolchain and pristine Lua test reference
 make test                            # GNU Debug, one build worker
 make test TARGET=x86_64-linux-musl    # native musl, default worker stacks
 make memcheck                        # GNU Debug behavioral memory checks
@@ -31,14 +31,46 @@ directory; its default is `~/.codex/skills/pkt-systems-cmake-lifecycle/scripts`.
 Configure only discovers prepared tools. `make prepare` is the explicit
 acquisition entrypoint; missing prerequisites fail instead of falling back.
 
-Development builds also require the released LoneJSON and MDF fixture inputs.
-Run `make prepare-modules MODULE=lonejson MODULE_ARCHIVE_DIR=/path/to/lonejson-0.50.0-artifacts`
-and `make prepare-modules MODULE=libmdf MODULE_ARCHIVE_DIR=/path/to/libmdf-0.23.1-artifacts`
-before configuring tests. Each verifies and stages its three pinned archives
-inside this checkout. See [module acceptance](module-compatibility.md) for
-artifact names, lifecycle and the scope of the actual-module/installed-SDK gates.
-Configure/build do not acquire these dependencies. Make enables `BUILD_TESTING`;
-product-only CMake builds may disable it.
+Luthrum builds its runtime from the vendored Lua sources. Standard tests also
+build unmodified upstream Lua 5.5.1 as the compatibility reference. `make prepare`
+prepares its checksum-pinned official source archive in `.cache/vendor/`; the
+reference source is extracted into each owned build tree. Configure and build
+never download it. `bash tools/prepare_lua_reference.sh` prepares only that
+archive when the compiler is already available. Product-only CMake builds can
+disable `BUILD_TESTING`; Make's development targets enable it.
+
+Independent Lua module projects are not build or test dependencies. Generic
+native-binding fixtures and relocated installed-SDK consumers establish the
+runtime boundary; downstream projects own integration tests against that SDK.
+
+`ctest --test-dir build/x86_64-linux-gnu/Debug -L compatibility --output-on-failure`
+runs identical portable Lua E2E code with Luthrum and the pristine interpreter,
+compares stdout/stderr, then compiles with each bytecode compiler and executes
+the result with the other runtime. Both collector modes cover language/library
+semantics, coroutines, close/unwind, GC, native callback reentry, original error
+objects, references, bounded streaming, binary file IO and module loading.
+The native fixture is built against upstream headers and loaded unchanged by
+both interpreters. These cases establish a growing regression baseline, not
+an exhaustive proof for all Lua programs. Concurrency-specific tests separately
+verify capabilities upstream Lua does not provide.
+
+`make benchmark CONFIG=Release` runs the same Lua workloads on both runtimes
+sequentially, with two warmups and five measured samples per workload and
+collector. Source loading and warmup are outside the timed region. The seven
+workloads cover integer loops, tables, closures, strings, allocation/GC, native
+callbacks and bounded streaming. Each sample checks its result, and results
+must match between runtimes. CPU time uses `os.clock`; wall time uses the same
+small native monotonic-clock fixture loaded by both interpreters.
+Each timed sample repeats its bounded workload in a batch; both runtimes use
+the identical repetition count, recorded in the CSV output. This increases
+timing duration without requiring a correspondingly large live heap.
+
+Raw samples, median summaries and run metadata are written under
+`build/<target>/<config>/benchmarks/lua/`. Ratios are Luthrum/upstream, so values
+above one mean slower. Timings are observations, not correctness thresholds;
+host load and CPU policy can affect them. The CTest smoke case verifies the
+benchmark path with reduced work. Shared-VM parallel scaling is a separate
+measurement because upstream Lua does not provide that execution model.
 
 The native build publishes `build/x86_64-linux-gnu/Debug/compile_commands.json`,
 which `.clangd` discovers normally. Run `make build` once before using the editor

@@ -9,19 +9,20 @@ JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 
-.PHONY: help prepare prepare-modules configure build test memcheck racecheck install format format-check clean
+.PHONY: help prepare configure build test benchmark memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|test|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: explicitly prepare the selected pinned toolchain' 'make prepare-modules MODULE=lonejson|libmdf MODULE_ARCHIVE_DIR=/path/to/release-artifacts' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|test|benchmark|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: prepare the pinned toolchain and pristine Lua 5.5.1 test reference' 'make benchmark CONFIG=Release: identical-code upstream/Luthrum CPU and wall-time comparisons' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
-prepare-modules:
-	bash "$(ROOT)/tests/modules/prepare.sh" "$(or $(MODULE_ARCHIVE_DIR),$(ROOT)/.cache/modules/archives)" "$(or $(MODULE),lonejson)"
+	bash "$(ROOT)/tools/prepare_lua_reference.sh"
 configure:
 	cmake -S "$(ROOT)" -B "$(BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHRUM_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE="$(CONFIG)" -DBUILD_TESTING=ON
 build: configure
 	cmake --build "$(BUILD_DIR)" --parallel "$(JOBS)"
 test: build
 	ctest --test-dir "$(BUILD_DIR)" --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
+benchmark: configure
+	cmake --build "$(BUILD_DIR)" --target benchmark_lua --parallel "$(JOBS)"
 memcheck: build
 	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L memcheck --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 racecheck: build

@@ -16,12 +16,6 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
-include(modules/LoneJSON.cmake)
-include(modules/MDF.cmake)
-add_test(NAME module_prepare_inputs COMMAND "${CMAKE_COMMAND}"
-  "-Dsource_dir=${PROJECT_SOURCE_DIR}" "-Dbuild_dir=${PROJECT_BINARY_DIR}"
-  -P "${CMAKE_CURRENT_SOURCE_DIR}/modules/PrepareTests.cmake")
-set_tests_properties(module_prepare_inputs PROPERTIES LABELS "lifecycle;modules" TIMEOUT 15)
 luthrum_test_program(reference_test reference_test.c)
 set_target_properties(reference_test PROPERTIES C_STANDARD 99)
 target_compile_options(reference_test PRIVATE -Wall -Wextra -Werror)
@@ -342,39 +336,6 @@ target_include_directories(native_scheduler_test PRIVATE "${CMAKE_CURRENT_BINARY
 target_compile_options(native_scheduler_test PRIVATE
   "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
 target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
-target_link_libraries(native_scheduler_test PRIVATE lonejson_binding lonejson::lonejson_static
-  mdf_binding libmdf::mdf_static)
-target_compile_definitions(native_scheduler_test PRIVATE
-  LUTHRUM_LONEJSON_LUA_DIR="${LUTHRUM_LONEJSON_SOURCE}/lua"
-  LUTHRUM_LONEJSON_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/modules/lonejson_semantics.lua"
-  LUTHRUM_LONEJSON_STREAM_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/modules/lonejson_stream.lua")
-target_compile_definitions(native_scheduler_test PRIVATE
-  LUTHRUM_MDF_LUA_DIR="${LUTHRUM_MDF_SOURCE}/lua"
-  LUTHRUM_MDF_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/modules/mdf_semantics.lua"
-  LUTHRUM_MDF_STREAM_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/modules/mdf_stream.lua")
-target_link_options(native_scheduler_test PRIVATE -Wl,--wrap=read -Wl,--wrap=lua_getfield)
-foreach(module IN ITEMS lonejson mdf)
-  foreach(backend IN ITEMS raw facade)
-    foreach(gc IN ITEMS incremental generational)
-      foreach(case IN ITEMS normal migrate error oom stop shutdown stream stream_stop)
-        add_test(NAME native_scheduler_${module}_${backend}_${case}_${gc}
-          COMMAND native_scheduler_test ${module}_${backend}_${case}_${gc})
-        set_tests_properties(native_scheduler_${module}_${backend}_${case}_${gc}
-          PROPERTIES LABELS "runtime;parallel;memcheck;modules" TIMEOUT 600)
-      endforeach()
-    endforeach()
-  endforeach()
-endforeach()
-foreach(backend IN ITEMS raw facade)
-  foreach(gc IN ITEMS incremental generational)
-    foreach(case IN ITEMS init init_cancel init_owner_stop)
-      add_test(NAME native_scheduler_mdf_${backend}_${case}_${gc}
-        COMMAND native_scheduler_test mdf_${backend}_${case}_${gc})
-      set_tests_properties(native_scheduler_mdf_${backend}_${case}_${gc}
-        PROPERTIES LABELS "runtime;parallel;memcheck;modules" TIMEOUT 60)
-    endforeach()
-  endforeach()
-endforeach()
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS normal nested error stop shutdown cpu yield nested_stop nested_shutdown
@@ -625,6 +586,8 @@ add_test(NAME bytecode_compile COMMAND "${LUTHRUM_RUNTIME_LOADER}"
 set_tests_properties(bytecode_compile PROPERTIES FIXTURES_SETUP bytecode LABELS runtime TIMEOUT 10)
 add_test(NAME bytecode_execute COMMAND luthrum_test_host "${CMAKE_CURRENT_BINARY_DIR}/interpreter.luac")
 set_tests_properties(bytecode_execute PROPERTIES FIXTURES_REQUIRED bytecode LABELS "runtime;memcheck" TIMEOUT 10)
+
+add_subdirectory(e2e)
 
 add_test(NAME stage_sdk COMMAND "${CMAKE_COMMAND}"
   "-Dbuild_dir=${PROJECT_BINARY_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/StageSdk.cmake")
