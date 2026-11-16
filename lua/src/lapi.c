@@ -1410,17 +1410,21 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
 }
 
 
-LUA_API int lua_load (lua_State *L, lua_Reader reader, void *data,
-                      const char *chunkname, const char *mode) {
+int luaA_load (lua_State *L, lua_Reader reader, void *data,
+               const char *chunkname, const char *mode, int managed) {
   ZIO z;
   TStatus status;
   lua_lock(L);
   luaC_checkGC(L);
   if (!chunkname) chunkname = "?";
-  luaZ_init(L, &z, reader, data);
+  luaZ_init(L, &z, reader, data, managed);
   status = luaD_protectedparser(L, &z, chunkname, mode);
   if (status == LUA_OK) {  /* no errors? */
-    LClosure *f = clLvalue(s2v(L->top.p - 1));  /* get new function */
+    LuaNativeRoot function;
+    LClosure *f;
+    luaR_pushroot(L, &function);
+    luaR_setroot(L, &function, s2v(L->top.p - 1));
+    f = clLvalue(&function.value);
     if (f->nupvalues >= 1) {  /* does it have an upvalue? */
       /* get global table from registry */
       TValue gt;
@@ -1428,11 +1432,16 @@ LUA_API int lua_load (lua_State *L, lua_Reader reader, void *data,
       /* set global table as 1st upvalue of 'f' (may be LUA_ENV) */
       luaF_writecapture(L, f, 0, &gt);
     }
+    luaR_poproot(L, &function);
   }
   lua_unlock(L);
   return APIstatus(status);
 }
 
+LUA_API int lua_load (lua_State *L, lua_Reader reader, void *data,
+                      const char *chunkname, const char *mode) {
+  return luaA_load(L, reader, data, chunkname, mode, 0);
+}
 
 /*
 ** Dump a Lua function, calling 'writer' to write its parts. Ensure

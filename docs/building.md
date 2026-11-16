@@ -218,6 +218,20 @@ saturation, forced migration, saved-context GC, pinned native reentry and string
 arithmetic callbacks that await task results. Arbitrarily long numeric parsing
 still uses the existing parser and needs its own bounded-work feasibility gate.
 
+`load_library_*` checks text/binary loading, environment selection, reader errors,
+allocation denial and retention of source/name/mode/environment snapshots after
+debug argument replacement. Reader closures and their current external fragment
+remain rooted independently of Lua stack temporaries. Owned memory readers and
+Lua-reader trampolines remain managed; public C readers and Lua C bindings called
+by a reader retain native admission. A 1 MiB comment stream is compiled under a
+128 KiB Lua-heap cap with at most two live 2 KiB external fragments. Reader
+fragments feed the parser directly; compilation still constructs complete
+prototypes and literal values as required by Lua's load API.
+`native_scheduler_task_*load*` compiles and executes text/binary functions with
+both native slots occupied, requires migration during input consumption, collects
+with saved parser state and exercises nested loads and reader callbacks awaiting
+another task's result. File loading and other library/module gates remain open.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

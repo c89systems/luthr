@@ -17,7 +17,7 @@
 
 typedef struct Zio ZIO;
 
-#define zgetc(z)  (((z)->n--)>0 ?  cast_uchar(*(z)->p++) : luaZ_fill(z))
+#define zgetc(z) luaZ_getc(z)
 
 
 typedef struct Mbuffer {
@@ -45,7 +45,7 @@ typedef struct Mbuffer {
 
 
 LUAI_FUNC void luaZ_init (lua_State *L, ZIO *z, lua_Reader reader,
-                                        void *data);
+                                        void *data, int managed);
 LUAI_FUNC size_t luaZ_read (ZIO* z, void *b, size_t n);	/* read next n bytes */
 
 LUAI_FUNC const void *luaZ_getaddr (ZIO* z, size_t n);
@@ -59,9 +59,12 @@ struct Zio {
   lua_Reader reader;		/* reader function */
   void *data;			/* additional data */
   lua_State *L;			/* Lua state (for reader) */
+  int managed;
+  unsigned work;
 };
 
 
 LUAI_FUNC int luaZ_fill (ZIO *z);
+LUAI_FUNC int luaZ_getc (ZIO *z);
 
 #endif

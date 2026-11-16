@@ -1289,6 +1289,7 @@ static void checkmode (lua_State *L, const char *mode, const char *x) {
 ** with a table for anchoring stuff.
 */
 static void f_parser (lua_State *L, void *ud) {
+  LuaNativeRoot anchor_root;
   LClosure *cl;
   struct SParser *p = cast(struct SParser *, ud);
   const char *mode = p->mode ? p->mode : "bt";
@@ -1297,8 +1298,9 @@ static void f_parser (lua_State *L, void *ud) {
   ptrdiff_t otop = savestack(L, L->top.p);  /* original top */
   luaD_checknativestack(L);
   luaD_checkstack(L, 2);
-  anchor = luaH_new(L);  /* create the anchor table */
-  sethvalue2s(L, L->top.p++, anchor);  /* anchor the anchor table */
+  luaR_pushroot(L, &anchor_root);
+  anchor = luaH_new(L);
+  sethvalue(L, &anchor_root.value, anchor);
   c = zgetc(p->z);  /* read first character */
   if (c == LUA_SIGNATURE[0]) {
     int fixed = 0;
@@ -1312,24 +1314,26 @@ static void f_parser (lua_State *L, void *ud) {
     checkmode(L, mode, "text");
     cl = luaY_parser(L, p->z, anchor, &p->buff, &p->dyd, p->name, c);
   }
-  L->top.p = restorestack(L, otop);  /* restore stack */
-  setclLvalue2s(L, L->top.p++, cl);  /* push closure */
   lua_assert(cl->nupvalues == cl->p->sizeupvalues);
   luaF_initupvals(L, cl);
+  L->top.p = restorestack(L, otop);  /* restore stack */
+  setclLvalue2s(L, L->top.p++, cl);  /* publish the initialized closure */
+  luaR_poproot(L, &anchor_root);
 }
 
 
 /*
-** Anchor an object in a table in the stack.  First, anchor the object
-** temporarily in the stack, as luaH_set may call an emergency GC.
-** Then, add it in the table with itself as its key.
+** Root an object privately while luaH_set may run an emergency collection,
+** then add it to the parser's anchor table with itself as its key.
 */
 void luaD_anchorobj (lua_State *L, Table *anchor, GCObject *obj) {
-  setgcovalue(L, s2v(L->top.p++), obj);  /* temporary anchor in the stack */
-  luaH_set(L, anchor, s2v(L->top.p - 1), s2v(L->top.p - 1));
+  LuaNativeRoot object;
+  luaR_pushroot(L, &object);
+  setgcovalue(L, &object.value, obj);
+  luaH_set(L, anchor, &object.value, &object.value);
   /* Because this is a new key, luaH_set will call the GC barrier, so
      we don't need to call the barrier again here */
-  L->top.p--;
+  luaR_poproot(L, &object);
 }
 
 

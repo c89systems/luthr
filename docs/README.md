@@ -76,6 +76,9 @@ packing helpers now also support managed execution and bounded work checkpoints.
 Dumping and string-arithmetic callbacks also support managed execution, with
 private roots and native-writer admission preserved. Long numeric-input parsing
 still needs its separate fairness proof.
+Loading from memory and Lua reader callbacks now supports managed execution,
+with private parser/fragment roots and checkpoints during input consumption.
+Public reader callbacks and file I/O retain native admission.
 Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.

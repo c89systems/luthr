@@ -22,6 +22,9 @@
 #include "llimits.h"
 #include "lexec.h"
 #include "lcontrol.h"
+#include "lapi.h"
+#include "lauxowned.h"
+#include "lvm.h"
 
 
 static int luaB_print (lua_State *L) {
@@ -370,42 +373,76 @@ static int luaB_loadfile (lua_State *L) {
 /*
 ** Reader for generic 'load' function.
 */
+typedef struct LoadReader {
+  LuaNativeRoot *function;
+  LuaNativeRoot *chunk;
+} LoadReader;
+
 static const char *generic_reader (lua_State *L, void *ud, size_t *size) {
-  int *firstcall = cast(int *, ud);
+  LoadReader *reader = cast(LoadReader *, ud);
   luaL_checkstack(L, 2, "too many nested functions");
-  if (*firstcall)
-    *firstcall = 0;
-  else
-    lua_pop(L, 1);  /* remove previous result */
-  lua_pushvalue(L, 1);  /* get function */
+  luaL_pushrooted(L, reader->function);
   lua_call(L, 0, 1);  /* call it */
-  if (lua_isnil(L, -1)) {
+  lua_lock(L);
+  luaR_setroot(L, reader->chunk, s2v(L->top.p - 1));
+  L->top.p--;
+  lua_unlock(L);
+  if (ttisnil(&reader->chunk->value)) {
     *size = 0;
     return NULL;
   }
-  else if (l_unlikely(!lua_isstring(L, -1)))
+  else if (l_unlikely(!ttisstring(&reader->chunk->value) &&
+                     !cvt2str(&reader->chunk->value)))
     luaL_error(L, "reader function must return a string");
-  return lua_tolstring(L, -1, size);
+  return luaL_roottostring(L, reader->chunk, size);
 }
 
+static const char *loadstringarg (lua_State *L, int arg,
+                                  LuaNativeRoot *root, size_t *len) {
+  if (!ttisstring(&root->value) && !cvt2str(&root->value))
+    luaL_typeerror(L, arg, "string");
+  return luaL_roottostring(L, root, len);
+}
 
 static int luaB_load (lua_State *L) {
-  int status;
+  LuaNativeRoot roots[5];  /* input/reader, name, mode, env, current fragment */
+  LoadReader reader;
+  int status, env = !lua_isnone(L, 4), string;
+  unsigned index;
   size_t l;
-  const char *s = lua_tolstring(L, 1, &l);
-  const char *mode = getMode(L, 3);
-  int env = (!lua_isnone(L, 4) ? 4 : 0);  /* 'env' index or 0 if no 'env' */
-  if (s != NULL) {  /* loading a string? */
-    const char *chunkname = luaL_optstring(L, 2, s);
+  const char *s = NULL, *mode = NULL, *chunkname;
+  for (index = 0; index < 4; ++index)
+    luaL_rootarg(L, cast_int(index + 1), &roots[index]);
+  lua_lock(L); luaR_pushroot(L, &roots[4]); lua_unlock(L);
+  string = ttisstring(&roots[0].value) || cvt2str(&roots[0].value);
+  if (string) s = luaL_roottostring(L, &roots[0], &l);
+  if (!ttisnil(&roots[2].value)) {
+    size_t ignored;
+    mode = loadstringarg(L, 3, &roots[2], &ignored);
+    luaL_argcheck(L, strchr(mode, 'B') == NULL, 3, "invalid mode");
+  }
+  chunkname = string ? s : "=(load)";
+  if (!ttisnil(&roots[1].value)) {
+    size_t ignored;
+    chunkname = loadstringarg(L, 2, &roots[1], &ignored);
+  }
+  if (string) {
     status = luaL_loadbufferx(L, s, l, chunkname, mode);
   }
   else {  /* loading from a reader function */
-    int firstcall = 1;  /* userdata for generic_reader */
-    const char *chunkname = luaL_optstring(L, 2, "=(load)");
-    luaL_checktype(L, 1, LUA_TFUNCTION);
-    status = lua_load(L, generic_reader, &firstcall, chunkname, mode);
+    luaL_argexpected(L, ttisfunction(&roots[0].value), 1, "function");
+    reader.function = &roots[0]; reader.chunk = &roots[4];
+    status = luaA_load(L, generic_reader, &reader, chunkname, mode, 1);
   }
-  return load_aux(L, status, env);
+  if (status == LUA_OK) {
+    if (env) {
+      luaL_pushrooted(L, &roots[3]);
+      if (!lua_setupvalue(L, -2, 1)) lua_pop(L, 1);
+    }
+    status = 1;
+  }
+  else { luaL_pushfail(L); lua_insert(L, -2); status = 2; }
+  return luaL_rootresult(L, roots, 5, status);
 }
 
 /* }====================================================== */
@@ -547,7 +584,7 @@ LUAMOD_API int luaopen_base (lua_State *L) {
     if (entry->func == NULL)
       lua_pushboolean(L, 0);
     else if (entry->func == luaB_print || entry->func == luaB_loadfile ||
-             entry->func == luaB_load || entry->func == luaB_dofile)
+             entry->func == luaB_dofile)
       lua_pushcfunction(L, entry->func);  /* opaque I/O/reader paths */
     else
       luaQ_pushmanaged(L, entry->func, 0);

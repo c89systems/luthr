@@ -26,27 +26,51 @@ int luaZ_fill (ZIO *z) {
   lua_State *L = z->L;
   const char *buff;
   LuaWorldScope depth;
-  luaQ_beginnative(L);
+  if (!z->managed) luaQ_beginnative(L);
   depth = luaW_detach(L);
   buff = z->reader(L, z->data, &size);
   luaW_attach(L, depth);
-  luaQ_endnative(L);
-  if (buff == NULL || size == 0)
+  if (!z->managed) luaQ_endnative(L);
+  if (buff == NULL || size == 0) {
+    z->n = 0; z->p = NULL;
     return EOZ;
+  }
   z->n = size - 1;  /* discount char being returned */
   z->p = buff;
   return cast_uchar(*(z->p++));
 }
 
 
-void luaZ_init (lua_State *L, ZIO *z, lua_Reader reader, void *data) {
+void luaZ_init (lua_State *L, ZIO *z, lua_Reader reader, void *data, int managed) {
   z->L = L;
   z->reader = reader;
   z->data = data;
   z->n = 0;
   z->p = NULL;
+  z->managed = managed;
+  z->work = 0;
 }
 
+/* Constructor state is visible to GC before a consumed-byte checkpoint parks. */
+static void readwork (ZIO *z, size_t size) {
+  while (size >= 1024u - z->work) {
+    size -= 1024u - z->work;
+    z->work = 0;
+    luaX_poll(z->L);
+  }
+  z->work += cast_uint(size);
+}
+
+int luaZ_getc (ZIO *z) {
+  int c;
+  if (z->n != 0) {
+    z->n--;
+    c = cast_uchar(*(z->p++));
+  }
+  else c = luaZ_fill(z);
+  if (c != EOZ) readwork(z, 1);
+  return c;
+}
 
 /* --------------------------------------------------------------- read --- */
 
@@ -69,11 +93,13 @@ size_t luaZ_read (ZIO *z, void *b, size_t n) {
     if (!checkbuffer(z))
       return n;  /* no more input; return number of missing bytes */
     m = (n <= z->n) ? n : z->n;  /* min. between n and z->n */
+    if (m > 1024u) m = 1024u;
     memcpy(b, z->p, m);
     z->n -= m;
     z->p += m;
     b = (char *)b + m;
     n -= m;
+    readwork(z, m);
   }
   return 0;
 }

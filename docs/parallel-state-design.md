@@ -1289,8 +1289,36 @@ inside arithmetic fallback callbacks.
 The shared numeric parser still contains whole-string scans and libc floating
 conversion. Bounded work for arbitrarily long numeric inputs remains unproven;
 managed arithmetic callback support does not establish that fairness gate.
-Loading/readers, other libraries, required modules and the remaining scheduler
-acceptance gates also remain unfinished.
+
+## Managed loading and incremental readers
+
+`load` and the owned memory-reader path now use managed execution. A private
+reader classification distinguishes memory access and the Lua-reader trampoline
+from the public `lua_Reader` callback, which remains native. An actual Lua C
+binding invoked by the trampoline also retains its ordinary native boundary.
+Foreign activations remain pinned while their nested parsing can release managed
+capacity at runtime waits.
+
+Source or reader, chunk name, mode, environment and current reader fragment have
+private roots through parsing. Parser anchor tables and temporary anchored
+objects also use native roots, and the resulting closure is published only
+after its upvalues are initialized. Consumed source bytes and bounded binary
+copies checkpoint with GC-visible constructor state. Fixed-buffer address
+borrowing preserves its existing caller-owned lifetime contract.
+
+`load_library_*` exercises semantics, errors, allocation denial, explicit native
+reader admission and retention after debug argument replacement. The reader
+snapshot includes a captured finalizable owner and an external fragment. A
+1 MiB comment stream must compile under a 128 KiB Lua-heap cap while retaining
+at most two 2 KiB external fragments. Fragments are not concatenated into a full
+source buffer; prototypes and individual literal values are still materialized
+by the compiler. `native_scheduler_task_*load*` requires native-saturation
+progress, migration during text/binary consumption, collection with saved
+constructor state, nested loads, callback waits and native pinning.
+
+These checks do not establish bounded work for every parser/metadata pass or
+arbitrarily long numeric conversion. File I/O, other libraries, required modules
+and the remaining scheduler acceptance gates remain unfinished.
 
 ## Lua-specific proof obligations
 

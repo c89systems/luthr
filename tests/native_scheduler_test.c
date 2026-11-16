@@ -454,6 +454,7 @@ static int block_binding(lua_State *state) {
                     "if audit_patterns then audit_patterns(0) end; "
                     "if audit_strings then audit_strings(0) end; "
                     "if audit_dump then audit_dump(0) end; "
+                    "if audit_load then audit_load(0) end; "
                     "return await_checked(2)"
                   : "local n=0; for i=1,4000 do n=n+i end; "
                     "local bytes=string.dump(function() return 42 end); "
@@ -1990,6 +1991,51 @@ static void install_dump_audit(struct pool *pool) {
   require(luaL_loadstring(state, source) == LUA_OK);
   require(lua_pcall(state, 0, 0, 0) == LUA_OK);
 }
+static void install_load_audit(struct pool *pool) {
+  static const char source[] =
+      "load_prefix='--[=['..string.rep('a',4096)..']=]\\n'; "
+      "load_text=load_prefix..'return marker'; "
+      "load_literal='return [=['..string.rep('R',4096)..']=]'; "
+      "load_ident=string.rep('n',4096); "
+      "load_names='local '..load_ident..'=42; return '..load_ident; "
+      "load_binary=string.dump(assert(load('return function() return 42,\"'.."
+      "string.rep('R',4096)..'\" end'))()); "
+      "function audit_load(id) check_managed(); "
+      "local function work(source,name,mode,env) local before=helper_ticks(1); "
+      "local f,e=load(source,name,mode,env); assert(helper_ticks(1)>before); "
+      "assert(f,e); return f end; "
+      "assert(work(load_text,'=text','t',{marker=42})()==42); "
+      "assert(work(load_literal,'=literal','t')()==string.rep('R',4096)); "
+      "assert(work(load_names,'=names','t')()==42); "
+      "local a,b=work(load_binary,'=binary','b')(); assert(a==42 and "
+      "b==string.rep('R',4096)); "
+      "local calls=0; local f=work(function() check_managed(); calls=calls+1; "
+      "if calls==1 then if id==2 then assert(await_checked(3)==42) end; "
+      "assert(assert(load('return 7'))()==7); collectgarbage('collect'); "
+      "return load_text end end,'=reader','t',{marker=42}); "
+      "assert(calls==2 and f()==42); "
+      "local n=0; f=work(function() n=n+1; if n<=4 then return load_prefix "
+      "elseif n==5 then return 'return 42' end end,'=fragments','t'); "
+      "assert(f()==42); "
+      "local bad,e=load(load_prefix..'return {','=bad'); assert(bad==nil and "
+      "type(e)=='string'); "
+      "bad,e=load(function() check_managed(); "
+      "assert(string.len(load_binary)>4096); "
+      "error('reader expected') end); assert(bad==nil and type(e)=='string'); "
+      "check_managed() end";
+  lua_State *state = pool->main;
+  pool->helper_count = 1;
+  luaQ_pushmanaged(state, helper_ticks, 0);
+  lua_setglobal(state, "helper_ticks");
+  luaQ_pushmanaged(state, helper_managed, 0);
+  lua_setglobal(state, "check_managed");
+  lua_getglobal(state, "load");
+  pool->helper_work[0] = lua_tocfunction(state, -1);
+  require(pool->helper_work[0] != NULL);
+  lua_pop(state, 1);
+  require(luaL_loadstring(state, source) == LUA_OK);
+  require(lua_pcall(state, 0, 0, 0) == LUA_OK);
+}
 static int exercise_task_wait(const char *name) {
   struct pool *pool = calloc(1, sizeof(*pool));
   pthread_t workers[MAX_WORKERS];
@@ -2005,7 +2051,8 @@ static int exercise_task_wait(const char *name) {
   int pattern = strstr(name, "pattern") != NULL;
   int strings = strstr(name, "strings") != NULL;
   int dump = strstr(name, "dump") != NULL;
-  int helpers = utf8 || pattern || strings || dump;
+  int load = strstr(name, "load") != NULL;
+  int helpers = utf8 || pattern || strings || dump || load;
   int movealloc = strstr(name, "movealloc") != NULL;
   static const char producer[] =
       "local token,id=...; return function() "
@@ -2018,6 +2065,7 @@ static int exercise_task_wait(const char *name) {
       "if audit_patterns then audit_patterns(id) end; "
       "if audit_strings then audit_strings(id) end; "
       "if audit_dump then audit_dump(id) end; "
+      "if audit_load then audit_load(id) end; "
       "if id==2 then gate2:recv() else gate3:recv() end; "
       "if id==3 and failing then error(token) end; "
       "return token,function() return shared end,42 end";
@@ -2109,6 +2157,8 @@ static int exercise_task_wait(const char *name) {
     install_string_audit(pool);
   if (dump)
     install_dump_audit(pool);
+  if (load)
+    install_load_audit(pool);
   if (strstr(name, "generational") != NULL)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < MAX_TASKS; ++id) {
@@ -2201,7 +2251,7 @@ static int exercise_task_wait(const char *name) {
   }
   while (!pool->await_ready[0] || !pool->await_ready[1] ||
          !pool->tasks[2].published || !pool->tasks[3].published ||
-         ((library || pattern || strings || dump) &&
+         ((library || pattern || strings || dump || load) &&
           !pool->tasks[2].await_waits)) {
     require(!pool->tasks[2].finished && !pool->tasks[3].finished);
     wait_change(pool);
@@ -2257,7 +2307,7 @@ static int exercise_task_wait(const char *name) {
   require(pool->await_winners[0] == 1 && pool->await_winners[1] == 1);
   require(pool->await_losers[0] == (callback ? 2U : 1U) &&
           pool->await_losers[1] ==
-              ((library || pattern || strings || dump) ? 1U : 0U));
+              ((library || pattern || strings || dump || load) ? 1U : 0U));
   pool->release[0] = pool->release[1] = 1;
   signal_change(pool);
   while (pool->done != MAX_TASKS)
@@ -2287,7 +2337,7 @@ static int exercise_task_wait(const char *name) {
       if (pool->force_migrate)
         require(task->migrations != 0);
     }
-    if ((library || pattern || strings || dump) && id == 2) {
+    if ((library || pattern || strings || dump || load) && id == 2) {
       require(task->await_waits != 0 && task->pinned_resource_waits == 0);
       if (pool->force_migrate)
         require(task->migrations != 0);

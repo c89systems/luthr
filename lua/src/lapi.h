@@ -19,7 +19,11 @@
 #define api_check(l,e,msg)	((void)(l), lua_assert((e) && msg))
 #endif
 
-
+/* Only owned memory readers and runtime Lua-reader trampolines pass managed=1.
+** Public reader callbacks retain native admission. Borrowed C strings/storage
+** remain the caller's responsibility for the duration of this call. */
+LUAI_FUNC int luaA_load (lua_State *L, lua_Reader reader, void *data,
+                       const char *name, const char *mode, int managed);
 
 /* Increments 'L->top.p', checking for stack overflows */
 #define api_incr_top(L)  \

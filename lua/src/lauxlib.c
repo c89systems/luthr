@@ -954,7 +954,7 @@ LUALIB_API int luaL_loadbufferx (lua_State *L, const char *buff, size_t size,
   LoadS ls;
   ls.s = buff;
   ls.size = size;
-  return lua_load(L, getS, &ls, name, mode);
+  return luaA_load(L, getS, &ls, name, mode, 1);
 }
 
 
