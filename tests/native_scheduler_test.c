@@ -40,6 +40,8 @@ struct task {
   int permit, native, pinned, finished, status, results, id;
   int worker, target;
   unsigned parks, migrations, pinned_waits;
+  unsigned pin_binds, pin_releases, pin_parks;
+  int pin_worker;
   long last_carrier;
   LuaWaiter *waiter;
   int notified, published, wait_pinned;
@@ -74,6 +76,11 @@ struct pool {
   void *await_payloads[2];
   int awaiting;
   int stop_waiting;
+  int affinity_test, affinity_close_error;
+  unsigned affinity_opened, affinity_closed, affinity_finalized,
+      affinity_rejected;
+  int affinity_reject_worker;
+  unsigned affinity_deny, affinity_denied;
   lua_CFunction helper_work[MAX_HELPERS];
   int helper_count;
   unsigned done, entered, callback_done, release[2], finalized;
@@ -88,6 +95,7 @@ struct pool {
   unsigned char stream_seen[1024];
 };
 static __thread int native_marker;
+static __thread struct worker *current_worker;
 static struct pool *fixture;
 
 static void check(int code) {
@@ -152,7 +160,16 @@ static void release_permit(struct task *task) {
 static void park(struct task *task, enum reason reason) {
   long previous = syscall(SYS_gettid);
   task->reason = reason;
-  if (task->pool->force_migrate) {
+  if (task->fiber.execution.pin_depth != 0) {
+    require(
+        pthread_equal(task->fiber.execution.pinned_carrier, pthread_self()));
+    task->pin_parks++;
+    lock(task->pool);
+    task->target = task->worker;
+    unlock(task->pool);
+  } else if (task->pool->force_migrate &&
+             (!task->pool->affinity_test ||
+              (task->id == 2 && task->pin_releases != 0))) {
     lock(task->pool);
     if (task->pool->stop_waiting) {
       if (task->id >= 2)
@@ -166,6 +183,9 @@ static void park(struct task *task, enum reason reason) {
   task->parks++;
   test_fiber_pause(&task->fiber);
   luaD_rebindexecution(&task->fiber.execution);
+  if (task->fiber.execution.pin_depth != 0)
+    require(
+        pthread_equal(task->fiber.execution.pinned_carrier, pthread_self()));
   if (previous != syscall(SYS_gettid))
     task->migrations++;
   task->last_carrier = syscall(SYS_gettid);
@@ -259,6 +279,26 @@ static void native_restore(LuaExecution *execution, lua_State *state,
                            unsigned previous) {
   (void)previous;
   native_leave(execution, state);
+}
+static int pin_carrier(LuaExecution *execution) {
+  struct task *task = execution->context;
+  if (current_worker == NULL || current_worker->pool != task->pool)
+    return 0;
+  lock(task->pool);
+  task->pin_worker = task->worker;
+  task->target = task->worker;
+  task->pin_binds++;
+  unlock(task->pool);
+  return 1;
+}
+static void unpin_carrier(LuaExecution *execution) {
+  struct task *task = execution->context;
+  require(current_worker != NULL && current_worker->pool == task->pool &&
+          task->worker == task->pin_worker);
+  lock(task->pool);
+  task->pin_releases++;
+  task->target = -1;
+  unlock(task->pool);
 }
 static void poll(LuaExecution *execution, lua_State *state) {
   struct task *task = execution->context;
@@ -357,6 +397,7 @@ static void task_entry(void *argument) {
    * No state access is permitted below this point without another Lua root. */
   if (task->root.global != NULL)
     require(luaTK_finish(&task->root, &task->status, &task->results) == LUA_OK);
+  require(task->fiber.execution.pin_depth == 0);
   lock(task->pool);
   if (task->permit)
     release_permit(task); /* A private probe may finish without a Lua entry. */
@@ -369,6 +410,7 @@ static void task_entry(void *argument) {
 static void *worker_entry(void *argument) {
   struct worker *worker = argument;
   struct pool *pool = worker->pool;
+  current_worker = worker;
   if (worker->bind_cpu) {
     cpu_set_t allowed;
     CPU_ZERO(&allowed);
@@ -398,6 +440,7 @@ static void *worker_entry(void *argument) {
     }
     if (pool->stop) {
       unlock(pool);
+      current_worker = NULL;
       return NULL;
     }
     task->worker = (int)(worker - pool->workers);
@@ -544,6 +587,8 @@ static void init_execution(struct task *task) {
   task->fiber.execution.poll = poll;
   task->fiber.execution.wait = resource_wait;
   task->fiber.execution.wake = resource_wake;
+  task->fiber.execution.pin_carrier = pin_carrier;
+  task->fiber.execution.unpin_carrier = unpin_carrier;
 }
 static void init_task(struct pool *pool, struct task *task, int id,
                       void (*run)(struct task *)) {
@@ -1725,6 +1770,12 @@ static void *utf8_allocate(void *context, void *old, size_t old_size,
     free(old);
     return NULL;
   }
+  if (luaQ_current() == &pool->tasks[2].fiber.execution &&
+      pool->affinity_deny != 0 && size > old_size) {
+    pool->affinity_deny--;
+    pool->affinity_denied++;
+    return NULL;
+  }
   memory = malloc(size);
   if (memory != NULL) {
     if (old != NULL) {
@@ -2731,12 +2782,396 @@ static int exercise_stop_wait(const char *name) {
   free(pool);
   return 0;
 }
+struct affine_resource {
+  LuaCarrierPin pin;
+  pthread_mutex_t mutex;
+  unsigned magic;
+};
+static int affine_close(lua_State *state) {
+  struct affine_resource *resource = lua_touserdata(state, 1);
+  struct task *task = luaQ_current()->context;
+  struct pool *pool = task->pool;
+  require(resource != NULL && luaQ_current()->native_depth != 0);
+  check(pthread_mutex_lock(&resource->mutex));
+  if (!resource->pin.active) {
+    check(pthread_mutex_unlock(&resource->mutex));
+    return 0;
+  }
+  if (!luaQ_pinowner(&resource->pin)) {
+    check(pthread_mutex_unlock(&resource->mutex));
+    return luaL_error(state, "affine resource belongs to another execution");
+  }
+  require(task->worker == task->pin_worker);
+  lock(pool);
+  require(resource->magic == 12345);
+  resource->magic = 0;
+  pool->affinity_closed++;
+  unlock(pool);
+  require(luaQ_unpincarrier(&resource->pin) == LUA_OK);
+  check(pthread_mutex_unlock(&resource->mutex));
+  if (pool->affinity_close_error && task->id == 2)
+    return luaL_error(state, "affine close expected");
+  return 0;
+}
+static int affine_finalize(lua_State *state) {
+  struct affine_resource *resource = lua_touserdata(state, 1);
+  require(resource != NULL);
+  check(pthread_mutex_lock(&resource->mutex));
+  require(!resource->pin.active && resource->magic == 0);
+  check(pthread_mutex_unlock(&resource->mutex));
+  check(pthread_mutex_destroy(&resource->mutex));
+  lock(fixture);
+  fixture->affinity_finalized++;
+  unlock(fixture);
+  return 0;
+}
+static int affine_scope_done(lua_State *state, int status,
+                             lua_KContext context) {
+  (void)state;
+  (void)status;
+  (void)context;
+  return 1;
+}
+static int affine_scope(lua_State *state) {
+  struct affine_resource *resource;
+  luaL_checktype(state, 1, LUA_TFUNCTION);
+  resource = lua_newuserdatauv(state, sizeof(*resource), 0);
+  memset(resource, 0, sizeof(*resource));
+  check(pthread_mutex_init(&resource->mutex, NULL));
+  luaL_setmetatable(state, "affine.fixture");
+  /* Install cleanup before reserving affinity or creating the native handle. */
+  lua_toclose(state, 2);
+  require(luaQ_pincarrier(&resource->pin) == LUA_OK);
+  luaQ_beginnative(state);
+  lock(fixture);
+  resource->magic = 12345;
+  fixture->affinity_opened++;
+  unlock(fixture);
+  luaQ_endnative(state);
+  lua_pushvalue(state, 1);
+  lua_pushvalue(state, 2);
+  lua_callk(state, 1, 1, 0, affine_scope_done);
+  return affine_scope_done(state, LUA_OK, 0);
+}
+static int affine_use(lua_State *state) {
+  struct affine_resource *resource =
+      luaL_checkudata(state, 1, "affine.fixture");
+  struct task *task = luaQ_current()->context;
+  struct pool *pool = task->pool;
+  int owned;
+  check(pthread_mutex_lock(&resource->mutex));
+  lock(pool);
+  owned = luaQ_pinowner(&resource->pin);
+  if (!owned) {
+    pool->affinity_rejected++;
+    pool->affinity_reject_worker = task->worker;
+  } else
+    require(resource->magic == 12345 && task->worker == task->pin_worker);
+  unlock(pool);
+  check(pthread_mutex_unlock(&resource->mutex));
+  if (owned) {
+    long carrier;
+    luaQ_beginnative(state);
+    carrier = syscall(SYS_gettid);
+    native_marker = 800;
+    if (lua_isfunction(state, 2)) {
+      lua_pushvalue(state, 2);
+      lua_call(state, 0, 1);
+      require(lua_tointeger(state, -1) == 42);
+      lua_pop(state, 1);
+    }
+    require(syscall(SYS_gettid) == carrier && native_marker == 800 &&
+            luaQ_pinowner(&resource->pin));
+    luaQ_endnative(state);
+  }
+  lua_pushboolean(state, owned);
+  return 1;
+}
+static int affine_ready(lua_State *state) {
+  (void)state;
+  lock(fixture);
+  fixture->stage++;
+  signal_change(fixture);
+  unlock(fixture);
+  return 0;
+}
+static void affine_run(struct task *task) {
+  task->status = luaTK_resume(&task->root, 0, &task->results);
+  if (task->status == LUA_YIELD) {
+    require(task->results == 1 && lua_tointeger(task->state, -1) == 17);
+    lua_pop(task->state, 1);
+    require(task->fiber.execution.pin_depth != 0);
+    park(task, READY);
+    task->status = luaTK_resume(&task->root, 0, &task->results);
+  }
+}
+static int affine_fail(lua_State *state) {
+  /* Deny this owner's initial allocation and its emergency-GC retry only. */
+  fixture->affinity_deny = 2;
+  lua_newuserdatauv(state, 4096, 0);
+  return luaL_error(state, "allocation denial did not fail");
+}
+static int exercise_affinity(const char *name) {
+  static const int ids[] = {0, 1, 2, 3, 4, 6};
+  static const char source[] =
+      "local function body(r) "
+      "assert(affine_use(r,function() local n=0; for i=1,4000 do n=n+i end; "
+      "return 42 end)); affine_shared=r; "
+      "if affine_yield then coroutine.yield(17) end; "
+      "affine_ready(); assert(q:recv()=='go'); "
+      "if affine_oom then affine_fail() end; "
+      "if affine_cpu then affine_ready(); while true do end end; "
+      "if affine_error then error('affine body expected') end; "
+      "assert(affine_use(r)); return 41 end; "
+      "local n=affine_scope(function(r) "
+      "if affine_nested then return affine_scope(body) else return body(r) end "
+      "end); local sum=0; for i=1,4000 do sum=sum+i end; return n+1";
+  struct pool *pool = calloc(1, sizeof(*pool));
+  pthread_t workers[MAX_WORKERS];
+  int facade = strstr(name, "facade") != NULL;
+  int oom = strstr(name, "oom") != NULL;
+  int moving = strstr(name, "movealloc") != NULL || oom;
+  int shutdown = strstr(name, "shutdown") != NULL;
+  int stopped =
+      shutdown || strstr(name, "stop") != NULL || strstr(name, "cpu") != NULL;
+  int error = strstr(name, "error") != NULL || oom;
+  int nested = strstr(name, "nested") != NULL;
+  int cpu = strstr(name, "cpu") != NULL;
+  require(pool != NULL);
+  fixture = pool;
+  pool->managed_limit = 2;
+  pool->affinity_test = pool->force_migrate = pool->stop_waiting = 1;
+  pool->affinity_close_error = strstr(name, "close_error") != NULL;
+  check(pthread_mutex_init(&pool->mutex, NULL));
+  check(pthread_cond_init(&pool->changed, NULL));
+  if (facade) {
+    static const unsigned char capture[] = "require('fixture')";
+    if (moving) {
+      luthrum_lua_runtime_allocator_config config = {0};
+      config.user = pool;
+      config.alloc_fn = utf8_host_allocate;
+      config.realloc_fn = utf8_allocate;
+      config.free_fn = utf8_host_free;
+      require(luthrum_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
+              LUTHRUM_LUA_RUNTIME_OK);
+    } else
+      require(luthrum_lua_runtime_new(&pool->runtime) ==
+              LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                  open_fixture) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
+                                           sizeof(capture) - 1, "affinity", 0,
+                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  } else {
+    pool->main =
+        moving ? lua_newstate(utf8_allocate, pool, 0) : luaL_newstate();
+    require(pool->main != NULL);
+    luaL_openlibs(pool->main);
+  }
+  if (strstr(name, "generational"))
+    lua_gc(pool->main, LUA_GCGEN);
+  lua_pushcfunction(pool->main, block_binding);
+  lua_setglobal(pool->main, "block");
+  luaQ_pushmanaged(pool->main, affine_scope, 0);
+  lua_setglobal(pool->main, "affine_scope");
+  luaQ_pushmanaged(pool->main, affine_use, 0);
+  lua_setglobal(pool->main, "affine_use");
+  luaQ_pushmanaged(pool->main, affine_ready, 0);
+  lua_setglobal(pool->main, "affine_ready");
+  luaQ_pushmanaged(pool->main, affine_fail, 0);
+  lua_setglobal(pool->main, "affine_fail");
+  luaL_newmetatable(pool->main, "affine.fixture");
+  lua_pushcfunction(pool->main, affine_close);
+  lua_setfield(pool->main, -2, "__close");
+  luaQ_pushmanaged(pool->main, affine_finalize, 0);
+  lua_setfield(pool->main, -2, "__gc");
+  lua_pop(pool->main, 1);
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "q");
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "q2");
+  lua_pushboolean(pool->main, nested);
+  lua_setglobal(pool->main, "affine_nested");
+  lua_pushboolean(pool->main, error && !pool->affinity_close_error && !oom);
+  lua_setglobal(pool->main, "affine_error");
+  lua_pushboolean(pool->main, oom);
+  lua_setglobal(pool->main, "affine_oom");
+  lua_pushboolean(pool->main, cpu);
+  lua_setglobal(pool->main, "affine_cpu");
+  lua_pushboolean(pool->main, strstr(name, "yield") != NULL);
+  lua_setglobal(pool->main, "affine_yield");
+  for (unsigned n = 0; n < sizeof(ids) / sizeof(ids[0]); ++n) {
+    int id = ids[n];
+    struct task *task = &pool->tasks[id];
+    task->state = lua_newthread(pool->main);
+    require(luaL_loadstring(
+                task->state,
+                id < 2    ? "return block(...)"
+                : id == 2 ? source
+                : id == 3 ? "assert(not affine_use(affine_shared)); return 42"
+                : id == 4
+                    ? "return affine_scope(function(r) affine_ready(); "
+                      "assert(affine_use(r)); assert(q2:recv()=='go'); "
+                      "assert(affine_use(r)); return 42 end)"
+                    : "local n=0; for i=1,4000 do n=n+i end; return 42") ==
+            LUA_OK);
+    if (id < 2) {
+      unsigned *payload;
+      lua_pushinteger(task->state, id);
+      payload = lua_newuserdatauv(task->state, sizeof(*payload), 0);
+      *payload = 12345;
+    }
+    init_task(pool, task, id, NULL);
+    task->target = id < 2 ? id : id >= 4 ? 3 : 2;
+    if (id == 2)
+      task->run = affine_run;
+    lua_settop(pool->main, 0);
+  }
+  for (int i = 0; i < MAX_WORKERS; ++i) {
+    pool->workers[i].pool = pool;
+    check(pthread_create(&workers[i], NULL, worker_entry, &pool->workers[i]));
+  }
+  submit(pool, 2);
+  lock(pool);
+  while (!pool->tasks[2].published)
+    wait_change(pool);
+  require(pool->stage == 1 && pool->affinity_opened == (nested ? 2u : 1u));
+  require(pool->tasks[2].pin_worker == 2 && pool->tasks[2].pin_binds == 1 &&
+          pool->tasks[2].migrations == 0);
+  unlock(pool);
+  submit(pool, 4);
+  lock(pool);
+  while (!pool->tasks[4].published)
+    wait_change(pool);
+  require(pool->stage == 2 && pool->affinity_opened == (nested ? 3u : 2u));
+  require(pool->tasks[4].pin_worker == 3 && pool->tasks[4].pin_binds == 1 &&
+          pool->tasks[4].migrations == 0);
+  unlock(pool);
+  submit(pool, 0);
+  submit(pool, 1);
+  lock(pool);
+  while (pool->entered != 2)
+    wait_change(pool);
+  unlock(pool);
+  submit(pool, 3);
+  submit(pool, 6);
+  lock(pool);
+  while (!pool->tasks[3].finished || !pool->tasks[6].finished)
+    wait_change(pool);
+  require(pool->native == 2 && pool->affinity_rejected == 1 &&
+          pool->affinity_reject_worker == 2);
+  unlock(pool);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  if (!shutdown) {
+    require(luaL_loadstring(pool->main, "q2:send('go')") == LUA_OK);
+    require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  }
+  if (!stopped || cpu) {
+    require(luaL_loadstring(pool->main, "q:send('go')") == LUA_OK);
+    require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  }
+  if (cpu) {
+    lock(pool);
+    while (pool->stage != 3)
+      wait_change(pool);
+    unlock(pool);
+  }
+  if (shutdown)
+    require(luaTK_shutdown(G(pool->main)) == LUA_TK_PENDING);
+  else if (stopped)
+    require(luaTK_requeststop(&pool->tasks[2].root) == LUA_OK);
+  lock(pool);
+  while (pool->native_waits < 2)
+    wait_change(pool);
+  require(pool->native == 2 && pool->affinity_closed == 0 &&
+          pool->affinity_finalized == 0 && !pool->tasks[2].finished);
+  unlock(pool);
+  {
+    int status = -99, results = -99;
+    require(luaTK_collect(pool->main, &pool->tasks[2].root, &status,
+                          &results) == LUA_TK_PENDING);
+    require(status == -99 && results == -99);
+  }
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  lock(pool);
+  require(pool->affinity_finalized == 0);
+  pool->release[0] = 1;
+  signal_change(pool);
+  while (!pool->tasks[2].finished || !pool->tasks[4].finished)
+    wait_change(pool);
+  require(pool->native == 1 && !pool->release[1]);
+  require(pool->affinity_closed == pool->affinity_opened &&
+          pool->tasks[2].pin_releases == 1 && pool->tasks[2].pin_parks != 0 &&
+          pool->tasks[4].pin_releases == 1 && pool->tasks[4].pin_parks != 0);
+  if (!stopped && !error)
+    require(pool->tasks[2].migrations != 0);
+  pool->release[1] = 1;
+  signal_change(pool);
+  while (pool->done != sizeof(ids) / sizeof(ids[0]))
+    wait_change(pool);
+  require(pool->native_peak == 2 && pool->managed_peak <= 2 &&
+          pool->native == 0 && pool->managed == 0);
+  pool->stop = 1;
+  signal_change(pool);
+  unlock(pool);
+  for (int i = 0; i < MAX_WORKERS; ++i)
+    check(pthread_join(workers[i], NULL));
+  for (unsigned n = 0; n < sizeof(ids) / sizeof(ids[0]); ++n) {
+    int id = ids[n], status = -99, results = -99;
+    int failed = id == 2 ? stopped || error : (id < 2 || id == 4) && shutdown;
+    require(luaTK_collect(pool->main, &pool->tasks[id].root, &status,
+                          &results) == LUA_OK);
+    require(status == (id == 2 && oom ? LUA_ERRMEM
+                       : failed       ? LUA_ERRRUN
+                                      : LUA_OK) &&
+            results == 1);
+    if (failed) {
+      const char *message = lua_tostring(pool->main, -1);
+      require(message != NULL);
+      require(id == 2 && oom ? strcmp(message, "not enough memory") == 0
+              : id == 2 && pool->affinity_close_error
+                  ? strstr(message, "affine close expected") != NULL
+              : id == 2 && error && !stopped
+                  ? strstr(message, "affine body expected") != NULL
+                  : strcmp(message, "task stopped") == 0);
+    } else if (id >= 2)
+      require(lua_tointeger(pool->main, -1) == 42);
+    lua_pop(pool->main, 1);
+    test_fiber_destroy(&pool->tasks[id].fiber);
+  }
+  require(G(pool->main)->tasks == NULL);
+  if (shutdown)
+    require(luaTK_shutdown(G(pool->main)) == LUA_OK);
+  lua_pushnil(pool->main);
+  lua_setglobal(pool->main, "affine_shared");
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  require(pool->affinity_finalized == pool->affinity_opened);
+  require(pool->affinity_denied == (oom ? 2u : 0u) && pool->affinity_deny == 0);
+  if (facade)
+    luthrum_lua_runtime_free(pool->runtime);
+  else
+    lua_close(pool->main);
+  if (moving)
+    require(pool->stream_live == 0);
+  check(pthread_cond_destroy(&pool->changed));
+  check(pthread_mutex_destroy(&pool->mutex));
+  free(pool);
+  return 0;
+}
 int main(int argc, char **argv) {
   struct pool *pool;
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
   require(argc == 2 || argc == 3);
+  if (strncmp(argv[1], "affinity_", 9) == 0)
+    return exercise_affinity(argv[1]);
   if (strncmp(argv[1], "stop_", 5) == 0)
     return exercise_stop_wait(argv[1]);
   if (strncmp(argv[1], "task_", 5) == 0)

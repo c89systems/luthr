@@ -279,6 +279,10 @@ static void *run(void *context) {
       require(luaCB_call(&fixture->callbacks[0], &execution, marshal, &value,
                          error, sizeof(error)) == LUA_CB_INVALID);
       execution.native_depth = 0;
+      execution.pin_depth = 1;
+      require(luaCB_call(&fixture->callbacks[0], &execution, marshal, &value,
+                         error, sizeof(error)) == LUA_CB_INVALID);
+      execution.pin_depth = 0;
       require(luaCB_call(&fixture->callbacks[0], &execution, marshal, &value,
                          error, sizeof(error)) == LUA_ERRRUN);
       require(error[0] != '\0' && error[3] == '\0');

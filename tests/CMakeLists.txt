@@ -16,6 +16,15 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(carrier_pin_test carrier_pin_test.c)
+set_target_properties(carrier_pin_test PROPERTIES C_STANDARD 99)
+target_compile_options(carrier_pin_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(carrier_pin_test PRIVATE luthrum_static)
+add_test(NAME carrier_pin_contract COMMAND carrier_pin_test)
+set_tests_properties(carrier_pin_contract PROPERTIES
+  LABELS "runtime;parallel;memcheck" TIMEOUT 30)
+add_test(NAME carrier_pin_wrong_driver COMMAND carrier_pin_test wrong_driver)
+set_tests_properties(carrier_pin_wrong_driver PROPERTIES LABELS runtime TIMEOUT 30)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS prestart cpu catch xpcall native native_oom continuation callback unprotected foreign_vm oom parser parser_oom yield cleanup_error cleanup_wait request_race late
@@ -315,6 +324,17 @@ target_include_directories(native_scheduler_test PRIVATE "${CMAKE_CURRENT_BINARY
 target_compile_options(native_scheduler_test PRIVATE
   "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
 target_link_libraries(native_scheduler_test PRIVATE luthrum_static)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS normal nested error stop shutdown cpu yield nested_stop nested_shutdown
+        stop_close_error normal_close_error movealloc_normal movealloc_nested_stop oom nested_oom)
+      add_test(NAME native_scheduler_affinity_${backend}_${case}_${gc}
+        COMMAND native_scheduler_test affinity_${backend}_${case}_${gc})
+      set_tests_properties(native_scheduler_affinity_${backend}_${case}_${gc}
+        PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 180)
+    endforeach()
+  endforeach()
+endforeach()
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS normal migrate early error callback callback_migrate callback_error

@@ -129,7 +129,8 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
   if (current == NULL) {
     NativeStackContext *source = luaE_getnativestackcontext();
     if (execution == NULL || execution->managed_depth != 0 ||
-        execution->native_depth != 0 || execution->protected != NULL ||
+        execution->native_depth != 0 || execution->pin_depth != 0 ||
+        execution->protected != NULL ||
         __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE) != NULL)
       return LUA_CB_INVALID;
     execution->native_depth = 1;  /* already on a provider-owned native stack */

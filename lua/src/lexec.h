@@ -23,11 +23,26 @@ typedef struct LuaExecution {
   ** Lua or switch the calling stack. */
   void (*wait)(struct LuaExecution *, pthread_mutex_t *, struct LuaWaiter *);
   void (*wake)(struct LuaExecution *, struct LuaWaiter *);
+  /* Reserve/release routing to the current carrier at the outermost pin.
+  ** pin returns nonzero on success. Both hooks are nonblocking: no Lua entry,
+  ** allocation, migration, or nonlocal exit. Carriers remain reusable while
+  ** the pinned execution parks. Missing hooks reject managed pin regions. */
+  int (*pin_carrier)(struct LuaExecution *);
+  void (*unpin_carrier)(struct LuaExecution *);
   struct lua_longjmp *protected;
   struct LuaTaskRoot *task;  /* atomic binding, cleared at result collection */
   unsigned managed_depth;
   unsigned native_depth;
+  unsigned pin_depth;
+  pthread_t pinned_carrier;
 } LuaExecution;
+
+enum { LUA_PIN_INVALID = -1, LUA_PIN_UNAVAILABLE = -2, LUA_PIN_OVERFLOW = -3 };
+typedef struct LuaCarrierPin {
+  LuaExecution *execution;
+  pthread_t carrier;
+  int active;
+} LuaCarrierPin;
 
 typedef struct LuaOwner {
   LuaExecution *execution;
@@ -48,6 +63,19 @@ typedef struct LuaStopWait {
 } LuaStopWait;
 
 LUAI_FUNC LuaExecution *luaQ_current (void);
+/* Private binding-author regions. Initially zeroed storage and its execution
+** outlive every use; the caller serializes access to each record. A region
+** belongs to both its logical execution and physical carrier. Multiple regions
+** may retire in any order. A binding must close its native resources on that
+** owner before unpinning, including protected error/stop cleanup, and retire
+** all regions before task completion is published or a foreign callback detaches.
+** Cleanup must already be installed before creating the native resource.
+** Pinning does not root a Lua value or
+** adapt arbitrary finalizers/callbacks. An unmanaged owner is thread-local.
+** Rejection preserves the record and routing. No allocation or native join. */
+LUAI_FUNC int luaQ_pincarrier (LuaCarrierPin *pin);
+LUAI_FUNC int luaQ_pinowner (const LuaCarrierPin *pin);
+LUAI_FUNC int luaQ_unpincarrier (LuaCarrierPin *pin);
 /* Trusted runtime code only: body and continuations cannot retain foreign TLS
 ** or perform opaque blocking work. Zero-capture implementations have canonical
 ** GC-rooted identities for the VM lifetime; captured closures remain distinct.

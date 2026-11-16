@@ -1411,6 +1411,12 @@ current protected boundary without allocating or invoking a message handler.
 The request remains latched through `pcall`/`xpcall` recovery. This is an
 experimental termination mechanism, not a committed public cancellation contract.
 
+Delivery reads the request and phase together under the world mutex. It does not
+rely on a lock-free request fast path; the free-running CPU/affinity case below
+exercises a request concurrent with VM work under the pthread race checker.
+This adds a short bookkeeping lock to each eligible check; scheduler performance
+still needs measurement before public commitment.
+
 Task finishing and active close operations are exempt from new delivery so that
 normal close cleanup can run. Close errors retain their ordinary outcome rules.
 The atomic delivery flag is diagnostic, not acknowledgment. A native caller can
@@ -1519,6 +1525,54 @@ waits stop and migrate. Native owners remain uncollectible until explicitly
 released, and the peer outcome completed before shutdown remains unchanged.
 Raw/C89 backends, both collectors and moving-allocation variants exercise the
 same gates. Public shutdown policy, deadlines and scheduler sizing remain open.
+
+## Private carrier-affinity regions
+
+`luaQ_pincarrier` reserves routing to the current physical carrier through private
+execution-driver hooks. Missing hooks or a refused reservation return an explicit
+unavailable result before activating the region. A `LuaCarrierPin` belongs to both
+its logical execution and OS thread; another task on the same reused carrier is
+not its owner. Regions nest independently and can retire in either order. Only
+the first region reserves routing and the last releases it. Pinning allocates no
+storage, joins no native call and does not retain a managed execution permit.
+Admission cannot adopt an execution with live regions as a fresh task or foreign
+callback. Existing attached native callbacks retain their owner's reservation.
+
+The driver may park a pinned task and reuse its carrier for other work, but must
+route every resumption back to that carrier. Managed entry, poll return and native
+admission check that invariant; a broken private driver aborts before starting a
+foreign activation on the wrong thread. A pin does not reserve exclusive TLS:
+other tasks can use the carrier between activations. Actual opaque C frames
+retain their existing stronger rule: they cannot move or release the carrier.
+
+The binding owns each pin record's storage and serialization. Cleanup must be
+installed before pinning or creating a native handle. Regions must retire before
+task completion is published or a foreign callback detaches. Pinning does not
+itself root a Lua value, route arbitrary userdata finalizers, transfer a handle
+to another task, or adapt an unchanged module. Resource adapters and their
+finalization/transfer contracts still need module-specific acceptance before a
+public affinity API.
+
+`carrier_pin_contract` covers unavailable/refused reservations, unmanaged owners,
+logical and physical owner rejection, nested/non-LIFO retirement, execution
+admission and counter overflow. A separate wrong-driver negative control must
+abort before its native-entry hook runs.
+
+`native_scheduler_affinity_*` installs a to-be-closed guard on a retained managed
+C frame before native creation, then calls ordinary sequential Lua inside that
+scope. Two independent owners park with separate reservations on four reused
+carriers; runnable peers reuse both carriers. Two native slots exercise
+create/use/close, nested scopes, callbacks, explicit yield continuations,
+body/close errors, CPU stop, shutdown and allocation failure with emergency GC.
+A parked owner keeps its
+carrier identity while a different task reuses that carrier and must reject the
+shared handle before native admission. Other runnable Lua completes with both
+native slots occupied. Close remains pending behind those unchanged blocked
+bindings, retains its roots through GC, then runs on the owner's carrier when
+one slot is released. The last unpin restores migration; finalization must occur
+exactly once after close. Raw/C89 backends, both collectors and moving allocators
+cover these paths. This proves a scoped binding-author mechanism, not general
+module compatibility, resource-owned dispatch, or automatic scheduler sizing.
 
 ## Lua-specific proof obligations
 

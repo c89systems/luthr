@@ -86,10 +86,10 @@ void luaTK_checkstop (lua_State *L) {
   if (execution == NULL || L->errorJmp == NULL ||
       L->errorJmp != execution->protected) return;
   task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
-  if (task == NULL || task->global != G(L) ||
-      !__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return;
+  if (task == NULL || task->global != G(L)) return;
   luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
-  deliver = task->phase == LUA_TASK_RUNNING && L->close_active == 0;
+  deliver = __atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE) &&
+            task->phase == LUA_TASK_RUNNING && L->close_active == 0;
   luaX_checksync(pthread_mutex_unlock(&task->global->world.mutex));
   if (deliver) luaTK_throwstop(L);
 }
@@ -123,6 +123,7 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
   int status = LUA_TK_INVALID;
   if (task->phase != LUA_TASK_UNUSED || execution == NULL ||
       execution->managed_depth != 0 || execution->native_depth != 0 ||
+      execution->pin_depth != 0 ||
       execution->protected != NULL)
     return status;
   lua_lock(L);

@@ -6,17 +6,66 @@
 #include "lexec.h"
 #include "lstate.h"
 #include "ltask.h"
+#include <stdlib.h>
 
 LuaExecution *luaQ_current (void) {
   return luaE_getnativestackcontext()->execution;
 }
 
+static void checkcarrier (LuaExecution *execution) {
+  /* A driver that ignores an accepted routing reservation must never enter
+  ** foreign code on a different carrier. This is a private driver violation. */
+  if (execution->pin_depth != 0 &&
+      !pthread_equal(execution->pinned_carrier, pthread_self())) abort();
+}
+
+int luaQ_pincarrier (LuaCarrierPin *pin) {
+  LuaExecution *execution = luaQ_current();
+  if (pin->active) return LUA_PIN_INVALID;
+  if (execution != NULL) {
+    if (execution->pin_depth == ~0u) return LUA_PIN_OVERFLOW;
+    if (execution->pin_depth != 0) {
+      if (!pthread_equal(execution->pinned_carrier, pthread_self()))
+        return LUA_PIN_INVALID;
+    }
+    else {
+      if (execution->pin_carrier == NULL || execution->unpin_carrier == NULL ||
+          !execution->pin_carrier(execution)) return LUA_PIN_UNAVAILABLE;
+      execution->pinned_carrier = pthread_self();
+    }
+    execution->pin_depth++;
+  }
+  pin->execution = execution;
+  pin->carrier = pthread_self();
+  pin->active = 1;
+  return LUA_OK;
+}
+
+int luaQ_pinowner (const LuaCarrierPin *pin) {
+  return pin->active && pin->execution == luaQ_current() &&
+         pthread_equal(pin->carrier, pthread_self());
+}
+
+int luaQ_unpincarrier (LuaCarrierPin *pin) {
+  LuaExecution *execution = luaQ_current();
+  if (!luaQ_pinowner(pin)) return LUA_PIN_INVALID;
+  if (execution != NULL) {
+    lua_assert(execution->pin_depth != 0);
+    checkcarrier(execution);
+    if (--execution->pin_depth == 0) execution->unpin_carrier(execution);
+  }
+  pin->active = 0;
+  return LUA_OK;
+}
+
 void luaQ_entermanaged (lua_State *L) {
   LuaExecution *execution = luaQ_current();
   if (execution != NULL) {
+    checkcarrier(execution);
     /* The callback may park before any state gate/world participation exists. */
     if (execution->managed_depth == 0 && execution->managed_enter != NULL)
       execution->managed_enter(execution, L);
+    checkcarrier(execution);
     execution->managed_depth++;
   }
 }
@@ -33,9 +82,11 @@ void luaQ_leavemanaged (void) {
 void luaQ_beginnative (lua_State *L) {
   LuaExecution *execution = luaQ_current();
   if (execution != NULL) {
+    checkcarrier(execution);
     /* Admission runs before the foreign activation exists. */
     if (execution->native_enter != NULL)
       execution->native_enter(execution, L);
+    checkcarrier(execution);
     execution->native_depth++;
   }
 }
@@ -61,8 +112,11 @@ void luaQ_restorenative (LuaExecution *execution, lua_State *L, unsigned depth) 
 
 void luaQ_poll (lua_State *L) {
   LuaExecution *execution = luaQ_current();
-  if (execution != NULL && execution->poll != NULL)
-    execution->poll(execution, L);
+  if (execution != NULL) {
+    checkcarrier(execution);
+    if (execution->poll != NULL) execution->poll(execution, L);
+    checkcarrier(execution);
+  }
 }
 
 void luaQ_work (lua_State *L, unsigned *work) {
