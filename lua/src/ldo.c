@@ -748,6 +748,7 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));
   L->ci = ci->previous;  /* back to caller (after closing variables) */
   luaTK_checkstop(L);
+  luaCP_checklimit(L);
 }
 
 

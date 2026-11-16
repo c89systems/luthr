@@ -369,6 +369,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthr_stack_limit = 0;
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
+  L->policy = NULL;
   L->barrier_count = 0;
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
@@ -441,6 +442,7 @@ static void close_state (lua_State *L, int owns_gate) {
   for (i = 0; i < LUA_STRING_SHARDS; i++)
     luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
   freestack(L);
+  luaCP_bind(L, NULL);
   luaM_reclaimpages(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
   if (owns_gate) {
@@ -469,6 +471,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   if (preinit_thread(L1, g) != 0)
     luaM_error(L);
   luaW_register(L1);
+  luaCP_bind(L1, L->policy);
   lua_sethook(L1, gethook(L), gethookmask(L), getbasehookcount(L));
   /* initialize L1 extra space */
   memcpy(lua_getextraspace(L1), lua_getextraspace(mainthread(g)),
@@ -487,6 +490,11 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
   freestack(L1);
+  {
+    LuaPolicy *policy = L1->policy;
+    L1->policy = NULL;
+    luaCP_release(L, policy);
+  }
   luaX_destroygate(&L1->stack_gate);
   luaW_unregister(L1);
   luaM_free(L, l);
@@ -567,6 +575,8 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->frealloc = f;
   g->allocation_pages = NULL;
   g->scheduler = NULL;
+  g->policy_factory = NULL;
+  g->policy_context = NULL;
   g->slot_caches = NULL;
   for (i = 0; i < LUA_ALLOC_BINS; i++)
     g->allocation_available[i] = NULL;

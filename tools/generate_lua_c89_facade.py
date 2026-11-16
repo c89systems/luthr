@@ -462,7 +462,7 @@ extern "C" {
 #define LUTHR_LUA_BUFFER_SIZE (16 * sizeof(void *) * sizeof(double))
 
 /** Opaque Lua VM state; close the owner with luthr_lua_close(). */
-typedef struct luthr_lua_state luthr_lua_state;
+typedef struct lua_State luthr_lua_state;
 /** Lua numeric value; this bundle configures it as double. */
 typedef double luthr_lua_number;
 /** Opaque C continuation context passed unchanged to its callback. */
@@ -966,6 +966,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--header", required=True, type=pathlib.Path)
     parser.add_argument("--source", required=True, type=pathlib.Path)
     parser.add_argument("--runtime-header", required=True, type=pathlib.Path)
+    parser.add_argument("--task-header", required=True, type=pathlib.Path)
     parser.add_argument("--exports", required=True, type=pathlib.Path)
     return parser.parse_args()
 
@@ -992,6 +993,9 @@ def main() -> int:
     symbols.update(re.findall(
         r"\b(luthr_lua_runtime_[A-Za-z0-9_]+)\s*\(",
         strip_comments(args.runtime_header.read_text(encoding="utf-8"))))
+    symbols.update(re.findall(
+        r"\b(luthr_lua_[A-Za-z0-9_]+)\s*\(",
+        strip_comments(args.task_header.read_text(encoding="utf-8"))))
     args.exports.parent.mkdir(parents=True, exist_ok=True)
     export_map = "{\n  global:\n" + "".join(
         "    " + name + ";\n" for name in sorted(symbols)) + "  local: *;\n};\n"

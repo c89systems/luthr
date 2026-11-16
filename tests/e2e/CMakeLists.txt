@@ -34,7 +34,7 @@ target_link_options(upstream_lua PRIVATE -Wl,--export-dynamic)
 
 foreach(runtime IN ITEMS upstream luthr)
   luthr_test_program(parallel_${runtime} parallel.c)
-  target_sources(parallel_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/tests/private/cpu_capacity.c")
+  target_sources(parallel_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
   set_target_properties(parallel_${runtime} PROPERTIES C_STANDARD 99)
   target_compile_options(parallel_${runtime} PRIVATE -Wall -Wextra -Werror)
   target_include_directories(parallel_${runtime} BEFORE PRIVATE "${reference_dir}")

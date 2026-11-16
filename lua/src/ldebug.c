@@ -856,7 +856,7 @@ const char *luaG_addinfo (lua_State *L, const char *msg, TString *src,
 
 l_noret luaG_errormsg (lua_State *L) {
   luaD_releaseoperations(L);
-  if (L->errfunc != 0) {  /* is there an error handling function? */
+  if (L->errfunc != 0 && !luaCP_exhausted(L)) {  /* policy errors bypass handlers */
     luaA_release(L);
     (void)luaW_suspend(L);
     StkId errfunc = restorestack(L, L->errfunc);

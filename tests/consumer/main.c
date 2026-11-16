@@ -1,5 +1,6 @@
 #include <luthr/lua.h>
 #include <luthr/lua_runtime.h>
+#include <luthr/tasks.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -7,6 +8,10 @@ int main(int argc, char **argv) {
   luthr_lua_state *state;
   luthr_lua_integer value;
   luthr_lua_runtime *runtime;
+  luthr_lua_scheduler *scheduler;
+  luthr_lua_task *task;
+  luthr_lua_task_result result;
+  luthr_lua_scheduler_config config;
   const unsigned char source[] = "assert(6*7==42)";
   state = luthr_lua_l_newstate();
   if (state == NULL)
@@ -44,6 +49,29 @@ int main(int argc, char **argv) {
     return 4;
   }
   luthr_lua_runtime_free(runtime);
+  memset(&config, 0, sizeof(config));
+  config.parallelism = 1;
+  config.native_limit = 1;
+  config.carrier_limit = 2;
+  state = luthr_lua_l_newstate();
+  if (state == NULL)
+    return 7;
+  luthr_lua_l_openlibs(state);
+  if (luthr_lua_scheduler_new(state, &config, &scheduler) !=
+      LUTHR_LUA_RUNTIME_OK)
+    return 7;
+  if (luthr_lua_task_submit_buffer(scheduler, source, sizeof(source) - 1,
+                                   "=installed-task", NULL,
+                                   &task) != LUTHR_LUA_RUNTIME_OK)
+    return 8;
+  if (luthr_lua_task_wait(task, 5000, &result) != LUTHR_LUA_RUNTIME_OK ||
+      result.status != LUTHR_LUA_RUNTIME_OK)
+    return 9;
+  if (luthr_lua_task_collect(task, NULL, &result) != LUTHR_LUA_RUNTIME_OK ||
+      luthr_lua_task_free(task) != LUTHR_LUA_RUNTIME_OK ||
+      luthr_lua_scheduler_free(scheduler) != LUTHR_LUA_RUNTIME_OK)
+    return 10;
+  luthr_lua_close(state);
   puts("installed C89 consumer: passed");
   return 0;
 }

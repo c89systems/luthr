@@ -145,6 +145,8 @@ void luaS_init (lua_State *L) {
   luaC_fix(L, obj2gco(g->memerrmsg));  /* it should never be collected */
   g->stoperrmsg = luaS_newliteral(L, "task stopped");
   luaC_fix(L, obj2gco(g->stoperrmsg));
+  g->limiterrmsg = luaS_newliteral(L, "Lua instruction limit exceeded");
+  luaC_fix(L, obj2gco(g->limiterrmsg));
 }
 
 

@@ -30,6 +30,7 @@ struct LuaExecutionSlot {
 struct LuaScheduledTask {
   LuaFiber fiber;
   LuaTaskRoot root;
+  LuaPolicy *policy;
   LuaScheduler *scheduler;
   LuaScheduledTask *next;  /* local runnable queue, never more than one */
   LuaScheduledTask *registered_next;
@@ -72,6 +73,8 @@ struct LuaScheduler {
   unsigned submitted, outstanding, native, native_peak;
   unsigned created, next_home;
   int closed, stopping, ready;
+  void (*completed)(void *);
+  void *completion_context;
 };
 
 /* Explicit private limits until final workload sizing. carriers must cover
@@ -86,12 +89,15 @@ LUAI_FUNC int luaSC_submit (LuaScheduler *, LuaScheduledTask *, lua_State *, int
 LUAI_FUNC void luaSC_wait (LuaScheduledTask *);
 LUAI_FUNC int luaSC_collect (lua_State *, LuaScheduledTask *, int *, int *);
 LUAI_FUNC int luaSC_shutdown (LuaScheduler *);
+typedef struct LuaCallbackOutcome {
+  int lua_status, exhausted, stopped;
+} LuaCallbackOutcome;
 /* Synchronous registered callbacks share the engine's managed slots. Foreign
 ** entries have a separate bounded admission count; their provider owns the
 ** physical thread. Nested attached calls retain the enclosing task identity.
 ** Registration and provider acknowledgment still use luaCB's lifetime rules. */
 LUAI_FUNC int luaSC_callback (LuaScheduler *, LuaCallback *,
-  void (*)(lua_State *, void *), void *, char *, size_t);
+  void (*)(lua_State *, void *), void *, char *, size_t, LuaCallbackOutcome *);
 /* Requires collected outcomes and no concurrent host calls. */
 LUAI_FUNC int luaSC_destroy (lua_State *, LuaScheduler *);
 

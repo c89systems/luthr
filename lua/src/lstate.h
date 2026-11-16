@@ -353,6 +353,7 @@ struct lua_State {
   LuaStackGate stack_gate;
   LuaParticipation participation;
   LuaParticipation *admission;  /* shared by a paired stack transaction */
+  LuaPolicy *policy;
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
   unsigned poll_remaining;
@@ -443,6 +444,9 @@ typedef struct global_State {
   lua_CFunction panic;  /* to be called in unprotected errors */
   TString *memerrmsg;  /* message for memory-allocation errors */
   TString *stoperrmsg;  /* fixed task stop delivery; never allocates */
+  TString *limiterrmsg;
+  LuaPolicy *(*policy_factory)(lua_State *, const void *, void *);
+  void *policy_context;
   TString *tmname[TM_N];  /* array with tag-method names */
   struct Table *mt[LUA_NUMTYPES];  /* metatables for basic types */
   lua_WarnFunction warnf;  /* warning function */

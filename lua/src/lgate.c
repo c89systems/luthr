@@ -89,6 +89,7 @@ void luaX_lockstate (lua_State *L) {
   luaQ_entermanaged(L);
   reserve(L);
   luaW_enter(L);
+  luaCP_apply(L);
   if (L->errorJmp == NULL && luaQ_current() != NULL)
     luaE_refreshnativestack(L);
 }
@@ -126,6 +127,8 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
              second->admission == &second->participation);
   second->admission = &first->participation;
   luaW_enter(first);
+  luaCP_apply(first);
+  if (second != first) luaCP_apply(second);
   if (first->errorJmp == NULL && luaQ_current() != NULL)
     luaE_refreshnativestack(first);
   if (second != first && second->errorJmp == NULL && luaQ_current() != NULL)
@@ -182,4 +185,5 @@ void luaX_poll (lua_State *L) {
     L->native_depth--;
   }
   luaTK_checkstop(L);
+  luaCP_checklimit(L);
 }

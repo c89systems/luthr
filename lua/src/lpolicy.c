@@ -1,0 +1,72 @@
+#define LUA_CORE
+#include "lprefix.h"
+#include "lapi.h"
+#include "ldo.h"
+#include "lgc.h"
+#include "lpolicy.h"
+#include "lstate.h"
+
+static __thread LuaPolicy *host_policy;
+
+LuaPolicy *luaCP_current (void) {
+  LuaExecution *execution = luaQ_current();
+  return execution != NULL ? execution->policy : host_policy;
+}
+
+void luaCP_retain (LuaPolicy *policy) {
+  if (policy != NULL) __atomic_fetch_add(&policy->references, 1, __ATOMIC_RELAXED);
+}
+
+void luaCP_release (lua_State *L, LuaPolicy *policy) {
+  if (policy != NULL &&
+      __atomic_fetch_sub(&policy->references, 1, __ATOMIC_ACQ_REL) == 1)
+    policy->release(L, policy);
+}
+
+void luaCP_bind (lua_State *L, LuaPolicy *policy) {
+  if (L->policy != policy) {
+    LuaPolicy *previous = L->policy;
+    luaCP_retain(policy);
+    L->policy = policy;
+    luaCP_release(L, previous);
+  }
+}
+
+void luaCP_apply (lua_State *L) {
+  LuaPolicy *policy = luaCP_current();
+  if (policy != NULL && policy->global == G(L)) luaCP_bind(L, policy);
+  if (L->policy != NULL) L->policy->configure(L->policy, L);
+}
+
+void luaCP_begin (LuaPolicy *policy, LuaPolicyScope *scope) {
+  scope->execution = luaQ_current();
+  if (scope->execution != NULL) {
+    scope->previous = scope->execution->policy;
+    scope->execution->policy = policy;
+  }
+  else {
+    scope->previous = host_policy;
+    host_policy = policy;
+  }
+}
+
+void luaCP_end (LuaPolicyScope *scope) {
+  if (scope->execution != NULL) scope->execution->policy = scope->previous;
+  else host_policy = scope->previous;
+}
+
+int luaCP_exhausted (lua_State *L) {
+  LuaPolicy *policy = L->policy;
+  return policy != NULL && __atomic_load_n(&policy->active, __ATOMIC_ACQUIRE) &&
+         __atomic_load_n(&policy->exhausted, __ATOMIC_ACQUIRE);
+}
+
+void luaCP_throwlimit (lua_State *L) {
+  lua_assert(L->top.p < L->stack_last.p + EXTRA_STACK);
+  setsvalue2s(L, L->top.p++, G(L)->limiterrmsg);
+  luaD_throw(L, LUA_ERRRUN);
+}
+
+void luaCP_checklimit (lua_State *L) {
+  if (luaCP_exhausted(L)) luaCP_throwlimit(L);
+}

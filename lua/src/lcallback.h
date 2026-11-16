@@ -31,6 +31,7 @@ typedef struct LuaCallback {
   unsigned limit;
   int revoked;
   int ready;
+  const void *policy_settings;  /* registration-owned options for foreign entries */
 } LuaCallback;
 
 /* The function on top is retained without consumption. Zero selects one

@@ -6,9 +6,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-const char *bench_quota_name(enum bench_quota status) {
-  return status == BENCH_QUOTA_LIMITED     ? "limited"
-         : status == BENCH_QUOTA_UNLIMITED ? "unlimited"
+const char *luthr_quota_name(enum luthr_quota status) {
+  return status == LUTHR_QUOTA_LIMITED     ? "limited"
+         : status == LUTHR_QUOTA_UNLIMITED ? "unlimited"
                                            : "unknown";
 }
 
@@ -126,7 +126,7 @@ static int mount_path(const char *file, const char *group, int version,
 }
 
 /* Missing controller files are valid; a missing cgroup directory is unknown. */
-static int quota_at(struct bench_capacity *capacity, const char *directory,
+static int quota_at(struct luthr_capacity *capacity, const char *directory,
                     int version) {
   char *path = NULL, word[32], extra;
   long long quota = 0, period = 0;
@@ -173,17 +173,17 @@ static int quota_at(struct bench_capacity *capacity, const char *directory,
     if (quota < 0)
       return 0;
   }
-  if (capacity->status != BENCH_QUOTA_LIMITED ||
+  if (capacity->status != LUTHR_QUOTA_LIMITED ||
       (long double)quota / period <
           (long double)capacity->quota_us / capacity->period_us) {
-    capacity->status = BENCH_QUOTA_LIMITED;
+    capacity->status = LUTHR_QUOTA_LIMITED;
     capacity->quota_us = (uint64_t)quota;
     capacity->period_us = (uint64_t)period;
   }
   return 0;
 }
 
-int bench_capacity_read(struct bench_capacity *capacity, const char *groups,
+int luthr_capacity_read(struct luthr_capacity *capacity, const char *groups,
                         const char *mounts) {
   char *group = NULL, *root = NULL, *point = NULL, *directory = NULL;
   int version, result = -1;
@@ -211,7 +211,7 @@ int bench_capacity_read(struct bench_capacity *capacity, const char *groups,
   size_t length = strlen(directory);
   if (length > 1 && directory[length - 1] == '/')
     directory[length - 1] = '\0';
-  capacity->status = BENCH_QUOTA_UNLIMITED;
+  capacity->status = LUTHR_QUOTA_UNLIMITED;
   for (;;) {
     struct stat status;
     char *slash;
@@ -236,11 +236,11 @@ done:
   free(point);
   free(directory);
   if (result != 0) {
-    capacity->status = BENCH_QUOTA_UNKNOWN;
+    capacity->status = LUTHR_QUOTA_UNKNOWN;
     capacity->quota_us = capacity->period_us = 0;
   } else {
     long double effective = capacity->cpus;
-    if (capacity->status == BENCH_QUOTA_LIMITED &&
+    if (capacity->status == LUTHR_QUOTA_LIMITED &&
         (long double)capacity->quota_us / capacity->period_us < effective)
       effective = (long double)capacity->quota_us / capacity->period_us;
     capacity->effective_milli = (uint64_t)(effective * 1000);

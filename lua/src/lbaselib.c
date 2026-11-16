@@ -22,6 +22,7 @@
 #include "llimits.h"
 #include "lexec.h"
 #include "lcontrol.h"
+#include "lpolicy.h"
 #include "lapi.h"
 #include "lauxowned.h"
 #include "lvm.h"
@@ -507,6 +508,9 @@ static int luaB_select (lua_State *L) {
 ** ignored).
 */
 static int finishpcall (lua_State *L, int status, lua_KContext extra) {
+  lua_lock(L);
+  luaCP_checklimit(L);
+  lua_unlock(L);
   if (l_unlikely(status != LUA_OK && status != LUA_YIELD)) {  /* error? */
     lua_pushboolean(L, 0);  /* first result (false) */
     lua_pushvalue(L, -2);  /* error message */

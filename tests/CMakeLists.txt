@@ -13,11 +13,43 @@ function(luthr_test_program name source)
 endfunction()
 
 luthr_test_program(cpu_capacity_test cpu_capacity_test.c)
-target_sources(cpu_capacity_test PRIVATE private/cpu_capacity.c)
+target_sources(cpu_capacity_test PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
 set_target_properties(cpu_capacity_test PROPERTIES C_STANDARD 99)
 target_compile_options(cpu_capacity_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(cpu_capacity_test PRIVATE Threads::Threads)
 include("${CMAKE_CURRENT_SOURCE_DIR}/CapacityFixtures.cmake")
+
+luthr_test_program(public_tasks_test public_tasks_test.c)
+luthr_c89(public_tasks_test)
+target_link_libraries(public_tasks_test PRIVATE luthr_static)
+foreach(case IN ITEMS results prepared budget raw_policy traces blocked_trace defaults nested shutdown
+    callback callback_budget callback_shutdown callback_oom pin pin_cancel oom collect_oom automatic load_error raw_vm)
+  add_test(NAME public_tasks_${case} COMMAND public_tasks_test ${case})
+  set_tests_properties(public_tasks_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
+endforeach()
+
+luthr_test_program(sdk_consumer_smoke consumer/main.c)
+luthr_c89(sdk_consumer_smoke)
+target_link_libraries(sdk_consumer_smoke PRIVATE luthr_shared)
+add_test(NAME sdk_consumer_smoke COMMAND sdk_consumer_smoke)
+set_tests_properties(sdk_consumer_smoke PROPERTIES LABELS "unit;facade;memcheck" TIMEOUT 10)
+
+luthr_test_program(native_sdk_test native_sdk_test.c)
+set_target_properties(native_sdk_test PROPERTIES C_STANDARD 99)
+target_compile_options(native_sdk_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(native_sdk_test PRIVATE luthr_shared)
+add_test(NAME native_sdk COMMAND native_sdk_test)
+set_tests_properties(native_sdk PROPERTIES LABELS "unit;runtime;memcheck" TIMEOUT 10)
+
+luthr_test_program(public_tasks_shared public_tasks_test.c)
+luthr_c89(public_tasks_shared)
+target_link_libraries(public_tasks_shared PRIVATE luthr_shared)
+foreach(case IN ITEMS results callback_budget pin_cancel)
+  add_test(NAME public_tasks_shared_${case} COMMAND public_tasks_shared ${case})
+  set_tests_properties(public_tasks_shared_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
+endforeach()
 
 luthr_test_program(scheduler_test scheduler_test.c)
 set_target_properties(scheduler_test PROPERTIES C_STANDARD 99)
@@ -685,7 +717,8 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test scheduler_test native_lifecycle_test)
+  capture_cells_test memory_publication_test scheduler_test native_lifecycle_test
+  public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

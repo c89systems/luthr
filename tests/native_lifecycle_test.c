@@ -288,7 +288,7 @@ static int nested(lua_State *L) {
   char error[64];
   f->nested = 0;
   status = luaSC_callback(&f->scheduler, &f->callback, marshal, f, error,
-                          sizeof(error));
+                          sizeof(error), NULL);
   require(status == LUA_OK);
   lua_pushinteger(L, f->callback_value);
   f->callback_value = old;
@@ -336,7 +336,7 @@ static void *provider(void *context) {
   struct fixture *f = context;
   require(luaQ_current() == NULL);
   f->callback_status = luaSC_callback(&f->scheduler, &f->callback, marshal, f,
-                                      f->error, sizeof(f->error));
+                                      f->error, sizeof(f->error), NULL);
   require(luaQ_current() == NULL);
   return NULL;
 }
@@ -382,7 +382,7 @@ static void callbacks(struct fixture *f, const char *mode) {
       change(f);
     unlock(f);
     require(luaSC_callback(&f->scheduler, &f->callback, marshal, f, error,
-                           sizeof(error)) == LUA_CB_CAPACITY);
+                           sizeof(error), NULL) == LUA_CB_CAPACITY);
     require(error[0] == '\0');
     luaCB_revoke(&f->callback);
     require(luaCB_destroy(f->main, &f->callback) == LUA_CB_PENDING);
@@ -441,7 +441,7 @@ static int call_registered(lua_State *L) {
   struct fixture *f = active;
   char error[64];
   int status = luaSC_callback(&f->scheduler, &f->callback, marshal, f, error,
-                              sizeof(error));
+                              sizeof(error), NULL);
   require(status == LUA_OK);
   lua_pushinteger(L, f->callback_value);
   return 1;

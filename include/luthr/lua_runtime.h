@@ -10,10 +10,9 @@ extern "C" {
 /**
  * Opaque strict-C89 Lua runtime handle.
  *
- * This facade owns a Lua state and exposes only embedding policy operations.
- * It deliberately does not expose upstream Lua stack, value, userdata, or
- * metatable APIs. Consumers that need the full Lua C API should link the
- * strict-C89 `luthr::static` target and include <luthr/lua.h> instead.
+ * This facade owns a Lua state and its embedding defaults. Borrow the state
+ * through luthr_lua_runtime_state() for the full Lua/task SDK. Consumers use
+ * `luthr::static` or `luthr::shared` and <luthr/lua.h> for the complete C API.
  */
 typedef struct luthr_lua_runtime luthr_lua_runtime;
 
@@ -61,7 +60,12 @@ typedef enum luthr_lua_runtime_status {
   /** Lua code loaded but failed while running. */
   LUTHR_LUA_RUNTIME_ERR_RUNTIME = 4,
   /** Configured Lua VM instruction limit was reached. */
-  LUTHR_LUA_RUNTIME_ERR_LIMIT = 5
+  LUTHR_LUA_RUNTIME_ERR_LIMIT = 5,
+  LUTHR_LUA_RUNTIME_PENDING = 6,
+  LUTHR_LUA_RUNTIME_CANCELLED = 7,
+  LUTHR_LUA_RUNTIME_ERR_STATE = 8,
+  LUTHR_LUA_RUNTIME_ERR_CLOSED = 9,
+  LUTHR_LUA_RUNTIME_BUSY = 10
 } luthr_lua_runtime_status;
 
 /**
@@ -217,8 +221,16 @@ luthr_lua_runtime_status luthr_lua_runtime_new_with_allocator(
  *
  * Passing NULL is allowed. Any stored error string, registered preload chunks,
  * and Lua-state memory are released through the runtime allocator.
+ * Close schedulers and retire task/callback handles first. A live scheduler or
+ * entered host invocation keeps the runtime owned; free then does nothing.
  */
 void luthr_lua_runtime_free(luthr_lua_runtime *runtime);
+
+/* Borrow the owned upstream state for the full Lua/task SDK. Serialize host
+ * stack sequences; task workers use their own admitted coroutines. The runtime
+ * outlives schedulers, callback registrations, task handles and entered calls.
+ */
+void *luthr_lua_runtime_state(luthr_lua_runtime *runtime);
 
 /**
  * Stores an embedder-owned context pointer.
@@ -253,7 +265,8 @@ void luthr_lua_runtime_set_warning_callback(
  * replacement/removal takes effect on the next event. Other operations on this
  * runtime return ERR_ARG, or do nothing for void functions, without changing
  * its error. Do not access its Lua state through another API from the callback.
- * The runtime requires serialized use; callbacks do not make it thread-safe.
+ * Serialize facade host operations on its main state. Task policies snapshot
+ * defaults independently; trace observers in distinct tasks can overlap.
  * Callback failures must be recorded in caller-owned context and handled after
  * the host call; the callback has no error return or cancellation channel.
  */
@@ -306,9 +319,9 @@ luthr_lua_runtime_set_traceback(luthr_lua_runtime *runtime, int enabled);
  * Ordinary protected-call results and coroutine yields retain native behavior.
  * This embedding policy does not make unrestricted Lua a security sandbox.
  *
- * The budget is shared across the main thread and coroutines for each host
- * invocation. Yielding or resuming a coroutine does not replenish it. A new
- * host invocation starts a fresh budget. While enabled, instruction accounting
+ * The budget is shared across coroutines within one host invocation or task.
+ * Yielding or resuming does not replenish it. New invocations/tasks snapshot
+ * these defaults with a fresh budget. While enabled, instruction accounting
  * runs a count hook for every VM instruction.
  * Lua finalizers participate in the budget. Destruction uses a fresh budget
  * for finalizers when the limit remains enabled; finalizer failures reach the
@@ -460,7 +473,7 @@ luthr_lua_runtime_status luthr_lua_runtime_run_buffer(
  *
  * The returned string is owned by the runtime handle and remains valid until
  * the next facade operation that changes the error state or until the runtime
- * is freed.
+ * is freed. Task outcomes have their own error state.
  */
 const char *luthr_lua_runtime_error(const luthr_lua_runtime *runtime);
 

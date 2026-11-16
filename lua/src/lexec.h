@@ -4,6 +4,7 @@
 
 #include "lua.h"
 #include "llimits.h"
+#include "lpolicy.h"
 #include <pthread.h>
 
 struct lua_longjmp;
@@ -26,6 +27,7 @@ typedef struct LuaCallScope {
 typedef struct LuaExecution {
   void *context;
   struct LuaScheduler *scheduler;  /* production routing, NULL for host drivers */
+  LuaPolicy *policy;
   void (*managed_enter)(struct LuaExecution *, lua_State *);
   /* Release only: this may run under a resource bookkeeping mutex. */
   void (*managed_leave)(struct LuaExecution *);

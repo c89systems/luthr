@@ -43,16 +43,17 @@ add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
     --include-dir "${CMAKE_CURRENT_SOURCE_DIR}/lua/src"
     --header "${facade_header}" --source "${facade_source}"
     --runtime-header "${CMAKE_CURRENT_SOURCE_DIR}/include/luthr/lua_runtime.h"
+    --task-header "${CMAKE_CURRENT_SOURCE_DIR}/include/luthr/tasks.h"
     --exports "${export_map}"
   DEPENDS tools/generate_lua_c89_facade.py tools/generated_output_paths.py
     lua/src/lua.h lua/src/luaconf.h lua/src/lauxlib.h lua/src/lualib.h
-    include/luthr/lua_runtime.h
+    include/luthr/lua_runtime.h include/luthr/tasks.h
   VERBATIM)
 add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
   laccess lapi lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
-  lparser lpipe lroots lscheduler lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
+  lparser lpipe lpolicy lroots lscheduler lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")
 list(TRANSFORM lua_sources APPEND ".c")
@@ -81,10 +82,19 @@ target_compile_definitions(luthr_facade_objects PRIVATE
 target_include_directories(luthr_facade_objects PRIVATE
   include "${generated_include}" lua/src)
 
+add_library(luthr_task_objects OBJECT src/policy.c src/tasks.c src/cpu_capacity.c)
+add_dependencies(luthr_task_objects luthr_facade_header)
+set_target_properties(luthr_task_objects PROPERTIES
+  C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+target_compile_options(luthr_task_objects PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
+target_include_directories(luthr_task_objects PRIVATE include "${generated_include}" lua/src)
+target_link_libraries(luthr_task_objects PRIVATE Threads::Threads)
+
 foreach(linkage IN ITEMS static shared)
   string(TOUPPER "${linkage}" kind)
   add_library(luthr_${linkage} ${kind}
-    $<TARGET_OBJECTS:luthr_lua_objects> $<TARGET_OBJECTS:luthr_facade_objects>)
+    $<TARGET_OBJECTS:luthr_lua_objects> $<TARGET_OBJECTS:luthr_facade_objects>
+    $<TARGET_OBJECTS:luthr_task_objects>)
   add_library(luthr::${linkage} ALIAS luthr_${linkage})
   set_target_properties(luthr_${linkage} PROPERTIES OUTPUT_NAME luthr EXPORT_NAME ${linkage})
   target_include_directories(luthr_${linkage} PUBLIC
@@ -113,7 +123,7 @@ target_link_libraries(luthrc PRIVATE luthr_static)
 install(TARGETS luthr_static luthr_shared luthr luthrc
   EXPORT luthrTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES "${facade_header}" include/luthr/lua_runtime.h
+install(FILES "${facade_header}" include/luthr/lua_runtime.h include/luthr/tasks.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/luthr)
 install(FILES lua/src/lua.h lua/src/luaconf.h lua/src/lauxlib.h
   lua/src/lualib.h lua/src/lua.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
