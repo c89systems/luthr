@@ -643,10 +643,11 @@ static void setroot (lua_State *L, const LuaNativeRoot *object,
 static void getregistryroot (lua_State *L, const char *field,
                              LuaNativeRoot *result) {
   LuaNativeRoot registry;
+  LuaObjectScope access;
   luaR_pushroot(L, &registry);
-  luaW_heapenter(L);
+  luaA_beginlock(L, &G(L)->registry_access, &access);
   luaR_setroot(L, &registry, &G(L)->l_registry);
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   getfieldroot(L, &registry, field, result);
   luaR_poproot(L, &registry);
 }

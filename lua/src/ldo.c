@@ -193,9 +193,12 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
       luaW_attach(L, source);
       luaR_poproot(L, &error);
     }
-    luaW_heapenter(L);
-    panicf = g->panic;
-    luaW_heapleave(L);
+    {
+      LuaObjectScope access;
+      luaA_beginlock(L, &g->panic_access, &access);
+      panicf = g->panic;
+      luaA_end(L, &access);
+    }
     lua_assert(L->native_depth == 1);
     L->native_depth--;  /* all abandoned runtime scopes retire before panic */
     if (panicf != NULL) {

@@ -24,6 +24,7 @@ typedef struct LuaCallback {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   LuaOwner owner;
+  pthread_t carrier;
   unsigned entries;
   unsigned depth;
   unsigned waiters;

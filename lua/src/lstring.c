@@ -14,6 +14,7 @@
 
 #include "lua.h"
 
+#include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lmem.h"
@@ -27,15 +28,9 @@
 */
 #define MAXSTRTB	cast_int(luaM_limitN(INT_MAX, TString*))
 
-/*
-** Initial size for the string table (must be power of 2).
-** The Lua core alone registers ~50 strings (reserved words +
-** metaevent keys + a few others). Libraries would typically add
-** a few dozens more.
-*/
-#if !defined(MINSTRTABSIZE)
-#define MINSTRTABSIZE   128
-#endif
+/* Low hash bits select a partition; the remaining bits select its bucket. */
+#define stringtableof(g,h) (&(g)->strt[(h) % LUA_STRING_SHARDS])
+#define stringbucket(h,n) lmod((h) / LUA_STRING_SHARDS, (n))
 
 
 /*
@@ -81,7 +76,7 @@ static void tablerehash (TString **vect, int osize, int nsize) {
     vect[i] = NULL;
     while (p) {  /* for each string in the list */
       TString *hnext = p->u.hnext;  /* save next */
-      unsigned int h = lmod(p->hash, nsize);  /* new position */
+      unsigned int h = stringbucket(p->hash, nsize);  /* new position */
       p->u.hnext = vect[h];  /* chain it into array */
       vect[h] = p;
       p = hnext;
@@ -95,8 +90,7 @@ static void tablerehash (TString **vect, int osize, int nsize) {
 ** (This can degrade performance, but any non-zero size should work
 ** correctly.)
 */
-void luaS_resize (lua_State *L, int nsize) {
-  stringtable *tb = &G(L)->strt;
+void luaS_resize (lua_State *L, stringtable *tb, int nsize) {
   int osize = tb->size;
   TString **newvect;
   if (nsize < osize)  /* shrinking table? */
@@ -122,11 +116,15 @@ void luaS_resize (lua_State *L, int nsize) {
 */
 void luaS_clearcache (global_State *g) {
   int i, j;
-  for (i = 0; i < STRCACHE_N; i++)
-    for (j = 0; j < STRCACHE_M; j++) {
-      if (iswhite(g->strcache[i][j]))  /* will entry be collected? */
-        g->strcache[i][j] = g->memerrmsg;  /* replace it with something fixed */
-    }
+  LuaParticipation *participant;
+  for (participant = g->world.participants; participant != NULL;
+       participant = participant->next)
+    for (i = 0; i < STRCACHE_N; i++)
+      for (j = 0; j < STRCACHE_M; j++) {
+        TString **entry = &participant->thread->strcache[i][j];
+        if (*entry != NULL && iswhite(*entry))
+          *entry = g->memerrmsg;
+      }
 }
 
 
@@ -135,17 +133,16 @@ void luaS_clearcache (global_State *g) {
 */
 void luaS_init (lua_State *L) {
   global_State *g = G(L);
-  int i, j;
-  stringtable *tb = &G(L)->strt;
-  tb->hash = luaM_newvector(L, MINSTRTABSIZE, TString*);
-  tablerehash(tb->hash, 0, MINSTRTABSIZE);  /* clear array */
-  tb->size = MINSTRTABSIZE;
+  int i;
+  for (i = 0; i < LUA_STRING_SHARDS; i++) {
+    stringtable *tb = &g->strt[i];
+    tb->hash = luaM_newvector(L, LUA_STRING_INITIAL_BUCKETS, TString*);
+    tablerehash(tb->hash, 0, LUA_STRING_INITIAL_BUCKETS);
+    tb->size = LUA_STRING_INITIAL_BUCKETS;
+  }
   /* pre-create memory-error message */
   g->memerrmsg = luaS_newliteral(L, MEMERRMSG);
   luaC_fix(L, obj2gco(g->memerrmsg));  /* it should never be collected */
-  for (i = 0; i < STRCACHE_N; i++)  /* fill cache with valid strings */
-    for (j = 0; j < STRCACHE_M; j++)
-      g->strcache[i][j] = g->memerrmsg;
   g->stoperrmsg = luaS_newliteral(L, "task stopped");
   luaC_fix(L, obj2gco(g->stoperrmsg));
 }
@@ -193,8 +190,8 @@ TString *luaS_createlngstrobj (lua_State *L, size_t l) {
 
 
 void luaS_remove (lua_State *L, TString *ts) {
-  stringtable *tb = &G(L)->strt;
-  TString **p = &tb->hash[lmod(ts->hash, tb->size)];
+  stringtable *tb = stringtableof(G(L), ts->hash);
+  TString **p = &tb->hash[stringbucket(ts->hash, tb->size)];
   while (*p != ts)  /* find previous element */
     p = &(*p)->u.hnext;
   *p = (*p)->u.hnext;  /* remove element from its list */
@@ -209,7 +206,7 @@ static void growstrtab (lua_State *L, stringtable *tb) {
       luaM_error(L);  /* cannot even create a message... */
   }
   if (tb->size <= MAXSTRTB / 2)  /* can grow string table? */
-    luaS_resize(L, tb->size * 2);
+    luaS_resize(L, tb, tb->size * 2);
 }
 
 
@@ -219,11 +216,12 @@ static void growstrtab (lua_State *L, stringtable *tb) {
 static TString *internshrstr (lua_State *L, const char *str, size_t l) {
   TString *ts;
   global_State *g = G(L);
-  stringtable *tb = &g->strt;
   unsigned int h = luaS_hash(str, l, g->seed);
+  stringtable *tb = stringtableof(g, h);
   TString **list;
-  luaW_heapenter(L);
-  list = &tb->hash[lmod(h, tb->size)];
+  LuaObjectScope access;
+  luaA_beginlock(L, &tb->access, &access);
+  list = &tb->hash[stringbucket(h, tb->size)];
   lua_assert(str != NULL);  /* otherwise 'memcmp'/'memcpy' are undefined */
   for (ts = *list; ts != NULL; ts = ts->u.hnext) {
     if (l == cast_uint(ts->shrlen) &&
@@ -231,23 +229,25 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
       /* found! */
       if (isdead(g, ts))  /* dead (but not collected yet)? */
         changewhite(ts);  /* resurrect it */
-      luaW_heapleave(L);
+      luaA_end(L, &access);
       return ts;
     }
   }
   /* else must create a new string */
   if (tb->nuse >= tb->size) {  /* need to grow string table? */
     growstrtab(L, tb);
-    list = &tb->hash[lmod(h, tb->size)];  /* rehash with new size */
   }
   ts = createstrobj(L, sizestrshr(l), LUA_VSHRSTR, h);
   ts->shrlen = cast(ls_byte, l);
   getshrstr(ts)[l] = '\0';  /* ending 0 */
   memcpy(getshrstr(ts), str, l * sizeof(char));
+  /* Allocation may rendezvous with collection. Revalidate the bucket after
+  ** that boundary; no pointer into an old bucket array crosses the wait. */
+  list = &tb->hash[stringbucket(h, tb->size)];
   ts->u.hnext = *list;
   *list = ts;
   tb->nuse++;
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   return ts;
 }
 
@@ -279,13 +279,11 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
 TString *luaS_new (lua_State *L, const char *str) {
   unsigned int i = point2uint(str) % STRCACHE_N;  /* hash */
   int j;
-  TString **p = G(L)->strcache[i];
+  TString **p = L->strcache[i];
   TString *result;
-  luaW_heapenter(L);
   for (j = 0; j < STRCACHE_M; j++) {
-    if (strcmp(str, getstr(p[j])) == 0) { /* hit? */
+    if (p[j] != NULL && strcmp(str, getstr(p[j])) == 0) { /* hit? */
       result = p[j];
-      luaW_heapleave(L);
       return result;  /* that is it */
     }
   }
@@ -295,7 +293,6 @@ TString *luaS_new (lua_State *L, const char *str) {
   /* new element is first in the list */
   p[0] = luaS_newlstr(L, str, strlen(str));
   result = p[0];
-  luaW_heapleave(L);
   return result;
 }
 

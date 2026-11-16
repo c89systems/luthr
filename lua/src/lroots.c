@@ -12,11 +12,13 @@
 
 void luaR_pushroot (lua_State *L, LuaNativeRoot *root) {
   setnilvalue(&root->value);
+  root->table_view = NULL;
   root->previous = L->native_roots;
   L->native_roots = root;
 }
 
 void luaR_setroot (lua_State *L, LuaNativeRoot *root, const TValue *value) {
+  root->table_view = NULL;
   setobj(L, &root->value, value);
 }
 

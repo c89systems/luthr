@@ -5,6 +5,7 @@
 
 #include <string.h>
 #include "lapi.h"
+#include "laccess.h"
 #include "lcallback.h"
 #include "ldo.h"
 #include "lstate.h"
@@ -47,7 +48,8 @@ int luaCB_init (lua_State *L, LuaCallback *callback, unsigned limit) {
   top = savestack(L, L->top.p);
   status = luaD_pcall(L, createthread, callback, top, 0);
   if (status == LUA_OK) {
-    luaW_heapenter(L);
+    LuaObjectScope access;
+    luaA_beginlock(L, &G(L)->callbacks_access, &access);
     callback->next = G(L)->callbacks;
     callback->previous = &G(L)->callbacks;
     if (callback->next != NULL)
@@ -55,7 +57,7 @@ int luaCB_init (lua_State *L, LuaCallback *callback, unsigned limit) {
     G(L)->callbacks = callback;
     callback->thread->callback_owner = callback;
     callback->ready = 1;
-    luaW_heapleave(L);
+    luaA_end(L, &access);
   }
   else {
     callback->thread = NULL;
@@ -145,7 +147,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
     return LUA_CB_INVALID;
   luaX_checksync(pthread_mutex_lock(&callback->mutex));
   nested = callback->depth != 0 && luaQ_isowner(&callback->owner) &&
-           pthread_equal(callback->owner.carrier, pthread_self());
+           pthread_equal(callback->carrier, pthread_self());
   if (callback->revoked) status = LUA_CB_REVOKED;
   else if (!nested && callback->entries == callback->limit)
     status = LUA_CB_CAPACITY;
@@ -165,6 +167,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
     else {
       callback->depth++;
       luaQ_setowner(&callback->owner);
+      callback->carrier = pthread_self();
       luaX_checksync(pthread_mutex_unlock(&callback->mutex));
       L = callback->thread;
       call.callback = callback;
@@ -204,6 +207,7 @@ void luaCB_revoke (LuaCallback *callback) {
 
 int luaCB_destroy (lua_State *L, LuaCallback *callback) {
   lua_State *thread;
+  LuaObjectScope access;
   luaX_checksync(pthread_mutex_lock(&callback->mutex));
   if (!callback->revoked || !callback->ready || G(L) != G(callback->thread)) {
     luaX_checksync(pthread_mutex_unlock(&callback->mutex));
@@ -217,7 +221,7 @@ int luaCB_destroy (lua_State *L, LuaCallback *callback) {
   thread = callback->thread;
   luaX_checksync(pthread_mutex_unlock(&callback->mutex));
   luaX_lockpair(L, thread);
-  luaW_heapenter(L);
+  luaA_beginlock(L, &G(L)->callbacks_access, &access);
   *callback->previous = callback->next;
   if (callback->next != NULL)
     callback->next->previous = callback->previous;
@@ -227,7 +231,7 @@ int luaCB_destroy (lua_State *L, LuaCallback *callback) {
   thread->callback_owner = NULL;
   callback->close_error = NULL;
   setnilvalue(&callback->function);
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   luaX_unlockpair(L, thread);
   luaX_checksync(pthread_cond_destroy(&callback->changed));
   luaX_checksync(pthread_mutex_destroy(&callback->mutex));

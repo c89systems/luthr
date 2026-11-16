@@ -35,6 +35,7 @@ struct fixture {
   int forbid_allocations;
   unsigned allocations;
   pthread_t failure_carrier;
+  void *failure_owner;
   unsigned failures_left;
   unsigned allocation_failures;
   unsigned emergency_frees;
@@ -637,6 +638,7 @@ static int native_shared(lua_State *state) {
     fixture = user;
     check(pthread_mutex_lock(&fixture->mutex));
     fixture->failure_carrier = pthread_self();
+    fixture->failure_owner = luaQ_ownertoken();
     fixture->failures_left = 2;
     check(pthread_mutex_unlock(&fixture->mutex));
     (void)lua_tolstring(state, slot, NULL);
@@ -721,6 +723,7 @@ static int fail_allocation(lua_State *state) {
   fixture = user;
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->failure_carrier = pthread_self();
+  fixture->failure_owner = luaQ_ownertoken();
   fixture->failures_left =
       2; /* original attempt, then the emergency-GC retry */
   check(pthread_mutex_unlock(&fixture->mutex));
@@ -1162,10 +1165,9 @@ int main(int argc, char **argv) {
                   ? fixture.actors[1].state->object_waiting
                   : fixture.actors[1].state->heap_waiting) == 0)
         luaQ_wait(main_state, &world->mutex, &world->changed, &world->waiters);
-      failed |=
-          world->active != 1 || world->heap_depth == 0 ||
-          fixture.actors[1].state->native_depth == 0 ||
-          !pthread_equal(world->heap_owner.carrier, fixture.failure_carrier);
+      failed |= luaW_activecount(world) != 1 || world->heap_depth == 0 ||
+                fixture.actors[1].state->native_depth == 0 ||
+                world->heap_owner.token != fixture.failure_owner;
       fixture.waiter_observed = 1;
       check(pthread_mutex_unlock(&world->mutex));
       check(pthread_mutex_lock(&fixture.mutex));
@@ -1182,8 +1184,9 @@ int main(int argc, char **argv) {
   if (fixture.resume_yields)
     failed |= fixture.actors[0].yields != 6;
   if (allocation_case && strcmp(argv[1], "table_handler_blocked") != 0)
-    failed |= fixture.allocations - before_allocations <
-              ((table_case || capi_case) ? 1U : 1000U);
+    /* Backing calls are batched; object/result/finalizer counts prove the work.
+     */
+    failed |= fixture.allocations == before_allocations;
   if (allocation_case && !table_case && !join_case && !capi_case) {
     failed |= fixture.resources_created !=
               (strcmp(argv[1], "allocate_blocked") == 0 ? 500U : 1000U);

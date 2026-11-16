@@ -44,10 +44,9 @@ static Pipe *enter (lua_State *L, Access *access, Udata *owner) {
     owner = uvalue(s2v(L->ci->func.p + 1));
   }
   luaA_begin(L, obj2gco(owner), &access->object);
-  luaW_heapenter(L);
-  if (owner->metatable != G(L)->pipe_meta || owner->len != sizeof(Pipe) ||
+  if (owner->metatable != __atomic_load_n(&G(L)->pipe_meta, __ATOMIC_ACQUIRE) ||
+      owner->len != sizeof(Pipe) ||
       owner->nuvalue == 0 || owner->nuvalue > LUA_PIPE_SLOTS_MAX) {
-    luaW_heapleave(L);
     luaA_end(L, &access->object);
     lua_unlock(L);
     luaL_argerror(L, 1, "chunk pipe expected");
@@ -56,7 +55,6 @@ static Pipe *enter (lua_State *L, Access *access, Udata *owner) {
   access->pipe = cast(Pipe *, getudatamem(owner));
   if (access->pipe->identity != &identity ||
       access->pipe->capacity != owner->nuvalue) {
-    luaW_heapleave(L);
     luaA_end(L, &access->object);
     lua_unlock(L);
     luaL_argerror(L, 1, "chunk pipe expected");
@@ -69,7 +67,6 @@ static Pipe *enter (lua_State *L, Access *access, Udata *owner) {
 static void leave (lua_State *L, Access *access) {
   if (access->pipe->ready)
     luaX_checksync(pthread_mutex_unlock(&access->pipe->mutex));
-  luaW_heapleave(L);
   luaA_end(L, &access->object);
   lua_unlock(L);
 }
@@ -104,7 +101,6 @@ static int waitforchange (lua_State *L, Access *access, unsigned *waiting) {
   (*waiting)++;
   /* Stable userdata arguments and the detached C activation retain the owner.
   ** Only native queue bookkeeping remains under this mutex after withdrawal. */
-  luaW_heapleave(L);
   luaA_end(L, &access->object);
   lua_unlock(L);
   stopped = luaQ_waitstop(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
@@ -255,16 +251,15 @@ static int stats (lua_State *L) {
 }
 
 static void metatable (lua_State *L) {
+  Table *shared;
   lua_lock(L);
-  luaW_heapenter(L);
-  if (G(L)->pipe_meta != NULL) {
-    sethvalue2s(L, L->top.p, G(L)->pipe_meta);
+  shared = __atomic_load_n(&G(L)->pipe_meta, __ATOMIC_ACQUIRE);
+  if (shared != NULL) {
+    sethvalue2s(L, L->top.p, shared);
     api_incr_top(L);
-    luaW_heapleave(L);
     lua_unlock(L);
     return;
   }
-  luaW_heapleave(L);
   lua_unlock(L);
   lua_newtable(L);
   lua_pushvalue(L, -1); lua_setfield(L, -2, "__index");
@@ -276,12 +271,10 @@ static void metatable (lua_State *L) {
   lua_pushliteral(L, "luthr.chunk_pipe"); lua_setfield(L, -2, "__name");
   lua_pushboolean(L, 0); lua_setfield(L, -2, "__metatable");
   lua_lock(L);
-  luaW_heapenter(L);
-  if (G(L)->pipe_meta == NULL)
-    G(L)->pipe_meta = hvalue(s2v(L->top.p - 1));
-  else
-    sethvalue2s(L, L->top.p - 1, G(L)->pipe_meta);
-  luaW_heapleave(L);
+  shared = NULL;
+  if (!__atomic_compare_exchange_n(&G(L)->pipe_meta, &shared,
+        hvalue(s2v(L->top.p - 1)), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    sethvalue2s(L, L->top.p - 1, shared);
   lua_unlock(L);
 }
 

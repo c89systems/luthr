@@ -105,11 +105,13 @@ static TValue *index2value (lua_State *L, int idx, LuaNativeRoot *snapshot) {
     luaA_end(L, &scope);
   }
   else {
-    if (idx == LUA_REGISTRYINDEX) luaW_heapenter(L);
+    LuaObjectScope access;
+    if (idx == LUA_REGISTRYINDEX)
+      luaA_beginlock(L, &G(L)->registry_access, &access);
     source = index2addr(L, idx);
     valid = isvalid(L, source);
     luaR_setroot(L, snapshot, source);
-    if (idx == LUA_REGISTRYINDEX) luaW_heapleave(L);
+    if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
   }
   return valid ? &snapshot->value : &G(L)->nilvalue;
 }
@@ -129,12 +131,14 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
     luaA_end(L, &scope);
   }
   else {
-    if (idx == LUA_REGISTRYINDEX) luaW_heapenter(L);
+    LuaObjectScope access;
+    if (idx == LUA_REGISTRYINDEX)
+      luaA_beginlock(L, &G(L)->registry_access, &access);
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
     setobj(L, target, value);
     /* The collector revisits the registry before completing collection. */
-    if (idx == LUA_REGISTRYINDEX) luaW_heapleave(L);
+    if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
   }
 }
 
@@ -159,8 +163,9 @@ static int stringindex (lua_State *L, int idx, LuaNativeRoot *value) {
     luaA_end(L, &scope);
   }
   else {
+    LuaObjectScope access;
     if (idx == LUA_REGISTRYINDEX) {
-      luaW_heapenter(L);
+      luaA_beginlock(L, &G(L)->registry_access, &access);
       luaR_setroot(L, value, &G(L)->l_registry);
     }
     if (cvt2str(&value->value)) {
@@ -168,7 +173,7 @@ static int stringindex (lua_State *L, int idx, LuaNativeRoot *value) {
       writeindex(L, idx, &value->value);
       converted = 1;
     }
-    if (idx == LUA_REGISTRYINDEX) luaW_heapleave(L);
+    if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
   }
   return converted;
 }
@@ -229,11 +234,12 @@ LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
 
 LUA_API lua_CFunction lua_atpanic (lua_State *L, lua_CFunction panicf) {
   lua_CFunction old;
+  LuaObjectScope access;
   lua_lock(L);
-  luaW_heapenter(L);
+  luaA_beginlock(L, &G(L)->panic_access, &access);
   old = G(L)->panic;
   G(L)->panic = panicf;
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   lua_unlock(L);
   return old;
 }
@@ -872,9 +878,11 @@ void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
     pushcclosure(L, fn, n, 1);
   else {
     CClosure *function;
+    LuaObjectScope access;
+    unsigned bucket = point2uint(fn) % LUA_MANAGED_SHARDS;
     lua_lock(L);
-    luaW_heapenter(L);
-    for (function = G(L)->managed_functions; function != NULL;
+    luaA_beginlock(L, &G(L)->managed_access[bucket], &access);
+    for (function = G(L)->managed_functions[bucket]; function != NULL;
          function = function->managed_next) {
       if (function->f == fn) break;
     }
@@ -882,12 +890,12 @@ void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
       function = luaF_newCclosure(L, 0);
       function->f = fn;
       function->managed = 1;
-      function->managed_next = G(L)->managed_functions;
-      G(L)->managed_functions = function;
+      function->managed_next = G(L)->managed_functions[bucket];
+      G(L)->managed_functions[bucket] = function;
     }
     setclCvalue(L, s2v(L->top.p), function);
     api_incr_top(L);
-    luaW_heapleave(L);
+    luaA_end(L, &access);
     luaC_checkGC(L);
     lua_unlock(L);
   }
@@ -1708,10 +1716,8 @@ LUA_API void lua_len (lua_State *L, int idx) {
 LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
   lua_Alloc f;
   lua_lock(L);
-  luaW_heapenter(L);
   if (ud) *ud = G(L)->ud;
   f = G(L)->frealloc;
-  luaW_heapleave(L);
   lua_unlock(L);
   return f;
 }
@@ -1719,20 +1725,21 @@ LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
 
 LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud) {
   lua_lock(L);
-  luaW_heapenter(L);
+  luaW_stop(L);
   G(L)->ud = ud;
   G(L)->frealloc = f;
-  luaW_heapleave(L);
+  luaW_start(L);
   lua_unlock(L);
 }
 
 
 void lua_setwarnf (lua_State *L, lua_WarnFunction f, void *ud) {
+  LuaObjectScope access;
   lua_lock(L);
-  luaW_heapenter(L);
+  luaA_beginlock(L, &G(L)->warning_access, &access);
   G(L)->ud_warn = ud;
   G(L)->warnf = f;
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   lua_unlock(L);
 }
 

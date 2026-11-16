@@ -91,10 +91,6 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
   if (next)
     next->open.previous = &uv->open.next;
   *prev = uv;
-  if (!isintwups(L)) {  /* thread not in list of threads with upvalues? */
-    L->twups = G(L)->twups;  /* link it to the list */
-    G(L)->twups = L;
-  }
   return uv;
 }
 
@@ -234,24 +230,18 @@ void luaF_joincaptures (lua_State *L, LClosure *to, int target,
 ** at the given level.
 */
 UpVal *luaF_findupval (lua_State *L, StkId level) {
-  ptrdiff_t offset = savestack(L, level);
   UpVal **pp;
   UpVal *p;
-  luaW_heapenter(L);
-  level = restorestack(L, offset);
   pp = &L->openupval;
-  lua_assert(isintwups(L) || L->openupval == NULL);
   while ((p = *pp) != NULL && uplevel(p) >= level) {  /* search for it */
     lua_assert(!isdead(G(L), p));
     if (uplevel(p) == level) {  /* corresponding upvalue? */
-      luaW_heapleave(L);
       return p;  /* return it */
     }
     pp = &p->open.next;
   }
   /* not found: create a new upvalue after 'pp' */
   p = newupval(L, level, pp);
-  luaW_heapleave(L);
   return p;
 }
 
@@ -359,36 +349,13 @@ void luaF_unlinkupval (UpVal *uv) {
 */
 void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
-  ptrdiff_t offset;
-  LuaNativeRoot cell, value;
-  if (L->openupval == NULL)
-    return;
-  offset = savestack(L, level);
-  luaW_heapenter(L);
-  luaR_pushroot(L, &cell);
-  luaR_pushroot(L, &value);
-  level = restorestack(L, offset);
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
-    int barrier;
-    setgcovalue(L, &cell.value, obj2gco(uv));
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
     lua_assert(uplevel(uv) < L->top.p);
     luaF_unlinkupval(uv);  /* remove upvalue from 'openupval' list */
     uv->owner = NULL;
-    luaR_setroot(L, &value, &uv->value);
-    barrier = !iswhite(uv);
-    if (barrier) {  /* neither white nor dead? */
-      nw2black(uv);  /* closed upvalues cannot be gray */
-    }
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
-    /* A full barrier buffer may rendezvous. No cell mutex crosses that wait. */
-    if (barrier)
-      luaC_barrier(L, uv, &value.value);
-    level = restorestack(L, offset);
   }
-  luaR_poproot(L, &value);
-  luaR_poproot(L, &cell);
-  luaW_heapleave(L);
 }
 
 

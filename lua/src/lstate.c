@@ -30,6 +30,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "laccess.h"
 #include "lcallback.h"
 #include "ldebug.h"
 #include "ldo.h"
@@ -359,16 +360,29 @@ static void f_luaopen (lua_State *L, void *ud) {
 ** any memory (to avoid errors)
 */
 static int preinit_thread (lua_State *L, global_State *g) {
+  int i, j;
   G(L) = g;
   L->stack.p = NULL;
   L->ci = NULL;
   L->nci = 0;
-  L->twups = L;  /* thread has no upvalues */
   L->nCcalls = 0;
   L->luthr_stack_limit = 0;
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
   L->barrier_count = 0;
+  L->new_objects = L->new_objects_tail = NULL;
+  L->allocation_debt = 0;
+  L->finalizer_count = 0;
+  for (i = 0; i < LUA_ALLOC_BINS; i++)
+    L->allocation_cache[i] = NULL;
+  for (i = 0; i < STRCACHE_N; i++)
+    for (j = 0; j < STRCACHE_M; j++)
+      L->strcache[i][j] = NULL;
+  L->participation.next = NULL;
+  L->participation.previous = NULL;
+  L->participation.thread = L;
+  L->participation.active = 0;
+  L->admission = &L->participation;
   L->callback_owner = NULL;
   L->callback_active = 0;
   L->operation = NULL;
@@ -407,8 +421,11 @@ lu_mem luaE_threadsize (lua_State *L) {
 
 static void close_state (lua_State *L, int owns_gate) {
   global_State *g = G(L);
+  int i;
   if (owns_gate)
     luaW_stop(L);
+  else
+    luaC_publish(L);  /* exclusive cleanup of a partially constructed VM */
   if (!completestate(g))  /* closing a partially built state? */
     luaC_freeallobjects(L);  /* just collect its objects */
   else {  /* closing a fully built state */
@@ -421,14 +438,17 @@ static void close_state (lua_State *L, int owns_gate) {
     luaC_freeallobjects(L);  /* collect all objects */
     luai_userstateclose(L);
   }
-  luaM_freearray(L, G(L)->strt.hash, cast_sizet(G(L)->strt.size));
+  for (i = 0; i < LUA_STRING_SHARDS; i++)
+    luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
   freestack(L);
+  luaM_reclaimpages(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
   if (owns_gate) {
     luaW_start(L);
     lua_unlock(L);
   }
   luaX_destroygate(&L->stack_gate);
+  luaW_unregister(L);
   luaW_destroy(&g->world);
   (*g->frealloc)(g->ud, g, sizeof(global_State), 0);  /* free main block */
 }
@@ -448,6 +468,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   api_incr_top(L);
   if (preinit_thread(L1, g) != 0)
     luaM_error(L);
+  luaW_register(L1);
   lua_sethook(L1, gethook(L), gethookmask(L), getbasehookcount(L));
   /* initialize L1 extra space */
   memcpy(lua_getextraspace(L1), lua_getextraspace(mainthread(g)),
@@ -467,6 +488,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   luai_userstatefree(L, L1);
   freestack(L1);
   luaX_destroygate(&L1->stack_gate);
+  luaW_unregister(L1);
   luaM_free(L, l);
 }
 
@@ -538,23 +560,37 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
+  luaW_register(L);
   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
   L->next = NULL;
   incnny(L);  /* main thread is always non yieldable */
   g->frealloc = f;
+  g->allocation_pages = NULL;
+  for (i = 0; i < LUA_ALLOC_BINS; i++)
+    g->allocation_available[i] = NULL;
   g->ud = ud;
   g->warnf = NULL;
   g->ud_warn = NULL;
   g->seed = seed;
   g->gcstp = GCSTPGC;  /* no GC while building state */
-  g->strt.size = g->strt.nuse = 0;
-  g->strt.hash = NULL;
+  for (i = 0; i < LUA_STRING_SHARDS; i++) {
+    g->strt[i].size = g->strt[i].nuse = 0;
+    g->strt[i].hash = NULL;
+    luaA_initlock(&g->strt[i].access);
+  }
   setnilvalue(&g->l_registry);
   g->panic = NULL;
   g->managed_hook = NULL;
   g->callbacks = NULL;
   g->pipe_meta = NULL;
-  g->managed_functions = NULL;
+  for (i = 0; i < LUA_MANAGED_SHARDS; i++) {
+    g->managed_functions[i] = NULL;
+    luaA_initlock(&g->managed_access[i]);
+  }
+  luaA_initlock(&g->registry_access);
+  luaA_initlock(&g->warning_access);
+  luaA_initlock(&g->panic_access);
+  luaA_initlock(&g->callbacks_access);
   g->coroutine_scopes = NULL;
   g->tasks = NULL;
   g->task_admission_closed = 0;
@@ -569,7 +605,6 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->sweepgc = NULL;
   g->gray = g->grayagain = NULL;
   g->weak = g->ephemeron = g->allweak = NULL;
-  g->twups = NULL;
   g->GCtotalbytes = sizeof(global_State);
   g->GCmarked = 0;
   g->GCdebt = 0;
@@ -580,7 +615,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   setgcparam(g, MINORMUL, LUAI_GENMINORMUL);
   setgcparam(g, MINORMAJOR, LUAI_MINORMAJOR);
   setgcparam(g, MAJORMINOR, LUAI_MAJORMINOR);
-  for (i=0; i < LUA_NUMTYPES; i++) g->mt[i] = NULL;
+  for (i=0; i < LUA_NUMTYPES; i++) {
+    g->mt[i] = NULL;
+    luaA_initlock(&g->metatable_access[i]);
+  }
   if (luaD_rawrunprotected(L, f_luaopen, NULL) != LUA_OK) {
     /* memory allocation error: free partial state */
     close_state(L, 0);
@@ -600,10 +638,11 @@ LUA_API void lua_close (lua_State *L) {
 void luaE_warning (lua_State *L, const char *msg, int tocont) {
   lua_WarnFunction wf;
   void *context;
-  luaW_heapenter(L);
+  LuaObjectScope access;
+  luaA_beginlock(L, &G(L)->warning_access, &access);
   wf = G(L)->warnf;
   context = G(L)->ud_warn;
-  luaW_heapleave(L);
+  luaA_end(L, &access);
   if (wf != NULL) {
     LuaWorldScope depth;
     luaQ_beginnative(L);

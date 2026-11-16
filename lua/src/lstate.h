@@ -169,10 +169,15 @@ struct lua_longjmp;  /* defined in ldo.c */
 
 
 typedef struct stringtable {
+  LuaObjectLock access;
   TString **hash;  /* array of buckets (linked lists of strings) */
   int nuse;  /* number of elements */
   int size;  /* number of buckets */
 } stringtable;
+
+#define LUA_STRING_SHARDS 32
+#define LUA_STRING_INITIAL_BUCKETS 4
+#define LUA_MANAGED_SHARDS 32
 
 
 /*
@@ -296,9 +301,11 @@ typedef struct NativeStackContext {
 typedef struct LuaNativeRoot {
   struct LuaNativeRoot *previous;
   TValue value;
+  const Table *table_view;  /* borrowed resize image, strongly traced until pop */
 } LuaNativeRoot;
 
 #define LUA_BARRIER_CAPACITY 64
+#define LUA_ALLOC_BINS 6
 typedef struct LuaBarrierRecord {
   GCObject *owner;
   GCObject *value;
@@ -320,7 +327,6 @@ struct lua_State {
   UpVal *openupval;  /* list of open upvalues in this stack */
   StkIdRel tbclist;  /* list of to-be-closed variables */
   GCObject *gclist;
-  struct lua_State *twups;  /* list of threads with open upvalues */
   struct lua_longjmp *errorJmp;  /* current error recover point */
   CallInfo base_ci;  /* CallInfo for first level (C host) */
   lua_Hook hook;
@@ -346,6 +352,8 @@ struct lua_State {
   unsigned resume_active;
   unsigned close_active;  /* nesting depth, including recursive self-close */
   LuaStackGate stack_gate;
+  LuaParticipation participation;
+  LuaParticipation *admission;  /* shared by a paired stack transaction */
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
   unsigned poll_remaining;
@@ -356,6 +364,13 @@ struct lua_State {
   struct LuaObjectScope *object_scopes;
   unsigned barrier_count;
   LuaBarrierRecord barriers[LUA_BARRIER_CAPACITY];
+  GCObject *new_objects;
+  GCObject *new_objects_tail;
+  l_mem allocation_debt;
+  unsigned finalizer_count;
+  GCObject *finalizers[LUA_BARRIER_CAPACITY];
+  TString *strcache[STRCACHE_N][STRCACHE_M];
+  struct LuaAllocPage *allocation_cache[LUA_ALLOC_BINS];
 };
 
 
@@ -373,11 +388,19 @@ typedef struct LX {
 */
 typedef struct global_State {
   LuaWorld world;
+  struct LuaAllocPage *allocation_pages;
+  struct LuaAllocPage *allocation_available[LUA_ALLOC_BINS];
   lua_Alloc frealloc;  /* function to reallocate memory */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */
-  CClosure *managed_functions;  /* stable identities for zero-capture code */
+  CClosure *managed_functions[LUA_MANAGED_SHARDS];
+  LuaObjectLock managed_access[LUA_MANAGED_SHARDS];
+  LuaObjectLock metatable_access[LUA_NUMTYPES];
+  LuaObjectLock registry_access;
+  LuaObjectLock warning_access;
+  LuaObjectLock panic_access;
+  LuaObjectLock callbacks_access;
   struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
   struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
@@ -387,7 +410,7 @@ typedef struct global_State {
   l_mem GCdebt;  /* bytes counted but not yet allocated */
   l_mem GCmarked;  /* number of objects marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
-  stringtable strt;  /* hash table for strings */
+  stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
@@ -416,13 +439,11 @@ typedef struct global_State {
   GCObject *finobjsur;  /* list of survival objects with finalizers */
   GCObject *finobjold1;  /* list of old1 objects with finalizers */
   GCObject *finobjrold;  /* list of really old objects with finalizers */
-  struct lua_State *twups;  /* list of threads with open upvalues */
   lua_CFunction panic;  /* to be called in unprotected errors */
   TString *memerrmsg;  /* message for memory-allocation errors */
   TString *stoperrmsg;  /* fixed task stop delivery; never allocates */
   TString *tmname[TM_N];  /* array with tag-method names */
   struct Table *mt[LUA_NUMTYPES];  /* metatables for basic types */
-  TString *strcache[STRCACHE_N][STRCACHE_M];  /* cache for strings in API */
   lua_WarnFunction warnf;  /* warning function */
   void *ud_warn;         /* auxiliary data to 'warnf' */
   LX mainth;  /* main thread of this state */

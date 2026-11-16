@@ -282,7 +282,7 @@ static void overlap_poll(lua_State *state, void *context) {
         __atomic_add_fetch(&actor->test->arrivals, 1, __ATOMIC_SEQ_CST);
     if (arrivals == 2) {
       require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
-      require(G(state)->world.active == 2);
+      require(luaW_activecount(&G(state)->world) == 2);
       require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
     }
     status = pthread_barrier_wait(&actor->test->barrier);

@@ -145,14 +145,11 @@ int luaQ_ismanagedhook (lua_State *L, lua_Hook hook) {
 }
 
 void luaQ_setowner (LuaOwner *owner) {
-  owner->execution = luaQ_current();
-  owner->carrier = pthread_self();
+  __atomic_store_n(&owner->token, luaQ_ownertoken(), __ATOMIC_RELEASE);
 }
 
 int luaQ_isowner (const LuaOwner *owner) {
-  LuaExecution *execution = luaQ_current();
-  return owner->execution == execution &&
-         (execution != NULL || pthread_equal(owner->carrier, pthread_self()));
+  return __atomic_load_n(&owner->token, __ATOMIC_ACQUIRE) == luaQ_ownertoken();
 }
 
 void *luaQ_ownertoken (void) {

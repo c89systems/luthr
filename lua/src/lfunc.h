@@ -20,10 +20,6 @@ struct CallInfo;
 	(offsetof(LClosure, upvals) + sizeof(UpVal *) * cast_uint(n))
 
 
-/* test whether thread is in 'twups' list */
-#define isintwups(L)	(L->twups != L)
-
-
 /*
 ** maximum number of upvalues in a closure (both C and Lua). (Value
 ** must fit in a VM register.)

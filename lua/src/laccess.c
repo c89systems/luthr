@@ -41,14 +41,14 @@ static int tryaccess (LuaObjectLock *lock) {
   return 0;
 }
 
-void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
+static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
+                         LuaObjectScope *scope) {
   LuaWorld *world = &G(L)->world;
-  LuaObjectLock *lock = objectlock(object);
   scope->lock = lock;
   scope->held = 0;
   scope->saved_top = -1;
   luaR_pushroot(L, &scope->root);
-  setgcovalue(L, &scope->root.value, object);
+  if (object != NULL) { setgcovalue(L, &scope->root.value, object); }
   scope->previous = L->object_scopes;
   L->object_scopes = scope;
   /* A collector reads/mutates objects under quiescence, including ones whose
@@ -65,15 +65,15 @@ void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
         /* Never acquire an unrelated object behind metadata ownership. */
         lua_assert(world->heap_depth == 0 ||
                    !luaQ_isowner(&world->heap_owner));
-        lua_assert(world->active != 0);
+        lua_assert(__atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
         L->native_depth++;
         L->object_waiting++;
-        world->active--;
+        luaW_deactivate(L);
         luaQ_wake(&world->changed, &world->waiters);
         do {
           luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
         } while (world->stopped || !tryaccess(lock));
-        world->active++;
+        luaW_activate(L);
         L->object_waiting--;
         L->native_depth--;
       }
@@ -82,6 +82,14 @@ void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
     }
     scope->held = 1;
   }
+}
+
+void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
+  beginaccess(L, objectlock(object), object, scope);
+}
+
+void luaA_beginlock (lua_State *L, LuaObjectLock *lock, LuaObjectScope *scope) {
+  beginaccess(L, lock, NULL, scope);
 }
 
 static void releasescope (lua_State *L, LuaObjectScope *scope) {
@@ -147,11 +155,12 @@ void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *resul
   }
   else {
     int type = ttype(object);
-    luaW_heapenter(L);
+    LuaObjectScope access;
+    luaA_beginlock(L, &G(L)->metatable_access[type], &access);
     mt = G(L)->mt[type];
     if (mt) { sethvalue(L, &result->value, mt); }
     else setnilvalue(&result->value);
-    luaW_heapleave(L);
+    luaA_end(L, &access);
   }
 }
 
@@ -170,22 +179,21 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
-    luaW_heapenter(L);  /* userdata metatables are visited by mutator barriers */
     if (ttistable(object)) hvalue(object)->metatable = mt;
     else uvalue(object)->metatable = mt;
     if (mt) {
       luaC_objbarrier(L, gcvalue(object), mt);
       luaC_checkfinalizer(L, gcvalue(object), mt);
     }
-    luaW_heapleave(L);
     if (pair) luaA_end(L, &second);
     luaA_end(L, &first);
   }
   else {
     int type = ttype(object);
-    luaW_heapenter(L);
+    LuaObjectScope access;
+    luaA_beginlock(L, &G(L)->metatable_access[type], &access);
     G(L)->mt[type] = mt;
-    luaW_heapleave(L);
+    luaA_end(L, &access);
   }
   luaR_poproot(L, &rooted_mt);
   luaR_poproot(L, &rooted_object);
@@ -272,17 +280,18 @@ void luaA_metafield (lua_State *L, const TValue *object, TString *key,
     int type = ttype(&owner.value);
     for (;;) {
       Table *mt;
+      LuaObjectScope access;
       luaA_getmetatable(L, &owner.value, &metatable);
       mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
       if (mt) luaA_begin(L, obj2gco(mt), &first);
-      luaW_heapenter(L);
+      luaA_beginlock(L, &G(L)->metatable_access[type], &access);
       if (G(L)->mt[type] == mt) {
         metafield(L, mt, key, result, event);
-        luaW_heapleave(L);
+        luaA_end(L, &access);
         if (mt) luaA_end(L, &first);
         break;
       }
-      luaW_heapleave(L);
+      luaA_end(L, &access);
       if (mt) luaA_end(L, &first);
     }
   }

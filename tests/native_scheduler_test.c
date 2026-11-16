@@ -1604,7 +1604,7 @@ static void parallel_poll(lua_State *state, void *context) {
   if (arrived == 2) {
     LuaWorld *world = &G(state)->world;
     check(pthread_mutex_lock(&world->mutex));
-    require(world->active == 2 && !world->stopped);
+    require(luaW_activecount(world) == 2 && !world->stopped);
     check(pthread_mutex_unlock(&world->mutex));
   }
   status = pthread_barrier_wait(&pool->parallel);

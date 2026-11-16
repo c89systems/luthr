@@ -236,7 +236,7 @@
 #endif
 
 #define luaC_condGC(L,pre,pos) \
-	{ if (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= 0) \
+    { if (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt) \
           { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 
@@ -271,6 +271,9 @@ LUAI_FUNC void luaC_barrierback_ (lua_State *L, GCObject *o);
 LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back);
 /* Collector-only: participants are quiescent and all record storage is live. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
+/* Collector or exclusive incomplete-VM cleanup only. Publish complete local
+** construction lists, exact allocation totals and finalizer registrations. */
+LUAI_FUNC void luaC_publish (lua_State *L);
 LUAI_FUNC void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt);
 LUAI_FUNC void luaC_changemode (lua_State *L, int newmode);
 

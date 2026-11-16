@@ -16,7 +16,9 @@
 int luaW_init (LuaWorld *world) {
   int status;
   world->ready = world->stopped = 0;
-  world->active = world->heap_depth = 0;
+  world->heap_depth = 0;
+  world->heap_owner.token = world->collector.token = NULL;
+  world->participants = NULL;
   world->waiters = NULL;
   status = pthread_mutex_init(&world->mutex, NULL);
   if (status != 0)
@@ -31,32 +33,93 @@ int luaW_init (LuaWorld *world) {
 }
 
 void luaW_destroy (LuaWorld *world) {
-  lua_assert(world->ready && !world->stopped && world->active == 0 &&
+  lua_assert(world->ready && !world->stopped && world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
 }
 
+void luaW_register (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  LuaParticipation *participant = &L->participation;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(participant->previous == NULL && participant->active == 0);
+  participant->next = world->participants;
+  participant->previous = &world->participants;
+  if (participant->next != NULL)
+    participant->next->previous = &participant->next;
+  world->participants = participant;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void luaW_unregister (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  LuaParticipation *participant = &L->participation;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(__atomic_load_n(&participant->active, __ATOMIC_SEQ_CST) == 0);
+  if (participant->previous != NULL) {
+    *participant->previous = participant->next;
+    if (participant->next != NULL)
+      participant->next->previous = participant->previous;
+    participant->previous = NULL;
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+unsigned luaW_activecount (LuaWorld *world) {
+  LuaParticipation *participant;
+  unsigned active = 0;
+  for (participant = world->participants; participant != NULL;
+       participant = participant->next)
+    active += __atomic_load_n(&participant->active, __ATOMIC_SEQ_CST);
+  return active;
+}
+
+void luaW_activate (lua_State *L) {
+  __atomic_fetch_add(&L->admission->active, 1, __ATOMIC_SEQ_CST);
+}
+
+void luaW_deactivate (lua_State *L) {
+  unsigned previous = __atomic_fetch_sub(&L->admission->active, 1,
+                                        __ATOMIC_SEQ_CST);
+  lua_assert(previous != 0);
+  UNUSED(previous);
+}
+
 /* Stack ownership may already be reserved, but no managed data is accessed
 ** until this entry completes. A waiting gate does not count as a mutator. */
 void luaW_enter (lua_State *L) {
   LuaWorld *world = &G(L)->world;
+  /* Store/load ordering pairs with the collector's request/scan ordering.
+  ** Either the scan observes this entry, or it observes the request before
+  ** accessing managed data. No shared ownership word is changed here. */
+  luaW_activate(L);
+  if (!__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST))
+    return;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
+  /* Only the atomic participation record can change before admission. In
+  ** particular, a late entrant cannot change roots while a collector scans
+  ** this state. Its embedding caller retains the target's ordinary Lua root. */
+  luaW_deactivate(L);
+  luaQ_wake(&world->changed, &world->waiters);
   while (world->stopped)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  world->active++;
+  luaW_activate(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
-void luaW_leave (lua_State *L) {
-  LuaWorld *world = &G(L)->world;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(world->active != 0);
-  world->active--;
-  if (world->active == 0)
+void luaW_leave (LuaWorld *world, LuaParticipation *participant) {
+  unsigned previous = __atomic_fetch_sub(&participant->active, 1,
+                                        __ATOMIC_SEQ_CST);
+  lua_assert(previous != 0);
+  UNUSED(previous);
+  /* No participant accesses after withdrawing: it may already be reclaimed. */
+  if (__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST)) {
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  }
 }
 
 /* The requesting mutator retains its stack gate. Other mutators publish their
@@ -72,14 +135,14 @@ void luaW_stop (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
   luaQ_setowner(&world->collector);
-  __atomic_store_n(&world->stopped, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&world->stopped, 1, __ATOMIC_SEQ_CST);
   luaQ_wake(&world->changed, &world->waiters);
-  lua_assert(world->active != 0);
-  world->active--;
-  while (world->active != 0)
+  luaW_deactivate(L);
+  while (luaW_activecount(world) != 0)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaC_publish(L);
   luaC_drainbarriers(L);
 }
 
@@ -89,10 +152,11 @@ void luaW_start (lua_State *L) {
   if (--L->world_depth != 0)
     return;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(world->stopped && world->active == 0 &&
-             luaQ_isowner(&world->collector));
-  world->active = 1;  /* the collector resumes as an ordinary mutator */
-  __atomic_store_n(&world->stopped, 0, __ATOMIC_RELEASE);
+  lua_assert(world->stopped && luaQ_isowner(&world->collector));
+  /* Late entrants may have published a tentative reference after the stop
+  ** scan. They cannot access managed data until stopped becomes false. */
+  luaW_activate(L);  /* the collector resumes as an ordinary mutator */
+  __atomic_store_n(&world->stopped, 0, __ATOMIC_SEQ_CST);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaW_heapleave(L);
@@ -116,20 +180,21 @@ void luaW_heapenter (lua_State *L) {
   }
   else {
     if (world->heap_depth != 0 || world->stopped) {
-      lua_assert(L->world_depth == 0 && world->active != 0);
+      lua_assert(L->world_depth == 0 &&
+        __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
       L->native_depth++;
       L->heap_waiting++;
-      world->active--;
+      luaW_deactivate(L);
       luaQ_wake(&world->changed, &world->waiters);
       do {
         luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
       } while (world->heap_depth != 0 || world->stopped);
-      world->active++;
+      luaW_activate(L);
       L->heap_waiting--;
       L->native_depth--;
     }
-    luaQ_setowner(&world->heap_owner);
     world->heap_depth = 1;
+    luaQ_setowner(&world->heap_owner);
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -139,20 +204,16 @@ void luaW_heapleave (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(world->heap_depth != 0 &&
              luaQ_isowner(&world->heap_owner));
-  if (--world->heap_depth == 0)
+  if (--world->heap_depth == 0) {
+    __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
     luaQ_wake(&world->changed, &world->waiters);
+  }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 static unsigned heapdepth (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  unsigned depth;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  depth = (world->heap_depth != 0 &&
-           luaQ_isowner(&world->heap_owner))
-          ? world->heap_depth : 0;
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  return depth;
+  return luaQ_isowner(&world->heap_owner) ? world->heap_depth : 0;
 }
 
 static void restoreheap (lua_State *L, unsigned depth) {

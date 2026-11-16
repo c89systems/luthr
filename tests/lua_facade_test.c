@@ -9,6 +9,7 @@ static const char *luthr_lua_facade_pushvfstring(luthr_lua_state *state,
                                                  const char *format, ...);
 
 static int reject_allocations;
+static char format_test_padding[1024];
 
 struct external_string_context {
   char *pointer;
@@ -85,13 +86,13 @@ static void *format_test_allocator(void *user, void *pointer, size_t old_size,
 
 static int format_test_pushfstring(luthr_lua_state *state) {
   reject_allocations = 1;
-  (void)luthr_lua_pushfstring(state, "value=%s", "allocation failure probe");
+  (void)luthr_lua_pushfstring(state, "value=%s", format_test_padding);
   return 1;
 }
 
 static int format_test_pushfstring_integer(luthr_lua_state *state) {
   reject_allocations = 1;
-  (void)luthr_lua_pushfstring(state, "value=%I",
+  (void)luthr_lua_pushfstring(state, "%svalue=%I", format_test_padding,
                               luthr_lua_integer_make(0U, 12345U));
   return 1;
 }
@@ -101,12 +102,14 @@ static int format_test_error_contract(void) {
   const char *result;
   int status;
 
+  memset(format_test_padding, 'x', sizeof(format_test_padding) - 1);
   state = luthr_lua_newstate(format_test_allocator, NULL, 0U);
   if (state == NULL)
     return 1;
   reject_allocations = 1;
-  result = luthr_lua_facade_pushvfstring(state, "value=%I",
-                                         luthr_lua_integer_make(0U, 12345U));
+  result =
+      luthr_lua_facade_pushvfstring(state, "%svalue=%I", format_test_padding,
+                                    luthr_lua_integer_make(0U, 12345U));
   reject_allocations = 0;
   if (result != NULL || luthr_lua_gettop(state) != 1 ||
       strcmp(luthr_lua_tostring(state, -1), "not enough memory") != 0) {
@@ -116,7 +119,8 @@ static int format_test_error_contract(void) {
   luthr_lua_pop(state, 1);
 
   reject_allocations = 1;
-  result = luthr_lua_facade_pushvfstring(state, "value=%U", 65UL);
+  result = luthr_lua_facade_pushvfstring(state, "%svalue=%U",
+                                         format_test_padding, 65UL);
   reject_allocations = 0;
   if (result != NULL || luthr_lua_gettop(state) != 1 ||
       strcmp(luthr_lua_tostring(state, -1), "not enough memory") != 0) {

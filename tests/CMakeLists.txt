@@ -33,6 +33,20 @@ foreach(case IN ITEMS independent access semantics incremental generational)
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(memory_publication_test memory_publication_test.c)
+set_target_properties(memory_publication_test PROPERTIES C_STANDARD 99)
+target_compile_options(memory_publication_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(memory_publication_test PRIVATE luthr_static)
+target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
+  -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
+  -Wl,--wrap=luaM_free_)
+foreach(case IN ITEMS no_requests intern_hits ordinary_operations allocation_cache handoff paired_handoff late waiting
+    totals construction weak_resize incremental generational)
+  add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
+  set_tests_properties(memory_publication_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
@@ -646,7 +660,8 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
-  lua_facade_static lua_facade_shared native_roots_test execution_wait_test capture_cells_test)
+  lua_facade_static lua_facade_shared native_roots_test execution_wait_test
+  capture_cells_test memory_publication_test)
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

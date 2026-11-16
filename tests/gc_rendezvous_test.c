@@ -302,7 +302,7 @@ int main(int argc, char **argv) {
   fixture.active_phase = 0;
   world = &G(fixture.main)->world;
   fixture.failed |=
-      world->active != 0 || world->stopped ||
+      luaW_activecount(world) != 0 || world->stopped ||
       fixture.worker->native_depth != 0 || fixture.worker->world_depth != 0 ||
       fixture.main->native_depth != 0 || fixture.main->world_depth != 0 ||
       world->heap_depth != 0 || fixture.worker->heap_waiting != 0 ||

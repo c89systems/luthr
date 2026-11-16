@@ -45,8 +45,7 @@ typedef struct LuaCarrierPin {
 } LuaCarrierPin;
 
 typedef struct LuaOwner {
-  LuaExecution *execution;
-  pthread_t carrier;
+  void *token;
 } LuaOwner;
 
 typedef struct LuaWaiter {

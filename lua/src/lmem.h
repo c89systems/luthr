@@ -19,6 +19,10 @@
 /* Auxiliary-library buffer storage is not charged to Lua's GC debt. */
 LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
                                    size_t nsize);
+/* Local allocation accounting is exact at a collector publication boundary. */
+LUAI_FUNC void luaM_flushdebt (lua_State *L);
+/* Collector/exclusive shutdown only; retire local caches before freeing pages. */
+LUAI_FUNC void luaM_reclaimpages (lua_State *L);
 
 
 /*

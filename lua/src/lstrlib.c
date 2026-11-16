@@ -1083,7 +1083,6 @@ static int gmatch (lua_State *L) {
   if (init > ls)  /* start after string's end? */
     init = ls + 1;
   lua_lock(L);
-  luaW_heapenter(L);
   luaR_pushroot(L, &roots[2]);
   owner = luaS_newudata(L, sizeof(GMatchState), 2);
   setuvalue(L, &roots[2].value, owner);
@@ -1105,7 +1104,6 @@ static int gmatch (lua_State *L) {
   api_incr_top(L);
   for (index = 3; index != 0;)
     luaR_poproot(L, &roots[--index]);
-  luaW_heapleave(L);
   luaC_checkGC(L);
   lua_unlock(L);
   return 1;

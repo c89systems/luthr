@@ -16,6 +16,9 @@ typedef struct LuaObjectScope {
 } LuaObjectScope;
 
 LUAI_FUNC void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope);
+/* A VM-owned partition has permanent storage and needs no collectable root. */
+LUAI_FUNC void luaA_beginlock (lua_State *L, LuaObjectLock *lock,
+                              LuaObjectScope *scope);
 LUAI_FUNC void luaA_end (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_unwind (lua_State *L, LuaObjectScope *target);
 LUAI_FUNC void luaA_release (lua_State *L);

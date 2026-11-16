@@ -87,6 +87,7 @@ void luaTK_checkstop (lua_State *L) {
       L->errorJmp != execution->protected) return;
   task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
   if (task == NULL || task->global != G(L)) return;
+  if (!__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return;
   luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
   deliver = __atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE) &&
             task->phase == LUA_TASK_RUNNING && L->close_active == 0;

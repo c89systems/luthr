@@ -107,7 +107,10 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
     fixture->live_allocations++;
   else {
     memcpy(replacement, pointer, old_size < size ? old_size : size);
-    if (pointer == fixture->old_stack && fixture->retired_stack == NULL) {
+    if (fixture->old_stack != NULL &&
+        (uintptr_t)fixture->old_stack >= (uintptr_t)pointer &&
+        (uintptr_t)fixture->old_stack - (uintptr_t)pointer < old_size &&
+        fixture->retired_stack == NULL) {
       fixture->retired_stack = pointer;
       memset(pointer, 0, old_size);
     } else

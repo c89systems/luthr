@@ -24,6 +24,7 @@ int luaX_initgate (LuaStackGate *gate) {
   int status;
   gate->ready = gate->owned = 0;
   gate->next_ticket = gate->serving = 0;
+  gate->waiting = 0;
   gate->waiters = NULL;
   status = pthread_mutex_init(&gate->mutex, NULL);
   if (status != 0)
@@ -57,8 +58,13 @@ static void reserve (lua_State *L) {
     abort();
   }
   ticket = gate->next_ticket++;
-  while (ticket != gate->serving)
-    luaQ_wait(L, &gate->mutex, &gate->changed, &gate->waiters);
+  if (ticket != gate->serving) {
+    __atomic_fetch_add(&gate->waiting, 1, __ATOMIC_RELEASE);
+    do {
+      luaQ_wait(L, &gate->mutex, &gate->changed, &gate->waiters);
+    } while (ticket != gate->serving);
+    __atomic_fetch_sub(&gate->waiting, 1, __ATOMIC_RELEASE);
+  }
   lua_assert(!gate->owned);
   luaQ_setowner(&gate->owner);
   gate->owned = 1;
@@ -88,6 +94,9 @@ void luaX_lockstate (lua_State *L) {
 }
 
 void luaX_unlockstate (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  LuaParticipation *participant = L->admission;
+  lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
   if (L->errorJmp == NULL && luaQ_current() != NULL) {
@@ -97,7 +106,7 @@ void luaX_unlockstate (lua_State *L) {
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L);
-  luaW_leave(L);
+  luaW_leave(world, participant);
   luaQ_leavemanaged();  /* no state accesses after the final world leave */
 }
 
@@ -113,6 +122,9 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
   }
   reserve(first);
   if (second != first) reserve(second);
+  lua_assert(first->admission == &first->participation &&
+             second->admission == &second->participation);
+  second->admission = &first->participation;
   luaW_enter(first);
   if (first->errorJmp == NULL && luaQ_current() != NULL)
     luaE_refreshnativestack(first);
@@ -121,11 +133,15 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {
+  LuaWorld *world = &G(first)->world;
+  LuaParticipation *participant;
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
     lua_State *swap = first;
     first = second;
     second = swap;
   }
+  participant = first->admission;
+  second->admission = &second->participation;
   if (first->errorJmp == NULL && luaQ_current() != NULL) {
     first->luthr_stack_context = NULL;
     first->luthr_stack_limit = 0;
@@ -136,7 +152,7 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
   }
   if (second != first) release(second);
   release(first);
-  luaW_leave(first);
+  luaW_leave(world, participant);
   luaQ_leavemanaged();
 }
 
@@ -151,13 +167,19 @@ l_uint32 luaX_parentcalls (lua_State *from) {
 }
 
 void luaX_poll (lua_State *L) {
-  LuaWorldScope depth;
   luaQ_poll(L);
   /* Internal poll handlers execute as managed VM code, with stack ownership.
   ** They are not ordinary C bindings and do not detach automatically. */
   if (L->state_poll != NULL)
     L->state_poll(L, L->state_poll_context);
-  depth = luaW_detach(L);
-  luaW_attach(L, depth);
+  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
+      __atomic_load_n(&L->stack_gate.waiting, __ATOMIC_ACQUIRE) != 0) {
+    /* A real request publishes roots and hands off ownership. The successful
+    ** no-request path above reads request words without a gate transaction. */
+    L->native_depth++;
+    luaX_unlockstate(L);
+    luaX_lockstate(L);
+    L->native_depth--;
+  }
   luaTK_checkstop(L);
 }

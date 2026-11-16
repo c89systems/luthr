@@ -718,14 +718,19 @@ static void clearNewSlice (Table *t, unsigned oldasize, unsigned newasize) {
 static void rawresize (lua_State *L, Table *t, unsigned newasize,
                                           unsigned nhsize) {
   Table newt;  /* to keep the new hash part */
+  LuaNativeRoot image;
   unsigned oldasize;
   Value *newarray;
-  luaW_heapenter(L);
   oldasize = t->asize;
   if (newasize > MAXASIZE)
     luaG_runerror(L, "table overflow");
   /* create new hash part with appropriate size into 'newt' */
   newt.flags = 0;
+  newt.array = t->array;
+  newt.asize = oldasize;
+  newt.node = NULL;
+  luaR_pushroot(L, &image);
+  image.table_view = &newt;
   setnodevector(L, &newt, nhsize);
   if (newasize < oldasize) {  /* will array shrink? */
     /* re-insert into the new hash the elements from vanishing slice */
@@ -735,8 +740,11 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   }
   /* allocate new array */
   newarray = resizearray(L, t, oldasize, newasize);
+  newt.array = NULL;
+  newt.asize = 0;
   if (l_unlikely(newarray == NULL && newasize > 0)) {  /* allocation failed? */
     freehash(L, &newt);  /* release new hash part */
+    luaR_poproot(L, &image);
     luaM_error(L);  /* raise error (with array unchanged) */
   }
   /* allocation ok; initialize new part of the array */
@@ -749,7 +757,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
   freehash(L, &newt);  /* free old hash part */
-  luaW_heapleave(L);
+  luaR_poproot(L, &image);
 }
 
 

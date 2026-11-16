@@ -11,6 +11,7 @@
 
 
 #include <stddef.h>
+#include <string.h>
 
 #include "lua.h"
 
@@ -76,6 +77,106 @@ static void *firsttry (global_State *g, void *block, size_t os, size_t ns) {
 #else
 #define firsttry(g,block,os,ns)    callfrealloc(g, block, os, ns)
 #endif
+
+#define DEBT_BATCH 65536
+
+void luaM_flushdebt (lua_State *L) {
+  l_mem debt = L->allocation_debt;
+  L->allocation_debt = 0;
+  if (debt != 0)
+    __atomic_fetch_add(&G(L)->GCdebt, debt, __ATOMIC_RELAXED);
+}
+
+static void account (lua_State *L, l_mem change) {
+  if (!completestate(G(L)) || luaW_iscollector(L) ||
+      change >= DEBT_BATCH || change <= -DEBT_BATCH) {
+    luaM_flushdebt(L);
+    __atomic_fetch_add(&G(L)->GCdebt, change, __ATOMIC_RELAXED);
+  }
+  else {
+    L->allocation_debt += change;
+    if (L->allocation_debt >= DEBT_BATCH || L->allocation_debt <= -DEBT_BATCH)
+      luaM_flushdebt(L);
+  }
+}
+
+typedef struct LuaAllocPage LuaAllocPage;
+typedef union LuaAllocBlock LuaAllocBlock;
+union LuaAllocBlock {
+  struct {
+    LuaAllocPage *page;
+    LuaAllocBlock *next;
+  } block;
+  union { LUAI_MAXALIGN; } alignment;
+};
+
+struct LuaAllocPage {
+  LuaAllocPage *next;
+  LuaAllocPage *available_next;
+  LuaAllocBlock *free;
+  unsigned live;
+  unsigned bin;
+};
+
+#define ALLOC_PAGE_BYTES 4096
+#define ALLOC_PAGE_HEADER \
+  (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
+    * sizeof(LuaAllocBlock))
+#define binbytes(bin) (cast_sizet(16) << (bin))
+
+/* One admitted coroutine consumes a cached page. Other owners only return
+** blocks; MPSC push never reads a node's successor, and only the consumer
+** removes nodes. Collection retires caches before changing page ownership. */
+static void returnblock (LuaAllocBlock *block) {
+  LuaAllocPage *page = block->block.page;
+  LuaAllocBlock *head = __atomic_load_n(&page->free, __ATOMIC_RELAXED);
+  do {
+    block->block.next = head;
+  } while (!__atomic_compare_exchange_n(&page->free, &head, block, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  __atomic_fetch_sub(&page->live, 1, __ATOMIC_RELAXED);
+}
+
+static LuaAllocBlock *takeblock (LuaAllocPage *page) {
+  LuaAllocBlock *head = __atomic_load_n(&page->free, __ATOMIC_ACQUIRE);
+  while (head != NULL) {
+    LuaAllocBlock *next = head->block.next;
+    if (__atomic_compare_exchange_n(&page->free, &head, next, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
+      __atomic_fetch_add(&page->live, 1, __ATOMIC_RELAXED);
+      return head;
+    }
+  }
+  return NULL;
+}
+
+void luaM_reclaimpages (lua_State *L) {
+  global_State *g = G(L);
+  LuaParticipation *participant;
+  LuaAllocPage **link;
+  int i;
+  for (i = 0; i < LUA_ALLOC_BINS; i++)
+    g->allocation_available[i] = NULL;
+  for (participant = g->world.participants; participant != NULL;
+       participant = participant->next)
+    for (i = 0; i < LUA_ALLOC_BINS; i++)
+      participant->thread->allocation_cache[i] = NULL;
+  for (link = &g->allocation_pages; *link != NULL;) {
+    LuaAllocPage *page = *link;
+    if (__atomic_load_n(&page->live, __ATOMIC_RELAXED) == 0) {
+      *link = page->next;
+      callfrealloc(g, page, ALLOC_PAGE_BYTES, 0);
+      account(L, ALLOC_PAGE_BYTES);
+    }
+    else {
+      if (__atomic_load_n(&page->free, __ATOMIC_RELAXED) != NULL) {
+        page->available_next = g->allocation_available[page->bin];
+        g->allocation_available[page->bin] = page;
+      }
+      link = &page->next;
+    }
+  }
+}
 
 /* Native buffer work is detached. Rejoin before selecting/calling its
 ** allocator, but preserve the auxiliary library's unaccounted buffer storage
@@ -162,12 +263,18 @@ l_noret luaM_toobig (lua_State *L) {
 ** Free memory
 */
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
-  global_State *g = G(L);
-  luaW_heapenter(L);
+  LuaAllocBlock *allocation;
   lua_assert((osize == 0) == (block == NULL));
-  callfrealloc(g, block, osize, 0);
-  __atomic_fetch_add(&g->GCdebt, cast(l_mem, osize), __ATOMIC_RELAXED);
-  luaW_heapleave(L);
+  if (block == NULL) return;
+  allocation = cast(LuaAllocBlock *, block) - 1;
+  if (allocation->block.page != NULL)
+    returnblock(allocation);
+  else {
+    luaW_heapenter(L);
+    callfrealloc(G(L), allocation, osize + sizeof(LuaAllocBlock), 0);
+    account(L, cast(l_mem, osize + sizeof(LuaAllocBlock)));
+    luaW_heapleave(L);
+  }
 }
 
 
@@ -185,27 +292,131 @@ static void *tryagain (lua_State *L, void *block,
   else return NULL;  /* cannot run an emergency collection */
 }
 
+static LuaAllocPage *availablepage (lua_State *L, unsigned bin) {
+  LuaAllocPage *page = G(L)->allocation_available[bin];
+  if (page != NULL) {
+    G(L)->allocation_available[bin] = page->available_next;
+    page->available_next = NULL;
+  }
+  return page;
+}
+
+static LuaAllocPage *refill (lua_State *L, unsigned bin) {
+  global_State *g = G(L);
+  LuaAllocPage *page;
+  L->allocation_cache[bin] = NULL;
+  luaW_heapenter(L);
+  page = availablepage(L, bin);
+  if (page == NULL) {
+    page = cast(LuaAllocPage *, firsttry(g, NULL, 0, ALLOC_PAGE_BYTES));
+    if (page == NULL && cantryagain(g)) {
+      luaC_fullgc(L, 1);
+      page = availablepage(L, bin);
+      if (page != NULL) goto ready;
+      page = cast(LuaAllocPage *, callfrealloc(g, NULL, 0, ALLOC_PAGE_BYTES));
+    }
+    if (page != NULL) {
+      size_t stride = sizeof(LuaAllocBlock) + binbytes(bin);
+      size_t offset;
+      page->free = NULL;
+      page->bin = bin;
+      page->available_next = NULL;
+      page->live = 0;
+      for (offset = ALLOC_PAGE_HEADER;
+           offset + stride <= ALLOC_PAGE_BYTES; offset += stride) {
+        LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+        block->block.page = page;
+        block->block.next = page->free;
+        page->free = block;
+      }
+      page->next = g->allocation_pages;
+      g->allocation_pages = page;
+      account(L, -ALLOC_PAGE_BYTES);
+    }
+  }
+ ready:
+  L->allocation_cache[bin] = page;
+  luaW_heapleave(L);
+  return page;
+}
+
+static void *allocateblock (lua_State *L, size_t size, int tag) {
+  unsigned bin;
+  for (bin = 0; bin < LUA_ALLOC_BINS; bin++) {
+    if (size <= binbytes(bin)) {
+      LuaAllocPage *page = L->allocation_cache[bin];
+      LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
+      if (block == NULL) {
+        page = refill(L, bin);
+        if (page == NULL) return NULL;
+        block = takeblock(page);
+        lua_assert(block != NULL);
+      }
+      return block + 1;
+    }
+  }
+  if (size > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
+  else {
+    LuaAllocBlock *block;
+    size_t bytes = size + sizeof(LuaAllocBlock);
+    global_State *g = G(L);
+    luaW_heapenter(L);
+    block = cast(LuaAllocBlock *, firsttry(g, NULL, cast_sizet(tag), bytes));
+    if (block == NULL)
+      block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
+    if (block != NULL) {
+      block->block.page = NULL;
+      account(L, -cast(l_mem, bytes));
+    }
+    luaW_heapleave(L);
+    return block != NULL ? block + 1 : NULL;
+  }
+}
+
 
 /*
 ** Generic allocation routine.
 */
 void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   void *newblock;
-  global_State *g = G(L);
-  luaW_heapenter(L);
+  LuaAllocBlock *allocation;
   lua_assert((osize == 0) == (block == NULL));
-  newblock = firsttry(g, block, osize, nsize);
-  if (l_unlikely(newblock == NULL && nsize > 0)) {
-    newblock = tryagain(L, block, osize, nsize);
-    if (newblock == NULL) {  /* still no memory? */
-      luaW_heapleave(L);
-      return NULL;  /* do not update 'GCdebt' */
-    }
+  if (nsize == 0) {
+    luaM_free_(L, block, osize);
+    return NULL;
   }
-  lua_assert((nsize == 0) == (newblock == NULL));
-  __atomic_fetch_sub(&g->GCdebt, cast(l_mem, nsize) - cast(l_mem, osize),
-                    __ATOMIC_RELAXED);
-  luaW_heapleave(L);
+  allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
+  if (allocation != NULL && allocation->block.page != NULL &&
+      nsize <= binbytes(allocation->block.page->bin))
+    return block;
+  if (allocation != NULL && allocation->block.page == NULL &&
+      nsize > binbytes(LUA_ALLOC_BINS - 1)) {
+    global_State *g = G(L);
+    LuaAllocBlock *replacement;
+    size_t oldbytes = osize + sizeof(LuaAllocBlock);
+    size_t bytes;
+    if (nsize > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
+    bytes = nsize + sizeof(LuaAllocBlock);
+    luaW_heapenter(L);
+    replacement = cast(LuaAllocBlock *, firsttry(g, allocation, oldbytes, bytes));
+    if (replacement == NULL)
+      replacement = cast(LuaAllocBlock *, tryagain(L, allocation, oldbytes, bytes));
+    if (replacement != NULL) {
+      replacement->block.page = NULL;
+      account(L, cast(l_mem, osize) - cast(l_mem, nsize));
+    }
+    luaW_heapleave(L);
+    return replacement != NULL ? replacement + 1 : NULL;
+  }
+  newblock = allocateblock(L, nsize, 0);
+  if (newblock == NULL) return NULL;
+  if (block != NULL) {
+    int backing = allocation->block.page == NULL;
+    if (backing) luaW_heapenter(L);
+    memcpy(newblock, block, osize < nsize ? osize : nsize);
+    luaM_free_(L, block, osize);
+    if (backing) luaW_heapleave(L);
+  }
   return newblock;
 }
 
@@ -223,17 +434,8 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
   if (size == 0)
     return NULL;  /* that's all */
   else {
-    global_State *g = G(L);
-    void *newblock;
-    luaW_heapenter(L);
-    newblock = firsttry(g, NULL, cast_sizet(tag), size);
-    if (l_unlikely(newblock == NULL)) {
-      newblock = tryagain(L, NULL, cast_sizet(tag), size);
-      if (newblock == NULL)
-        luaM_error(L);
-    }
-    __atomic_fetch_sub(&g->GCdebt, cast(l_mem, size), __ATOMIC_RELAXED);
-    luaW_heapleave(L);
-    return newblock;
+    void *block = allocateblock(L, size, tag);
+    if (block == NULL) luaM_error(L);
+    return block;
   }
 }
