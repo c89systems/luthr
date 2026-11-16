@@ -146,6 +146,8 @@ void luaS_init (lua_State *L) {
   for (i = 0; i < STRCACHE_N; i++)  /* fill cache with valid strings */
     for (j = 0; j < STRCACHE_M; j++)
       g->strcache[i][j] = g->memerrmsg;
+  g->stoperrmsg = luaS_newliteral(L, "task stopped");
+  luaC_fix(L, obj2gco(g->stoperrmsg));
 }
 
 

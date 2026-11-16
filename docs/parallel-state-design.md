@@ -1390,6 +1390,52 @@ This establishes the file-execution boundary, not complete I/O-library/resource
 affinity or compiler fairness. Debug/OS/I/O libraries, required native modules
 and the remaining scheduler lifecycle/performance gates remain open.
 
+## Private task stop-request experiment
+
+`luaTK_requeststop` accepts idempotent, sticky requests while a private task record
+is admitted or running. Requesters receive the record only after successful
+admission. It takes the world bookkeeping mutex but does not enter
+a state gate, allocate, join a carrier or change the task's phase. Requests after
+return/finishing/completion/collection are rejected. The VM and caller-owned
+record must outlive every entered operation, as for the existing task interfaces.
+
+Delivery checks run at protected resume entry, Lua function entry, VM/owned-byte
+polls and completed frames after normal result transfer, including yielded C
+continuations. Only the owning VM is
+interrupted; another VM entered through native work remains opaque until that
+work returns. A callback without the current protected receiver defers delivery
+until an appropriate protected boundary is owned, including its native caller's
+return. An unprotected entry does not itself become a new panic boundary.
+Delivery pushes a fixed VM-owned error and throws through the
+current protected boundary without allocating or invoking a message handler.
+The request remains latched through `pcall`/`xpcall` recovery. This is an
+experimental termination mechanism, not a committed public cancellation contract.
+
+Task finishing and active close operations are exempt from new delivery so that
+normal close cleanup can run. Close errors retain their ordinary outcome rules.
+The atomic delivery flag is diagnostic, not acknowledgment. A native caller can
+receive a stopped nested Lua callback and continue holding its native activation;
+the task root and owners remain live until the binding returns and task finishing
+acknowledges cleanup. An accepted request can also race with already-completed
+execution and leave its normal outcome intact. Neither acceptance nor delivery
+implies that native work stopped or that a side effect did not happen.
+
+`task_stop_*` covers raw/C89 tasks under both collectors on constrained GNU and
+native musl workers. Gates exercise pre-start requests, CPU loops, parsers,
+yielded tasks, protected calls, native bindings/callbacks, isolated VM entry,
+cleanup errors and native cleanup waits. Peer tasks complete during those waits;
+GC checks retained owners and exactly-once finalization. Concurrent requesters
+and a paused completion-publication boundary exercise request/outcome races.
+Allocation denial surrounds request and delivery separately from host GC and
+finishing, and must record zero attempts to allocate. Cleanup executes a long
+Lua loop after delivery to prove the finishing exemption.
+
+Requests do not yet wake resource waits or remove registered waiters. Such waits
+still need cancellation-aware notification and lease retirement before delivery;
+throwing out of generic lock/ticket bookkeeping would be incorrect. Retained-stack
+cancellation, deadlines, admission shutdown and public outcome policy remain
+unproven. This experiment does not satisfy or narrow those required gates.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

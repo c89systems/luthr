@@ -31,6 +31,7 @@
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
+#include "ltask.h"
 #include "lvm.h"
 
 
@@ -1226,6 +1227,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #include "ljumptab.h"
 #endif
  startfunc:
+  luaTK_checkstop(L);
   trap = gethookmask(L);
  returning:  /* trap already set */
   cl = ci_func(ci);

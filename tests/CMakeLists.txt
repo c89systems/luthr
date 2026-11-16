@@ -16,6 +16,21 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(task_stop_test task_stop_test.c)
+set_target_properties(task_stop_test PROPERTIES C_STANDARD 99)
+target_compile_options(task_stop_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(task_stop_test PRIVATE luthrum_static)
+target_link_options(task_stop_test PRIVATE -Wl,--wrap=lua_resume)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS prestart cpu catch xpcall native native_oom continuation callback unprotected foreign_vm oom parser parser_oom yield cleanup_error cleanup_wait request_race late)
+      add_test(NAME task_stop_${backend}_${case}_${gc}
+        COMMAND task_stop_test ${backend}_${case}_${gc})
+      set_tests_properties(task_stop_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 120)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(file_library_test file_library_test.c)
 set_target_properties(file_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(file_library_test PRIVATE -Wall -Wextra -Werror)

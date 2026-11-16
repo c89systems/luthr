@@ -259,6 +259,16 @@ normally. Native callback variants load another file on the original carrier.
 File reading/compilation remains native; this does not prove bounded work or
 resource affinity for every I/O path.
 
+`task_stop_*` checks the private stop-request experiment. Explicit gates hold a
+task before start, in a CPU loop/parser, after yielding, inside an unchanged
+native call/continuation or inside native close cleanup. Independent tasks must
+still finish, and collection must retain active native/cleanup owners. Other cases cover repeated
+and concurrent requests, protected calls, protected/unprotected native callbacks,
+another VM, normal completion racing a request and cleanup errors. Denial checks separately
+prove request/delivery make no allocation attempts; explicit host GC runs outside
+the denial interval. A request/delivery flag never substitutes for completion.
+These tests do not establish interruptible resource waits or shutdown.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.

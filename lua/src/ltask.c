@@ -4,7 +4,45 @@
 #include "lprefix.h"
 
 #include "lapi.h"
+#include "ldo.h"
+#include "lgc.h"
 #include "ltask.h"
+
+int luaTK_requeststop (LuaTaskRoot *task) {
+  LuaWorld *world;
+  int status = LUA_TK_INVALID;
+  if (task->global == NULL) return status;
+  world = &task->global->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (task->phase == LUA_TASK_ADMITTED || task->phase == LUA_TASK_RUNNING) {
+    __atomic_store_n(&task->stop_requested, 1, __ATOMIC_RELEASE);
+    status = LUA_OK;
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  return status;
+}
+
+void luaTK_checkstop (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  LuaTaskRoot *task;
+  int deliver;
+  if (execution == NULL || L->errorJmp == NULL ||
+      L->errorJmp != execution->protected) return;
+  task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
+  if (task == NULL || task->global != G(L) ||
+      !__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return;
+  luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
+  deliver = task->phase == LUA_TASK_RUNNING && L->close_active == 0;
+  luaX_checksync(pthread_mutex_unlock(&task->global->world.mutex));
+  if (deliver) {
+    lua_assert(L->errorJmp != NULL);
+    lua_assert(L->top.p < L->stack_last.p + EXTRA_STACK);
+    __atomic_store_n(&task->stop_delivered, 1, __ATOMIC_RELEASE);
+    setsvalue2s(L, L->top.p, G(L)->stoperrmsg);
+    L->top.p++;
+    luaD_throw(L, LUA_ERRRUN);
+  }
+}
 
 static int driver (LuaTaskRoot *task) {
   LuaExecution *execution = luaQ_current();

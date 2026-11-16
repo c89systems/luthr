@@ -21,6 +21,8 @@ typedef struct LuaTaskRoot {
   int phase;
   int status;
   int results;
+  int stop_requested;  /* atomic, sticky until the record is retired */
+  int stop_delivered;  /* atomic diagnostic, not completion acknowledgment */
 } LuaTaskRoot;
 
 /* The record and execution are initially zeroed and outlive all entered calls,
@@ -49,5 +51,16 @@ LUAI_FUNC int luaTK_collect (lua_State *L, LuaTaskRoot *task,
 ** The receiver remains rooted by its caller throughout the entered call. */
 LUAI_FUNC int luaTK_await (lua_State *L, LuaTaskRoot *task,
                            int *status, int *results);
+/* Private feasibility boundary. Publish a record to requesters only after
+** successful admission. Requests accepted only while admitted/running;
+** repeated requests are idempotent. No state gate, allocation or native join.
+** A request does not wake resource waits or acknowledge native completion. */
+LUAI_FUNC int luaTK_requeststop (LuaTaskRoot *task);
+/* State ownership and the current protected execution boundary are required.
+** Delivery uses a fixed error, bypassing message handlers. Finishing/close
+** cleanup is exempt. Other VMs entered by a native caller remain opaque work.
+** Unprotected sibling calls defer delivery until a protected boundary is owned.
+** Never call this while resource bookkeeping still needs retirement. */
+LUAI_FUNC void luaTK_checkstop (lua_State *L);
 
 #endif

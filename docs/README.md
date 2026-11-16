@@ -93,6 +93,10 @@ through collection, including allocation-failure retry and error cleanup.
 Private awaiting now parks managed tasks or preserves a native caller's carrier,
 including simultaneous Lua execution with two managed permits while two native
 slots are blocked. The public task API, cancellation and shutdown remain unfinished.
+Private stop requests now have safe-point delivery evidence, including sticky
+protected-call interruption, allocation-free delivery and retention of native and
+cleanup owners until acknowledgment. Interruptible resource waits, retained-stack
+cancellation and shutdown still need their own gates.
 
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under

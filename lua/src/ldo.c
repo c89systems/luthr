@@ -32,6 +32,7 @@
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
+#include "ltask.h"
 #include "lundump.h"
 #include "lvm.h"
 #include "lzio.h"
@@ -747,6 +748,7 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
   lua_assert(!(ci->callstatus &
         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));
   L->ci = ci->previous;  /* back to caller (after closing variables) */
+  luaTK_checkstop(L);
 }
 
 
@@ -1066,6 +1068,7 @@ static void resume (lua_State *L, void *ud) {
   int n = *(cast(int*, ud));  /* number of arguments */
   StkId firstArg = L->top.p - n;  /* first argument */
   CallInfo *ci = L->ci;
+  luaTK_checkstop(L);
   if (L->status == LUA_OK)  /* starting a coroutine? */
     ccall(L, firstArg - 1, LUA_MULTRET, 0);  /* just call its body */
   else {  /* resuming from previous yield */

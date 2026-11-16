@@ -11,6 +11,7 @@
 #include "lgate.h"
 #include "ldo.h"
 #include "lstate.h"
+#include "ltask.h"
 
 void luaX_checksync (int status) {
   if (status != 0) {
@@ -158,4 +159,5 @@ void luaX_poll (lua_State *L) {
     L->state_poll(L, L->state_poll_context);
   depth = luaW_detach(L);
   luaW_attach(L, depth);
+  luaTK_checkstop(L);
 }
