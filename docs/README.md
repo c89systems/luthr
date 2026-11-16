@@ -1,124 +1,43 @@
-# Luthrum
+# Luthr
 
-Luthrum is Lua 5.5.1 without a global execution lock, with shared-VM scheduling
-under development. Ordinary language, library, interpreter and native API
-behavior must remain compatible with upstream Lua. Luthrum owns its runtime
-and strict C89 SDK. Independent Lua module projects own their builds and
-integration tests; they are not runtime dependencies or specialization targets.
+Luthr is Lua 5.5.1 without a global interpreter lock, with shared-VM parallel
+execution and runtime-owned scheduling. Upstream language/library and supported
+native API behavior are the compatibility contract. Internal data structures,
+compiler lowering, object/capture representation, allocation, GC and scheduling
+may all be replaced to meet it. Independent module projects are consumers,
+not implementation targets or runtime dependencies.
 
-The project follows the C/CMake lifecycle: Make exposes commands, Bash handles
-sequencing, CMake owns the build graph, and CTest owns verification. Initial
-implementation and verification focus on x86_64; other architectures are deferred
-until the runtime is established on this architecture.
+## Governing documents
 
-The initial products are static and shared runtime libraries, a strict C89 SDK,
-an interpreter, and a bytecode compiler. This phase changes only Luthrum and
-verifies consumers against its installed SDK. Independent consumers own their
-migrations to that SDK.
+- [Runtime specification](coroutine-multiplexing-concept.md): required behavior,
+  no-global-gate contract, native/lifecycle guarantees and products.
+- [Runtime architecture](parallel-state-design.md): distributed ownership and
+  the connected memory, execution and native surfaces.
+- [Delivery plan](implementation-plan.md): large coherent cutovers, short early
+  unit/invariant checks, and final exhaustive verification.
+- [Building and testing](building.md): commands and prepared toolchain usage.
+- [Embedding policy](embedding-policy.md): current C89 policy interface.
+- [Lua provenance](lua-source.md) and [C89 facade provenance](cpkt-source.md):
+  owned source origins and compatibility inputs.
 
-The execution model separates a task, its carrier OS thread, and permission to
-execute Lua. Lua bytecode must execute in parallel across cores within one
-shared VM, without a global interpreter lock. Blocking native work must release
-managed execution capacity so runnable tasks can progress on another carrier.
-Runtime-managed waits park tasks, and CPU-bound Lua tasks must hand off execution
-without application-authored yields. Safe migration, bounded carrier growth,
-and reserved progress capacity are required. Automatic carrier sizing starts
-from usable logical CPUs; the cap and native compensation policy require
-workload measurements.
+## Current state
 
-## Source baseline
+The project is undergoing a runtime overhaul. The prior object/heap ownership
+protocol uses VM-wide coordination on ordinary operations and is rejected as
+the final architecture. Existing tests, native fixtures, SDK machinery and
+portable upstream comparisons remain useful inputs. They do not establish that
+the current implementation meets the no-GIL product contract.
 
-The complete Lua 5.5.1 release is checked in at [`lua/`](../lua/).
-Its source, headers, documentation, license notice, and upstream Makefiles are
-unmodified in the initial import. [Provenance and ownership](lua-source.md)
-record the source archive and verified checksum.
+Implementation proceeds in substantial connected surfaces with selected short
+unit and invariant checks. Full E2E, official suites, benchmark matrices,
+exhaustive stress, broad memory/race checks and artifact certification follow
+once the integrated runtime is useful. This defers verification cost, not the
+final compatibility and correctness requirements.
 
-Lua source changes belong directly in this repository; there is no patch series
-or build-time source download. The current build includes the native runtime,
-the extracted C89 interfaces, interpreter, compiler and installed-SDK tests.
-Native-stack protection and finalizer instruction accounting are direct Lua
-source changes. The parallel scheduler and release packaging remain unfinished.
-
-See [building and testing](building.md), [embedding policy](embedding-policy.md)
-and [C89 facade provenance](cpkt-source.md).
-
-The [parallel-state investigation](parallel-state-design.md) compares
-free-threaded CPython and Go and records the first shared-VM candidate and its
-required evidence. Private shared-VM execution and collection experiments are
-implemented with explicit limits, including allocating coroutines, live and
-joined Lua/C captures, shared-table/metatable and registry operations, and forced
-GC at API ownership boundaries. Cross-state transfers, parent-call snapshots,
-carrier-local error forwarding and callback configuration have focused parallel
-regressions. Asynchronous native hook publication avoids walking live frames or
-waiting for the interrupted coroutine's gate. Parallel C89 policy experiments
-cover aggregate instruction budgets, observer dispatch, coroutine context and
-allocator ownership. A private retained-stack experiment proves Lua-task
-migration and CPU handoff over two reused carriers, including GC and moved
-error boundaries. A bounded native-call experiment proves queued Lua and nested
-callback progress while unchanged bindings occupy both native slots, including
-instruction budgets and observer admission. Runtime wait experiments also cover
-task parking at coroutine, object, metadata and collection waits, ownership on
-reused carriers, forced migration and early notification. A private registered
-callback prototype adds protected foreign-thread entry, nested calls at native
-saturation, live captures and revocation with retained roots. General external
-admission, native-resource affinity, shutdown and installed scheduling remain unfinished.
-Audited runtime closures and bounded chunk pipes now have private streaming
-proofs for backpressure, migration, native saturation and foreign callbacks;
-independent module projects own their integration tests against those guarantees.
-Owned base/coroutine control functions and C89 policy wrappers now support these
-parking/migration paths, with stable function identity on reopening and rooted
-wrapped-coroutine snapshots. Math/table helpers and auxiliary-buffer cleanup now
-also support managed execution, with scoped ownership for shared PRNG state.
-UTF-8 helpers also support managed execution, with bounded work checkpoints
-and private roots for input strings across parking and debug argument changes.
-String pattern helpers also support managed execution, with invocation-local
-matching scratch, rooted inputs/replacements and synchronized shared iterators.
-String slicing, case conversion, repetition, byte conversion, formatting and
-packing helpers now also support managed execution and bounded work checkpoints.
-Dumping and string-arithmetic callbacks also support managed execution, with
-private roots and native-writer admission preserved. Long numeric-input parsing
-still needs its separate fairness proof.
-Loading from memory and Lua reader callbacks now supports managed execution,
-with private parser/fragment roots and checkpoints during input consumption.
-Public reader callbacks and file I/O retain native admission.
-Package `require` and its preload searcher now support managed orchestration,
-with private snapshots across loader callbacks and bounded search-error copying.
-File and dynamic-library searchers keep their native boundaries.
-`dofile` now releases file-loading admission before running the loaded chunk,
-including parked callbacks and yielded continuations. `loadfile` privately roots
-its filename, mode and environment while file reading/compilation remains native.
-Other libraries still require their audit.
-Resume/close operation scopes now reject overlap through argument/result
-transfer and cleanup, retaining both states through GC and protected unwinding.
-Private scheduled-task records now reserve coroutines and retain their results
-through collection, including allocation-failure retry and error cleanup.
-Private awaiting now parks managed tasks or preserves a native caller's carrier,
-including simultaneous Lua execution with two managed permits while two native
-slots are blocked. The public task API, cancellation and shutdown remain unfinished.
-Private stop requests now have safe-point delivery evidence, including sticky
-protected-call interruption, allocation-free delivery and retention of native and
-cleanup owners until acknowledgment. Owned pipe/result waits now retire their
-registrations and notifier borrows before delivery, including forced carrier
-migration and early notification. General cancellation, deadlines and shutdown
-still need their remaining gates.
-
-Private admission shutdown closes task admission and retains outcomes until
-collection. Private carrier-affinity regions keep scoped native resource
-create/use/close on their carrier while allowing parked carriers to be reused.
-Auxiliary reference allocation/freeing uses table-owned transactions so
-parallel Lua API callers cannot receive the same live registry reference.
-Generic tests cover competing calls, GC, allocation-failure recovery and hooks.
-
-Luthrum is Lua 5.5.1 with shared-VM parallel execution and runtime-owned
-scheduling. Ordinary Lua behavior remains the upstream compatibility contract.
-Standard E2E tests run identical Lua code on Luthrum and pristine upstream Lua,
-compare results and cross-execute each compiler's bytecode. Concurrency-specific
-tests separately prove Luthrum's additional scheduling capabilities.
-Independent Lua module projects own their integration tests against the installed
-runtime and SDK. Module-specific adapters and dependencies do not belong in
-Luthrum's implementation or test lifecycle. Public scheduling, resource lifetime
-policy and sizing remain open.
-
-The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
-the scheduling requirements and feasibility gates. Documentation belongs under
-`docs/`; the root README is a navigation entrypoint.
+The products are libluthr static/shared libraries, strict C89 headers under
+include/luthr, the luthr interpreter and luthrc compiler, and relocatable CMake/
+pkg-config metadata. Initial supported targets are x86_64 Linux GNU and musl.
+Source is owned directly under lua/; documentation belongs under docs/.
+The project follows the selected C/CMake lifecycle. No sibling-project changes,
+additional architectures, pushes or release publication are authorized by this
+implementation plan.

@@ -2,7 +2,7 @@
 #include <lauxlib.h>
 #include <lstate.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +17,7 @@
   } while (0)
 struct fixture {
   lua_State *state;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   const char *mode;
   size_t live;
   unsigned remaining, failures, admissions, released;
@@ -155,11 +155,11 @@ static void admission(struct fixture *test) {
       "package.preload.foreign=native_loader; "
       "local file=package.searchers[2]; "
       "function file_call() "
-      "assert(type(file('luthrum_package_absent_123'))=='string') end; "
+      "assert(type(file('luthr_package_absent_123'))=='string') end; "
       "function path_call() "
-      "assert(package.searchpath('absent','/luthrum-absent/?.lua')==nil) end; "
+      "assert(package.searchpath('absent','/luthr-absent/?.lua')==nil) end; "
       "function library_call() "
-      "assert(package.loadlib('/luthrum-absent/lib.so','none')==nil) end; "
+      "assert(package.loadlib('/luthr-absent/lib.so','none')==nil) end; "
       "local preload=package.searchers[1]; package.searchers={preload, "
       "function(n) if n=='scripted' then return function() return 42 end end; "
       "if n=='native' then return native_searcher(n) end end}; "
@@ -283,20 +283,19 @@ static void *run(void *context) {
   lua_State *state;
   if (strstr(test->mode, "facade")) {
     static const unsigned char source[] = "require('fixture')";
-    luthrum_lua_runtime_allocator_config config = {0};
+    luthr_lua_runtime_allocator_config config = {0};
     config.user = test;
     config.alloc_fn = host_allocate;
     config.realloc_fn = allocate;
     config.free_fn = host_free;
-    require(luthrum_lua_runtime_new_with_allocator(&test->runtime, &config) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(test->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(
-                test->runtime, "fixture", capture) == LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(
-                test->runtime, source, sizeof(source) - 1, "package-library", 0,
-                NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_new_with_allocator(&test->runtime, &config) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(test->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(
+                test->runtime, "fixture", capture) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(test->runtime, source,
+                                         sizeof(source) - 1, "package-library",
+                                         0, NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     test->state = lua_newstate(allocate, test, 0);
     require(test->state != NULL);
@@ -396,7 +395,7 @@ static void *run(void *context) {
     oom(test);
   require(state->native_roots == NULL && state->object_scopes == NULL);
   if (test->runtime)
-    luthrum_lua_runtime_free(test->runtime);
+    luthr_lua_runtime_free(test->runtime);
   else
     lua_close(state);
   require(test->live == 0);

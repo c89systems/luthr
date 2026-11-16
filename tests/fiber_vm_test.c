@@ -153,7 +153,7 @@ static void poll(lua_State *state, void *user) {
   check(test_register_pause(&task->fiber));
   luaD_rebindexecution(&task->fiber.execution);
   luaW_attach(state, task->world);
-  if (state->luthrum_stack_context != &task->fiber.native)
+  if (state->luthr_stack_context != &task->fiber.native)
     abort();
   verify_rounding(task->rounding);
 }
@@ -393,7 +393,7 @@ static int exercise_vm(int generational) {
     if (luaL_loadstring(task->state, "return 42") != LUA_OK ||
         lua_resume(task->state, NULL, 0, &task->results) != LUA_OK ||
         lua_tointeger(task->state, -1) != 42 ||
-        task->state->luthrum_stack_context == &task->fiber.native)
+        task->state->luthr_stack_context == &task->fiber.native)
       abort();
     test_fiber_destroy(&task->fiber);
   }

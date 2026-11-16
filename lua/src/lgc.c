@@ -26,7 +26,7 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "lroots.h"
-#include "luthrum_hook_policy.h"
+#include "luthr_hook_policy.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -1064,7 +1064,7 @@ static void GCTM (lua_State *L) {
     LuaWorldScope depth;
     g->gcstp |= GCSTPGC;  /* avoid GC steps */
     /* Embedding limits also account for Lua finalizer instructions. */
-    L->allowhook = (gethookmask(L) & LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
+    L->allowhook = (gethookmask(L) & LUTHR_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
     setobj2s(L, L->top.p++, &method.value);  /* push finalizer... */
     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */

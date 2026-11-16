@@ -689,7 +689,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 
 static const char *match (MatchState *ms, const char *s, const char *p) {
   /* Pattern recursion also runs outside interpreter C-call accounting. */
-  if (l_unlikely(luaD_nativeposition() <= ms->L->luthrum_stack_limit)) {
+  if (l_unlikely(luaD_nativeposition() <= ms->L->luthr_stack_limit)) {
     lua_lock(ms->L);
     luaD_checknativestack(ms->L);
     lua_unlock(ms->L);

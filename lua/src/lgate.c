@@ -15,7 +15,7 @@
 
 void luaX_checksync (int status) {
   if (status != 0) {
-    fprintf(stderr, "Luthrum internal synchronization failure: %d\n", status);
+    fprintf(stderr, "Luthr internal synchronization failure: %d\n", status);
     abort();
   }
 }
@@ -53,7 +53,7 @@ static void reserve (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
   /* Recursive entry is an internal boundary error, not a wait for ourselves. */
   if (gate->owned && luaQ_isowner(&gate->owner)) {
-    fputs("Luthrum recursive coroutine stack gate entry\n", stderr);
+    fputs("Luthr recursive coroutine stack gate entry\n", stderr);
     abort();
   }
   ticket = gate->next_ticket++;
@@ -70,7 +70,7 @@ static void release (lua_State *L) {
   lua_assert(L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&gate->mutex));
   if (!gate->owned || !luaQ_isowner(&gate->owner)) {
-    fputs("Luthrum coroutine stack gate released by a non-owner\n", stderr);
+    fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
   gate->owned = 0;
@@ -91,8 +91,8 @@ void luaX_unlockstate (lua_State *L) {
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
   if (L->errorJmp == NULL && luaQ_current() != NULL) {
-    L->luthrum_stack_context = NULL;
-    L->luthrum_stack_limit = 0;
+    L->luthr_stack_context = NULL;
+    L->luthr_stack_limit = 0;
   }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
@@ -127,12 +127,12 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
     second = swap;
   }
   if (first->errorJmp == NULL && luaQ_current() != NULL) {
-    first->luthrum_stack_context = NULL;
-    first->luthrum_stack_limit = 0;
+    first->luthr_stack_context = NULL;
+    first->luthr_stack_limit = 0;
   }
   if (second != first && second->errorJmp == NULL && luaQ_current() != NULL) {
-    second->luthrum_stack_context = NULL;
-    second->luthrum_stack_limit = 0;
+    second->luthr_stack_context = NULL;
+    second->luthr_stack_limit = 0;
   }
   if (second != first) release(second);
   release(first);

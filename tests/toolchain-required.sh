@@ -8,7 +8,7 @@ if output=$(cmake -S "$1" -B "$2" -G Ninja 2>&1); then
   printf 'Configure unexpectedly accepted an undeclared host toolchain\n' >&2
   exit 1
 fi
-if [[ "$output" != *'Luthrum requires CMAKE_TOOLCHAIN_FILE='* ]]; then
+if [[ "$output" != *'Luthr requires CMAKE_TOOLCHAIN_FILE='* ]]; then
   printf 'Configure failed for an unrelated reason:\n%s\n' "$output" >&2
   exit 1
 fi

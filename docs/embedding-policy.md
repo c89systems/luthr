@@ -9,8 +9,8 @@ extended by [allocating VM tests](parallel-state-design.md#allocating-shared-vm-
 exercise constrained concurrent execution. Shared-container synchronization and
 the public API audit remain unfinished; this does not change the public contract.
 
-The full `<luthrum/lua.h>` facade preserves Lua's public C API. The separate
-`<luthrum/lua_runtime.h>` facade owns a VM and adds embedding policy, including
+The full `<luthr/lua.h>` facade preserves Lua's public C API. The separate
+`<luthr/lua_runtime.h>` facade owns a VM and adds embedding policy, including
 allocation caps, warning callbacks and an optional instruction limit.
 
 Owned Lua also checks native recursion against the current OS thread's stack
@@ -52,7 +52,7 @@ If OS stack bounds cannot be discovered, protected execution fails without
 invoking its error handler; discovery is retried on the next outer entry.
 
 With a limit enabled, exhaustion ends the host invocation with
-`LUTHRUM_LUA_RUNTIME_ERR_LIMIT`. Lua `pcall` and `xpcall` cannot repeatedly swallow
+`LUTHR_LUA_RUNTIME_ERR_LIMIT`. Lua `pcall` and `xpcall` cannot repeatedly swallow
 that failure. Their normal error results, argument forwarding and yielding
 continuations remain native Lua behavior. Each host invocation receives a fresh
 instruction budget; after exhaustion, the next invocation can run without
@@ -65,7 +65,7 @@ The private parallel-policy experiment also verifies this shared counter across
 simultaneously executing coroutines, including observation and fresh-budget
 recovery. This does not authorize concurrent host operations on the handle.
 
-`luthrum_lua_runtime_set_trace_callback()` installs an optional line observer with
+`luthr_lua_runtime_set_trace_callback()` installs an optional line observer with
 caller-owned context. Each synchronous callback receives a borrowed snapshot of
 the source identifier, its byte length and the positive one-based line about to
 execute. Source identifiers follow Lua's conventions: `@path`, `=name`, or source
@@ -79,11 +79,11 @@ The runtime multiplexes line events with its count hook. Observation neither
 consumes an extra instruction budget unit nor replenishes the budget. With no
 limit, only line observation is enabled. Passing NULL removes the observer.
 Install or remove it between host operations. Changes from warning callbacks or
-C module openers during execution or destruction return `LUTHRUM_LUA_RUNTIME_ERR_ARG`.
+C module openers during execution or destruction return `LUTHR_LUA_RUNTIME_ERR_ARG`.
 Replacement or removal inside the trace callback takes effect on the next event,
 including events from another coroutine. Read-only facade calls are allowed
 inside an observer. Other operations on the same runtime return
-`LUTHRUM_LUA_RUNTIME_ERR_ARG`, or do nothing for void functions, without changing
+`LUTHR_LUA_RUNTIME_ERR_ARG`, or do nothing for void functions, without changing
 the runtime error. This includes execution, instruction-limit changes and free.
 Do not access its Lua state through another API from the callback. Callbacks
 must return normally; yielding, raising Lua errors and longjmp are unsupported.
@@ -105,16 +105,16 @@ handler. Owned Lua has opt-in collector behavior that preserves instruction hook
 during finalizers for the runtime's private hook-mask bit. Ordinary native Lua
 hooks keep upstream finalizer suppression. This changes no public types or
 symbols; the collector source and shared private header are tracked build inputs.
-`luthrum_lua_runtime_free()` grants finalizers a fresh configured budget while the
+`luthr_lua_runtime_free()` grants finalizers a fresh configured budget while the
 limit remains enabled. Finalizer errors use the warning callback. Clearing the
 limit also removes accounting during finalization.
 
 The runtime handle lives in Lua's embedder extra space, outside the registry that
 `debug.getregistry()` exposes. Native C module openers borrow a VM state and must
 leave that extra space intact. Modules should use their own registry keys or
-userdata for module state. `luthrum_lua_runtime_context_from_state()` supplies the
+userdata for module state. `luthr_lua_runtime_context_from_state()` supplies the
 embedding context without changing ownership. C89 module callbacks can use
-`<luthrum/lua.h>` with the borrowed state; upstream headers require C99 or newer.
+`<luthr/lua.h>` with the borrowed state; upstream headers require C99 or newer.
 
 Coroutine wrappers install the runtime's hook and delegate execution, stack
 growth, return/yield transfers and error closure to Lua's own coroutine library.

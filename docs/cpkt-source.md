@@ -5,7 +5,7 @@ and their regression tests were extracted from cpkt at commit
 `f51ceac900ac39db63a018576c5329a2b2244e5c`.
 
 The copied source was clean relative to that commit. Public identifiers now use
-the `luthrum_` prefix, headers use `luthrum/`, and build integration is owned by
+the `luthr_` prefix, headers use `luthr/`, and build integration is owned by
 this repository. There is no build-time dependency on a cpkt checkout or SDK.
 Lua changes are maintained directly in `lua/src/`.
 

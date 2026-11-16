@@ -3,7 +3,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -67,12 +67,12 @@ static const struct stack_case cases[] = {
     {"suspended_migration", ""},
     {"yield_entry", ""},
     {"self_close", ""},
-#ifdef LUTHRUM_TEST_WRAP_BOUNDS
+#ifdef LUTHR_TEST_WRAP_BOUNDS
     {"bounds", ""},
 #endif
 };
 
-#ifdef LUTHRUM_TEST_WRAP_BOUNDS
+#ifdef LUTHR_TEST_WRAP_BOUNDS
 /* Only the static regression binary wraps discovery; production has no switch.
  */
 static int fail_bounds;
@@ -117,7 +117,7 @@ static int check_bounds(lua_State *state) {
 #endif
 
 struct trace_context {
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   unsigned calls;
   int failed;
 };
@@ -255,13 +255,13 @@ static int native_module(void *state) {
   return 0;
 }
 
-static void trace(void *context, const luthrum_lua_runtime_trace_event *event) {
+static void trace(void *context, const luthr_lua_runtime_trace_event *event) {
   struct trace_context *capture = context;
   (void)event;
   ++capture->calls;
-  if (luthrum_lua_runtime_run_buffer(
+  if (luthr_lua_runtime_run_buffer(
           capture->runtime, (const unsigned char *)"return true", 11,
-          "trace-reentry", 0, NULL, 0) != LUTHRUM_LUA_RUNTIME_ERR_ARG)
+          "trace-reentry", 0, NULL, 0) != LUTHR_LUA_RUNTIME_ERR_ARG)
     capture->failed = 1;
 }
 
@@ -283,7 +283,7 @@ static int run_case(struct worker_context *context) {
     return check_yield_entry(context->migrating_state);
   if (strcmp(context->test->name, "self_close") == 0)
     return check_self_close(context->migrating_state);
-#ifdef LUTHRUM_TEST_WRAP_BOUNDS
+#ifdef LUTHR_TEST_WRAP_BOUNDS
   if (strcmp(context->test->name, "bounds") == 0)
     return check_bounds(context->migrating_state);
 #endif
@@ -323,36 +323,35 @@ static int run_case(struct worker_context *context) {
       status = lua_pcall(root, 0, 0, 0);
     return status != LUA_OK;
   } else {
-    luthrum_lua_runtime *runtime = NULL;
+    luthr_lua_runtime *runtime = NULL;
     struct trace_context capture;
-    if (luthrum_lua_runtime_new(&runtime) != LUTHRUM_LUA_RUNTIME_OK)
+    if (luthr_lua_runtime_new(&runtime) != LUTHR_LUA_RUNTIME_OK)
       return 1;
     memset(&capture, 0, sizeof(capture));
     capture.runtime = runtime;
-    if (luthrum_lua_runtime_openlibs(runtime) != LUTHRUM_LUA_RUNTIME_OK ||
-        luthrum_lua_runtime_register_c_module(
-            runtime, "native_stack", native_module) != LUTHRUM_LUA_RUNTIME_OK ||
-        luthrum_lua_runtime_require(runtime, "native_stack") !=
-            LUTHRUM_LUA_RUNTIME_OK)
+    if (luthr_lua_runtime_openlibs(runtime) != LUTHR_LUA_RUNTIME_OK ||
+        luthr_lua_runtime_register_c_module(
+            runtime, "native_stack", native_module) != LUTHR_LUA_RUNTIME_OK ||
+        luthr_lua_runtime_require(runtime, "native_stack") !=
+            LUTHR_LUA_RUNTIME_OK)
       return 1;
     if (context->mode == 3 &&
-        luthrum_lua_runtime_set_trace_callback(runtime, trace, &capture) !=
-            LUTHRUM_LUA_RUNTIME_OK)
+        luthr_lua_runtime_set_trace_callback(runtime, trace, &capture) !=
+            LUTHR_LUA_RUNTIME_OK)
       return 1;
-    status = luthrum_lua_runtime_run_buffer(
+    status = luthr_lua_runtime_run_buffer(
         runtime, (const unsigned char *)program, strlen(program),
         "native-stack", 0, NULL, 0);
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
-      fprintf(stderr, "Runtime error: %s\n",
-              luthrum_lua_runtime_error(runtime));
-      luthrum_lua_runtime_free(runtime);
+    if (status != LUTHR_LUA_RUNTIME_OK) {
+      fprintf(stderr, "Runtime error: %s\n", luthr_lua_runtime_error(runtime));
+      luthr_lua_runtime_free(runtime);
       return 1;
     }
-    status = luthrum_lua_runtime_run_buffer(
+    status = luthr_lua_runtime_run_buffer(
         runtime, (const unsigned char *)recovery, sizeof(recovery) - 1,
         "stack-recovery", 0, NULL, 0);
-    luthrum_lua_runtime_free(runtime);
-    return status != LUTHRUM_LUA_RUNTIME_OK || capture.failed ||
+    luthr_lua_runtime_free(runtime);
+    return status != LUTHR_LUA_RUNTIME_OK || capture.failed ||
            (context->mode == 3 && capture.calls == 0);
   }
 }
@@ -390,7 +389,7 @@ static int exercise(const struct stack_case *test) {
   int single_mode = test->program[0] == '\0';
   memset(&context, 0, sizeof(context));
   context.test = test;
-#ifdef LUTHRUM_TEST_SMALL_NATIVE_STACK
+#ifdef LUTHR_TEST_SMALL_NATIVE_STACK
   /* glibc otherwise hides the default-musl-stack regression with several MiB.
    */
   if (pthread_attr_init(&attributes) != 0 ||
@@ -450,7 +449,7 @@ static int exercise(const struct stack_case *test) {
     }
   }
   lua_close(context.migrating_state);
-#ifdef LUTHRUM_TEST_SMALL_NATIVE_STACK
+#ifdef LUTHR_TEST_SMALL_NATIVE_STACK
   pthread_attr_destroy(&attributes);
 #endif
   return 0;

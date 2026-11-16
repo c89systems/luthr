@@ -22,8 +22,8 @@ set_target_properties(upstream_lua_reference PROPERTIES C_STANDARD 99)
 target_compile_definitions(upstream_lua_reference PRIVATE LUA_USE_LINUX)
 target_include_directories(upstream_lua_reference PUBLIC "${reference_dir}")
 target_link_libraries(upstream_lua_reference PUBLIC m ${CMAKE_DL_LIBS})
-luthrum_test_program(upstream_lua "${reference_dir}/lua.c")
-luthrum_test_program(upstream_luac "${reference_dir}/luac.c")
+luthr_test_program(upstream_lua "${reference_dir}/lua.c")
+luthr_test_program(upstream_luac "${reference_dir}/luac.c")
 foreach(program IN ITEMS upstream_lua upstream_luac)
   set_target_properties(${program} PROPERTIES C_STANDARD 99)
   target_compile_definitions(${program} PRIVATE LUA_USE_LINUX)
@@ -32,8 +32,8 @@ endforeach()
 
 target_link_options(upstream_lua PRIVATE -Wl,--export-dynamic)
 
-foreach(runtime IN ITEMS upstream luthrum)
-  luthrum_test_program(parallel_${runtime} parallel.c)
+foreach(runtime IN ITEMS upstream luthr)
+  luthr_test_program(parallel_${runtime} parallel.c)
   target_sources(parallel_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/tests/private/cpu_capacity.c")
   set_target_properties(parallel_${runtime} PROPERTIES C_STANDARD 99)
   target_compile_options(parallel_${runtime} PRIVATE -Wall -Wextra -Werror)
@@ -43,8 +43,8 @@ foreach(runtime IN ITEMS upstream luthrum)
     target_link_libraries(parallel_${runtime} PRIVATE upstream_lua_reference)
     set(workers 1)
   else()
-    target_compile_definitions(parallel_${runtime} PRIVATE LUTHRUM_BENCH_SHARED_VM)
-    target_link_libraries(parallel_${runtime} PRIVATE luthrum_shared)
+    target_compile_definitions(parallel_${runtime} PRIVATE LUTHR_BENCH_SHARED_VM)
+    target_link_libraries(parallel_${runtime} PRIVATE luthr_shared)
     set(workers 2)
   endif()
   foreach(workload IN ITEMS integers independent_tables shared_table closures allocation_gc)
@@ -54,7 +54,7 @@ foreach(runtime IN ITEMS upstream luthrum)
           "${workload}" "${collector}" "${workers}" 8 256 2 1)
       set_tests_properties(lua_parallel_${runtime}_${workload}_${collector}
         PROPERTIES LABELS "runtime;benchmark;memcheck" TIMEOUT 30)
-      if(runtime STREQUAL "luthrum")
+      if(runtime STREQUAL "luthr")
         set_property(TEST lua_parallel_${runtime}_${workload}_${collector}
           APPEND PROPERTY LABELS parallel)
       endif()
@@ -63,17 +63,17 @@ foreach(runtime IN ITEMS upstream luthrum)
 endforeach()
 
 set(parallel_arguments
-  "-Dupstream=$<TARGET_FILE:parallel_upstream>" "-Dluthrum=$<TARGET_FILE:parallel_luthrum>"
-  "-Dlibrary=$<TARGET_FILE:luthrum_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
+  "-Dupstream=$<TARGET_FILE:parallel_upstream>" "-Dluthr=$<TARGET_FILE:parallel_luthr>"
+  "-Dlibrary=$<TARGET_FILE:luthr_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
-  "-Dtarget=${LUTHRUM_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
+  "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
   "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 add_custom_target(benchmark_parallel
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
     "${CMAKE_COMMAND}" ${parallel_arguments}
     "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/parallel"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkParallel.cmake"
-  DEPENDS parallel_upstream parallel_luthrum VERBATIM USES_TERMINAL)
+  DEPENDS parallel_upstream parallel_luthr VERBATIM USES_TERMINAL)
 add_test(NAME lua_parallel_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${parallel_arguments}
   -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=2048 "-Dlevels=1;2"
   "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/parallel-smoke"
@@ -116,32 +116,32 @@ foreach(module IN ITEMS lib1 lib11 lib2 lib21 lib2-v2)
     C_STANDARD 99 LIBRARY_OUTPUT_DIRECTORY "${suite_modules}")
   target_include_directories(lua_suite_${module} PRIVATE "${reference_dir}")
 endforeach()
-foreach(runtime IN ITEMS upstream luthrum)
+foreach(runtime IN ITEMS upstream luthr)
   if(runtime STREQUAL "upstream")
     set(suite_runtime upstream_lua)
   else()
-    set(suite_runtime luthrum_test_host)
+    set(suite_runtime luthr_test_host)
   endif()
   add_test(NAME lua_official_${runtime} COMMAND "${CMAKE_COMMAND}"
     "-Druntime=$<TARGET_FILE:${suite_runtime}>" "-Darchive=${suite_archive}"
-    "-Dmodule_dir=${suite_modules}" "-Dtarget=${LUTHRUM_TARGET}"
+    "-Dmodule_dir=${suite_modules}" "-Dtarget=${LUTHR_TARGET}"
     "-Dwork_dir=${CMAKE_CURRENT_BINARY_DIR}/official-${runtime}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/OfficialLua.cmake")
   set_tests_properties(lua_official_${runtime} PROPERTIES LABELS "runtime;compatibility" TIMEOUT 900)
 endforeach()
 
 set(benchmark_arguments
-  "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthrum=$<TARGET_FILE:luthrum_test_host>"
+  "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthr=$<TARGET_FILE:luthr_test_host>"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/benchmark.lua"
   "-Dmodule_dir=$<TARGET_FILE_DIR:compat_fixture>"
-  "-Dtarget=${LUTHRUM_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
+  "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
   "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
 add_custom_target(benchmark_lua
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
     "${CMAKE_COMMAND}" ${benchmark_arguments}
     "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/lua"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkLua.cmake"
-  DEPENDS upstream_lua luthrum_test_host compat_fixture
+  DEPENDS upstream_lua luthr_test_host compat_fixture
   VERBATIM USES_TERMINAL)
 add_test(NAME lua_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${benchmark_arguments}
   -Dsamples=2 -Dwarmups=1 -Dwork_divisor=100
@@ -152,16 +152,16 @@ set_tests_properties(lua_benchmark_smoke PROPERTIES LABELS "runtime;compatibilit
 foreach(case IN ITEMS language native files_modules metatables diagnostics coroutine_close hooks locale coroutine_pipeline)
   foreach(collector IN ITEMS incremental generational)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${case}-${collector}/direct")
-    add_test(NAME lua_e2e_${case}_${collector} COMMAND luthrum_test_host
+    add_test(NAME lua_e2e_${case}_${collector} COMMAND luthr_test_host
       "${CMAKE_CURRENT_SOURCE_DIR}/entry.lua" "$<TARGET_FILE_DIR:compat_fixture>"
       "${CMAKE_CURRENT_SOURCE_DIR}/${case}.lua" "${collector}"
       "${CMAKE_CURRENT_BINARY_DIR}/${case}-${collector}/direct")
     set_tests_properties(lua_e2e_${case}_${collector}
       PROPERTIES LABELS "runtime;compatibility;memcheck" TIMEOUT 30)
     add_test(NAME lua_compat_${case}_${collector} COMMAND "${CMAKE_COMMAND}"
-      "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthrum=$<TARGET_FILE:luthrum_test_host>"
+      "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthr=$<TARGET_FILE:luthr_test_host>"
       "-Dupstream_compiler=$<TARGET_FILE:upstream_luac>"
-      "-Dluthrum_compiler=$<TARGET_FILE:luthrumc>" "-Dloader=${LUTHRUM_RUNTIME_LOADER}"
+      "-Dluthr_compiler=$<TARGET_FILE:luthrc>" "-Dloader=${LUTHR_RUNTIME_LOADER}"
       "-Druntime_libraries=${CMAKE_SYSROOT}/lib:${CMAKE_SYSROOT}/usr/lib"
       "-Dentry=${CMAKE_CURRENT_SOURCE_DIR}/entry.lua"
       "-Dsource=${CMAKE_CURRENT_SOURCE_DIR}/${case}.lua"

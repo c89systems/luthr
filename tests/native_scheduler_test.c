@@ -9,7 +9,7 @@
 #include <ltable.h>
 #include <ltask.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -69,7 +69,7 @@ struct pool {
   struct task *requests, *requests_tail, *ready, *ready_tail;
   struct task *native_wait, *native_tail;
   lua_State *main;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   unsigned managed, native, managed_peak, native_peak, native_waits;
   unsigned managed_limit, parallel_arrivals, await_winners[2], await_losers[2];
   unsigned await_closed, await_ready[2];
@@ -556,8 +556,7 @@ static int open_fixture(void *opaque) {
   fixture->main = opaque;
   return 0;
 }
-static void observe(void *context,
-                    const luthrum_lua_runtime_trace_event *event) {
+static void observe(void *context, const luthr_lua_runtime_trace_event *event) {
   struct pool *pool = context;
   LuaExecution *execution = luaQ_current();
   require(event->line > 0);
@@ -964,21 +963,19 @@ static int exercise_callback(const char *name) {
   fixture = pool = &test->pool;
   check(pthread_mutex_init(&pool->mutex, NULL));
   check(pthread_cond_init(&pool->changed, NULL));
-  require(luthrum_lua_runtime_new(&pool->runtime) == LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-          LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                open_fixture) ==
-          LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                         sizeof(capture) - 1, "capture", 0,
-                                         NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_new(&pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_register_c_module(
+              pool->runtime, "fixture", open_fixture) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                       sizeof(capture) - 1, "capture", 0, NULL,
+                                       0) == LUTHR_LUA_RUNTIME_OK);
   if (strstr(name, "budget") != NULL) {
-    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 100000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                           sizeof(capture) - 1, "budget", 0,
-                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 100000) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "budget", 0, NULL,
+                                         0) == LUTHR_LUA_RUNTIME_OK);
   }
   lua_pushcfunction(pool->main, block_binding);
   lua_setglobal(pool->main, "block");
@@ -1107,7 +1104,7 @@ static int exercise_callback(const char *name) {
     }
     luaCB_revoke(&test->registration);
   }
-  require(test->registration.thread->luthrum_stack_context == NULL);
+  require(test->registration.thread->luthr_stack_context == NULL);
   require(luaCB_destroy(pool->main, &test->registration) == LUA_OK);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized ==
@@ -1118,7 +1115,7 @@ static int exercise_callback(const char *name) {
   require(pool->finalized == 1);
   lua_getglobal(pool->main, "shared");
   lua_getfield(pool->main, -1, "child");
-  require(lua_tothread(pool->main, -1)->luthrum_stack_context == NULL);
+  require(lua_tothread(pool->main, -1)->luthr_stack_context == NULL);
   lua_pop(pool->main, 1);
   lua_getfield(pool->main, -1, "observed");
   require(lua_tointeger(pool->main, -1) == 500500);
@@ -1153,7 +1150,7 @@ static int exercise_callback(const char *name) {
   lua_settop(pool->main, 0);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized == 3);
-  luthrum_lua_runtime_free(pool->runtime);
+  luthr_lua_runtime_free(pool->runtime);
   check(pthread_cond_destroy(&pool->changed));
   check(pthread_mutex_destroy(&pool->mutex));
   printf("registered foreign callbacks %s: bounded admission and protected "
@@ -1341,18 +1338,17 @@ static int exercise_stream(const char *name) {
   check(pthread_cond_init(&pool->changed, NULL));
   if (facade) {
     static const unsigned char capture[] = "require('fixture')";
-    require(luthrum_lua_runtime_new_with_limit(
-                &pool->runtime, STREAM_HEAP_LIMIT) == LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                  open_fixture) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(
-                pool->runtime, capture, sizeof(capture) - 1, "stream-control",
-                0, NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_new_with_limit(
+                &pool->runtime, STREAM_HEAP_LIMIT) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                open_fixture) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "stream-control",
+                                         0, NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else
     pool->main = lua_newstate(stream_allocate, pool, 0);
   require(pool->main != NULL);
@@ -1574,7 +1570,7 @@ static int exercise_stream(const char *name) {
     require(lua_tointeger(pool->main, -1) == 0);
   }
   if (facade)
-    luthrum_lua_runtime_free(pool->runtime);
+    luthr_lua_runtime_free(pool->runtime);
   else
     lua_close(pool->main);
   require(pool->stream_live == 0 && pool->stream_peak <= STREAM_HEAP_LIMIT);
@@ -2205,26 +2201,24 @@ static int exercise_task_wait(const char *name, const char *file_path) {
   if (facade) {
     static const unsigned char capture[] = "require('fixture')";
     if (movealloc) {
-      luthrum_lua_runtime_allocator_config config = {0};
+      luthr_lua_runtime_allocator_config config = {0};
       config.user = pool;
       config.alloc_fn = utf8_host_allocate;
       config.realloc_fn = utf8_allocate;
       config.free_fn = utf8_host_free;
-      require(luthrum_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
+              LUTHR_LUA_RUNTIME_OK);
     } else
-      require(luthrum_lua_runtime_new(&pool->runtime) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                  open_fixture) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                           sizeof(capture) - 1, "task-wait", 0,
-                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new(&pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                open_fixture) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "task-wait", 0,
+                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     pool->main =
         movealloc ? lua_newstate(utf8_allocate, pool, 0) : luaL_newstate();
@@ -2520,7 +2514,7 @@ static int exercise_task_wait(const char *name, const char *file_path) {
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized == 2);
   if (facade)
-    luthrum_lua_runtime_free(pool->runtime);
+    luthr_lua_runtime_free(pool->runtime);
   else
     lua_close(pool->main);
   if (movealloc)
@@ -2584,26 +2578,24 @@ static int exercise_stop_wait(const char *name) {
   if (facade) {
     static const unsigned char capture[] = "require('fixture')";
     if (moving) {
-      luthrum_lua_runtime_allocator_config config = {0};
+      luthr_lua_runtime_allocator_config config = {0};
       config.user = pool;
       config.alloc_fn = utf8_host_allocate;
       config.realloc_fn = utf8_allocate;
       config.free_fn = utf8_host_free;
-      require(luthrum_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
+              LUTHR_LUA_RUNTIME_OK);
     } else
-      require(luthrum_lua_runtime_new(&pool->runtime) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                  open_fixture) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                           sizeof(capture) - 1, "stop-wait", 0,
-                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new(&pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                open_fixture) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "stop-wait", 0,
+                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     pool->main =
         moving ? lua_newstate(utf8_allocate, pool, 0) : luaL_newstate();
@@ -2772,7 +2764,7 @@ static int exercise_stop_wait(const char *name) {
                           "s.waiting_receivers==0)") == LUA_OK);
   require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
   if (facade)
-    luthrum_lua_runtime_free(pool->runtime);
+    luthr_lua_runtime_free(pool->runtime);
   else
     lua_close(pool->main);
   if (moving)
@@ -2947,24 +2939,22 @@ static int exercise_affinity(const char *name) {
   if (facade) {
     static const unsigned char capture[] = "require('fixture')";
     if (moving) {
-      luthrum_lua_runtime_allocator_config config = {0};
+      luthr_lua_runtime_allocator_config config = {0};
       config.user = pool;
       config.alloc_fn = utf8_host_allocate;
       config.realloc_fn = utf8_allocate;
       config.free_fn = utf8_host_free;
-      require(luthrum_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
+              LUTHR_LUA_RUNTIME_OK);
     } else
-      require(luthrum_lua_runtime_new(&pool->runtime) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                  open_fixture) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                           sizeof(capture) - 1, "affinity", 0,
-                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+      require(luthr_lua_runtime_new(&pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                open_fixture) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "affinity", 0,
+                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     pool->main =
         moving ? lua_newstate(utf8_allocate, pool, 0) : luaL_newstate();
@@ -3154,7 +3144,7 @@ static int exercise_affinity(const char *name) {
   require(pool->affinity_finalized == pool->affinity_opened);
   require(pool->affinity_denied == (oom ? 2u : 0u) && pool->affinity_deny == 0);
   if (facade)
-    luthrum_lua_runtime_free(pool->runtime);
+    luthr_lua_runtime_free(pool->runtime);
   else
     lua_close(pool->main);
   if (moving)
@@ -3191,27 +3181,25 @@ int main(int argc, char **argv) {
   fixture = pool;
   check(pthread_mutex_init(&pool->mutex, NULL));
   check(pthread_cond_init(&pool->changed, NULL));
-  require(luthrum_lua_runtime_new(&pool->runtime) == LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_openlibs(pool->runtime) ==
-          LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
-                                                open_fixture) ==
-          LUTHRUM_LUA_RUNTIME_OK);
-  require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
-                                         sizeof(capture) - 1, "capture", 0,
-                                         NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_new(&pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_register_c_module(
+              pool->runtime, "fixture", open_fixture) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                       sizeof(capture) - 1, "capture", 0, NULL,
+                                       0) == LUTHR_LUA_RUNTIME_OK);
   require(pool->main != NULL);
   if (pool->budget) {
-    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 60000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 60000) ==
+            LUTHR_LUA_RUNTIME_OK);
     /* The facade owns invocation boundaries and resets the shared budget. */
-    require(luthrum_lua_runtime_run_buffer(
-                pool->runtime, capture, sizeof(capture) - 1, "budget-start", 0,
-                NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
+                                         sizeof(capture) - 1, "budget-start", 0,
+                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   }
   if (pool->trace)
-    require(luthrum_lua_runtime_set_trace_callback(
-                pool->runtime, observe, pool) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_trace_callback(pool->runtime, observe,
+                                                 pool) == LUTHR_LUA_RUNTIME_OK);
   lua_pushcfunction(pool->main, block_binding);
   lua_setglobal(pool->main, "block");
   lua_pushcfunction(pool->main, failing_binding);
@@ -3350,7 +3338,7 @@ int main(int argc, char **argv) {
   lua_settop(pool->main, 0);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized == 2);
-  luthrum_lua_runtime_free(pool->runtime);
+  luthr_lua_runtime_free(pool->runtime);
   check(pthread_cond_destroy(&pool->changed));
   check(pthread_mutex_destroy(&pool->mutex));
   printf(

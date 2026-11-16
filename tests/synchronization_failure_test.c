@@ -1,7 +1,7 @@
 #include <errno.h>
 #include <lauxlib.h>
 #include <lua.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,8 +90,8 @@ static void facade_free(void *context, void *pointer, size_t size) {
 }
 
 static int facade_case(const char *name) {
-  luthrum_lua_runtime_allocator_config config;
-  luthrum_lua_runtime *runtime = NULL;
+  luthr_lua_runtime_allocator_config config;
+  luthr_lua_runtime *runtime = NULL;
   int failed;
   memset(&config, 0, sizeof(config));
   config.alloc_fn = facade_alloc;
@@ -107,17 +107,17 @@ static int facade_case(const char *name) {
     fail_mutex = 4;
   else
     return 1;
-  failed = luthrum_lua_runtime_new_with_allocator(&runtime, &config) !=
-               LUTHRUM_LUA_RUNTIME_ERR_ALLOC ||
+  failed = luthr_lua_runtime_new_with_allocator(&runtime, &config) !=
+               LUTHR_LUA_RUNTIME_ERR_ALLOC ||
            runtime != NULL || failures != 1 || live_mutexes != 0 ||
            live_conditions != 0 || live_bytes != 0;
   fail_mutex = 0;
   if (runtime != NULL)
-    luthrum_lua_runtime_free(runtime);
+    luthr_lua_runtime_free(runtime);
   runtime = NULL;
-  failed |= luthrum_lua_runtime_new_with_allocator(&runtime, &config) !=
-            LUTHRUM_LUA_RUNTIME_OK;
-  luthrum_lua_runtime_free(runtime);
+  failed |= luthr_lua_runtime_new_with_allocator(&runtime, &config) !=
+            LUTHR_LUA_RUNTIME_OK;
+  luthr_lua_runtime_free(runtime);
   return failed || live_mutexes != 0 || live_conditions != 0 || live_bytes != 0;
 }
 

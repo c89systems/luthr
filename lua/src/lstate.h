@@ -328,8 +328,8 @@ struct lua_State {
     int ftransfer;  /* offset of first value transferred */
     int ntransfer;  /* number of values transferred */
   } transferinfo;
-  uintptr_t luthrum_stack_limit;
-  NativeStackContext *luthrum_stack_context;
+  uintptr_t luthr_stack_limit;
+  NativeStackContext *luthr_stack_context;
   LuaNativeRoot *native_roots;
   struct LuaCallback *callback_owner;
   unsigned callback_active;

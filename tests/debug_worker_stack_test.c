@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
   pthread_t worker;
   struct observation result;
   int i;
-#ifdef LUTHRUM_TEST_NATIVE_SELF_EXEC
+#ifdef LUTHR_TEST_NATIVE_SELF_EXEC
   int status;
   pid_t child;
 #endif
@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
     if (result.failed)
       return 1;
   }
-#ifdef LUTHRUM_TEST_NATIVE_SELF_EXEC
+#ifdef LUTHR_TEST_NATIVE_SELF_EXEC
   /* Emulated targets require the runner to launch each guest executable. */
   if (strcmp(argv[1], "defaults") == 0) {
     child = fork();

@@ -1,384 +1,192 @@
-# Luthrum: coroutine multiplexing and native-call boundaries
-
-Status: conceptual draft for discussion, 2026-11-14.
-
-This records a direction and several implementation ideas. It is not a complete
-specification, an approved API, or a claim of implemented behavior.
-
-## Accepted project decisions
-
-- Luthrum is Lua 5.5.1 without a global execution lock, with shared-VM parallel
-  execution and runtime-owned scheduling. Ordinary Lua language and library
-  behavior must remain compatible with upstream. Additional concurrency does
-  not authorize downstream-module specialization or changed serial semantics.
-- Lua 5.5.1 source lives directly under the repository's top-level `lua/` and is
-  modified in place under Git ownership, without a patch series.
-- Parallel Lua bytecode execution across CPU cores within the shared VM is
-  required. A VM-wide execution lock that serializes Lua is excluded. The
-  earlier conditional acceptance of serialized bytecode has been superseded.
-  Automatic parking, safe migration, carrier handoff, CPU fairness and bounded
-  replacement-thread behavior remain acceptance requirements.
-- Implementation follows the C/CMake lifecycle, with documentation under `docs/`.
-  Work initially targets x86_64; other architectures remain deferred.
-- Initial products are static/shared runtime libraries, a strict C89 SDK, an
-  interpreter and a bytecode compiler.
-- The current phase modifies only Luthrum and verifies installed SDK consumers.
-  Coordinated cutover in cpkt, Vectis and libknurl is a later phase.
-- Automatic carrier sizing should start from usable logical CPUs, including HT,
-  account for process affinity and Linux CPU quotas, and allow an explicit
-  override. The ordinary worker budget, maximum carrier count and compensation
-  for blocked native calls are distinct limits. Benchmark pure Lua, native waits
-  and mixed workloads before fixing the automatic cap for large vCPU counts.
-  Managed execution permits limit parallelism and are distinct from object
-  synchronization and carriers occupied by native work.
-
-These decisions supersede the corresponding open questions below. Remaining
-runtime mechanisms and public scheduling operations require feasibility evidence.
-
-## Required baseline and compatibility boundary
-
-Luthrum is based on the latest stable Lua 5.5 release. At this draft's research
-date that is **Lua 5.5.1**, as confirmed by the
-[official download page](https://www.lua.org/download.html). Record the exact
-upstream source and digest for each implementation candidate; advancing to a
-later 5.5 maintenance release requires fresh verification.
-
-Luthrum's compatibility boundary is ordinary Lua 5.5.1 behavior and the public
-Lua/native SDK. Identical portable E2E Lua code must run against both pristine
-upstream Lua and Luthrum, with matching observable results. Scheduling and shared
-VM concurrency have separate tests for capabilities absent from upstream.
-Independent projects consume that runtime; they own their
-module builds, integration policy and compatibility tests against the installed
-SDK. Those projects are not Luthrum implementation targets or development
-dependencies. Luthrum must build and verify without their sources or SDKs.
-
-The runtime owns generic guarantees for Lua APIs, native entry, callbacks,
-streaming, userdata lifetime, finalizers, cleanup, synchronization and carrier
-affinity. Its tests use local fixtures and installed SDK consumers to prove
-those guarantees, including native waits and callback reentry. Downstream
-findings should become minimal generic runtime regressions when they expose a
-runtime defect. Module-specific initialization guards, handle policies and
-adapters belong to their owning projects.
-
-Native module artifacts must use one compatible runtime. Compatibility with
-unchanged existing binaries remains a separate ABI question, not an assumption.
-Runtime synchronization does not make a native handle reentrant or remove a
-library's thread-affinity requirements; generic runtime mechanisms must expose
-enough control for binding owners to uphold those contracts.
-
-## Intent
-
-Luthrum should let applications run ordinary Lua functions as concurrent tasks
-in one shared Lua VM. Tasks are coroutines multiplexed over OS threads. The
-runtime owns scheduling, waiting and native-call transitions. Application code
-should not need an async module namespace, callback chains, or a rewritten
-version of every operation that might block.
-
-The important unit of execution is the whole function. A function may perform
-CPU work, call existing Lua modules, enter a native binding, wait, and continue
-with sequential-looking code. An explicit application-authored yield cannot be
-the only way other tasks make progress.
-
-The desired effect is that one task waiting inside a native library does not
-prevent another runnable task from executing. Luthrum must also address fairness
-between tasks running pure Lua, rather than solving only network waits.
-
-One VM per task and one permanently assigned OS thread per task are outside
-this direction. A native call can nevertheless occupy an OS thread for its
-entire duration. That cost must be accounted for honestly.
-
-## Working execution model
-
-Three runtime objects are useful, without adopting another language's names:
-
-- **Task:** a coroutine, its Lua stack, result/error, cancellation state, roots
-  and scheduling identity. Shared tables, functions and globals belong to the
-  same VM; spawning does not copy an application's world into another state.
-- **Carrier:** an OS thread temporarily executing a task or a native call.
-  Carriers are reused and managed within an explicit resource budget.
-- **Execution permit:** one of the runtime's available managed-execution slots.
-  Multiple permits allow simultaneous Lua execution. Permits limit parallelism;
-  they do not replace synchronization for shared VM objects. A carrier blocked
-  in foreign code must not monopolize a permit needed by runnable tasks.
-
-A task moves conceptually between runnable, running, waiting, in-native and
-terminal states. A native result can be ready before its task is scheduled
-again. Cancellation requested and native execution finished are separate facts.
-
-Task creation, waiting for task results, timers and synchronization need public
-operations. Their names, syntax, channels and structured lifetime model are
-unresolved. A wait must park the task or relinquish runtime execution rights;
-it must not hold the interpreter lock while waiting for its own dependency.
-
-Migration is allowed only at proven safe boundaries. An actual foreign C
-activation remains on its carrier until that activation unwinds. Audited
-runtime C activations can park on retained runtime-owned stacks and migrate
-under the proven context protocol. Libraries with stronger thread affinity may
-require a resource or an entire task to stay on a particular thread for longer.
-
-A shared-VM execution lock would serialize Lua bytecode and is no longer an
-acceptable candidate. Multiplexing, shared-memory correctness and simultaneous
-multicore Lua execution must all be proved. Synchronization must protect shared
-tables, captured variables, registry/module state, allocation and collection
-without retaining a global execution lock across Lua code or native waits.
-The implementation candidate retains Lua's tracing collector, with object-scoped
-synchronization, explicit roots and coordinated collection pauses. The
-[parallel-state investigation](parallel-state-design.md) records the lessons
-from free-threaded CPython, private implementation evidence and remaining
-acceptance gates. Public scheduler interfaces remain unfrozen.
-
-The CPython precedent is its free-threaded shared-object runtime: replacing
-GIL protection with object synchronization, lifetime safety and collection
-coordination. It informs shared-heap correctness. Go's task/carrier separation
-informs multiplexing and native-call handoff. Both responsibilities must be
-satisfied; neither free threading alone nor scheduling alone supplies the other.
-
-## What to borrow from Go
-
-Go separates a goroutine, the OS thread carrying it, and runtime execution
-resources. Its scheduler can let another thread execute runnable Go work when
-one enters a system call. The useful lesson is separating the logical task from
-both its current thread and its execution rights, not copying the scheduler
-literally. See the [Go runtime scheduler notes](https://go.dev/src/runtime/HACKING).
-
-Go's C bridge performs a runtime transition before foreign execution. Its call
-machinery uses an OS-thread-associated stack and informs the scheduler that
-other work may need another thread. Return and callback paths reenter managed
-execution through corresponding transitions. This is an explicit boundary, not
-automatic discovery that an arbitrary instruction is about to block. See
-[Go's C call and callback implementation](https://go.dev/src/runtime/cgocall.go).
-
-Luthrum needs equivalent answers to four questions: who owns the native stack,
-who may execute managed code while C runs, how callbacks reenter, and which
-objects remain alive. Go's pointer restrictions and explicit pinning illustrate
-that foreign memory needs a contract even with a garbage collector. Lua's
-contract will differ. See [cgo pointer-passing rules](https://pkg.go.dev/cmd/cgo#hdr-Passing_pointers).
-
-## The Lua-specific opportunity and difficulty
-
-Lua already has interpreter entry/exit lock hooks, disabled by default. Its
-current C-function call path unlocks before invoking the C function and locks
-again afterward. These are useful investigation points, not proof that enabling
-a mutex produces a complete threaded runtime. Every relevant API access and
-runtime invariant still needs review. See the [Lua lock hooks](https://www.lua.org/source/5.5/lapi.h.html)
-and [C-function dispatch](https://www.lua.org/source/5.5/ldo.c.html).
-
-Lua's coroutine yield uses stack unwinding. An ordinary C activation cannot be
-discarded and subsequently resumed as if nothing happened; continuation-aware
-API boundaries have special rules. Luthrum must distinguish parking a Lua
-continuation from leaving an intact native stack blocked on an OS thread. See
-[Lua's C yield contract](https://www.lua.org/manual/5.5/manual.html#4.5).
-
-CPU fairness therefore needs interpreter safe points that preserve stack, GC,
-error and hook invariants. Thread replacement handles blocked native calls;
-it does not by itself make a pure-Lua loop release the VM execution permit.
-Whether safe points return a coroutine to the scheduler or temporarily hand
-execution to another carrier while retaining a C stack is unresolved.
-
-## Several approaches to bindings and FFI
-
-Here, a **Lua/C binding** is a C function using the Lua API. A **direct FFI**
-invokes a native symbol from a signature description. Both cross the scheduler
-boundary, but their access to Lua and their marshaling requirements differ.
-Supporting one does not automatically support the other.
-
-### A. Runtime-managed entry for existing Lua/C bindings
-
-Treat entry into an eligible C binding as a conservative native transition.
-Keep its task, argument stack and owners rooted, retain its carrier, release
-managed execution rights, and make another carrier available for runnable Lua.
-Before native return resumes Lua, reacquire the required execution rights.
-
-The C binding may call the Lua API before, during or after its native operation.
-Those accesses must obey runtime synchronization. A nested Lua callback requires
-a proper managed reentry transition. This is more involved than classifying the
-entire binding as code that never touches Lua.
-
-This is the closest route to preserving ordinary handler code and many existing
-bindings without per-operation rewrites. Its limit is compatibility: VM locks
-do not protect a binding's static variables, make a shared native handle
-reentrant, or remove thread-affinity requirements. Unknown bindings need an
-explicit policy; unverified shared-state safety cannot be inferred from
-successful loading or linking.
-
-### B. Generated adapters from C declarations and annotations
-
-Describe a native ABI plus ownership, callback and affinity rules, and generate
-the Lua entry point, marshaling, runtime transitions and result conversion.
-Application calls remain ordinary function calls. Generator output, rather
-than application code, handles scheduler participation.
-
-A declaration could distinguish ordinary possibly-blocking calls, audited short
-leaf calls, callbacks and thread-affine resource operations. The safe scheduling
-default is to assume a call can occupy its carrier; the runtime need not predict
-the exact blocking syscall.
-
-C signatures alone do not describe pointer retention, borrowed memory lifetimes,
-thread safety or callback timing. These require annotations or handwritten
-policy. A generic ABI invocation library could be an implementation tool, but
-would not supply those policies or the scheduler. No generator or FFI dependency
-is selected here.
-
-### C. An explicit native-call contract for binding authors
-
-Offer a supported low-level boundary for bindings that need more control:
-prepare and root inputs; enter foreign execution; perform native work; reenter
-managed execution; convert results and release owners. Pairing must survive
-errors, nested callbacks and cancellation. A plain cleanup statement after a
-Lua long jump is insufficient.
-
-An owned-operation variant could separate preparation, native execution and
-completion into runtime-managed phases. That can free the coroutine from a
-live C activation while a native executor owns the operation. It is useful for
-new bindings and callback-heavy libraries, but requires binding work and cannot
-be presented as a transparent solution for every unchanged binding.
-
-This is a binding-author interface, not a separate async application API.
-Audited leaf-call optimizations can be considered later; incorrect claims that
-a call cannot block or reenter must not silently compromise runtime progress.
-
-### D. Affinity-aware dispatch for native resources
-
-Some libraries require create/use/close on the same OS thread, or require all
-operations on one resource to be serialized. Represent that affinity explicitly.
-Possible mechanisms are a pinned task region or a resource-owned execution
-thread reached through a runtime adapter.
-
-This complements the other approaches. It cannot be solved by placing a mutex
-around an arbitrary borrowed pointer. It also reduces scheduling freedom and
-must count against the thread budget. An existing thread-affine binding may
-need adaptation even if the application's handler body remains unchanged.
-
-### Starting hypothesis
-
-Investigate A for existing compatible bindings, C as the explicit escape hatch,
-and B as a way to reduce repetitive integration work. D supplies necessary
-resource constraints across them. These mechanisms could coexist behind one
-ordinary Lua calling convention. This is a research hypothesis, not a settled
-compatibility guarantee or a requirement to implement all four immediately.
-
-## Callbacks, ownership and streaming
-
-A callback on the native call's own carrier may use a controlled nested reentry
-into its suspended managed context. It must acquire execution rights, preserve
-the native activation and contain Lua errors before returning to C.
-
-A callback arriving on a foreign thread needs a registered runtime entry and
-retained callback context. Candidate policies are attaching that thread through
-a runtime trampoline or delivering a callback task to an allowed carrier. The
-same coroutine must never execute concurrently on two threads. Synchronous
-callbacks need reserved progress capacity so the caller cannot wait forever for
-a callback queued behind itself. Late callbacks after close need a defined
-revocation and acknowledgment protocol.
-
-Lua errors must unwind only through the protected boundary on the executing
-thread. Neither an error nor cancellation may long-jump into another carrier's
-stack. Foreign exceptions and callback failures need translation at their
-registered boundary, with exactly-once release of execution rights and roots.
-
-Native-stack affinity and memory ownership must be specified independently.
-The runtime must retain tasks, arguments, userdata and callback registrations
-until no native call can still use them. A pointer to a Lua object is not a GC
-root. Lua's object layout or nonmoving objects do not make arbitrary borrowed
-pointers safe. Retaining an owner prevents collection; it does not prevent
-another task from explicitly closing or mutating the same resource.
-
-The binding contract must distinguish call-scoped borrowing, explicit retained
-handles, owned native buffers and bounded copies. It must also define how
-close/use conflicts and callback reentry are rejected or synchronized.
-
-Streaming must preserve producer-to-consumer flow with bounded chunks and
-backpressure. A native callback can retain one bounded chunk while awaiting a
-managed callback, provided the runtime guarantees that callback can run.
-Collecting the whole body or using an undisclosed staging file is not a valid
-substitute. Callback yield permission remains an explicit boundary decision.
-
-## Runtime responsibilities that must stay visible
-
-- **Shared-state correctness:** coordinate table mutation, registry access,
-  allocation, GC, finalizers and module initialization. Task stacks and native
-  roots must remain visible during collection.
-- **Application synchronization:** VM memory safety does not make a multi-step
-  application operation atomic. Provide synchronization with task-aware waits;
-  document what shared-state interleaving applications must expect.
-- **Task-local execution state:** errors, tracebacks, instruction budgets,
-  cancellation and tracing must not accidentally share one mutable invocation
-  slot across concurrent tasks. Embedding policy must survive nested calls.
-- **Bounded resources:** distinguish runnable tasks, parked tasks, native calls,
-  carriers and retained bytes. Compensating for blocked carriers must not spawn
-  threads without a limit. Define native admission and reserved progress before
-  claiming that a full pool cannot stall runnable work.
-- **Thread and process ownership:** create runtime threads after any embedding
-  application's fork boundary. Thread-local library state, stack guards and
-  platform-default stack limits are part of the foreign-call contract.
-- **Cancellation and shutdown:** request cancellation, stop new admission and
-  retain owners until running native work acknowledges completion. An opaque
-  uninterruptible C call cannot be safely killed by a coroutine operation.
-  Forced process termination, if needed, is an embedding policy.
-- **Host integration:** provide a way to submit tasks and observe completions
-  without making a host control thread wait on managed execution or join a
-  running native call. Timers, I/O readiness and completion wakes need an
-  explicit integration seam; application-specific transports remain outside
-  Luthrum's scope.
-
-Finite thread budgets cannot guarantee unlimited simultaneous blocking calls.
-At saturation, admission, errors and diagnostics must follow a stated policy.
-Timeout is not evidence that native work stopped or that a side effect did not
-happen. A timed-out task's late completion still needs safe retirement.
-
-## Focused feasibility experiments
-
-Prove the execution model before selecting a public API or attempting a broad
-binding migration. Use explicit gates and acknowledgments, rather than sleeps,
-to establish ordering.
-
-1. Multiplex many Lua-only tasks over fewer carriers; record carrier identity
-   and prove safe migration and fairness without application-authored yields.
-   This distinguishes the design from a thread permanently assigned per task.
-2. Run Lua tasks simultaneously on separate cores in the same VM. Prove actual
-   overlap without serializing the interpreter, including independent mutable
-   tables and shared captured variables. Verify shared-state correctness and
-   GC coordination; arithmetic-only overlap does not establish the full model.
-3. Block an unchanged Lua/C binding behind a native fixture gate. After native
-   entry is acknowledged, require another task to finish before opening the
-   gate. Verify shared VM identity and bounded replacement-thread behavior.
-4. Keep a pure-Lua task CPU-busy while another runs. Prove scheduling fairness
-   while preserving instruction limits, errors and protected-call behavior.
-5. Exercise same-thread callbacks, nested native calls and callbacks from a
-   foreign thread, including errors and callback reentry at capacity.
-6. Force GC and allocation failure while tasks are native, waiting or receiving
-   callbacks. Check exactly-once resource cleanup and explicit close/use races.
-7. Verify thread-affine resource create/use/close and rejection of unsupported
-   sharing. Include task cancellation, shutdown and a deliberately stuck call.
-8. Withhold the end of a streaming input until downstream progress is observed.
-   Prove bounded retained memory and backpressure in both directions.
-9. Build and run standalone installed-SDK consumers for static and shared
-   linkage, strict C89 entry points and ordinary native module loading. Keep
-   runtime regressions independent of downstream project sources, SDKs and
-   module-specific adapters. Downstream projects own their behavioral
-   compatibility suites against the installed runtime.
-
-Memory, race and stack checks must cover the actual runtime and binding paths,
-not just a scheduler fixture. A successful mutex experiment is evidence for one
-mechanism, not certification of arbitrary third-party bindings.
-
-## Decisions deliberately left open
-
-- Runtime modification surface, supported architectures and treatment of
-  existing binary modules. The selected Lua baseline and ordinary Lua/native
-  compatibility are fixed requirements; downstream integration remains owned
-  by independent projects.
-- Coroutine stack representation, safe-point implementation and limits on
-  migration in the presence of C activations.
-- Native-binding admission categories, default compatibility policy and where
-  annotations or generated adapters are necessary.
-- Callback attachment, affinity, nested-call and cancellation contracts.
-- Task lifetime, join/result semantics, synchronization, thread budgets,
-  fairness, observability and host event integration.
-
-The next commitment should be the smallest runtime experiment that can falsify
-this concept: parallel shared-VM execution with real shared mutable objects,
-coroutine multiplexing, unchanged blocking native work, and continued execution
-of another task. The [parallel-state investigation](parallel-state-design.md)
-records the initial candidate and the evidence required before committing the
-scheduler API. The broader design should follow those experiments.
+# Luthr runtime specification
+
+Status: governing product specification, revised 2026-11-16.
+
+This specification supersedes the earlier incremental synchronization candidate
+and its feasibility diary. [Runtime architecture](parallel-state-design.md)
+defines the implementation boundaries; [delivery plan](implementation-plan.md)
+defines the order and verification depth. Git history retains the superseded work.
+
+## Product and compatibility contract
+
+Luthr is Lua 5.5.1 with shared-VM parallel execution and runtime-owned scheduling,
+without a global interpreter lock. Ordinary upstream Lua programs must run with
+compatible observable behavior. The compatibility boundary is the language,
+standard libraries, interpreter/compiler behavior and supported Lua/native APIs.
+It is not Lua's existing implementation of those behaviors.
+
+Object representation, value transfer, capture storage, stack representation,
+allocation, memory accounting, garbage collection, barriers, compiler lowering,
+interpreter dispatch and scheduler internals may all be replaced. Preserving
+Lua's present invariants or internal structures is not a project constraint.
+The replacement must establish the invariants needed to deliver the same
+observable semantics. An overhaul comparable in scope to free-threaded CPython
+is authorized; retaining an implementation merely because it already passes
+tests is not a reason to preserve it.
+
+The baseline remains checksum-pinned Lua 5.5.1, owned directly under lua/.
+Upstream source and license provenance remain in [lua-source.md](lua-source.md).
+No patch application or source acquisition occurs during configure/build.
+
+Compatibility includes values and identity, lexical scope and mutable captures,
+metatables, errors and protected calls, coroutines, hooks/debug APIs, weak tables,
+userdata, finalization, close/unwind behavior and the public allocator contract.
+The incremental/generational collection controls remain compatible public
+operations; their underlying algorithms and metadata need not remain upstream's.
+Existing Lua bytecode interoperability remains a final compatibility gate.
+Concurrent task interleavings are additional behavior absent from upstream;
+ordinary serial behavior must not be weakened to implement them.
+
+There is no application-specific Lua subset, downstream-module specialization,
+required application rewrite, copied world per task, or hidden serialized mode.
+The same portable Lua E2E and benchmark payloads run on pristine upstream Lua and
+Luthr. Independent module projects own their integration suites; they are not
+runtime build dependencies or implementation targets.
+
+## No global interpreter lock
+
+Independent tasks in one VM must execute ordinary Lua work on separate cores,
+including tables, mutable captures, object creation and collection activity.
+Arithmetic overlap alone does not establish this requirement.
+
+Ordinary object/value operations must not acquire a VM-wide mutex or compete
+for a VM-wide ownership token. Replacing that mutex with a global spinlock,
+semaphore, atomic ownership word or common admission gate is the same defect.
+Per-operation global accounting must not recreate that serialization indirectly.
+
+Synchronization follows the object, shared cell or actual resource being shared.
+Independent objects must not serialize through common ownership bookkeeping.
+Immutable reads and owner-local work should use local state where possible.
+Multi-step application operations are not implicitly atomic; task-aware
+synchronization supplies application coordination.
+
+Global coordination has named, explicit purposes such as collection phase
+transitions, batched publication/refill, global work exchange and lifecycle
+changes. Those are slow paths with bounded work or a documented reason to wait.
+They must not become the default path for each access, allocation, pointer write
+or successful safepoint poll. Actual contention on the same object may serialize
+that object's operations; it must not stop unrelated objects or runnable tasks.
+
+## Execution and resource model
+
+- A task owns a coroutine's execution state, results/errors, cancellation state,
+  roots and logical identity. Tasks share one VM and ordinary object identity.
+- A carrier is a reusable OS thread. Tasks outnumber carriers; a permanent
+  thread per task is excluded.
+- An execution slot carries permission and local resources for managed Lua
+  execution: local queues, root publication and allocation/barrier bookkeeping.
+  It is distinct from both the task and its current carrier.
+
+Slots permit simultaneous managed execution. Task parking makes capacity
+available for other tasks. CPU-bound Lua receives automatic safe scheduling
+handoffs without application-authored yields. Migration occurs only at safe
+boundaries with complete ownership, stack, roots and error-context transfer.
+
+Managed parallelism, total carriers, occupied native carriers and reserved
+callback/progress capacity are separate bounded resources. Defaults account for
+usable CPUs, affinity and visible CPU quotas, with explicit overrides. Choose
+automatic caps and native compensation from the final workload measurements;
+do not freeze them from the rejected prototype or a thread-count guess.
+
+The embedding host can submit work and observe completion without joining a
+blocked native activation. Timers, readiness and completion notifications have
+a coherent host integration seam; application transports remain outside scope.
+
+## Memory and collection invariants
+
+Every shared value transfer is complete and correctly ordered; a payload and
+its type cannot be torn. Storage remains valid until all readers and retained
+native users have retired. Pointers into resizable objects cannot survive a
+wait, callback or resize without a lifetime guarantee and revalidation.
+
+Captures have one coherent identity and mutation protocol across owner-local
+access, foreign access, closing, stack movement, debug mutation and upvalue
+joining. Stack-backed captures are optional. Stable shared cells, heap-backed
+frames or other representations may replace them throughout the compiler/VM.
+
+Root publication, allocation, barriers and reclamation must be designed
+together. Local allocation/publication records and local barrier buffers avoid
+a VM-wide metadata transaction per ordinary operation. The collector observes
+a coherent published view, with safe-point or epoch coordination as required.
+The collector may be replaced; concurrent collection is an implementation
+choice, not a requirement to reproduce Go's algorithm literally.
+
+Native roots, parked tasks, callbacks, errors, finalizers and resurrection remain
+safe during collection and allocation failure. Finalizers and arbitrary user
+callbacks cannot run under a stopped-world ownership gate. The public Lua
+allocator contract must be honored; silently bypassing it or assuming an
+unchanged custom allocator became thread-safe is not an acceptable shortcut.
+
+## Native calls, callbacks and affinity
+
+Ordinary eligible Lua/C bindings enter conservatively as possibly blocking
+native work. Their task, arguments, roots and native activation remain alive on
+the carrier while managed capacity becomes available to unrelated tasks.
+The runtime must not require a per-library adapter to discover blocking calls.
+Native Lua API access and callbacks reenter managed execution under the same
+memory and slot protocol as ordinary tasks.
+
+A live opaque C activation remains on its carrier until it unwinds. Runtime-
+owned activations may park/migrate when their representation supports it.
+Go's movable stacks and compiler support do not establish safety for arbitrary
+C frames. Default musl worker stacks and constrained GNU Debug stacks remain
+supported; increasing stack sizes is not a correctness repair.
+
+Same-carrier, nested and registered foreign-thread callbacks have explicit
+entry, retained context, revocation and acknowledgment. A coroutine cannot run
+on two carriers at once. Synchronous callbacks must progress at native
+saturation using bounded reserved capacity. Errors and cancellation never
+long-jump across carrier stacks.
+
+Native resource serialization and thread affinity are explicit runtime-owned
+mechanisms. Create/use/close follows the resource's rule. Runtime memory safety
+does not make a foreign library or handle reentrant. Binding-specific policies
+remain in the owning projects; generic local fixtures prove runtime guarantees.
+
+## Lifecycle, policy and streaming
+
+Instruction budgets, tracing, errors, hooks and cancellation are task-local or
+explicitly shared through a defined policy. Nested calls and callbacks preserve
+the correct context without one mutable invocation slot for the whole VM.
+
+Cancellation is a request delivered at safe boundaries. Shutdown closes new
+admission and retains roots, results and native owners until acknowledgment.
+An uninterruptible native call cannot be safely killed by a coroutine operation.
+Late results, callback revocation, close/use races and repeated shutdown have
+defined exactly-once cleanup. A timeout does not mean native work has stopped.
+
+Streaming means bounded producer-to-consumer flow with backpressure end to end.
+No full-message materialization or undisclosed staging file may hide behind a
+streaming API. Chunk and callback ownership survive parking, cancellation,
+native saturation and shutdown.
+
+## Products, identity and scope
+
+The product name is luthr: interpreter luthr, compiler luthrc, static/shared
+libluthr, CMake package/namespace luthr, pkg-config luthr.pc, and strict C89
+headers under include/luthr. Project-owned facade/policy names use luthr_/LUTHR_;
+upstream Lua API names and Lua's reported version remain upstream-compatible.
+The checkout is /home/mike/g/luthr and the repository is c89systems/luthr.
+This pre-release rename is a clean cutover without old-name API shims.
+
+Initial supported targets are x86_64 Linux GNU and musl. Follow the selected
+C/CMake lifecycle, keep documentation under docs/, and keep generated outputs
+under the checkout's ignored build/ and .cache/. Do not modify sibling projects,
+expand architectures, push changes or release without a separate instruction.
+
+## Delivery and acceptance
+
+Implement coherent, substantial surfaces in the [delivery plan](implementation-plan.md).
+The implementation phase uses short unit and invariant checks selected for the
+surface being changed. These checks are intentionally non-exhaustive. Do not
+run long matrices, official suites, full E2E, benchmarks, broad memory/race
+sweeps or package certification after every patch or surface.
+
+Once the architecture is integrated and useful, run the final stabilization
+phase: exhaustive invariants, upstream differential E2E and official suites,
+concurrency/native/lifecycle scenarios, GNU/musl Debug/Release, stack checks,
+memory/race tools, performance/sizing, SDK/relocation and final artifact checks.
+Deferral changes the order of verification, not the final compatibility or
+correctness bar. Focused checks and completed surfaces must not be reported as
+proof of the complete runtime. Commit coherent surfaces after their phase-
+appropriate checks, and state outstanding final gates explicitly.

@@ -2,7 +2,7 @@
 #include <lauxlib.h>
 #include <lua.h>
 #include <lualib.h>
-#include <luthrum/lua.h>
+#include <luthr/lua.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,12 +44,12 @@ int __wrap_lua_rawgeti(lua_State *state, int table, lua_Integer key) {
   return result;
 }
 static int reference(lua_State *state, int table) {
-  return active->facade ? luthrum_lua_l_ref((luthrum_lua_state *)state, table)
+  return active->facade ? luthr_lua_l_ref((luthr_lua_state *)state, table)
                         : luaL_ref(state, table);
 }
 static void unreference(lua_State *state, int table, int ref) {
   if (active->facade)
-    luthrum_lua_l_unref((luthrum_lua_state *)state, table, ref);
+    luthr_lua_l_unref((luthr_lua_state *)state, table, ref);
   else
     luaL_unref(state, table, ref);
 }

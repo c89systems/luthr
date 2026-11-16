@@ -3,7 +3,7 @@
 #include <lpipe.h>
 #include <ltask.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,7 +20,7 @@ struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *main;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   LuaTaskRoot tasks[3];
   LuaExecution executions[3];
   const char *mode;
@@ -271,20 +271,19 @@ static void *run(void *context) {
   require(pthread_cond_init(&test->changed, NULL) == 0);
   if (strstr(test->mode, "facade")) {
     static const unsigned char source[] = "require('fixture')";
-    luthrum_lua_runtime_allocator_config config = {0};
+    luthr_lua_runtime_allocator_config config = {0};
     config.user = test;
     config.alloc_fn = host_allocate;
     config.realloc_fn = allocate;
     config.free_fn = host_free;
-    require(luthrum_lua_runtime_new_with_allocator(&test->runtime, &config) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(test->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(
-                test->runtime, "fixture", capture) == LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(test->runtime, source,
-                                           sizeof(source) - 1, "stop-wait", 0,
-                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_new_with_allocator(&test->runtime, &config) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(test->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(
+                test->runtime, "fixture", capture) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(test->runtime, source,
+                                         sizeof(source) - 1, "stop-wait", 0,
+                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     test->main = lua_newstate(allocate, test, 0);
     require(test->main != NULL);
@@ -479,7 +478,7 @@ static void *run(void *context) {
   gc(test);
   require(test->finalized == 1 && G(state)->tasks == NULL);
   if (test->runtime)
-    luthrum_lua_runtime_free(test->runtime);
+    luthr_lua_runtime_free(test->runtime);
   else
     lua_close(state);
   require(test->live == 0);

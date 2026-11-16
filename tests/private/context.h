@@ -1,5 +1,5 @@
-#ifndef LUTHRUM_TEST_CONTEXT_H
-#define LUTHRUM_TEST_CONTEXT_H
+#ifndef LUTHR_TEST_CONTEXT_H
+#define LUTHR_TEST_CONTEXT_H
 
 #include <lstate.h>
 #include <stddef.h>

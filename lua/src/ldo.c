@@ -70,7 +70,7 @@ typedef struct lua_longjmp {
   volatile pthread_t carrier;
   intptr_t b[5];  /* compiler-owned stack context; no libc thread encoding */
   volatile TStatus status;  /* error code */
-  lu_byte luthrum_stack_overflow;
+  lu_byte luthr_stack_overflow;
   LuaNativeRoot *native_roots;
   unsigned native_depth;
   LuaWorldScope world_scope;
@@ -147,7 +147,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
     if (L->errorJmp->execution != luaQ_current() ||
         !pthread_equal(L->errorJmp->carrier, pthread_self())) {
-      fputs("Luthrum error crossed a foreign carrier's protected boundary\n", stderr);
+      fputs("Luthr error crossed a foreign carrier's protected boundary\n", stderr);
       abort();
     }
     luaO_unwind(L->errorJmp->coroutine_scopes);
@@ -214,7 +214,7 @@ int luaD_canselfclose (lua_State *L) {
   lua_longjmp *base = L->errorJmp;
   if (base == NULL) return context->coroutine_scopes == NULL;
   while (base->previous != NULL) base = base->previous;
-  return L->luthrum_stack_context == context &&
+  return L->luthr_stack_context == context &&
          base->execution == context->execution &&
          pthread_equal(base->carrier, pthread_self()) &&
          base->coroutine_scopes == context->coroutine_scopes;
@@ -228,7 +228,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
       L->errorJmp = L->errorJmp->previous;
     luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
-    L->luthrum_stack_context->overflow = L->errorJmp->luthrum_stack_overflow;
+    L->luthr_stack_context->overflow = L->errorJmp->luthr_stack_overflow;
     L->native_roots = L->errorJmp->native_roots;
     luaW_restore(L, L->errorJmp->world_scope, L->errorJmp->native_depth);
   }
@@ -251,7 +251,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
                            ? lj.execution->protected : NULL;
   if (lj.execution != NULL)
     lj.execution->protected = &lj;
-  lj.luthrum_stack_overflow = L->luthrum_stack_context->overflow;
+  lj.luthr_stack_overflow = L->luthr_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
   lj.world_scope = luaW_scope(L);
@@ -276,7 +276,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   L->nCcalls = oldnCcalls;
   status = lj.status;
   if (l_unlikely(status != LUA_OK))
-    L->luthrum_stack_context->overflow = lj.luthrum_stack_overflow;
+    L->luthr_stack_context->overflow = lj.luthr_stack_overflow;
   return status;
 }
 
@@ -344,7 +344,7 @@ l_noret luaD_errerr (lua_State *L) {
 int luaD_checkminstack (lua_State *L) {
   if (L->errorJmp == NULL)
     luaE_refreshnativestack(L);
-  if (luaD_nativeposition() <= L->luthrum_stack_limit)
+  if (luaD_nativeposition() <= L->luthr_stack_limit)
     return 0;
   if (getCcalls(L) >= LUAI_MAXCCALLS - 2)
     return 0;  /* not enough C-stack slots */

@@ -1,5 +1,5 @@
-#ifndef LUTHRUM_LUA_RUNTIME_H
-#define LUTHRUM_LUA_RUNTIME_H
+#ifndef LUTHR_LUA_RUNTIME_H
+#define LUTHR_LUA_RUNTIME_H
 
 #include <stddef.h>
 
@@ -13,109 +13,108 @@ extern "C" {
  * This facade owns a Lua state and exposes only embedding policy operations.
  * It deliberately does not expose upstream Lua stack, value, userdata, or
  * metatable APIs. Consumers that need the full Lua C API should link the
- * strict-C89 `luthrum::static` target and include <luthrum/lua.h> instead.
+ * strict-C89 `luthr::static` target and include <luthr/lua.h> instead.
  */
-typedef struct luthrum_lua_runtime luthrum_lua_runtime;
+typedef struct luthr_lua_runtime luthr_lua_runtime;
 
 /**
  * Receives one Lua warning fragment. `message` is borrowed until return.
  * A nonzero `to_continue` means the next fragment belongs to this warning.
  * The callback and context remain caller-owned. Do not longjmp across Lua.
  */
-typedef void (*luthrum_lua_runtime_warning_fn)(void *context,
-                                               const char *message,
-                                               int to_continue);
+typedef void (*luthr_lua_runtime_warning_fn)(void *context, const char *message,
+                                             int to_continue);
 
 /**
  * Snapshot of a Lua line event, borrowed only until the observer returns.
  * Copy any fields needed afterward. No Lua state or stack access is exposed.
  */
-typedef struct luthrum_lua_runtime_trace_event {
+typedef struct luthr_lua_runtime_trace_event {
   /** Lua source identifier: @path, =name, or the source text itself. */
   const char *source;
   /** Source identifier length in bytes, excluding its trailing NUL. */
   size_t source_size;
   /** Positive, one-based source line about to execute. */
   int line;
-} luthrum_lua_runtime_trace_event;
+} luthr_lua_runtime_trace_event;
 
 /**
  * Observes a line event synchronously with caller-owned context.
  * The event and its source bytes are borrowed until return. The callback must
  * return normally: yielding, raising Lua errors and longjmp are unsupported.
  */
-typedef void (*luthrum_lua_runtime_trace_fn)(
-    void *context, const luthrum_lua_runtime_trace_event *event);
+typedef void (*luthr_lua_runtime_trace_fn)(
+    void *context, const luthr_lua_runtime_trace_event *event);
 
 /**
  * Result codes returned by strict Lua runtime facade operations.
  */
-typedef enum luthrum_lua_runtime_status {
+typedef enum luthr_lua_runtime_status {
   /** Operation completed successfully. */
-  LUTHRUM_LUA_RUNTIME_OK = 0,
+  LUTHR_LUA_RUNTIME_OK = 0,
   /** Invalid argument, missing required callback, or invalid handle. */
-  LUTHRUM_LUA_RUNTIME_ERR_ARG = 1,
+  LUTHR_LUA_RUNTIME_ERR_ARG = 1,
   /** Allocation failed, including a runtime-managed byte cap being reached. */
-  LUTHRUM_LUA_RUNTIME_ERR_ALLOC = 2,
+  LUTHR_LUA_RUNTIME_ERR_ALLOC = 2,
   /** Lua source failed to load or compile. */
-  LUTHRUM_LUA_RUNTIME_ERR_LOAD = 3,
+  LUTHR_LUA_RUNTIME_ERR_LOAD = 3,
   /** Lua code loaded but failed while running. */
-  LUTHRUM_LUA_RUNTIME_ERR_RUNTIME = 4,
+  LUTHR_LUA_RUNTIME_ERR_RUNTIME = 4,
   /** Configured Lua VM instruction limit was reached. */
-  LUTHRUM_LUA_RUNTIME_ERR_LIMIT = 5
-} luthrum_lua_runtime_status;
+  LUTHR_LUA_RUNTIME_ERR_LIMIT = 5
+} luthr_lua_runtime_status;
 
 /**
  * Execution flags for file and buffer runs.
  */
-typedef enum luthrum_lua_runtime_flags {
+typedef enum luthr_lua_runtime_flags {
   /** Open all Lua standard libraries before executing the script. */
-  LUTHRUM_LUA_RUNTIME_OPEN_LIBS = 1
-} luthrum_lua_runtime_flags;
+  LUTHR_LUA_RUNTIME_OPEN_LIBS = 1
+} luthr_lua_runtime_flags;
 
 /**
  * Bitmask for selecting Lua standard libraries.
  *
- * Use with `luthrum_lua_runtime_open_libs()`. The package library is required
+ * Use with `luthr_lua_runtime_open_libs()`. The package library is required
  * for `require`, package search paths, native module cpaths, and preload
  * modules.
  */
-typedef enum luthrum_lua_runtime_libs {
+typedef enum luthr_lua_runtime_libs {
   /** Lua base library. */
-  LUTHRUM_LUA_RUNTIME_LIB_BASE = 1,
+  LUTHR_LUA_RUNTIME_LIB_BASE = 1,
   /** Lua package library. */
-  LUTHRUM_LUA_RUNTIME_LIB_PACKAGE = 2,
+  LUTHR_LUA_RUNTIME_LIB_PACKAGE = 2,
   /** Lua coroutine library. */
-  LUTHRUM_LUA_RUNTIME_LIB_COROUTINE = 4,
+  LUTHR_LUA_RUNTIME_LIB_COROUTINE = 4,
   /** Lua table library. */
-  LUTHRUM_LUA_RUNTIME_LIB_TABLE = 8,
+  LUTHR_LUA_RUNTIME_LIB_TABLE = 8,
   /** Lua I/O library. */
-  LUTHRUM_LUA_RUNTIME_LIB_IO = 16,
+  LUTHR_LUA_RUNTIME_LIB_IO = 16,
   /** Lua OS library. */
-  LUTHRUM_LUA_RUNTIME_LIB_OS = 32,
+  LUTHR_LUA_RUNTIME_LIB_OS = 32,
   /** Lua string library. */
-  LUTHRUM_LUA_RUNTIME_LIB_STRING = 64,
+  LUTHR_LUA_RUNTIME_LIB_STRING = 64,
   /** Lua UTF-8 library. */
-  LUTHRUM_LUA_RUNTIME_LIB_UTF8 = 128,
+  LUTHR_LUA_RUNTIME_LIB_UTF8 = 128,
   /** Lua math library. */
-  LUTHRUM_LUA_RUNTIME_LIB_MATH = 256,
+  LUTHR_LUA_RUNTIME_LIB_MATH = 256,
   /** Lua debug library. `debug.sethook` is disabled by this strict facade. */
-  LUTHRUM_LUA_RUNTIME_LIB_DEBUG = 512,
+  LUTHR_LUA_RUNTIME_LIB_DEBUG = 512,
   /** All standard libraries supported by this facade. */
-  LUTHRUM_LUA_RUNTIME_LIB_ALL = 1023
-} luthrum_lua_runtime_libs;
+  LUTHR_LUA_RUNTIME_LIB_ALL = 1023
+} luthr_lua_runtime_libs;
 
 /**
- * C module opener callback used by `luthrum_lua_runtime_register_c_module()`.
+ * C module opener callback used by `luthr_lua_runtime_register_c_module()`.
  *
  * The pointer is the upstream Lua VM state as an opaque `void *` so this public
  * header remains C89-compatible and does not include Lua headers. C89 callbacks
- * may include <luthrum/lua.h> and cast the borrowed pointer to
- * luthrum_lua_state *. Callbacks using upstream Lua headers require a
+ * may include <luthr/lua.h> and cast the borrowed pointer to
+ * luthr_lua_state *. Callbacks using upstream Lua headers require a
  * C99-or-newer translation unit. The borrowed state stores facade policy in Lua
  * extra space; module openers must leave that embedder-owned storage intact.
  */
-typedef int (*luthrum_lua_runtime_c_module_open_fn)(void *lua_state);
+typedef int (*luthr_lua_runtime_c_module_open_fn)(void *lua_state);
 
 /**
  * Allocates a new block from a runtime allocator.
@@ -123,7 +122,7 @@ typedef int (*luthrum_lua_runtime_c_module_open_fn)(void *lua_state);
  * Return NULL on allocation failure. The facade never calls this callback with
  * `size == 0`.
  */
-typedef void *(*luthrum_lua_runtime_alloc_fn)(void *user, size_t size);
+typedef void *(*luthr_lua_runtime_alloc_fn)(void *user, size_t size);
 
 /**
  * Resizes a block from a runtime allocator.
@@ -132,9 +131,8 @@ typedef void *(*luthrum_lua_runtime_alloc_fn)(void *user, size_t size);
  * copies `min(old_size, new_size)` bytes, and frees the old block through the
  * same allocator. Return NULL on allocation failure.
  */
-typedef void *(*luthrum_lua_runtime_realloc_fn)(void *user, void *ptr,
-                                                size_t old_size,
-                                                size_t new_size);
+typedef void *(*luthr_lua_runtime_realloc_fn)(void *user, void *ptr,
+                                              size_t old_size, size_t new_size);
 
 /**
  * Frees a block from a runtime allocator.
@@ -143,28 +141,28 @@ typedef void *(*luthrum_lua_runtime_realloc_fn)(void *user, void *ptr,
  * must tolerate `ptr == NULL` only if the allocator itself chooses to support
  * that convention; the facade does not intentionally free NULL blocks.
  */
-typedef void (*luthrum_lua_runtime_free_fn)(void *user, void *ptr, size_t size);
+typedef void (*luthr_lua_runtime_free_fn)(void *user, void *ptr, size_t size);
 
 /**
- * Allocator configuration for `luthrum_lua_runtime_new_with_allocator()`.
+ * Allocator configuration for `luthr_lua_runtime_new_with_allocator()`.
  *
  * If `alloc_fn` and `free_fn` are both NULL, the facade uses the default heap
  * allocator and `realloc_fn` must also be NULL. If either `alloc_fn` or
  * `free_fn` is provided, both must be provided; `realloc_fn` is then optional.
  * `max_bytes == 0` means no facade-enforced byte cap.
  */
-typedef struct luthrum_lua_runtime_allocator_config {
+typedef struct luthr_lua_runtime_allocator_config {
   /** Opaque pointer passed to all allocator callbacks. */
   void *user;
   /** Required allocation callback when using a custom allocator. */
-  luthrum_lua_runtime_alloc_fn alloc_fn;
+  luthr_lua_runtime_alloc_fn alloc_fn;
   /** Optional resize callback. */
-  luthrum_lua_runtime_realloc_fn realloc_fn;
+  luthr_lua_runtime_realloc_fn realloc_fn;
   /** Required free callback when using a custom allocator. */
-  luthrum_lua_runtime_free_fn free_fn;
+  luthr_lua_runtime_free_fn free_fn;
   /** Maximum runtime-managed bytes, or 0 for unrestricted. */
   size_t max_bytes;
-} luthrum_lua_runtime_allocator_config;
+} luthr_lua_runtime_allocator_config;
 
 /**
  * Returns the static upstream LUA_VERSION string (major/minor, e.g. "Lua 5.5").
@@ -172,7 +170,7 @@ typedef struct luthrum_lua_runtime_allocator_config {
  * This does not include the patch release; consult docs/lua-source.md
  * for that version. The caller must not free the returned string.
  */
-const char *luthrum_lua_runtime_lua_version(void);
+const char *luthr_lua_runtime_lua_version(void);
 
 /**
  * Returns the static strict facade API revision string (currently "1").
@@ -180,7 +178,7 @@ const char *luthrum_lua_runtime_lua_version(void);
  * This is independent of the bundle release and shared-library ABI major.
  * The caller must not free the returned string.
  */
-const char *luthrum_lua_runtime_facade_version(void);
+const char *luthr_lua_runtime_facade_version(void);
 
 /**
  * Creates an unrestricted runtime with the default heap allocator.
@@ -189,18 +187,18 @@ const char *luthrum_lua_runtime_facade_version(void);
  * stack and reports exhaustion as a Lua error.
  *
  * On success, writes a new handle to `*out`. The caller owns the handle and
- * must free it with `luthrum_lua_runtime_free()`.
+ * must free it with `luthr_lua_runtime_free()`.
  */
-luthrum_lua_runtime_status luthrum_lua_runtime_new(luthrum_lua_runtime **out);
+luthr_lua_runtime_status luthr_lua_runtime_new(luthr_lua_runtime **out);
 
 /**
  * Creates a runtime with a byte cap for runtime-managed allocations.
  *
  * A max_bytes value of 0 means unrestricted. A cap-induced allocation failure
- * returns LUTHRUM_LUA_RUNTIME_ERR_ALLOC, including during construction.
+ * returns LUTHR_LUA_RUNTIME_ERR_ALLOC, including during construction.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_new_with_limit(luthrum_lua_runtime **out, size_t max_bytes);
+luthr_lua_runtime_status
+luthr_lua_runtime_new_with_limit(luthr_lua_runtime **out, size_t max_bytes);
 
 /**
  * Creates a runtime with caller-provided allocation callbacks.
@@ -210,9 +208,9 @@ luthrum_lua_runtime_new_with_limit(luthrum_lua_runtime **out, size_t max_bytes);
  * must be provided; realloc_fn is optional. The allocator is used for
  * facade-owned memory and as the Lua state allocation hook.
  */
-luthrum_lua_runtime_status luthrum_lua_runtime_new_with_allocator(
-    luthrum_lua_runtime **out,
-    const luthrum_lua_runtime_allocator_config *allocator);
+luthr_lua_runtime_status luthr_lua_runtime_new_with_allocator(
+    luthr_lua_runtime **out,
+    const luthr_lua_runtime_allocator_config *allocator);
 
 /**
  * Frees a runtime.
@@ -220,15 +218,14 @@ luthrum_lua_runtime_status luthrum_lua_runtime_new_with_allocator(
  * Passing NULL is allowed. Any stored error string, registered preload chunks,
  * and Lua-state memory are released through the runtime allocator.
  */
-void luthrum_lua_runtime_free(luthrum_lua_runtime *runtime);
+void luthr_lua_runtime_free(luthr_lua_runtime *runtime);
 
 /**
  * Stores an embedder-owned context pointer.
  *
  * The facade never dereferences or frees this pointer.
  */
-void luthrum_lua_runtime_set_context(luthrum_lua_runtime *runtime,
-                                     void *context);
+void luthr_lua_runtime_set_context(luthr_lua_runtime *runtime, void *context);
 
 /**
  * Replaces the warning sink for this runtime. NULL suppresses warnings.
@@ -236,8 +233,8 @@ void luthrum_lua_runtime_set_context(luthrum_lua_runtime *runtime,
  * Replacement during a warning takes effect on the next fragment. The
  * callback can run during script execution and runtime destruction.
  */
-void luthrum_lua_runtime_set_warning_callback(
-    luthrum_lua_runtime *runtime, luthrum_lua_runtime_warning_fn callback,
+void luthr_lua_runtime_set_warning_callback(
+    luthr_lua_runtime *runtime, luthr_lua_runtime_warning_fn callback,
     void *context);
 
 /**
@@ -260,20 +257,20 @@ void luthrum_lua_runtime_set_warning_callback(
  * Callback failures must be recorded in caller-owned context and handled after
  * the host call; the callback has no error return or cancellation channel.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_trace_callback(luthrum_lua_runtime *runtime,
-                                       luthrum_lua_runtime_trace_fn callback,
-                                       void *context);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_trace_callback(luthr_lua_runtime *runtime,
+                                     luthr_lua_runtime_trace_fn callback,
+                                     void *context);
 
 /**
  * Returns the embedder-owned context pointer currently stored on the runtime.
  */
-void *luthrum_lua_runtime_context(const luthrum_lua_runtime *runtime);
+void *luthr_lua_runtime_context(const luthr_lua_runtime *runtime);
 
 /**
  * Retrieves the embedder context from a C module opener callback state.
  */
-void *luthrum_lua_runtime_context_from_state(void *lua_state);
+void *luthr_lua_runtime_context_from_state(void *lua_state);
 
 /**
  * Opens all standard libraries supported by this facade.
@@ -281,8 +278,7 @@ void *luthrum_lua_runtime_context_from_state(void *lua_state);
  * If the debug library is opened, `debug.sethook` is replaced with a facade
  * error function so Lua code cannot clear or replace instruction-limit hooks.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_openlibs(luthrum_lua_runtime *runtime);
+luthr_lua_runtime_status luthr_lua_runtime_openlibs(luthr_lua_runtime *runtime);
 
 /**
  * Opens the selected standard-library bitmask.
@@ -290,21 +286,21 @@ luthrum_lua_runtime_openlibs(luthrum_lua_runtime *runtime);
  * If the debug library is selected, `debug.sethook` is replaced with a facade
  * error function so Lua code cannot clear or replace instruction-limit hooks.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_open_libs(luthrum_lua_runtime *runtime, int libs);
+luthr_lua_runtime_status luthr_lua_runtime_open_libs(luthr_lua_runtime *runtime,
+                                                     int libs);
 
 /**
  * Enables or disables traceback text in runtime errors.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_traceback(luthrum_lua_runtime *runtime, int enabled);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_traceback(luthr_lua_runtime *runtime, int enabled);
 
 /**
  * Installs a count hook that interrupts Lua execution after approximately the
- * requested number of VM instruction steps with LUTHRUM_LUA_RUNTIME_ERR_LIMIT.
+ * requested number of VM instruction steps with LUTHR_LUA_RUNTIME_ERR_LIMIT.
  *
  * instruction_count must be positive; use
- * luthrum_lua_runtime_clear_instruction_limit() to disable it. This is not a
+ * luthr_lua_runtime_clear_instruction_limit() to disable it. This is not a
  * wall-clock timeout and cannot interrupt a blocking C call. Exhaustion is
  * terminal for the host run: Lua pcall/xpcall cannot suppress the limit.
  * Ordinary protected-call results and coroutine yields retain native behavior.
@@ -321,81 +317,81 @@ luthrum_lua_runtime_set_traceback(luthrum_lua_runtime *runtime, int enabled);
  * coroutine.close applies the current budget to its target before executing
  * Lua close handlers, including coroutines created before the limit changed.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_instruction_limit(luthrum_lua_runtime *runtime,
-                                          int instruction_count);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_instruction_limit(luthr_lua_runtime *runtime,
+                                        int instruction_count);
 
 /**
  * Removes any configured instruction limit.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_clear_instruction_limit(luthrum_lua_runtime *runtime);
+luthr_lua_runtime_status
+luthr_lua_runtime_clear_instruction_limit(luthr_lua_runtime *runtime);
 
 /**
  * Replaces the runtime Lua module search path.
  *
  * Requires the package library to be open before use.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_package_path(luthrum_lua_runtime *runtime,
-                                     const char *path);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_package_path(luthr_lua_runtime *runtime,
+                                   const char *path);
 
 /**
  * Prepends an entry to the runtime Lua module search path.
  *
  * Requires the package library to be open before use.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_prepend_package_path(luthrum_lua_runtime *runtime,
-                                         const char *path);
+luthr_lua_runtime_status
+luthr_lua_runtime_prepend_package_path(luthr_lua_runtime *runtime,
+                                       const char *path);
 
 /**
  * Replaces the runtime native-module search path.
  *
  * Requires the package library to be open before use.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_package_cpath(luthrum_lua_runtime *runtime,
-                                      const char *path);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_package_cpath(luthr_lua_runtime *runtime,
+                                    const char *path);
 
 /**
  * Prepends an entry to the runtime native-module search path.
  *
  * Requires the package library to be open before use.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_prepend_package_cpath(luthrum_lua_runtime *runtime,
-                                          const char *path);
+luthr_lua_runtime_status
+luthr_lua_runtime_prepend_package_cpath(luthr_lua_runtime *runtime,
+                                        const char *path);
 
 /**
  * Sets a Lua global string value.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_global_string(luthrum_lua_runtime *runtime,
-                                      const char *name, const char *value);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_global_string(luthr_lua_runtime *runtime,
+                                    const char *name, const char *value);
 
 /**
  * Sets a Lua global boolean value.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_global_boolean(luthrum_lua_runtime *runtime,
-                                       const char *name, int value);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_global_boolean(luthr_lua_runtime *runtime,
+                                     const char *name, int value);
 
 /**
  * Sets a Lua global number value.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_global_number(luthrum_lua_runtime *runtime,
-                                      const char *name, double value);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_global_number(luthr_lua_runtime *runtime,
+                                    const char *name, double value);
 
 /**
  * Sets a Lua global integer from a C89 long. The accepted range is the host
- * long range; use luthrum_lua_pushinteger() in the full Lua facade for exact
+ * long range; use luthr_lua_pushinteger() in the full Lua facade for exact
  * two-word 64-bit values on hosts where long is narrower.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_set_global_integer(luthrum_lua_runtime *runtime,
-                                       const char *name, long value);
+luthr_lua_runtime_status
+luthr_lua_runtime_set_global_integer(luthr_lua_runtime *runtime,
+                                     const char *name, long value);
 
 /**
  * Registers a named C module opener in the runtime preload table.
@@ -406,9 +402,10 @@ luthrum_lua_runtime_set_global_integer(luthrum_lua_runtime *runtime,
  * registration releases its new record. Loader upvalues are validated against
  * runtime-owned records; foreign or wrong-kind values raise a Lua error.
  */
-luthrum_lua_runtime_status luthrum_lua_runtime_register_c_module(
-    luthrum_lua_runtime *runtime, const char *module_name,
-    luthrum_lua_runtime_c_module_open_fn opener);
+luthr_lua_runtime_status
+luthr_lua_runtime_register_c_module(luthr_lua_runtime *runtime,
+                                    const char *module_name,
+                                    luthr_lua_runtime_c_module_open_fn opener);
 
 /**
  * Copies and registers a named Lua source chunk in the runtime preload table.
@@ -422,29 +419,29 @@ luthrum_lua_runtime_status luthrum_lua_runtime_register_c_module(
  *
  * Requires the package library to be open before use.
  */
-luthrum_lua_runtime_status luthrum_lua_runtime_register_lua_module(
-    luthrum_lua_runtime *runtime, const char *module_name,
+luthr_lua_runtime_status luthr_lua_runtime_register_lua_module(
+    luthr_lua_runtime *runtime, const char *module_name,
     const unsigned char *source, size_t source_size, const char *chunk_name);
 
 /**
  * Loads a module for side effects and discards the returned module value.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_require(luthrum_lua_runtime *runtime,
-                            const char *module_name);
+luthr_lua_runtime_status luthr_lua_runtime_require(luthr_lua_runtime *runtime,
+                                                   const char *module_name);
 
 /**
  * Runs a script file synchronously and replaces the Lua global `arg` table.
  *
  * arg[0] is path; arg[1] through arg[argc] copy argv[0] through argv[argc-1].
  * argc must be non-negative; argv may be NULL only when argc is zero. NULL
- * entries become empty strings. LUTHRUM_LUA_RUNTIME_OPEN_LIBS opens the
+ * entries become empty strings. LUTHR_LUA_RUNTIME_OPEN_LIBS opens the
  * standard libraries before execution. Script return values are discarded;
  * globals and loaded modules remain in this runtime for subsequent calls.
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_run_file(luthrum_lua_runtime *runtime, const char *path,
-                             int argc, const char *const *argv, int flags);
+luthr_lua_runtime_status luthr_lua_runtime_run_file(luthr_lua_runtime *runtime,
+                                                    const char *path, int argc,
+                                                    const char *const *argv,
+                                                    int flags);
 
 /**
  * Runs source_size bytes synchronously; source need not be NUL-terminated.
@@ -452,13 +449,11 @@ luthrum_lua_runtime_run_file(luthrum_lua_runtime *runtime, const char *path,
  * source must be non-NULL even for an empty chunk and is borrowed for this
  * call. arg[0] is chunk_name, or an empty string when NULL. Remaining
  * arguments, flags, discarded return values, and persistent state follow
- * luthrum_lua_runtime_run_file().
+ * luthr_lua_runtime_run_file().
  */
-luthrum_lua_runtime_status
-luthrum_lua_runtime_run_buffer(luthrum_lua_runtime *runtime,
-                               const unsigned char *source, size_t source_size,
-                               const char *chunk_name, int argc,
-                               const char *const *argv, int flags);
+luthr_lua_runtime_status luthr_lua_runtime_run_buffer(
+    luthr_lua_runtime *runtime, const unsigned char *source, size_t source_size,
+    const char *chunk_name, int argc, const char *const *argv, int flags);
 
 /**
  * Returns the last facade-owned error message.
@@ -467,18 +462,17 @@ luthrum_lua_runtime_run_buffer(luthrum_lua_runtime *runtime,
  * the next facade operation that changes the error state or until the runtime
  * is freed.
  */
-const char *luthrum_lua_runtime_error(const luthrum_lua_runtime *runtime);
+const char *luthr_lua_runtime_error(const luthr_lua_runtime *runtime);
 
 /**
  * Clears the last facade-owned error message.
  */
-void luthrum_lua_runtime_clear_error(luthrum_lua_runtime *runtime);
+void luthr_lua_runtime_clear_error(luthr_lua_runtime *runtime);
 
 /**
  * Returns a static status description.
  */
-const char *
-luthrum_lua_runtime_status_string(luthrum_lua_runtime_status status);
+const char *luthr_lua_runtime_status_string(luthr_lua_runtime_status status);
 
 #ifdef __cplusplus
 }

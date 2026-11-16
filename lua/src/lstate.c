@@ -218,7 +218,7 @@ uintptr_t luaE_initnativestack (void) {
   else
     size = 0;
 #else
-#error Unsupported Luthrum Lua native stack platform
+#error Unsupported Luthr Lua native stack platform
 #endif
   if (low <= UINTPTR_MAX - size) {
 #if defined(__linux__) && !defined(__GLIBC__)
@@ -235,7 +235,7 @@ uintptr_t luaE_initnativestack (void) {
 }
 
 void luaE_nativestackerror (lua_State *L, uintptr_t position) {
-  if (L->luthrum_stack_limit == UINTPTR_MAX) {
+  if (L->luthr_stack_limit == UINTPTR_MAX) {
     if (!completestate(G(L)))
       luaD_throw(L, LUA_ERRMEM);
     luaD_checkstack(L, LUA_MINSTACK);
@@ -243,12 +243,12 @@ void luaE_nativestackerror (lua_State *L, uintptr_t position) {
     L->top.p++;
     luaD_throw(L, LUA_ERRRUN);
   }
-  if (position <= L->luthrum_stack_limit - 24576) {
+  if (position <= L->luthr_stack_limit - 24576) {
     luaD_checkstack(L, LUA_MINSTACK);
     luaD_errerr(L);
   }
-  if (!L->luthrum_stack_context->overflow) {
-    L->luthrum_stack_context->overflow = 1;
+  if (!L->luthr_stack_context->overflow) {
+    L->luthr_stack_context->overflow = 1;
     luaD_checkstack(L, LUA_MINSTACK);
     luaG_runerror(L, "C stack overflow");
   }
@@ -365,8 +365,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->nci = 0;
   L->twups = L;  /* thread has no upvalues */
   L->nCcalls = 0;
-  L->luthrum_stack_limit = 0;
-  L->luthrum_stack_context = NULL;
+  L->luthr_stack_limit = 0;
+  L->luthr_stack_context = NULL;
   L->native_roots = NULL;
   L->callback_owner = NULL;
   L->callback_active = 0;

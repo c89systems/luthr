@@ -273,7 +273,7 @@ static void metatable (lua_State *L) {
   luaQ_pushmanaged(L, closemethod, 0); lua_setfield(L, -2, "close");
   luaQ_pushmanaged(L, stats, 0); lua_setfield(L, -2, "stats");
   luaQ_pushmanaged(L, finalize, 0); lua_setfield(L, -2, "__gc");
-  lua_pushliteral(L, "luthrum.chunk_pipe"); lua_setfield(L, -2, "__name");
+  lua_pushliteral(L, "luthr.chunk_pipe"); lua_setfield(L, -2, "__name");
   lua_pushboolean(L, 0); lua_setfield(L, -2, "__metatable");
   lua_lock(L);
   luaW_heapenter(L);

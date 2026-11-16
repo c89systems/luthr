@@ -244,7 +244,7 @@ int main(int argc, char **argv) {
             argv[0]);
     return 2;
   }
-#ifndef LUTHRUM_BENCH_SHARED_VM
+#ifndef LUTHR_BENCH_SHARED_VM
   if (pool.width != 1) {
     fputs("upstream shared-VM reference requires workers=1\n", stderr);
     return 2;

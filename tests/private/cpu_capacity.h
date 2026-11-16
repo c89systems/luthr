@@ -1,5 +1,5 @@
-#ifndef LUTHRUM_TEST_CPU_CAPACITY_H
-#define LUTHRUM_TEST_CPU_CAPACITY_H
+#ifndef LUTHR_TEST_CPU_CAPACITY_H
+#define LUTHR_TEST_CPU_CAPACITY_H
 
 #include <sched.h>
 #include <stdint.h>

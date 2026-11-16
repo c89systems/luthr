@@ -3,8 +3,8 @@
 #include <lstate.h>
 #include <lua.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
-#include <luthrum_hook_policy.h>
+#include <luthr/lua_runtime.h>
+#include <luthr_hook_policy.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +39,7 @@ struct fixture {
   pthread_cond_t changed;
   pthread_barrier_t managed;
   pthread_barrier_t ready;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   lua_Hook hook;
   struct actor actors[2];
   struct observer observers[2];
@@ -90,7 +90,7 @@ static void counted_hook(lua_State *state, lua_Debug *record) {
 void __wrap_lua_sethook(lua_State *state, lua_Hook hook, int mask, int count) {
   struct fixture *fixture = active_fixture;
   if (fixture != NULL && hook != NULL && hook != counted_hook &&
-      (mask & LUTHRUM_LUA_RUNTIME_MASK_FINALIZERS)) {
+      (mask & LUTHR_LUA_RUNTIME_MASK_FINALIZERS)) {
     if (fixture->hook == NULL)
       fixture->hook = hook; /* first publication precedes worker creation */
     if (fixture->hook != hook || count < 0)
@@ -160,15 +160,15 @@ static void *resize(void *user, void *pointer, size_t old_size, size_t size) {
 }
 
 static struct fixture *from_state(lua_State *state) {
-  struct fixture *fixture = luthrum_lua_runtime_context_from_state(state);
+  struct fixture *fixture = luthr_lua_runtime_context_from_state(state);
   if (fixture != active_fixture)
     abort();
   return fixture;
 }
 
-static void trace_b(void *, const luthrum_lua_runtime_trace_event *);
+static void trace_b(void *, const luthr_lua_runtime_trace_event *);
 
-static void trace(void *user, const luthrum_lua_runtime_trace_event *event,
+static void trace(void *user, const luthr_lua_runtime_trace_event *event,
                   unsigned kind) {
   struct observer *observer = user;
   struct fixture *fixture = observer->fixture;
@@ -181,9 +181,9 @@ static void trace(void *user, const luthrum_lua_runtime_trace_event *event,
   observer->calls++;
   if (fixture->launched && worker) {
     observer->worker_calls++;
-    if (luthrum_lua_runtime_context(fixture->runtime) != fixture ||
-        luthrum_lua_runtime_set_instruction_limit(fixture->runtime, 1) !=
-            LUTHRUM_LUA_RUNTIME_ERR_ARG)
+    if (luthr_lua_runtime_context(fixture->runtime) != fixture ||
+        luthr_lua_runtime_set_instruction_limit(fixture->runtime, 1) !=
+            LUTHR_LUA_RUNTIME_ERR_ARG)
       abort();
     if (fixture->mode == TRACE_BLOCKED && observer->worker_calls == 1) {
       check(pthread_mutex_lock(&fixture->mutex));
@@ -195,13 +195,13 @@ static void trace(void *user, const luthrum_lua_runtime_trace_event *event,
     } else if (fixture->mode == TRACE_REPLACE ||
                fixture->mode == BUDGET_TRACE) {
       if (kind == 0) {
-        if (luthrum_lua_runtime_set_trace_callback(fixture->runtime, trace_b,
-                                                   &fixture->observers[1]) !=
-            LUTHRUM_LUA_RUNTIME_OK)
+        if (luthr_lua_runtime_set_trace_callback(fixture->runtime, trace_b,
+                                                 &fixture->observers[1]) !=
+            LUTHR_LUA_RUNTIME_OK)
           abort();
       } else if (observer->worker_calls == 20) {
-        if (luthrum_lua_runtime_set_trace_callback(
-                fixture->runtime, NULL, NULL) != LUTHRUM_LUA_RUNTIME_OK)
+        if (luthr_lua_runtime_set_trace_callback(fixture->runtime, NULL,
+                                                 NULL) != LUTHR_LUA_RUNTIME_OK)
           abort();
       }
     }
@@ -209,11 +209,11 @@ static void trace(void *user, const luthrum_lua_runtime_trace_event *event,
   fixture->trace_busy = 0;
 }
 
-static void trace_a(void *user, const luthrum_lua_runtime_trace_event *event) {
+static void trace_a(void *user, const luthr_lua_runtime_trace_event *event) {
   trace(user, event, 0);
 }
 
-static void trace_b(void *user, const luthrum_lua_runtime_trace_event *event) {
+static void trace_b(void *user, const luthr_lua_runtime_trace_event *event) {
   trace(user, event, 1);
 }
 
@@ -263,9 +263,9 @@ static int progress(lua_State *state) {
   while (!fixture->entered)
     check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
   check(pthread_mutex_unlock(&fixture->mutex));
-  if (luthrum_lua_runtime_set_trace_callback(fixture->runtime, trace_b,
-                                             &fixture->observers[1]) !=
-      LUTHRUM_LUA_RUNTIME_ERR_ARG)
+  if (luthr_lua_runtime_set_trace_callback(fixture->runtime, trace_b,
+                                           &fixture->observers[1]) !=
+      LUTHR_LUA_RUNTIME_ERR_ARG)
     abort();
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->rejected = 1;
@@ -287,9 +287,9 @@ static int await_observer(lua_State *state) {
 static int set_warning(lua_State *state) {
   struct fixture *fixture = from_state(state);
   int kind = (int)lua_tointeger(state, 1) % 2;
-  luthrum_lua_runtime_set_warning_callback(fixture->runtime,
-                                           kind ? warning_b : warning_a,
-                                           &fixture->observers[kind]);
+  luthr_lua_runtime_set_warning_callback(fixture->runtime,
+                                         kind ? warning_b : warning_a,
+                                         &fixture->observers[kind]);
   return 0;
 }
 
@@ -353,7 +353,7 @@ static int read_child(lua_State *state) {
   child = fixture->child;
   check(pthread_mutex_unlock(&fixture->mutex));
   do {
-    if (luthrum_lua_runtime_context_from_state(child) != fixture)
+    if (luthr_lua_runtime_context_from_state(child) != fixture)
       abort();
     reads++;
     check(pthread_mutex_lock(&fixture->mutex));
@@ -476,8 +476,8 @@ static const char *actor_source(struct fixture *fixture, int role) {
 
 int main(int argc, char **argv) {
   struct fixture fixture;
-  luthrum_lua_runtime_allocator_config allocator;
-  luthrum_lua_runtime_status status;
+  luthr_lua_runtime_allocator_config allocator;
+  luthr_lua_runtime_status status;
   char *source;
   size_t capacity;
   const char *left, *right, *right_loader;
@@ -519,36 +519,36 @@ int main(int argc, char **argv) {
   allocator.realloc_fn = resize;
   allocator.free_fn = release;
   allocator.max_bytes = fixture.mode == CAP ? 512 * 1024 : 0;
-  if (luthrum_lua_runtime_new_with_allocator(&fixture.runtime, &allocator) !=
-          LUTHRUM_LUA_RUNTIME_OK ||
-      luthrum_lua_runtime_openlibs(fixture.runtime) != LUTHRUM_LUA_RUNTIME_OK)
+  if (luthr_lua_runtime_new_with_allocator(&fixture.runtime, &allocator) !=
+          LUTHR_LUA_RUNTIME_OK ||
+      luthr_lua_runtime_openlibs(fixture.runtime) != LUTHR_LUA_RUNTIME_OK)
     abort();
-  luthrum_lua_runtime_set_context(fixture.runtime, &fixture);
-  if (luthrum_lua_runtime_register_c_module(
-          fixture.runtime, "fixture", open_fixture) != LUTHRUM_LUA_RUNTIME_OK)
+  luthr_lua_runtime_set_context(fixture.runtime, &fixture);
+  if (luthr_lua_runtime_register_c_module(fixture.runtime, "fixture",
+                                          open_fixture) != LUTHR_LUA_RUNTIME_OK)
     abort();
   if (strstr(argv[1], "generational") != NULL) {
     static const unsigned char gc[] = "collectgarbage('generational')";
-    if (luthrum_lua_runtime_run_buffer(fixture.runtime, gc, sizeof(gc) - 1,
-                                       "gc-mode", 0, NULL,
-                                       0) != LUTHRUM_LUA_RUNTIME_OK)
+    if (luthr_lua_runtime_run_buffer(fixture.runtime, gc, sizeof(gc) - 1,
+                                     "gc-mode", 0, NULL,
+                                     0) != LUTHR_LUA_RUNTIME_OK)
       abort();
   }
   for (i = 0; i < 2; ++i) {
     fixture.observers[i].fixture = &fixture;
     fixture.observers[i].kind = (unsigned)i;
   }
-  luthrum_lua_runtime_set_warning_callback(fixture.runtime, warning_a,
-                                           &fixture.observers[0]);
+  luthr_lua_runtime_set_warning_callback(fixture.runtime, warning_a,
+                                         &fixture.observers[0]);
   if (fixture.mode == BUDGET_TRACE || fixture.mode == TRACE_REPLACE ||
       fixture.mode == TRACE_BLOCKED)
-    if (luthrum_lua_runtime_set_trace_callback(fixture.runtime, trace_a,
-                                               &fixture.observers[0]) !=
-        LUTHRUM_LUA_RUNTIME_OK)
+    if (luthr_lua_runtime_set_trace_callback(fixture.runtime, trace_a,
+                                             &fixture.observers[0]) !=
+        LUTHR_LUA_RUNTIME_OK)
       abort();
   limited = fixture.mode == BUDGET || fixture.mode == BUDGET_TRACE;
-  if (limited && luthrum_lua_runtime_set_instruction_limit(
-                     fixture.runtime, 4000) != LUTHRUM_LUA_RUNTIME_OK)
+  if (limited && luthr_lua_runtime_set_instruction_limit(
+                     fixture.runtime, 4000) != LUTHR_LUA_RUNTIME_OK)
     abort();
   left = actor_source(&fixture, 0);
   right = actor_source(&fixture, 1);
@@ -578,8 +578,8 @@ int main(int argc, char **argv) {
   length += i;
   fixture.measured = 1;
   status =
-      luthrum_lua_runtime_run_buffer(fixture.runtime, (unsigned char *)source,
-                                     (size_t)length, "@root.lua", 0, NULL, 0);
+      luthr_lua_runtime_run_buffer(fixture.runtime, (unsigned char *)source,
+                                   (size_t)length, "@root.lua", 0, NULL, 0);
   fixture.measured = 0;
   free(source);
   failed |= fixture.driver_calls != 1;
@@ -595,14 +595,14 @@ int main(int argc, char **argv) {
       failed |= fixture.actors[i].status != expected;
   }
   if (limited) {
-    failed |= status != LUTHRUM_LUA_RUNTIME_ERR_LIMIT ||
+    failed |= status != LUTHR_LUA_RUNTIME_ERR_LIMIT ||
               fixture.accepted != 3999 || fixture.ticks[0] == 0 ||
               fixture.ticks[1] == 0;
   } else if (fixture.mode == CAP)
-    failed |= status != LUTHRUM_LUA_RUNTIME_ERR_ALLOC ||
+    failed |= status != LUTHR_LUA_RUNTIME_ERR_ALLOC ||
               fixture.peak_bytes > allocator.max_bytes;
   else
-    failed |= status != LUTHRUM_LUA_RUNTIME_OK;
+    failed |= status != LUTHR_LUA_RUNTIME_OK;
   if (fixture.mode == TRACE_REPLACE || fixture.mode == BUDGET_TRACE)
     failed |= fixture.observers[0].worker_calls != 1 ||
               fixture.observers[1].worker_calls != 20;
@@ -617,12 +617,12 @@ int main(int argc, char **argv) {
               fixture.rejected_headers != 2 || fixture.failures_left != 0;
   if (limited) {
     static const unsigned char recovery[] = "assert(2+2==4)";
-    if (luthrum_lua_runtime_run_buffer(fixture.runtime, recovery,
-                                       sizeof(recovery) - 1, "@recovery.lua", 0,
-                                       NULL, 0) != LUTHRUM_LUA_RUNTIME_OK)
+    if (luthr_lua_runtime_run_buffer(fixture.runtime, recovery,
+                                     sizeof(recovery) - 1, "@recovery.lua", 0,
+                                     NULL, 0) != LUTHR_LUA_RUNTIME_OK)
       failed = 1;
   }
-  luthrum_lua_runtime_free(fixture.runtime);
+  luthr_lua_runtime_free(fixture.runtime);
   failed |= fixture.live_bytes != 0 || fixture.allocations == 0;
   check(pthread_barrier_destroy(&fixture.ready));
   check(pthread_barrier_destroy(&fixture.managed));

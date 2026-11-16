@@ -16,7 +16,7 @@ only its top-level `lua-5.5.1/` directory renamed to `lua/`. No upstream file wa
 modified. The archive checksum identifies this baseline, not future modified
 source trees.
 
-The top-level `lua/` directory is Luthrum-owned runtime source, maintained
+The top-level `lua/` directory is Luthr-owned runtime source, maintained
 directly as part of this project. Use Git history to track changes; do not add a
 patch series or regenerate the source during builds.
 Upstream updates are deliberate source changes that retain the license notice
@@ -59,7 +59,7 @@ character classes or decimal separators assumed by two suite sections. Both
 musl working copies disable only those Portuguese-locale blocks in `strings.lua`
 and `literals.lua`; `tests/e2e/OfficialLua.cmake` contains the exact adjustments.
 The portable `locale.lua` E2E test instead compares actual locale results between
-pristine Lua and Luthrum on each libc, including numeric parsing and C reset.
+pristine Lua and Luthr on each libc, including numeric parsing and C reset.
 The suite's `testC` internal instrumentation is not enabled in either runtime.
 No `_U`, `_soft` or `_port` exclusions are set; CLI, native-module and I/O tests
 remain enabled on both libc targets.

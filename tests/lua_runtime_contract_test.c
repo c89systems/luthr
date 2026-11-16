@@ -1,5 +1,5 @@
-#include <luthrum/lua.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,90 +9,90 @@ struct runtime_case {
   const char *name;
   const char *source;
   int limited;
-  luthrum_lua_runtime_status expected;
+  luthr_lua_runtime_status expected;
 };
 
 static const struct runtime_case cases[] = {
     {"large_arguments",
      "local f=coroutine.wrap(function(...) return select('#',...) end); "
      "assert(f(table.unpack({},1,1000))==1000)",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"large_results",
      "local f=coroutine.wrap(function() return table.unpack({},1,1000) end); "
      "assert(select('#',f())==1000)",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"large_yields",
      "local f=coroutine.wrap(function() "
      "coroutine.yield(table.unpack({},1,1000)); return 17 end); "
      "assert(select('#',f())==1000); assert(f()==17)",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"closed_error",
      "local closed=false; local f=coroutine.wrap(function() "
      "local resource <close> = setmetatable({}, {__close=function() "
      "closed=true end}); error('original failure') end); "
      "local ok,err=pcall(f); assert(not ok); assert(closed); "
      "assert(tostring(err):match('original failure'))",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"close_error_replaced",
      "local f=coroutine.wrap(function() "
      "local resource <close> = setmetatable({}, {__close=function() "
      "error('close failure') end}); error('original failure') end); "
      "local ok,err=pcall(f); assert(not ok); "
      "assert(tostring(err):match('close failure'))",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"protected_limit",
      "while true do pcall(function() while true do end end) end", 1,
-     LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"xprotected_limit",
      "while true do xpcall(function() while true do end end, "
      "function(err) return 'caught' end) end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"xhandler_limit",
      "xpcall(function() while true do end end, "
      "function(err) while true do end end)",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"xhandler_error_limit",
      "xpcall(function() error('ordinary error') end, "
      "function(err) while true do end end)",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"xhandler_normal",
      "local ok,err=xpcall(function(a,b) assert(a==7 and b==9); "
      "error('ordinary error') end, function(err) "
      "assert(err:match('ordinary error')); return 'handled' end,7,9); "
      "assert(not ok and err=='handled')",
-     1, LUTHRUM_LUA_RUNTIME_OK},
+     1, LUTHR_LUA_RUNTIME_OK},
     {"gc_limit",
      "local t=setmetatable({}, {__gc=function() while true do end end}); "
      "t=nil; collectgarbage()",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"gc_coroutine_limit",
      "local co=coroutine.create(function() "
      "local t=setmetatable({}, {__gc=function() while true do end end}); "
      "t=nil; collectgarbage() end); coroutine.resume(co)",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"gc_finite",
      "local finalized=false; "
      "local t=setmetatable({}, {__gc=function() local n=0; "
      "for i=1,10 do n=n+i end; assert(n==55); finalized=true end}); "
      "t=nil; collectgarbage(); assert(finalized)",
-     1, LUTHRUM_LUA_RUNTIME_OK},
+     1, LUTHR_LUA_RUNTIME_OK},
     {"gc_close_limit",
      "saved_gc=setmetatable({}, {__gc=function() while true do end end})", 1,
-     LUTHRUM_LUA_RUNTIME_OK},
+     LUTHR_LUA_RUNTIME_OK},
     {"gc_close_after_limit",
      "saved_gc=setmetatable({}, {__gc=function() while true do end end}); "
      "while true do end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"native_gc_hooks", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"coroutine_close_existing_limit", "", 0, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"coroutine_close_reopen_limit", "", 0, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"coroutine_close_cleared_limit", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"coroutine_close_normal_results", "", 0, LUTHRUM_LUA_RUNTIME_OK},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"native_gc_hooks", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"coroutine_close_existing_limit", "", 0, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"coroutine_close_reopen_limit", "", 0, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"coroutine_close_cleared_limit", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"coroutine_close_normal_results", "", 0, LUTHR_LUA_RUNTIME_OK},
     {"registry_limit",
      "for k in pairs(debug.getregistry()) do "
      "if type(k)=='userdata' then debug.getregistry()[k]=nil end end; "
      "while true do end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"protected_yields",
      "local f=coroutine.wrap(function() "
      "local ok,v=pcall(function() return coroutine.yield(91) end); "
@@ -100,22 +100,22 @@ static const struct runtime_case cases[] = {
      "local ok,w=xpcall(function() return coroutine.yield(93) end, tostring); "
      "assert(ok and w==94); return 95 end); "
      "assert(f()==91); assert(f(92)==93); assert(f(94)==95)",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"yielded_protected_limit",
      "local f=coroutine.wrap(function() pcall(function() "
      "coroutine.yield('ready'); while true do end end) end); "
      "assert(f()=='ready'); while true do pcall(f) end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"upvalue_limit",
      "debug.setupvalue(coroutine.create,2,io.stdout); "
      "debug.setupvalue(coroutine.resume,2,io.stdout); "
      "local co=coroutine.create(function() while true do end end); "
      "coroutine.resume(co)",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"existing_wrap_limit",
      "local f=coroutine.wrap(function() coroutine.yield('ready'); "
      "while true do end end); _G.policy_saved_wrap=f; assert(f()=='ready')",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"native_upvalues",
      "assert(debug.getupvalue(coroutine.create,1)==nil); "
      "assert(debug.getupvalue(coroutine.resume,1)==nil); "
@@ -125,28 +125,28 @@ static const struct runtime_case cases[] = {
      "assert(debug.getupvalue(f,2)==nil); "
      "policy_saved_resume=coroutine.resume; "
      "policy_saved_thread=coroutine.create(function() while true do end end)",
-     0, LUTHRUM_LUA_RUNTIME_OK},
+     0, LUTHR_LUA_RUNTIME_OK},
     {"shared_resume_budget",
      "local co=coroutine.create(function() for j=1,10 do local sum=0; "
      "for i=1,200 do sum=sum+i end; coroutine.yield(sum) end end); "
      "for j=1,10 do assert(coroutine.resume(co)) end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
     {"shared_wrap_budget",
      "local f=coroutine.wrap(function() for j=1,10 do local sum=0; "
      "for i=1,200 do sum=sum+i end; coroutine.yield(sum) end end); "
      "for j=1,10 do assert(f()) end",
-     1, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"error_conversion_oom", "", 0, LUTHRUM_LUA_RUNTIME_ERR_ALLOC},
-    {"numeric_error", "error(1729)", 0, LUTHRUM_LUA_RUNTIME_ERR_RUNTIME},
-    {"preload_registration", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"preload_arguments", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"preload_lua_upvalues", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"preload_c_upvalues", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"preload_c_allocation", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"reopen_resume_limit", "", 0, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"reopen_wrap_limit", "", 0, LUTHRUM_LUA_RUNTIME_ERR_LIMIT},
-    {"reopen_library_identity", "", 0, LUTHRUM_LUA_RUNTIME_OK},
-    {"construction_failure", "", 0, LUTHRUM_LUA_RUNTIME_ERR_ALLOC}};
+     1, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"error_conversion_oom", "", 0, LUTHR_LUA_RUNTIME_ERR_ALLOC},
+    {"numeric_error", "error(1729)", 0, LUTHR_LUA_RUNTIME_ERR_RUNTIME},
+    {"preload_registration", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"preload_arguments", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"preload_lua_upvalues", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"preload_c_upvalues", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"preload_c_allocation", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"reopen_resume_limit", "", 0, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"reopen_wrap_limit", "", 0, LUTHR_LUA_RUNTIME_ERR_LIMIT},
+    {"reopen_library_identity", "", 0, LUTHR_LUA_RUNTIME_OK},
+    {"construction_failure", "", 0, LUTHR_LUA_RUNTIME_ERR_ALLOC}};
 
 struct failure_allocator {
   int reject_growth;
@@ -155,39 +155,39 @@ struct failure_allocator {
 static int native_hook_calls;
 static int native_finalizer_hook_calls;
 
-static void native_hook(luthrum_lua_state *state, luthrum_lua_debug *record) {
+static void native_hook(luthr_lua_state *state, luthr_lua_debug *record) {
   (void)record;
   native_hook_calls += 1;
-  luthrum_lua_getglobal(state, "inside_native_gc");
-  if (luthrum_lua_toboolean(state, -1)) {
+  luthr_lua_getglobal(state, "inside_native_gc");
+  if (luthr_lua_toboolean(state, -1)) {
     native_finalizer_hook_calls += 1;
   }
-  luthrum_lua_pop(state, 1);
+  luthr_lua_pop(state, 1);
 }
 
 static int exercise_native_gc_hooks(void) {
-  luthrum_lua_state *state;
+  luthr_lua_state *state;
   const char *source;
   int status;
-  state = luthrum_lua_l_newstate();
+  state = luthr_lua_l_newstate();
   if (state == NULL) {
     return 1;
   }
-  luthrum_lua_l_openlibs(state);
+  luthr_lua_l_openlibs(state);
   native_hook_calls = 0;
   native_finalizer_hook_calls = 0;
-  luthrum_lua_sethook(state, native_hook, LUTHRUM_LUA_MASKCOUNT, 1);
+  luthr_lua_sethook(state, native_hook, LUTHR_LUA_MASKCOUNT, 1);
   source = "local t=setmetatable({}, {__gc=function() "
            "inside_native_gc=true; local n=0; "
            "for i=1,100 do n=n+i end; assert(n==5050); "
            "inside_native_gc=false; native_finalized=true end}); "
            "t=nil; collectgarbage(); assert(native_finalized)";
-  status = luthrum_lua_l_loadbuffer(state, source, strlen(source), "native-gc");
-  if (status == LUTHRUM_LUA_OK) {
-    status = luthrum_lua_pcall(state, 0, 0, 0);
+  status = luthr_lua_l_loadbuffer(state, source, strlen(source), "native-gc");
+  if (status == LUTHR_LUA_OK) {
+    status = luthr_lua_pcall(state, 0, 0, 0);
   }
-  luthrum_lua_close(state);
-  return status != LUTHRUM_LUA_OK || native_hook_calls == 0 ||
+  luthr_lua_close(state);
+  return status != LUTHR_LUA_OK || native_hook_calls == 0 ||
          native_finalizer_hook_calls != 0;
 }
 
@@ -214,41 +214,41 @@ static void release(void *user, void *pointer, size_t size) {
 
 static int failing_numeric_module(void *state) {
   struct failure_allocator *allocator;
-  luthrum_lua_integer value;
+  luthr_lua_integer value;
   allocator =
-      (struct failure_allocator *)luthrum_lua_runtime_context_from_state(state);
+      (struct failure_allocator *)luthr_lua_runtime_context_from_state(state);
   value.high = 0;
   value.low = 1729;
-  luthrum_lua_pushinteger((luthrum_lua_state *)state, value);
+  luthr_lua_pushinteger((luthr_lua_state *)state, value);
   allocator->reject_growth = 1;
-  return luthrum_lua_error((luthrum_lua_state *)state);
+  return luthr_lua_error((luthr_lua_state *)state);
 }
 
 static int preload_c_module(void *state) {
-  luthrum_lua_pushboolean((luthrum_lua_state *)state, 1);
+  luthr_lua_pushboolean((luthr_lua_state *)state, 1);
   return 1;
 }
 
-static luthrum_lua_runtime_status run_text(luthrum_lua_runtime *runtime,
-                                           const char *text) {
-  return luthrum_lua_runtime_run_buffer(runtime, (const unsigned char *)text,
-                                        strlen(text), "preload-contract", 0,
-                                        NULL, 0);
+static luthr_lua_runtime_status run_text(luthr_lua_runtime *runtime,
+                                         const char *text) {
+  return luthr_lua_runtime_run_buffer(runtime, (const unsigned char *)text,
+                                      strlen(text), "preload-contract", 0, NULL,
+                                      0);
 }
 
-static luthrum_lua_runtime_status
-exercise_preload_upvalues(luthrum_lua_runtime *runtime, int c_module) {
-  luthrum_lua_runtime_status status;
+static luthr_lua_runtime_status
+exercise_preload_upvalues(luthr_lua_runtime *runtime, int c_module) {
+  luthr_lua_runtime_status status;
   const char *source;
   source = "return true";
-  status = luthrum_lua_runtime_register_lua_module(
-      runtime, "tamper_lua", (const unsigned char *)source, strlen(source),
-      "tamper-lua");
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
-    status = luthrum_lua_runtime_register_c_module(runtime, "tamper_c",
-                                                   preload_c_module);
+  status = luthr_lua_runtime_register_lua_module(runtime, "tamper_lua",
+                                                 (const unsigned char *)source,
+                                                 strlen(source), "tamper-lua");
+  if (status == LUTHR_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_register_c_module(runtime, "tamper_c",
+                                                 preload_c_module);
   }
-  if (status != LUTHRUM_LUA_RUNTIME_OK) {
+  if (status != LUTHR_LUA_RUNTIME_OK) {
     return status;
   }
   status =
@@ -258,7 +258,7 @@ exercise_preload_upvalues(luthrum_lua_runtime *runtime, int c_module) {
                                  : "tamper_loader=package.preload.tamper_lua; "
                                    "tamper_other=package.preload.tamper_c; "
                                    "tamper_error='invalid Lua preload chunk'");
-  if (status != LUTHRUM_LUA_RUNTIME_OK) {
+  if (status != LUTHR_LUA_RUNTIME_OK) {
     return status;
   }
   status = run_text(
@@ -273,14 +273,14 @@ exercise_preload_upvalues(luthrum_lua_runtime *runtime, int c_module) {
       "reject(io.stdout); reject(nil); reject(17); reject('foreign'); "
       "reject(other); "
       "debug.setupvalue(tamper_loader,1,saved); assert(tamper_loader()==true)");
-  return status == LUTHRUM_LUA_RUNTIME_OK
+  return status == LUTHR_LUA_RUNTIME_OK
              ? run_text(runtime, "assert(require('tamper_c')==true)")
              : status;
 }
 
-static luthrum_lua_runtime_status
-exercise_reopened_libraries(luthrum_lua_runtime *runtime, const char *name) {
-  luthrum_lua_runtime_status status;
+static luthr_lua_runtime_status
+exercise_reopened_libraries(luthr_lua_runtime *runtime, const char *name) {
+  luthr_lua_runtime_status status;
   const char *preparation;
   const char *execution;
   if (strcmp(name, "reopen_library_identity") == 0) {
@@ -304,39 +304,37 @@ exercise_reopened_libraries(luthrum_lua_runtime *runtime, const char *name) {
                     : "saved_reopened_wrap()";
   }
   status = run_text(runtime, preparation);
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
-    status = luthrum_lua_runtime_openlibs(runtime);
+  if (status == LUTHR_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_openlibs(runtime);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
-    status = luthrum_lua_runtime_open_libs(
-        runtime,
-        LUTHRUM_LUA_RUNTIME_LIB_BASE | LUTHRUM_LUA_RUNTIME_LIB_COROUTINE);
+  if (status == LUTHR_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_open_libs(
+        runtime, LUTHR_LUA_RUNTIME_LIB_BASE | LUTHR_LUA_RUNTIME_LIB_COROUTINE);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  if (status == LUTHR_LUA_RUNTIME_OK &&
       strcmp(name, "reopen_wrap_limit") == 0) {
     status = run_text(
         runtime, "saved_reopened_wrap=coroutine.wrap(function() local sum=0; "
                  "for i=1,100000 do sum=sum+i end; return sum end)");
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  if (status == LUTHR_LUA_RUNTIME_OK &&
       strcmp(name, "reopen_library_identity") != 0) {
-    status = luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
+    status = luthr_lua_runtime_set_instruction_limit(runtime, 1000);
   }
-  return status == LUTHRUM_LUA_RUNTIME_OK ? run_text(runtime, execution)
-                                          : status;
+  return status == LUTHR_LUA_RUNTIME_OK ? run_text(runtime, execution) : status;
 }
 
-static luthrum_lua_runtime_status
-exercise_coroutine_close(luthrum_lua_runtime *runtime, const char *name) {
-  luthrum_lua_runtime_status status;
+static luthr_lua_runtime_status
+exercise_coroutine_close(luthr_lua_runtime *runtime, const char *name) {
+  luthr_lua_runtime_status status;
   const char *closer;
   const char *finish;
   int cleared;
   cleared = strcmp(name, "coroutine_close_cleared_limit") == 0;
   closer = "while true do end";
   if (cleared) {
-    status = luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_set_instruction_limit(runtime, 1000);
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       return status;
     }
     closer = "local n=0; for i=1,10000 do n=n+i end; "
@@ -345,11 +343,11 @@ exercise_coroutine_close(luthrum_lua_runtime *runtime, const char *name) {
     closer = "error('native close error')";
   }
   status = run_text(runtime, "close_source=nil");
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
+  if (status == LUTHR_LUA_RUNTIME_OK) {
     status =
-        luthrum_lua_runtime_set_global_string(runtime, "close_source", closer);
+        luthr_lua_runtime_set_global_string(runtime, "close_source", closer);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
+  if (status == LUTHR_LUA_RUNTIME_OK) {
     status = run_text(
         runtime, "local closer=assert(load(close_source)); "
                  "close_thread=coroutine.create(function() "
@@ -358,21 +356,21 @@ exercise_coroutine_close(luthrum_lua_runtime *runtime, const char *name) {
                  "local ok,value=coroutine.resume(close_thread); "
                  "assert(ok and value=='ready')");
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  if (status == LUTHR_LUA_RUNTIME_OK &&
       strcmp(name, "coroutine_close_reopen_limit") == 0) {
     status = run_text(
         runtime, "saved_close=coroutine.close; package.loaded.coroutine=nil");
-    if (status == LUTHRUM_LUA_RUNTIME_OK) {
-      status = luthrum_lua_runtime_open_libs(runtime,
-                                             LUTHRUM_LUA_RUNTIME_LIB_COROUTINE);
+    if (status == LUTHR_LUA_RUNTIME_OK) {
+      status =
+          luthr_lua_runtime_open_libs(runtime, LUTHR_LUA_RUNTIME_LIB_COROUTINE);
     }
-    if (status == LUTHRUM_LUA_RUNTIME_OK) {
+    if (status == LUTHR_LUA_RUNTIME_OK) {
       status = run_text(runtime, "assert(coroutine.close==saved_close)");
     }
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
-    status = cleared ? luthrum_lua_runtime_clear_instruction_limit(runtime)
-                     : luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
+  if (status == LUTHR_LUA_RUNTIME_OK) {
+    status = cleared ? luthr_lua_runtime_clear_instruction_limit(runtime)
+                     : luthr_lua_runtime_set_instruction_limit(runtime, 1000);
   }
   finish = "coroutine.close(close_thread)";
   if (cleared) {
@@ -383,18 +381,18 @@ exercise_coroutine_close(luthrum_lua_runtime *runtime, const char *name) {
              "assert(coroutine.status(close_thread)=='dead'); "
              "assert(coroutine.close(close_thread))";
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK) {
+  if (status == LUTHR_LUA_RUNTIME_OK) {
     status = run_text(runtime, finish);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK && cleared) {
-    status = luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
+  if (status == LUTHR_LUA_RUNTIME_OK && cleared) {
+    status = luthr_lua_runtime_set_instruction_limit(runtime, 1000);
   }
   return status;
 }
 
-static luthrum_lua_runtime_status exercise_preload(luthrum_lua_runtime *runtime,
-                                                   int registration_case) {
-  luthrum_lua_runtime_status status;
+static luthr_lua_runtime_status exercise_preload(luthr_lua_runtime *runtime,
+                                                 int registration_case) {
+  luthr_lua_runtime_status status;
   const char *source;
 
   if (registration_case) {
@@ -402,36 +400,36 @@ static luthrum_lua_runtime_status exercise_preload(luthrum_lua_runtime *runtime,
         runtime, "preload_calls=0; setmetatable(package.preload, "
                  "{__newindex=function(t,k,v) preload_calls=preload_calls+1; "
                  "rawset(t,k,v); error('published loader then raised') end})");
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       return status;
     }
   }
   source =
       "local name,data=...; return {name=name,data=data,count=select('#',...)}";
-  status = luthrum_lua_runtime_register_lua_module(
+  status = luthr_lua_runtime_register_lua_module(
       runtime, "preload_contract", (const unsigned char *)source,
       strlen(source), "preload-contract-module");
-  if (status != LUTHRUM_LUA_RUNTIME_OK) {
+  if (status != LUTHR_LUA_RUNTIME_OK) {
     return status;
   }
   if (registration_case) {
-    status = luthrum_lua_runtime_register_c_module(
-        runtime, "preload_c_contract", preload_c_module);
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_register_c_module(runtime, "preload_c_contract",
+                                                 preload_c_module);
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       return status;
     }
     status = run_text(runtime, "assert(preload_calls==0); "
                                "assert(require('preload_contract').count==2); "
                                "assert(require('preload_c_contract')==true); "
                                "assert(preload_calls==0)");
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       return status;
     }
     source = "return {replacement=true}";
-    status = luthrum_lua_runtime_register_lua_module(
+    status = luthr_lua_runtime_register_lua_module(
         runtime, "preload_contract", (const unsigned char *)source,
         strlen(source), "preload-contract-replacement");
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       return status;
     }
     return run_text(runtime,
@@ -453,7 +451,7 @@ static luthrum_lua_runtime_status exercise_preload(luthrum_lua_runtime *runtime,
 }
 
 static void count_trace(void *context,
-                        const luthrum_lua_runtime_trace_event *event) {
+                        const luthr_lua_runtime_trace_event *event) {
   unsigned *count;
   count = (unsigned *)context;
   if (event->source != NULL && event->source_size > 0 && event->line > 0) {
@@ -462,13 +460,13 @@ static void count_trace(void *context,
 }
 
 static int exercise(const struct runtime_case *item, int observed) {
-  luthrum_lua_runtime *runtime;
-  luthrum_lua_runtime_status status;
+  luthr_lua_runtime *runtime;
+  luthr_lua_runtime_status status;
   const char *message;
   int failed;
   const char *recovery;
   struct failure_allocator allocator;
-  luthrum_lua_runtime_allocator_config config;
+  luthr_lua_runtime_allocator_config config;
   int conversion_case;
   unsigned trace_count;
 
@@ -478,15 +476,15 @@ static int exercise(const struct runtime_case *item, int observed) {
     return exercise_native_gc_hooks();
   }
   if (strcmp(item->name, "construction_failure") == 0) {
-    status = luthrum_lua_runtime_new_with_limit(&runtime, 512);
-    if (status != LUTHRUM_LUA_RUNTIME_ERR_ALLOC || runtime != NULL) {
-      luthrum_lua_runtime_free(runtime);
+    status = luthr_lua_runtime_new_with_limit(&runtime, 512);
+    if (status != LUTHR_LUA_RUNTIME_ERR_ALLOC || runtime != NULL) {
+      luthr_lua_runtime_free(runtime);
       fprintf(stderr, "limited construction did not fail safely\n");
       return 1;
     }
-    status = luthrum_lua_runtime_new(&runtime);
-    luthrum_lua_runtime_free(runtime);
-    return status != LUTHRUM_LUA_RUNTIME_OK;
+    status = luthr_lua_runtime_new(&runtime);
+    luthr_lua_runtime_free(runtime);
+    return status != LUTHR_LUA_RUNTIME_OK;
   }
   failed = 0;
   conversion_case = strcmp(item->name, "error_conversion_oom") == 0;
@@ -497,96 +495,96 @@ static int exercise(const struct runtime_case *item, int observed) {
   config.realloc_fn = resize;
   config.free_fn = release;
   status = (conversion_case || strcmp(item->name, "preload_c_allocation") == 0)
-               ? luthrum_lua_runtime_new_with_allocator(&runtime, &config)
-               : luthrum_lua_runtime_new(&runtime);
-  if (status != LUTHRUM_LUA_RUNTIME_OK) {
+               ? luthr_lua_runtime_new_with_allocator(&runtime, &config)
+               : luthr_lua_runtime_new(&runtime);
+  if (status != LUTHR_LUA_RUNTIME_OK) {
     return 1;
   }
-  status = luthrum_lua_runtime_openlibs(runtime);
-  if (status == LUTHRUM_LUA_RUNTIME_OK && observed) {
-    status = luthrum_lua_runtime_set_trace_callback(runtime, count_trace,
-                                                    &trace_count);
+  status = luthr_lua_runtime_openlibs(runtime);
+  if (status == LUTHR_LUA_RUNTIME_OK && observed) {
+    status = luthr_lua_runtime_set_trace_callback(runtime, count_trace,
+                                                  &trace_count);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK && item->limited) {
-    status = luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
+  if (status == LUTHR_LUA_RUNTIME_OK && item->limited) {
+    status = luthr_lua_runtime_set_instruction_limit(runtime, 1000);
   }
-  if (status == LUTHRUM_LUA_RUNTIME_OK && conversion_case) {
-    luthrum_lua_runtime_set_context(runtime, &allocator);
-    status = luthrum_lua_runtime_register_c_module(runtime, "numeric_failure",
-                                                   failing_numeric_module);
-    if (status == LUTHRUM_LUA_RUNTIME_OK) {
-      status = luthrum_lua_runtime_require(runtime, "numeric_failure");
+  if (status == LUTHR_LUA_RUNTIME_OK && conversion_case) {
+    luthr_lua_runtime_set_context(runtime, &allocator);
+    status = luthr_lua_runtime_register_c_module(runtime, "numeric_failure",
+                                                 failing_numeric_module);
+    if (status == LUTHR_LUA_RUNTIME_OK) {
+      status = luthr_lua_runtime_require(runtime, "numeric_failure");
     }
     allocator.reject_growth = 0;
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  } else if (status == LUTHR_LUA_RUNTIME_OK &&
              (strcmp(item->name, "preload_lua_upvalues") == 0 ||
               strcmp(item->name, "preload_c_upvalues") == 0)) {
     status = exercise_preload_upvalues(
         runtime, strcmp(item->name, "preload_c_upvalues") == 0);
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  } else if (status == LUTHR_LUA_RUNTIME_OK &&
              strcmp(item->name, "preload_c_allocation") == 0) {
     allocator.reject_growth = 1;
-    status = luthrum_lua_runtime_register_c_module(runtime, "allocation_failed",
-                                                   preload_c_module);
+    status = luthr_lua_runtime_register_c_module(runtime, "allocation_failed",
+                                                 preload_c_module);
     allocator.reject_growth = 0;
-    if (status == LUTHRUM_LUA_RUNTIME_ERR_ALLOC) {
+    if (status == LUTHR_LUA_RUNTIME_ERR_ALLOC) {
       status = run_text(runtime,
                         "assert(package.preload.allocation_failed==nil); "
                         "saved_preload=package.preload; package.preload=nil");
-      if (status == LUTHRUM_LUA_RUNTIME_OK) {
-        status = luthrum_lua_runtime_register_c_module(
+      if (status == LUTHR_LUA_RUNTIME_OK) {
+        status = luthr_lua_runtime_register_c_module(
             runtime, "publication_failed", preload_c_module);
-        if (status == LUTHRUM_LUA_RUNTIME_ERR_RUNTIME) {
+        if (status == LUTHR_LUA_RUNTIME_ERR_RUNTIME) {
           status = run_text(runtime,
                             "package.preload=saved_preload; "
                             "assert(package.preload.publication_failed==nil)");
-          if (status == LUTHRUM_LUA_RUNTIME_OK) {
-            status = luthrum_lua_runtime_register_c_module(
+          if (status == LUTHR_LUA_RUNTIME_OK) {
+            status = luthr_lua_runtime_register_c_module(
                 runtime, "allocation_recovery", preload_c_module);
-            if (status == LUTHRUM_LUA_RUNTIME_OK) {
+            if (status == LUTHR_LUA_RUNTIME_OK) {
               status = run_text(runtime,
                                 "assert(require('allocation_recovery')==true)");
             }
           }
         } else {
-          status = LUTHRUM_LUA_RUNTIME_ERR_RUNTIME;
+          status = LUTHR_LUA_RUNTIME_ERR_RUNTIME;
         }
       }
     } else {
-      status = LUTHRUM_LUA_RUNTIME_ERR_RUNTIME;
+      status = LUTHR_LUA_RUNTIME_ERR_RUNTIME;
     }
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  } else if (status == LUTHR_LUA_RUNTIME_OK &&
              strncmp(item->name, "coroutine_close_", 16) == 0) {
     status = exercise_coroutine_close(runtime, item->name);
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  } else if (status == LUTHR_LUA_RUNTIME_OK &&
              strncmp(item->name, "reopen_", 7) == 0) {
     status = exercise_reopened_libraries(runtime, item->name);
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK &&
+  } else if (status == LUTHR_LUA_RUNTIME_OK &&
              (strcmp(item->name, "preload_registration") == 0 ||
               strcmp(item->name, "preload_arguments") == 0)) {
     status = exercise_preload(runtime,
                               strcmp(item->name, "preload_registration") == 0);
-  } else if (status == LUTHRUM_LUA_RUNTIME_OK) {
-    status = luthrum_lua_runtime_run_buffer(
+  } else if (status == LUTHR_LUA_RUNTIME_OK) {
+    status = luthr_lua_runtime_run_buffer(
         runtime, (const unsigned char *)item->source, strlen(item->source),
         item->name, 0, NULL, 0);
   }
   if (status != item->expected) {
-    message = luthrum_lua_runtime_error(runtime);
+    message = luthr_lua_runtime_error(runtime);
     fprintf(stderr, "%s: expected %d, got %d (%s)\n", item->name,
             (int)item->expected, (int)status,
             message != NULL ? message : "no diagnostic");
     failed = 1;
   }
   if (!failed && strcmp(item->name, "numeric_error") == 0) {
-    message = luthrum_lua_runtime_error(runtime);
+    message = luthr_lua_runtime_error(runtime);
     if (message == NULL || strstr(message, "1729") == NULL) {
       fprintf(stderr, "numeric error conversion lost the original value\n");
       failed = 1;
     }
   }
   if (strncmp(item->name, "gc_close_", 9) == 0) {
-    luthrum_lua_runtime_free(runtime);
+    luthr_lua_runtime_free(runtime);
     return failed || (observed && trace_count == 0);
   }
   if (!failed && (strcmp(item->name, "existing_wrap_limit") == 0 ||
@@ -594,13 +592,13 @@ static int exercise(const struct runtime_case *item, int observed) {
     recovery = strcmp(item->name, "existing_wrap_limit") == 0
                    ? "policy_saved_wrap()"
                    : "policy_saved_resume(policy_saved_thread)";
-    status = luthrum_lua_runtime_set_instruction_limit(runtime, 1000);
-    if (status == LUTHRUM_LUA_RUNTIME_OK) {
-      status = luthrum_lua_runtime_run_buffer(
+    status = luthr_lua_runtime_set_instruction_limit(runtime, 1000);
+    if (status == LUTHR_LUA_RUNTIME_OK) {
+      status = luthr_lua_runtime_run_buffer(
           runtime, (const unsigned char *)recovery, strlen(recovery),
           "existing-wrap-limit", 0, NULL, 0);
     }
-    if (status != LUTHRUM_LUA_RUNTIME_ERR_LIMIT) {
+    if (status != LUTHR_LUA_RUNTIME_ERR_LIMIT) {
       fprintf(stderr, "an existing wrapper ignored the changed limit\n");
       failed = 1;
     }
@@ -609,20 +607,20 @@ static int exercise(const struct runtime_case *item, int observed) {
       (item->limited || strncmp(item->name, "coroutine_close_", 16) == 0)) {
     recovery = "local total=0; for i=1,20 do total=total+i end; "
                "assert(total==210); assert(pcall(function() return true end))";
-    status = luthrum_lua_runtime_run_buffer(
+    status = luthr_lua_runtime_run_buffer(
         runtime, (const unsigned char *)recovery, strlen(recovery),
         "fresh-budget", 0, NULL, 0);
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       fprintf(stderr, "%s: the next host invocation did not reset its budget\n",
               item->name);
       failed = 1;
     }
     if (!failed) {
       recovery = "while true do pcall(function() while true do end end) end";
-      status = luthrum_lua_runtime_run_buffer(
+      status = luthr_lua_runtime_run_buffer(
           runtime, (const unsigned char *)recovery, strlen(recovery),
           "repeated-limit", 0, NULL, 0);
-      if (status != LUTHRUM_LUA_RUNTIME_ERR_LIMIT) {
+      if (status != LUTHR_LUA_RUNTIME_ERR_LIMIT) {
         fprintf(stderr, "%s: a subsequent invocation bypassed the limit\n",
                 item->name);
         failed = 1;
@@ -633,24 +631,24 @@ static int exercise(const struct runtime_case *item, int observed) {
     recovery = "assert(pcall(function() return true end)); "
                "assert(xpcall(function() return true end,tostring)); "
                "assert(coroutine.wrap(function() return 7 end)()==7)";
-    status = luthrum_lua_runtime_clear_instruction_limit(runtime);
-    if (status == LUTHRUM_LUA_RUNTIME_OK) {
-      status = luthrum_lua_runtime_run_buffer(
+    status = luthr_lua_runtime_clear_instruction_limit(runtime);
+    if (status == LUTHR_LUA_RUNTIME_OK) {
+      status = luthr_lua_runtime_run_buffer(
           runtime, (const unsigned char *)recovery, strlen(recovery),
           "recovery", 0, NULL, 0);
     }
-    if (status != LUTHRUM_LUA_RUNTIME_OK) {
+    if (status != LUTHR_LUA_RUNTIME_OK) {
       fprintf(stderr, "%s: runtime failed recovery after clearing the limit\n",
               item->name);
       failed = 1;
     }
   }
-  luthrum_lua_runtime_free(runtime);
+  luthr_lua_runtime_free(runtime);
   return failed || (observed && trace_count == 0);
 }
 
 struct trace_capture {
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   const char *source;
   unsigned events;
   unsigned matching;
@@ -661,16 +659,16 @@ struct trace_capture {
 };
 
 static void capture_trace(void *context,
-                          const luthrum_lua_runtime_trace_event *event);
+                          const luthr_lua_runtime_trace_event *event);
 
 static void replacement_trace(void *context,
-                              const luthrum_lua_runtime_trace_event *event) {
+                              const luthr_lua_runtime_trace_event *event) {
   capture_trace(context, event);
 }
 
 struct warning_trace_install {
   struct trace_capture *capture;
-  luthrum_lua_runtime_status status;
+  luthr_lua_runtime_status status;
   unsigned calls;
 };
 
@@ -681,24 +679,24 @@ static void install_trace_from_warning(void *context, const char *message,
   (void)to_continue;
   install = (struct warning_trace_install *)context;
   install->calls += 1;
-  install->status = luthrum_lua_runtime_set_trace_callback(
+  install->status = luthr_lua_runtime_set_trace_callback(
       install->capture->runtime, capture_trace, install->capture);
 }
 
 static int install_trace_from_module(void *state) {
   struct warning_trace_install *install;
   install =
-      (struct warning_trace_install *)luthrum_lua_runtime_context_from_state(
+      (struct warning_trace_install *)luthr_lua_runtime_context_from_state(
           state);
-  install->status = luthrum_lua_runtime_set_trace_callback(
+  install->status = luthr_lua_runtime_set_trace_callback(
       install->capture->runtime, capture_trace, install->capture);
   return 0;
 }
 
 static void capture_trace(void *context,
-                          const luthrum_lua_runtime_trace_event *event) {
+                          const luthr_lua_runtime_trace_event *event) {
   struct trace_capture *capture;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   static const unsigned char source[] = "return true";
   capture = (struct trace_capture *)context;
   runtime = capture->runtime;
@@ -716,44 +714,44 @@ static void capture_trace(void *context,
     capture->lines |= 1U << (event->line - 1);
   }
   if (capture->action == 1) {
-    capture->failed |= luthrum_lua_runtime_set_trace_callback(
-                           runtime, NULL, NULL) != LUTHRUM_LUA_RUNTIME_OK;
+    capture->failed |= luthr_lua_runtime_set_trace_callback(
+                           runtime, NULL, NULL) != LUTHR_LUA_RUNTIME_OK;
   } else if (capture->action == 2) {
-    capture->failed |= luthrum_lua_runtime_set_trace_callback(
+    capture->failed |= luthr_lua_runtime_set_trace_callback(
                            runtime, replacement_trace, capture->replacement) !=
-                       LUTHRUM_LUA_RUNTIME_OK;
+                       LUTHR_LUA_RUNTIME_OK;
   } else if (capture->action == 3) {
 #define REJECT_TRACE_CALL(call)                                                \
-  capture->failed |= (call) != LUTHRUM_LUA_RUNTIME_ERR_ARG
-    REJECT_TRACE_CALL(luthrum_lua_runtime_openlibs(runtime));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_open_libs(runtime, 0));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_traceback(runtime, 1));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_instruction_limit(runtime, 1));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_clear_instruction_limit(runtime));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_package_path(runtime, ""));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_prepend_package_path(runtime, ""));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_package_cpath(runtime, ""));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_prepend_package_cpath(runtime, ""));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_global_string(runtime, "x", ""));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_global_boolean(runtime, "x", 1));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_global_number(runtime, "x", 1));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_set_global_integer(runtime, "x", 1));
+  capture->failed |= (call) != LUTHR_LUA_RUNTIME_ERR_ARG
+    REJECT_TRACE_CALL(luthr_lua_runtime_openlibs(runtime));
+    REJECT_TRACE_CALL(luthr_lua_runtime_open_libs(runtime, 0));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_traceback(runtime, 1));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_instruction_limit(runtime, 1));
+    REJECT_TRACE_CALL(luthr_lua_runtime_clear_instruction_limit(runtime));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_package_path(runtime, ""));
+    REJECT_TRACE_CALL(luthr_lua_runtime_prepend_package_path(runtime, ""));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_package_cpath(runtime, ""));
+    REJECT_TRACE_CALL(luthr_lua_runtime_prepend_package_cpath(runtime, ""));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_global_string(runtime, "x", ""));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_global_boolean(runtime, "x", 1));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_global_number(runtime, "x", 1));
+    REJECT_TRACE_CALL(luthr_lua_runtime_set_global_integer(runtime, "x", 1));
     REJECT_TRACE_CALL(
-        luthrum_lua_runtime_register_c_module(runtime, "x", preload_c_module));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_register_lua_module(
+        luthr_lua_runtime_register_c_module(runtime, "x", preload_c_module));
+    REJECT_TRACE_CALL(luthr_lua_runtime_register_lua_module(
         runtime, "x", source, sizeof(source) - 1, "x"));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_require(runtime, "x"));
+    REJECT_TRACE_CALL(luthr_lua_runtime_require(runtime, "x"));
     REJECT_TRACE_CALL(
-        luthrum_lua_runtime_run_file(runtime, "missing.lua", 0, NULL, 0));
-    REJECT_TRACE_CALL(luthrum_lua_runtime_run_buffer(
+        luthr_lua_runtime_run_file(runtime, "missing.lua", 0, NULL, 0));
+    REJECT_TRACE_CALL(luthr_lua_runtime_run_buffer(
         runtime, source, sizeof(source) - 1, "x", 0, NULL, 0));
 #undef REJECT_TRACE_CALL
-    luthrum_lua_runtime_free(runtime);
-    luthrum_lua_runtime_set_context(runtime, NULL);
-    luthrum_lua_runtime_set_warning_callback(runtime, NULL, NULL);
-    luthrum_lua_runtime_clear_error(runtime);
-    capture->failed |= luthrum_lua_runtime_context(runtime) != capture;
-    capture->failed |= luthrum_lua_runtime_error(runtime)[0] != '\0';
+    luthr_lua_runtime_free(runtime);
+    luthr_lua_runtime_set_context(runtime, NULL);
+    luthr_lua_runtime_set_warning_callback(runtime, NULL, NULL);
+    luthr_lua_runtime_clear_error(runtime);
+    capture->failed |= luthr_lua_runtime_context(runtime) != capture;
+    capture->failed |= luthr_lua_runtime_error(runtime)[0] != '\0';
   }
   capture->action = 0;
 }
@@ -770,7 +768,7 @@ static int exercise_trace_observer(void) {
   static const char *finalizer_setup =
       "saved_gc=setmetatable({}, {__gc=assert(load('local "
       "x=1\\nx=x+1\\nassert(x==2)', '@finalizer.lua'))})";
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   struct trace_capture capture;
   struct trace_capture second;
   struct warning_trace_install install;
@@ -791,198 +789,194 @@ static int exercise_trace_observer(void) {
       goto done;                                                               \
     }                                                                          \
   } while (0)
-  TRACE_CHECK(
-      luthrum_lua_runtime_set_trace_callback(NULL, capture_trace, &capture) ==
-      LUTHRUM_LUA_RUNTIME_ERR_ARG);
-  TRACE_CHECK(luthrum_lua_runtime_new(&runtime) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_openlibs(runtime) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  NULL, capture_trace, &capture) == LUTHR_LUA_RUNTIME_ERR_ARG);
+  TRACE_CHECK(luthr_lua_runtime_new(&runtime) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_openlibs(runtime) == LUTHR_LUA_RUNTIME_OK);
   capture.runtime = runtime;
   capture.source = "@trace.lua";
   second.runtime = runtime;
   second.source = "@trace.lua";
   install.capture = &capture;
-  luthrum_lua_runtime_set_warning_callback(runtime, install_trace_from_warning,
-                                           &install);
+  luthr_lua_runtime_set_warning_callback(runtime, install_trace_from_warning,
+                                         &install);
   TRACE_CHECK(run_text(runtime,
                        "coroutine.wrap(function()\nwarn('observer')"
-                       "\nlocal x=1\nx=x+1\nend)()") == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(install.calls > 0 &&
-              install.status == LUTHRUM_LUA_RUNTIME_ERR_ARG);
+                       "\nlocal x=1\nx=x+1\nend)()") == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(install.calls > 0 && install.status == LUTHR_LUA_RUNTIME_ERR_ARG);
   TRACE_CHECK(capture.events == 0);
-  luthrum_lua_runtime_set_context(runtime, &install);
-  TRACE_CHECK(luthrum_lua_runtime_register_c_module(
-                  runtime, "trace_install", install_trace_from_module) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-  install.status = LUTHRUM_LUA_RUNTIME_OK;
-  TRACE_CHECK(luthrum_lua_runtime_require(runtime, "trace_install") ==
-              LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(install.status == LUTHRUM_LUA_RUNTIME_ERR_ARG &&
+  luthr_lua_runtime_set_context(runtime, &install);
+  TRACE_CHECK(luthr_lua_runtime_register_c_module(runtime, "trace_install",
+                                                  install_trace_from_module) ==
+              LUTHR_LUA_RUNTIME_OK);
+  install.status = LUTHR_LUA_RUNTIME_OK;
+  TRACE_CHECK(luthr_lua_runtime_require(runtime, "trace_install") ==
+              LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(install.status == LUTHR_LUA_RUNTIME_ERR_ARG &&
               capture.events == 0);
   for (limited = 0; limited <= 1; ++limited) {
     if (limited) {
-      TRACE_CHECK(luthrum_lua_runtime_set_instruction_limit(runtime, 1000) ==
-                  LUTHRUM_LUA_RUNTIME_OK);
+      TRACE_CHECK(luthr_lua_runtime_set_instruction_limit(runtime, 1000) ==
+                  LUTHR_LUA_RUNTIME_OK);
     }
     capture.lines = 0;
-    TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(runtime, capture_trace,
-                                                       &capture) ==
-                LUTHRUM_LUA_RUNTIME_OK);
-    TRACE_CHECK(luthrum_lua_runtime_run_buffer(
+    TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                    runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+    TRACE_CHECK(luthr_lua_runtime_run_buffer(
                     runtime, source, sizeof(source) - 1, "@trace.lua", 0, NULL,
-                    0) == LUTHRUM_LUA_RUNTIME_OK);
+                    0) == LUTHR_LUA_RUNTIME_OK);
     TRACE_CHECK(capture.lines == 7 && !capture.failed);
-    TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                    runtime, NULL, &second) == LUTHRUM_LUA_RUNTIME_OK);
+    TRACE_CHECK(luthr_lua_runtime_set_trace_callback(runtime, NULL, &second) ==
+                LUTHR_LUA_RUNTIME_OK);
     before = capture.events;
-    TRACE_CHECK(run_text(runtime, "local x=1; x=x+1") ==
-                LUTHRUM_LUA_RUNTIME_OK);
+    TRACE_CHECK(run_text(runtime, "local x=1; x=x+1") == LUTHR_LUA_RUNTIME_OK);
     TRACE_CHECK(capture.events == before);
   }
-  TRACE_CHECK(luthrum_lua_runtime_clear_instruction_limit(runtime) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_clear_instruction_limit(runtime) ==
+              LUTHR_LUA_RUNTIME_OK);
   capture.source = "=named chunk";
   capture.lines = 0;
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
-                  runtime, source, sizeof(source) - 1, "=named chunk", 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(runtime, source, sizeof(source) - 1,
+                                           "=named chunk", 0, NULL,
+                                           0) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.lines == 7);
   capture.source =
       "=a deliberately long source identifier that must remain complete in the "
       "observer event instead of using Lua's shortened display name";
   capture.lines = 0;
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
-                  runtime, source, sizeof(source) - 1, capture.source, 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(runtime, source, sizeof(source) - 1,
+                                           capture.source, 0, NULL,
+                                           0) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.lines == 7);
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(runtime, NULL, NULL) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(run_text(runtime, child_setup) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(runtime, NULL, NULL) ==
+              LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(run_text(runtime, child_setup) == LUTHR_LUA_RUNTIME_OK);
   capture.source = "@child.lua";
   capture.lines = 0;
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(run_text(runtime,
                        "assert(coroutine.resume(saved)); wrapped(); "
                        "assert(coroutine.resume(coroutine.create(assert(load('"
                        "local x=1\\nx=x+1', '@child.lua')))))") ==
-              LUTHRUM_LUA_RUNTIME_OK);
+              LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.lines == 7);
   capture.source = "@trace.lua";
   capture.matching = 0;
   capture.action = 2;
   capture.replacement = &second;
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
-                  runtime, source, sizeof(source) - 1, "@trace.lua", 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(runtime, source, sizeof(source) - 1,
+                                           "@trace.lua", 0, NULL,
+                                           0) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.matching == 1 && second.matching == 2);
   capture.source = "@child.lua";
   capture.action = 1;
   capture.matching = 0;
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(
       run_text(runtime,
                "local f=assert(load('local x=1\\nx=x+1', '@child.lua')); "
                "coroutine.wrap(f)(); coroutine.wrap(f)()") ==
-      LUTHRUM_LUA_RUNTIME_OK);
+      LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.matching == 1);
   before = capture.events;
-  TRACE_CHECK(run_text(runtime, "assert(true)") == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(run_text(runtime, "assert(true)") == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(capture.events == before);
-  TRACE_CHECK(luthrum_lua_runtime_set_instruction_limit(runtime, 100) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_instruction_limit(runtime, 100) ==
+              LUTHR_LUA_RUNTIME_OK);
   /* A line event must not consume another unit of the instruction budget. */
   TRACE_CHECK(
       run_text(runtime, "progress=0\nfor i=1,1000 do\nprogress=i\nend") ==
-      LUTHRUM_LUA_RUNTIME_ERR_LIMIT);
+      LUTHR_LUA_RUNTIME_ERR_LIMIT);
   TRACE_CHECK(run_text(runtime, "unobserved_progress=progress") ==
-              LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
+              LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(
       run_text(runtime, "progress=0\nfor i=1,1000 do\nprogress=i\nend") ==
-      LUTHRUM_LUA_RUNTIME_ERR_LIMIT);
+      LUTHR_LUA_RUNTIME_ERR_LIMIT);
   TRACE_CHECK(run_text(runtime, "assert(progress==unobserved_progress)") ==
-              LUTHRUM_LUA_RUNTIME_OK);
+              LUTHR_LUA_RUNTIME_OK);
   capture.source = "reentry";
   capture.action = 3;
-  luthrum_lua_runtime_set_context(runtime, &capture);
-  TRACE_CHECK(luthrum_lua_runtime_set_instruction_limit(runtime, 100) ==
-              LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
+  luthr_lua_runtime_set_context(runtime, &capture);
+  TRACE_CHECK(luthr_lua_runtime_set_instruction_limit(runtime, 100) ==
+              LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(
                   runtime, (const unsigned char *)"while true do\nend",
                   sizeof("while true do\nend") - 1, "reentry", 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_ERR_LIMIT);
+                  0) == LUTHR_LUA_RUNTIME_ERR_LIMIT);
   TRACE_CHECK(!capture.failed && capture.action == 0);
   capture.source = "remove-budget";
   capture.matching = 0;
   capture.action = 1;
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(
                   runtime, (const unsigned char *)"while true do\nend",
                   sizeof("while true do\nend") - 1, capture.source, 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_ERR_LIMIT);
+                  0) == LUTHR_LUA_RUNTIME_ERR_LIMIT);
   TRACE_CHECK(capture.matching == 1);
   capture.source = "replace-budget";
   capture.matching = 0;
   capture.action = 2;
   second.source = capture.source;
   second.matching = 0;
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_run_buffer(
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_run_buffer(
                   runtime, (const unsigned char *)"while true do\nend",
                   sizeof("while true do\nend") - 1, capture.source, 0, NULL,
-                  0) == LUTHRUM_LUA_RUNTIME_ERR_LIMIT);
+                  0) == LUTHR_LUA_RUNTIME_ERR_LIMIT);
   TRACE_CHECK(capture.matching == 1 && second.matching > 0);
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(luthrum_lua_runtime_clear_instruction_limit(runtime) ==
-              LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_clear_instruction_limit(runtime) ==
+              LUTHR_LUA_RUNTIME_OK);
   TRACE_CHECK(run_text(runtime, "error('observed script error')") ==
-              LUTHRUM_LUA_RUNTIME_ERR_RUNTIME);
-  TRACE_CHECK(strstr(luthrum_lua_runtime_error(runtime),
+              LUTHR_LUA_RUNTIME_ERR_RUNTIME);
+  TRACE_CHECK(strstr(luthr_lua_runtime_error(runtime),
                      "observed script error") != NULL);
   before = capture.events;
-  TRACE_CHECK(run_text(runtime, "local =") == LUTHRUM_LUA_RUNTIME_ERR_LOAD);
+  TRACE_CHECK(run_text(runtime, "local =") == LUTHR_LUA_RUNTIME_ERR_LOAD);
   TRACE_CHECK(capture.events == before);
-  TRACE_CHECK(luthrum_lua_runtime_set_trace_callback(
-                  runtime, capture_trace, &capture) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(run_text(runtime, "assert(true)") == LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(luthr_lua_runtime_set_trace_callback(
+                  runtime, capture_trace, &capture) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(run_text(runtime, "assert(true)") == LUTHR_LUA_RUNTIME_OK);
   capture.source = "@finalizer.lua";
   for (limited = 0; limited <= 1; ++limited) {
     if (limited) {
-      TRACE_CHECK(luthrum_lua_runtime_set_instruction_limit(runtime, 1000) ==
-                  LUTHRUM_LUA_RUNTIME_OK);
+      TRACE_CHECK(luthr_lua_runtime_set_instruction_limit(runtime, 1000) ==
+                  LUTHR_LUA_RUNTIME_OK);
     }
     capture.lines = 0;
-    TRACE_CHECK(run_text(runtime, finalizer_setup) == LUTHRUM_LUA_RUNTIME_OK);
+    TRACE_CHECK(run_text(runtime, finalizer_setup) == LUTHR_LUA_RUNTIME_OK);
     TRACE_CHECK(run_text(runtime, "saved_gc=nil; collectgarbage()") ==
-                LUTHRUM_LUA_RUNTIME_OK);
+                LUTHR_LUA_RUNTIME_OK);
     TRACE_CHECK(capture.lines == 7);
   }
   capture.lines = 0;
-  TRACE_CHECK(run_text(runtime, finalizer_setup) == LUTHRUM_LUA_RUNTIME_OK);
-  TRACE_CHECK(run_text(runtime, "warning_gc=setmetatable({}, {__gc=function() "
-                                "error('close warning') end})") ==
-              LUTHRUM_LUA_RUNTIME_OK);
+  TRACE_CHECK(run_text(runtime, finalizer_setup) == LUTHR_LUA_RUNTIME_OK);
+  TRACE_CHECK(run_text(runtime,
+                       "warning_gc=setmetatable({}, {__gc=function() "
+                       "error('close warning') end})") == LUTHR_LUA_RUNTIME_OK);
   before = install.calls;
-  luthrum_lua_runtime_free(runtime);
+  luthr_lua_runtime_free(runtime);
   runtime = NULL;
   TRACE_CHECK(capture.lines == 7 && !capture.failed);
   TRACE_CHECK(install.calls > before &&
-              install.status == LUTHRUM_LUA_RUNTIME_ERR_ARG);
+              install.status == LUTHR_LUA_RUNTIME_ERR_ARG);
 done:
-  luthrum_lua_runtime_free(runtime);
+  luthr_lua_runtime_free(runtime);
 #undef TRACE_CHECK
   return failed;
 }
 
 static int exercise_trace_limits(void) {
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   unsigned count;
   size_t index;
   int failed;
@@ -1000,14 +994,14 @@ static int exercise_trace_limits(void) {
   }
   runtime = NULL;
   count = 0;
-  if (luthrum_lua_runtime_new(&runtime) != LUTHRUM_LUA_RUNTIME_OK) {
+  if (luthr_lua_runtime_new(&runtime) != LUTHR_LUA_RUNTIME_OK) {
     return 1;
   }
-  failed = luthrum_lua_runtime_openlibs(runtime) != LUTHRUM_LUA_RUNTIME_OK ||
-           luthrum_lua_runtime_set_instruction_limit(runtime, 1000) !=
-               LUTHRUM_LUA_RUNTIME_OK ||
-           luthrum_lua_runtime_set_trace_callback(
-               runtime, count_trace, &count) != LUTHRUM_LUA_RUNTIME_OK;
+  failed = luthr_lua_runtime_openlibs(runtime) != LUTHR_LUA_RUNTIME_OK ||
+           luthr_lua_runtime_set_instruction_limit(runtime, 1000) !=
+               LUTHR_LUA_RUNTIME_OK ||
+           luthr_lua_runtime_set_trace_callback(runtime, count_trace, &count) !=
+               LUTHR_LUA_RUNTIME_OK;
   nested = "local function f(n) if n>0 then "
            "coroutine.resume(coroutine.create(function() f(n-1) end)) "
            "else while true do end end end; f(8)";
@@ -1016,11 +1010,11 @@ static int exercise_trace_limits(void) {
            "b=coroutine.create(function() coroutine.resume(a) end); "
            "coroutine.resume(a)";
   if (!failed) {
-    failed = run_text(runtime, nested) != LUTHRUM_LUA_RUNTIME_ERR_LIMIT ||
-             run_text(runtime, cyclic) != LUTHRUM_LUA_RUNTIME_ERR_LIMIT ||
+    failed = run_text(runtime, nested) != LUTHR_LUA_RUNTIME_ERR_LIMIT ||
+             run_text(runtime, cyclic) != LUTHR_LUA_RUNTIME_ERR_LIMIT ||
              count == 0;
   }
-  luthrum_lua_runtime_free(runtime);
+  luthr_lua_runtime_free(runtime);
   return failed;
 }
 

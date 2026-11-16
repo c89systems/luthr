@@ -1,5 +1,16 @@
 # Building and testing
 
+During the runtime overhaul, use `make unit` for the early implementation loop.
+It builds the products and a small set of unit programs, then runs eleven short
+facade, root, wait-registration and export checks. This sample is intentionally
+non-exhaustive. Add/select focused invariant tests for the surface being changed;
+do not expand this loop into the full matrix. See the
+[delivery plan](implementation-plan.md) for the large-surface sequence.
+
+Full CTest, official Lua suites, E2E, benchmarking, broad memory/race checks and
+package certification are deferred until the integrated runtime is useful.
+Their commands below describe final stabilization, not per-edit prerequisites.
+
 Initial development supports `x86_64-linux-gnu` and `x86_64-linux-musl` on an
 x86_64 Linux host. Each uses the complete pinned Bootlin collection selected by
 the `pkt-systems-cmake-lifecycle` skill. There is no host compiler/libc fallback,
@@ -14,6 +25,15 @@ compilation does not search host system headers. Valgrind is required for
 clangd is used for editor verification. The activated lifecycle skill supplies
 its toolchain resolver.
 Run operations serially against a stable checkout and stable prepared tools.
+
+Early implementation:
+
+```sh
+make unit                            # GNU Debug, short non-exhaustive sample
+make format-check
+```
+
+Final stabilization, after integration:
 
 ```sh
 make prepare                         # pinned toolchain and pristine Lua test reference
@@ -31,7 +51,7 @@ directory; its default is `~/.codex/skills/pkt-systems-cmake-lifecycle/scripts`.
 Configure only discovers prepared tools. `make prepare` is the explicit
 acquisition entrypoint; missing prerequisites fail instead of falling back.
 
-Luthrum builds its runtime from the vendored Lua sources. Standard tests also
+Luthr builds its runtime from the vendored Lua sources. Standard tests also
 build unmodified upstream Lua 5.5.1 as the compatibility reference. `make prepare`
 prepares its checksum-pinned official source and test-suite archives in
 `.cache/vendor/`; the reference source is extracted into each owned build tree.
@@ -44,7 +64,7 @@ native-binding fixtures and relocated installed-SDK consumers establish the
 runtime boundary; downstream projects own integration tests against that SDK.
 
 `ctest --test-dir build/x86_64-linux-gnu/Debug -L compatibility --output-on-failure`
-runs identical portable Lua E2E code with Luthrum and the pristine interpreter,
+runs identical portable Lua E2E code with Luthr and the pristine interpreter,
 compares stdout/stderr, then compiles with each bytecode compiler and executes
 the result with the other runtime. Both collector modes cover language/library
 semantics, coroutines, close/unwind, GC, native callback reentry, original error
@@ -55,7 +75,7 @@ an exhaustive proof for all Lua programs. Concurrency-specific tests separately
 verify capabilities upstream Lua does not provide.
 
 The same compatibility label includes `lua_official_upstream` and
-`lua_official_luthrum`. Each runs the official Lua 5.5.1 suite in a
+`lua_official_luthr`. Each runs the official Lua 5.5.1 suite in a
 fresh working directory, including large programs, CLI subprocesses, I/O and
 native-module loading. The suite's five native modules are compiled against
 upstream headers and loaded unchanged by both interpreters. Stdin is an empty
@@ -83,7 +103,7 @@ the identical repetition count, recorded in the CSV output. This increases
 timing duration without requiring a correspondingly large live heap.
 
 Raw samples, median summaries and run metadata are written under
-`build/<target>/<config>/benchmarks/lua/`. Ratios are Luthrum/upstream, so values
+`build/<target>/<config>/benchmarks/lua/`. Ratios are Luthr/upstream, so values
 above one mean slower. Timings are observations, not correctness thresholds;
 host load and CPU policy can affect them. The CTest smoke case verifies the
 benchmark path with reduced work.
@@ -91,7 +111,7 @@ benchmark path with reduced work.
 `make benchmark-parallel CONFIG=Release` measures shared-VM execution using a
 fixed, reusable host thread pool. The same C host, upstream public headers and
 portable `tests/e2e/parallel.lua` payload run against both libraries. Upstream
-runs with one worker; Luthrum runs with one and increasing worker counts. Each
+runs with one worker; Luthr runs with one and increasing worker counts. Each
 batch has 32 rooted coroutines, so workers execute multiple jobs. Integer loops,
 independent tables, a shared table with disjoint partitions, closures and
 allocation/GC run under both collectors. Every job and shared-table partition is
@@ -112,8 +132,8 @@ batch wall time, job service and release-to-completion latency (including queue
 wait), Lua live/peak/retained allocation bytes, process resident high-water KiB,
 actual worker stack/guard bytes and dispatch counts. Job percentiles use nearest
 rank; summaries take the median across samples, averaging the middle two for an
-even count. `wall_ratio` is Luthrum/upstream (above one is slower), while
-`scaling_speedup` compares Luthrum's one-worker wall time with the measured width
+even count. `wall_ratio` is Luthr/upstream (above one is slower), while
+`scaling_speedup` compares Luthr's one-worker wall time with the measured width
 (above one is faster). Resident high-water comes from this executable's
 `/proc/self/status` and includes setup/warmup; zero means unavailable. Lua peaks
 are reset before each timed batch. The same atomic counting allocator instruments
@@ -121,7 +141,7 @@ both runtimes and adds measurement overhead, especially during parallel
 allocation. Loading, preparation, full collection and result verification are
 outside timing; dispatch, job execution, automatic collection and worker
 rendezvous are inside it. Metadata records capacity, settings, source revision,
-dirty state and hashes of the Lua payload, host binaries and Luthrum library.
+dirty state and hashes of the Lua payload, host binaries and Luthr library.
 
 This measures the free-threaded VM under a host pool: jobs run to completion and
 do not request application yields. It does not measure the private fiber
@@ -136,16 +156,16 @@ which `.clangd` discovers normally. Run `make build` once before using the edito
 to prepare generated facade headers. The database uses the real selected
 compiler, sysroot, language and defines from this checkout.
 
-The products are `libluthrum.a`, `libluthrum.so.0`, `luthrum`, and `luthrumc`.
+The products are `libluthr.a`, `libluthr.so.0`, `luthr`, and `luthrc`.
 Both libraries contain the native Lua API, strict C89 Lua API and embedding
 policy. The interpreter links the shared runtime. The compiler links the static
 runtime so it can use Lua's private bytecode-writing implementation.
 
-Installed CMake consumers use `find_package(luthrum CONFIG REQUIRED)` and link
-`luthrum::static` or `luthrum::shared`. Strict C89 headers are
-`<luthrum/lua.h>` and `<luthrum/lua_runtime.h>`. Upstream headers are also
+Installed CMake consumers use `find_package(luthr CONFIG REQUIRED)` and link
+`luthr::static` or `luthr::shared`. Strict C89 headers are
+`<luthr/lua.h>` and `<luthr/lua_runtime.h>`. Upstream headers are also
 installed for native bindings built as C99 or newer. pkg-config metadata is
-`luthrum.pc`; `--static` supplies the static system/thread closure. Metadata
+`luthr.pc`; `--static` supplies the static system/thread closure. Metadata
 records the selected target and Lua baseline.
 
 When using the project toolchain for an installed consumer, put the SDK prefix

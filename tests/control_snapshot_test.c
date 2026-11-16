@@ -1,7 +1,7 @@
 #include <lauxlib.h>
 #include <lstate.h>
 #include <lualib.h>
-#include <luthrum/lua_runtime.h>
+#include <luthr/lua_runtime.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,7 +11,7 @@ struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *main, *caller;
-  luthrum_lua_runtime *runtime;
+  luthr_lua_runtime *runtime;
   int armed, entered, release, status, results, finalized;
   const char *mode;
 };
@@ -65,16 +65,15 @@ static void *run(void *context) {
   int facade = strstr(test->mode, "facade") != NULL;
   if (facade) {
     static const unsigned char source[] = "require('fixture')";
-    require(luthrum_lua_runtime_new(&test->runtime) == LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_openlibs(test->runtime) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_register_c_module(
-                test->runtime, "fixture", capture) == LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_set_instruction_limit(test->runtime, 10000) ==
-            LUTHRUM_LUA_RUNTIME_OK);
-    require(luthrum_lua_runtime_run_buffer(
-                test->runtime, source, sizeof(source) - 1, "control-snapshot",
-                0, NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_new(&test->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_openlibs(test->runtime) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_register_c_module(
+                test->runtime, "fixture", capture) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_set_instruction_limit(test->runtime, 10000) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_run_buffer(test->runtime, source,
+                                         sizeof(source) - 1, "control-snapshot",
+                                         0, NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   } else {
     test->main = luaL_newstate();
     require(test->main != NULL);
@@ -135,7 +134,7 @@ static void *run(void *context) {
           LUA_OK);
   require(lua_pcall(state, 0, 0, 0) == LUA_OK);
   if (facade)
-    luthrum_lua_runtime_free(test->runtime);
+    luthr_lua_runtime_free(test->runtime);
   else
     lua_close(state);
   require(test->finalized == 1);
