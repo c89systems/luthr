@@ -26,6 +26,9 @@ static __thread unsigned measured;
 static __thread unsigned world_acquisitions;
 static __thread unsigned access_calls;
 static __thread unsigned read_calls;
+static __thread unsigned reading;
+static __thread unsigned reader_mutexes;
+static __thread unsigned reader_ownership;
 static __thread unsigned write_calls;
 static __thread unsigned barrier_flushes;
 static const void *measured_function;
@@ -50,6 +53,8 @@ void __wrap_luaW_stop(lua_State *state) {
 }
 
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  if (reading)
+    reader_mutexes++;
   if (measured && observed_world != NULL && mutex == &observed_world->mutex)
     world_acquisitions++;
   return __real_pthread_mutex_lock(mutex);
@@ -57,6 +62,8 @@ int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
 
 void __wrap_luaA_begin(lua_State *state, GCObject *object,
                        LuaObjectScope *scope) {
+  if (reading)
+    reader_ownership++;
   measured++;
   access_calls++;
   __real_luaA_begin(state, object, scope);
@@ -73,7 +80,9 @@ void __wrap_luaF_readcapture(lua_State *state, LClosure *closure, int n,
                              LuaNativeRoot *value) {
   measured++;
   read_calls++;
+  reading++;
   __real_luaF_readcapture(state, closure, n, value);
+  reading--;
   measured--;
 }
 
@@ -256,7 +265,14 @@ int main(int argc, char **argv) {
   luaL_openlibs(state);
   if (strcmp(argv[1], "independent") == 0)
     independent(state);
-  else if (strcmp(argv[1], "access") == 0) {
+  else if (strcmp(argv[1], "readers") == 0) {
+    run(state, "local x=17; local function read() return x end; "
+               "for i=1,20000 do assert(read()==17) end");
+    fprintf(stderr, "capture readers: mutex=%u ownership=%u\n", reader_mutexes,
+            reader_ownership);
+    require(read_calls >= 20000 && reader_mutexes == 0 &&
+            reader_ownership == 0);
+  } else if (strcmp(argv[1], "access") == 0) {
     observed_world = &G(state)->world;
     access_calls = read_calls = write_calls = world_acquisitions = 0;
     lua_gc(state, LUA_GCSTOP);

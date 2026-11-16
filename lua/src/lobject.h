@@ -691,6 +691,7 @@ typedef struct Proto {
 typedef struct UpVal {
   CommonHeader;
   TValue value;  /* stable shared cell, including while its local is live */
+  uint64_t sequence;  /* even published value; odd during a writer's stores */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
   struct {
     struct UpVal *next;

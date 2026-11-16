@@ -406,7 +406,9 @@ static void parked_wait(struct fixture *f, int cancel) {
     (void)collect(f, 0, LUA_ERRRUN);
   else
     require(collect(f, 0, LUA_OK) == 77);
-  require(f->tasks[0].parks == 1 && f->tasks[0].root.stop_wait == NULL);
+  /* Cancellation may park again while its notifier borrow retires. */
+  require(f->tasks[0].parks >= 1 && (cancel || f->tasks[0].parks == 1));
+  require(f->tasks[0].root.stop_wait == NULL && f->tasks[0].waiter == NULL);
   require(f->waiters == NULL);
   finish(f);
 }

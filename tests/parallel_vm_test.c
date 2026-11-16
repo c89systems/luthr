@@ -58,12 +58,17 @@ struct resource {
 };
 
 static const char closed_source[] =
-    "local x=7; return "
+    "local x=7; local object={n=7}; local function answer() return 13 end; "
+    "return "
     "function() local t={0}; coroutine.yield(); "
-    "for i=1,5000 do x=(i%2==0) and 7 or 'word'; t[1]=t[1]+1 end; "
+    "for i=1,5000 do local k=i%7; "
+    "if k==0 then x=7 elseif k==1 then x='word' elseif k==2 then x=false "
+    "elseif k==3 then x=nil elseif k==4 then x=1.25 "
+    "elseif k==5 then x=object else x=answer end; t[1]=t[1]+1 end; "
     "return t[1] end, "
     "function() local t={0}; coroutine.yield(); local ok=true; "
-    "for i=1,5000 do local v=x; if v~=7 and v~='word' then ok=false end; "
+    "for i=1,5000 do local v=x; if v~=7 and v~='word' and v~=false and "
+    "v~=nil and v~=1.25 and v~=object and v~=answer then ok=false end; "
     "t[1]=t[1]+1 end; return ok,t[1] end";
 
 static const char open_source[] =
