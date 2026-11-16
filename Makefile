@@ -9,13 +9,15 @@ JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 
-.PHONY: help prepare configure build test memcheck racecheck install format format-check clean
+.PHONY: help prepare prepare-modules configure build test memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|test|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: explicitly prepare the selected pinned toolchain' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|test|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: explicitly prepare the selected pinned toolchain' 'make prepare-modules MODULE_ARCHIVE_DIR=/path/to/lonejson-0.50.0-artifacts' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
+prepare-modules:
+	bash "$(ROOT)/tests/modules/prepare.sh" "$(or $(MODULE_ARCHIVE_DIR),$(ROOT)/.cache/modules/archives)"
 configure:
-	cmake -S "$(ROOT)" -B "$(BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHRUM_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE="$(CONFIG)"
+	cmake -S "$(ROOT)" -B "$(BUILD_DIR)" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$(ROOT)/cmake/toolchains/bootlin.cmake" -DCPKT_LIFECYCLE_SCRIPTS_DIR="$(LIFECYCLE_SCRIPTS_DIR)" -DLUTHRUM_TARGET="$(TARGET)" -DCMAKE_BUILD_TYPE="$(CONFIG)" -DBUILD_TESTING=ON
 build: configure
 	cmake --build "$(BUILD_DIR)" --parallel "$(JOBS)"
 test: build

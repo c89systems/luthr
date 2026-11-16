@@ -24,6 +24,10 @@
 ** remain the caller's responsibility for the duration of this call. */
 LUAI_FUNC int luaA_load (lua_State *L, lua_Reader reader, void *data,
                        const char *name, const char *mode, int managed);
+/* Auxiliary reference transactions own one table through free-list mutation
+** and publication. A zero result denotes a consumed nil (no table access). */
+LUAI_FUNC int luaA_ref (lua_State *L, int idx);
+LUAI_FUNC void luaA_unref (lua_State *L, int idx, int ref);
 
 /* Increments 'L->top.p', checking for stack overflows */
 #define api_incr_top(L)  \

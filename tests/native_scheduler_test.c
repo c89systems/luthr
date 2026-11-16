@@ -3164,12 +3164,16 @@ static int exercise_affinity(const char *name) {
   free(pool);
   return 0;
 }
+#include "private/lonejson_acceptance.inc.h"
+
 int main(int argc, char **argv) {
   struct pool *pool;
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
   require(argc == 2 || argc == 3);
+  if (strncmp(argv[1], "lonejson_", 9) == 0)
+    return exercise_lonejson(argv[1]);
   if (strncmp(argv[1], "affinity_", 9) == 0)
     return exercise_affinity(argv[1]);
   if (strncmp(argv[1], "stop_", 5) == 0)

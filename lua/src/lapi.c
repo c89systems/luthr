@@ -1039,6 +1039,69 @@ l_sinline Table *gettable (lua_State *L, int idx, LuaNativeRoot *indexed) {
   return hvalue(t);
 }
 
+int luaA_ref (lua_State *L, int idx) {
+  LuaNativeRoot value, indexed;
+  LuaObjectScope scope;
+  Table *table;
+  TValue link;
+  lua_Integer head = 0;
+  int ref;
+  lua_lock(L);
+  api_checkpop(L, 1);
+  if (ttisnil(s2v(L->top.p - 1))) {
+    L->top.p--;
+    lua_unlock(L);
+    return 0;
+  }
+  luaR_pushroot(L, &value);
+  luaR_setroot(L, &value, s2v(L->top.p - 1));
+  table = gettable(L, idx, &indexed);
+  luaA_begin(L, obj2gco(table), &scope);
+  setnilvalue(&link);
+  luaH_getint(L, table, 1, &link);
+  if (ttisnumber(&link)) {
+    tointeger(&link, &head);
+  }
+  else {
+    lua_assert(l_isfalse(&link));
+    setivalue(&link, 0);
+    luaH_setint(L, table, 1, &link);
+  }
+  ref = cast_int(head);
+  if (ref != 0) {
+    setnilvalue(&link);
+    luaH_getint(L, table, ref, &link);
+    luaH_setint(L, table, 1, &link);
+  }
+  else ref = cast_int(luaH_getn(L, table)) + 1;
+  luaH_setint(L, table, ref, &value.value);
+  luaA_end(L, &scope);
+  L->top.p--;
+  luaR_poproot(L, &indexed);
+  luaR_poproot(L, &value);
+  lua_unlock(L);
+  return ref;
+}
+
+void luaA_unref (lua_State *L, int idx, int ref) {
+  LuaNativeRoot indexed;
+  LuaObjectScope scope;
+  Table *table;
+  TValue head;
+  lua_lock(L);
+  table = gettable(L, idx, &indexed);
+  luaA_begin(L, obj2gco(table), &scope);
+  setnilvalue(&head);
+  luaH_getint(L, table, 1, &head);
+  lua_assert(ttisinteger(&head));
+  luaH_setint(L, table, ref, &head);
+  setivalue(&head, ref);
+  luaH_setint(L, table, 1, &head);
+  luaA_end(L, &scope);
+  luaR_poproot(L, &indexed);
+  lua_unlock(L);
+}
+
 
 LUA_API int lua_rawget (lua_State *L, int idx) {
   LuaNativeRoot indexed;

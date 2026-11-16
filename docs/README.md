@@ -100,6 +100,17 @@ registrations and notifier borrows before delivery, including forced carrier
 migration and early notification. General cancellation, deadlines and shutdown
 still need their remaining gates.
 
+Private admission shutdown now closes task admission and retains outcomes until
+collection. Private carrier-affinity regions keep scoped native resource
+create/use/close on their carrier while allowing parked carriers to be reused.
+The first [actual module acceptance](module-compatibility.md) uses released
+LoneJSON sources and C SDKs for concurrent receivers, callback ownership,
+errors/OOM, stop/shutdown, bounded input/output and relocated SDK consumers.
+Auxiliary reference allocation/freeing now uses table-owned transactions so
+parallel native bindings cannot receive the same live registry reference.
+Other module workflows, resource adapters and public scheduling/sizing remain
+unproven.
+
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under
 `docs/`; the root README is a navigation entrypoint.

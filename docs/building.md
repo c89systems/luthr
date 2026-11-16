@@ -31,6 +31,14 @@ directory; its default is `~/.codex/skills/pkt-systems-cmake-lifecycle/scripts`.
 Configure only discovers prepared tools. `make prepare` is the explicit
 acquisition entrypoint; missing prerequisites fail instead of falling back.
 
+Development builds also require the released LoneJSON module fixture inputs.
+Run `make prepare-modules MODULE_ARCHIVE_DIR=/path/to/lonejson-0.50.0-artifacts`
+once before configuring tests. It verifies and stages the three pinned archives
+inside this checkout. See [module acceptance](module-compatibility.md) for
+artifact names, lifecycle and the scope of the actual-module/installed-SDK gates.
+Configure/build do not acquire these dependencies. Make enables `BUILD_TESTING`;
+product-only CMake builds may disable it.
+
 The native build publishes `build/x86_64-linux-gnu/Debug/compile_commands.json`,
 which `.clangd` discovers normally. Run `make build` once before using the editor
 to prepare generated facade headers. The database uses the real selected
