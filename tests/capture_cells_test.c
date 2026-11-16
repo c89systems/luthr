@@ -1,5 +1,6 @@
 #include <laccess.h>
 #include <lauxlib.h>
+#include <ldebug.h>
 #include <lfunc.h>
 #include <lstate.h>
 #include <lua.h>
@@ -27,6 +28,8 @@ static __thread unsigned access_calls;
 static __thread unsigned read_calls;
 static __thread unsigned write_calls;
 static __thread unsigned barrier_flushes;
+static const void *measured_function;
+static unsigned local_loads;
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaA_begin(lua_State *state, GCObject *object,
@@ -37,6 +40,7 @@ void __real_luaF_readcapture(lua_State *state, LClosure *closure, int n,
 void __real_luaF_writecapture(lua_State *state, LClosure *closure, int n,
                               const TValue *value);
 void __real_luaF_storelocals(lua_State *state, StkId first, int count);
+void __real_luaF_loadlocals(lua_State *state, CallInfo *ci);
 void __real_luaW_stop(lua_State *state);
 
 void __wrap_luaW_stop(lua_State *state) {
@@ -85,6 +89,17 @@ void __wrap_luaF_storelocals(lua_State *state, StkId first, int count) {
   measured++;
   __real_luaF_storelocals(state, first, count);
   measured--;
+}
+
+void __wrap_luaF_loadlocals(lua_State *state, CallInfo *ci) {
+  if (ci_func(ci) == measured_function)
+    local_loads++;
+  __real_luaF_loadlocals(state, ci);
+}
+
+static int select_frame(lua_State *state) {
+  measured_function = lua_topointer(state, 1);
+  return 0;
 }
 
 static void require(int condition) {
@@ -252,6 +267,15 @@ int main(int argc, char **argv) {
     require(access_calls > 0 && read_calls > 0 && write_calls > 0);
     require(world_acquisitions == 0);
     observed_world = NULL;
+  } else if (strcmp(argv[1], "uncaptured") == 0) {
+    lua_pushcfunction(state, select_frame);
+    lua_setglobal(state, "select_frame");
+    run(state, "local cell=17; local function read() return cell end; "
+               "local function work() local n=0; "
+               "for i=1,20000 do n=n+i end; return n end; "
+               "select_frame(work); "
+               "assert(work()==200010000 and read()==17)");
+    require(local_loads == 0);
   } else if (strcmp(argv[1], "semantics") == 0)
     run(state, semantics);
   else {

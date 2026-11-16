@@ -372,6 +372,7 @@ static void resourcewait (LuaExecution *execution, pthread_mutex_t *mutex,
 }
 
 static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
+  (void)waiter;  /* also checked by the debug ownership assertion below */
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   lock(s);

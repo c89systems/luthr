@@ -1239,6 +1239,12 @@ void luaV_finishOp (lua_State *L) {
 	  luai_threadyield(L); updatebase(ci); updatetrap(ci); }
 
 
+/* Open cells are ordered by descending stack level. Captures in callers do
+** not require register synchronization in an uncaptured executing frame. */
+#define haslocalcaptures(L,ci) \
+  ((L)->openupval != NULL && \
+   (L)->openupval->level > savestack(L, (ci)->func.p))
+
 /* fetch an instruction and prepare its execution */
 #define vmfetch()	{ \
   if (l_unlikely(--L->poll_remaining == 0)) { \
@@ -1255,12 +1261,12 @@ void luaV_finishOp (lua_State *L) {
     trap = luaG_traceexec(L, pc);  /* handle hooks */ \
     updatebase(ci);  /* correct stack */ \
   } \
-  if (l_unlikely(L->openupval != NULL)) luaF_loadlocals(L, ci); \
+  if (l_unlikely(haslocalcaptures(L, ci))) luaF_loadlocals(L, ci); \
   i = *(pc++); \
 }
 
 #define storeinstructionresults() { \
-  if (l_unlikely(L->openupval != NULL)) { \
+  if (l_unlikely(haslocalcaptures(L, ci))) { \
     savepc(ci); storeinstruction(L, ci, i, pc); updatebase(ci); \
   } \
 }
@@ -1934,7 +1940,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
             chgivalue(s2v(ra), l_castU2S(count - 1));  /* update counter */
             idx = intop(+, idx, step);  /* add step to index */
             chgivalue(s2v(ra + 2), idx);  /* update control variable */
-            if (L->openupval != NULL) {
+            if (haslocalcaptures(L, ci)) {
               savepc(ci);
               luaF_storelocals(L, ra, 1);
               updatebase(ci);
@@ -1946,7 +1952,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         }
         else if (floatforloop(L, ra)) {  /* float loop */
           pc -= GETARG_Bx(i);  /* jump back */
-          if (L->openupval != NULL) {
+          if (haslocalcaptures(L, ci)) {
             savepc(ci);
             luaF_storelocals(L, ra + 2, 1);
             updatebase(ci);
@@ -1960,7 +1966,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         savestate(L, ci);  /* in case of errors */
         if (forprep(L, ra))
           pc += GETARG_Bx(i) + 1;  /* skip the loop */
-        else if (L->openupval != NULL) {
+        else if (haslocalcaptures(L, ci)) {
           savepc(ci);
           luaF_storelocals(L, ra, 3);
           updatebase(ci);
