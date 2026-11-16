@@ -40,6 +40,7 @@ struct task {
   int permit, native, pinned, finished, status, results, id;
   int worker, target;
   unsigned parks, migrations, pinned_waits;
+  int migrate_any;
   unsigned pin_binds, pin_releases, pin_parks;
   int pin_worker;
   long last_carrier;
@@ -167,6 +168,10 @@ static void park(struct task *task, enum reason reason) {
     lock(task->pool);
     task->target = task->worker;
     unlock(task->pool);
+  } else if (task->migrate_any) {
+    lock(task->pool);
+    task->target = -1;
+    unlock(task->pool);
   } else if (task->pool->force_migrate &&
              (!task->pool->affinity_test ||
               (task->id == 2 && task->pin_releases != 0))) {
@@ -186,6 +191,8 @@ static void park(struct task *task, enum reason reason) {
   if (task->fiber.execution.pin_depth != 0)
     require(
         pthread_equal(task->fiber.execution.pinned_carrier, pthread_self()));
+  if (task->migrate_any && task->fiber.execution.pin_depth == 0)
+    require(previous != syscall(SYS_gettid));
   if (previous != syscall(SYS_gettid))
     task->migrations++;
   task->last_carrier = syscall(SYS_gettid);
@@ -423,8 +430,15 @@ static void *worker_entry(void *argument) {
     while (!pool->stop && task == NULL) {
       struct task **link = &pool->ready, *previous = NULL;
       while (*link != NULL) {
-        if ((*link)->target < 0 ||
-            (*link)->target == (int)(worker - pool->workers)) {
+        struct task *candidate = *link;
+        int carrier = (int)(worker - pool->workers);
+        /* Migration stress must select a different available carrier. A fixed
+         * swap can queue a gate owner behind the opaque frame awaiting it. */
+        int eligible =
+            candidate->migrate_any && candidate->fiber.execution.pin_depth == 0
+                ? candidate->worker != carrier
+                : candidate->target < 0 || candidate->target == carrier;
+        if (eligible) {
           task = *link;
           *link = task->next;
           if (pool->ready_tail == task)
@@ -3164,7 +3178,7 @@ static int exercise_affinity(const char *name) {
   free(pool);
   return 0;
 }
-#include "private/lonejson_acceptance.inc.h"
+#include "private/module_acceptance.inc.h"
 
 int main(int argc, char **argv) {
   struct pool *pool;
@@ -3172,8 +3186,8 @@ int main(int argc, char **argv) {
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
   require(argc == 2 || argc == 3);
-  if (strncmp(argv[1], "lonejson_", 9) == 0)
-    return exercise_lonejson(argv[1]);
+  if (strncmp(argv[1], "lonejson_", 9) == 0 || strncmp(argv[1], "mdf_", 4) == 0)
+    return exercise_module(argv[1]);
   if (strncmp(argv[1], "affinity_", 9) == 0)
     return exercise_affinity(argv[1]);
   if (strncmp(argv[1], "stop_", 5) == 0)

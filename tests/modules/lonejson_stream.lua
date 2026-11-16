@@ -4,7 +4,7 @@ local Row = lj.schema('Row', {
   lj.field('value', lj.string {required=true, fixed_capacity=256}),
 })
 local record = Row:new_record()
-local cursor = Row:array_stream_fd('', json_input_fd)
+local cursor = Row:array_stream_fd('', binding_input_fd)
 assert(cursor)
 q:send('[')
 local count=0
@@ -13,10 +13,10 @@ while true do
   if status == 'eof' then break end
   assert(status == 'item' and value == record, err and err.message)
   count=count+1
-  assert(record.id == count and #record.value == json_payload_size)
+  assert(record.id == count and #record.value == binding_payload_size)
   if count>1 then q:send(',') end
   lj.encode_json_to_sink({id=record.id*2, value=record.value}, function(chunk)
-    json_stream_callback()
+    binding_stream_callback()
     q:send(chunk)
   end)
 end

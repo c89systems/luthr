@@ -44,6 +44,57 @@ and publication, including roots through allocation failure. `reference_*`
 separately gates competing reference calls, GC, failure/retry and debug hooks
 through native and C89 entry points. References stay unique until released.
 
+## Prepared MDF inputs and constructor integration
+
+MDF acceptance uses the unmodified libmdf 0.23.1 Lua archive and its released
+x86_64 GNU/musl C SDKs. Prepare the three archives declared in
+`tests/modules/libmdf-0.23.1.sha256` separately:
+
+```sh
+make prepare-modules MODULE=libmdf MODULE_ARCHIVE_DIR=/path/to/libmdf-0.23.1-artifacts
+```
+
+The same helper validates all inputs before changing the selected module trees.
+`MODULE` defaults to `lonejson`; repeating preparation without an archive path
+uses the selected module's archives already staged in this checkout.
+
+The released binding lazily initializes `libmdf.owner_map` from both `new` and
+`document_stream`. Two unchecked constructors can replace that map concurrently
+and lose an existing receiver's callback. The deterministic `mdf_*_init_*` gate
+pauses the first constructor after its missing-map read. Removing constructor
+serialization makes the second missing-map read fail the gate.
+
+Private integration metadata wraps these two ordinary module entry points with
+one task-aware recursive gate. Contenders park without holding a VM object lock
+or an execution permit. Calls on independent receivers continue concurrently.
+The adapter protects native construction and releases its admission before
+rethrowing the original Lua error, including OOM and stop. Tests cover recursive
+construction, a queued constructor's cancellation, and stop of the constructor
+owner while its unchanged native frame remains live. An unrelated Lua task and
+GC must progress before the paused owner is released.
+
+Migration stress requires every unpinned park to resume on a different available
+carrier. A forced fixed-carrier swap reproduced a cycle with a gate owner
+queued behind its waiting native caller; routing must leave the owner eligible
+for an available carrier. Module waits report task routing and admission state
+after a stalled test condition so this failure is falsifiable.
+
+`native_scheduler_mdf_*` also exercises independent receiver rendering, source,
+sink and write-trace callbacks, exact output, error-object identity, reset/reuse,
+document lifecycle, geometry, callback ownership after a creating coroutine is
+collected, close/finalization and migration outside opaque native frames. The
+source callback's native reads and sink callback's one-slot output pipe provide
+bounded streaming and backpressure. The host withholds later paragraphs until
+validated word bytes arrive; deferred paragraph spacing is checked against the
+complete stream as later input arrives. Source and expected-output scratch stay
+record-sized. Both complete input and output exceed the 256 KiB Lua heap cap.
+This does not impose a new allocation limit on MDF's own C allocator.
+
+This constructor adapter is private feasibility evidence, not a public module
+registration API or a general same-handle serialization policy. No released
+module source is patched. Native receiver ownership and finalization adapters
+for other libraries remain separate requirements.
+
 ## Incremental input and callback output
 
 The streaming gate supplies one bounded item and its delimiter through a native
@@ -78,8 +129,15 @@ dependencies and definitions must not introduce another Lua implementation.
 The serial consumer covers mapping, cursors, sink callbacks, errors and reuse.
 Concurrent scheduling still uses private test interfaces, not a public ABI.
 
-Shared-handle contention policy, optional LoneJSON integrations, full module
-initialization races and the other required modules retain their acceptance
+MDF receives the same relocated-header/static-host/shared-host checks and uses
+its released shared C library for the loadable extension; the released static
+archive is not PIC. The scheduler fixture links its static C library into the
+executable. The existing simple native fixture and both module hosts remain
+distinct consumers. Installed hosts run serial module operations; they do not
+provide the private constructor or scheduler integration.
+
+Shared-handle contention policy, optional LoneJSON integrations, remaining module
+initialization contracts and the other required modules retain their acceptance
 gates. Softline owner-thread callbacks/finalization and liblockdc's native
 owning-thread checks need explicit integration. Scoped carrier pins alone do
 not certify those contracts. Public scheduling, resource transfer/finalization

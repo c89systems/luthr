@@ -1,7 +1,7 @@
 local lj = require('lonejson').new({max_alloc_bytes=65536})
-local checkpoint = json_checkpoint or function() end
-local id = json_task_id and json_task_id() or 2
-local mode = json_fault and json_fault() or 'normal'
+local checkpoint = binding_checkpoint or function() end
+local id = binding_task_id and binding_task_id() or 2
+local mode = binding_fault and binding_fault() or 'normal'
 local Row = lj.schema('Row', {
   lj.field('id', lj.i64 {required=true}),
   lj.field('name', lj.string {required=true, fixed_capacity=64}),
@@ -26,7 +26,7 @@ local ok, message = pcall(function()
   lj.encode_json_to_sink({id=id, name='callback'}, function(chunk)
     checkpoint(id)
     if mode == 'error' then error('LoneJSON sink expected') end
-    if mode == 'oom' then json_oom() end
+    if mode == 'oom' then binding_oom() end
     chunks[#chunks+1] = chunk
   end)
 end)

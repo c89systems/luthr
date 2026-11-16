@@ -111,6 +111,13 @@ parallel native bindings cannot receive the same live registry reference.
 Other module workflows, resource adapters and public scheduling/sizing remain
 unproven.
 
+Released MDF acceptance adds source/sink/trace callbacks, document lifecycle,
+error cleanup and bounded rendering. A forced lazy-owner-map race requires
+private constructor serialization; queued cancellation and owner stop prove
+that integration without changing module sources. Relocated C89 consumers load
+the binding through static and shared hosts. This does not freeze a public
+module metadata API or establish general shared-handle/resource policy.
+
 The [coroutine multiplexing concept](coroutine-multiplexing-concept.md) records
 the scheduling requirements and feasibility gates. Documentation belongs under
 `docs/`; the root README is a navigation entrypoint.

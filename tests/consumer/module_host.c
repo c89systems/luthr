@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
   (void)configure_paths(state);
   if (luthrum_lua_l_dostring(state, (const char *)setup) != LUTHRUM_LUA_OK ||
       luthrum_lua_l_dofile(state, argv[3]) != LUTHRUM_LUA_OK) {
-    fprintf(stderr, "installed LoneJSON: %s\n",
+    fprintf(stderr, "installed native module: %s\n",
             luthrum_lua_tostring(state, -1));
     return 3;
   }
@@ -44,11 +44,11 @@ int main(int argc, char **argv) {
                                      0, NULL, 0) != LUTHRUM_LUA_RUNTIME_OK ||
       luthrum_lua_runtime_run_file(runtime, argv[3], 0, NULL, 0) !=
           LUTHRUM_LUA_RUNTIME_OK) {
-    fprintf(stderr, "installed LoneJSON policy: %s\n",
+    fprintf(stderr, "installed native module policy: %s\n",
             luthrum_lua_runtime_error(runtime));
     return 5;
   }
   luthrum_lua_runtime_free(runtime);
-  puts("installed LoneJSON mapping/stream/sink/error/reuse: passed");
+  puts("installed native module operations/callbacks/error/reuse: passed");
   return 0;
 }
