@@ -89,7 +89,10 @@
 
 
 #define getmarked(x) __atomic_load_n(&(x)->marked, __ATOMIC_RELAXED)
-#define setmarked(x,m) __atomic_store_n(&(x)->marked, (m), __ATOMIC_RELAXED)
+/* Diagnostic reads can run outside metadata ownership. An exchange also
+** makes these atomic writes visible to Helgrind's instruction-level model. */
+#define setmarked(x,m) \
+  ((void)__atomic_exchange_n(&(x)->marked, (m), __ATOMIC_RELAXED))
 #define iswhite(x)      testbits(getmarked(x), WHITEBITS)
 #define isblack(x)      testbit(getmarked(x), BLACKBIT)
 #define isgray(x)  /* neither white nor black */  \

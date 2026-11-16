@@ -75,4 +75,43 @@ assert(getmetatable(protected)=='protected')
 assert(not pcall(setmetatable,protected,{}))
 assert(not pcall(rawset,{},nil,42))
 assert(not pcall(rawset,{},0/0,42))
-print('metatables: hits, misses, writes, replacement, GC, self/pair ownership, errors passed')
+
+-- Mutating a metatable must invalidate cached absent methods.
+local mt={}
+local cached=setmetatable({},mt)
+assert(cached.missing==nil)
+cached.first=1
+mt.__index=function(_,key) return 'read:'..key end
+mt.__newindex=function(object,key,value) rawset(object,key,value*2) end
+assert(cached.missing=='read:missing')
+cached.second=2
+assert(cached.first==1 and cached.second==4)
+mt.__index=nil
+mt.__newindex=nil
+assert(cached.missing==nil)
+cached.third=3
+assert(cached.third==3)
+
+-- Misses insert keys through the allocating path; hits copy whole values.
+local keys={false,true,0,1,1.5,-7,math.maxinteger,
+  'short',string.rep('long key',20),{},function() end,coroutine.create(function() end)}
+local mixed=setmetatable({},{})
+collectgarbage('collect')
+for i,key in ipairs(keys) do
+  local value={id=i,payload=string.rep(tostring(i),100)}
+  mixed[key]=value
+  if i%2==0 then collectgarbage('collect') end
+end
+collectgarbage('collect')
+for i,key in ipairs(keys) do
+  assert(mixed[key].id==i and mixed[key].payload==string.rep(tostring(i),100))
+  mixed[key]=false
+  assert(mixed[key]==false)
+  mixed[key]=nil
+  assert(mixed[key]==nil)
+end
+mixed[1.0]={answer=42}
+assert(mixed[1].answer==42)
+assert(not pcall(function() mixed[nil]=42 end))
+assert(not pcall(function() mixed[0/0]=42 end))
+print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')

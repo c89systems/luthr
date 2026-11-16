@@ -134,6 +134,12 @@ LUAI_FUNC lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue
 LUAI_FUNC lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res);
 LUAI_FUNC lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res);
 
+/* Caller owns 't'. Reads do not allocate; writes require rooted key/value
+** storage that remains valid through allocation and collection. */
+LUAI_FUNC lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res);
+LUAI_FUNC void luaH_setowned (lua_State *L, Table *t, const TValue *key,
+                             TValue *value);
+
 /* Borrowed lookup: requires object ownership or collector quiescence. */
 LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);
 

@@ -1024,7 +1024,7 @@ static lu_byte rawgetstr (Table *t, TString *key, TValue *res) {
 /*
 ** main search function
 */
-static lu_byte rawget (Table *t, const TValue *key, TValue *res) {
+lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res) {
   const TValue *slot;
   switch (ttypetag(key)) {
     case LUA_VSHRSTR:
@@ -1190,14 +1190,15 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
 }
 
 
-/*
-** beware: when using this function you probably need to check a GC
-** barrier and invalidate the TM cache.
-*/
-static void rawset (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  int hres = rawpset(t, key, value);
+/* Complete write under existing ownership, with caller-rooted inputs. */
+void luaH_setowned (lua_State *L, Table *t, const TValue *key, TValue *value) {
+  int hres;
+  invalidateTMcache(t);
+  hres = rawpset(t, key, value);
   if (hres != HOK)
     rawfinishset(L, t, key, value, hres);
+  invalidateTMcache(t);
+  luaC_barrierback(L, obj2gco(t), value);
 }
 
 
@@ -1354,7 +1355,7 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   luaR_pushroot(L, &rooted_key);
   luaR_setroot(L, &rooted_key, key);
   luaA_begin(L, obj2gco(t), &scope);
-  tag = rawget(t, &rooted_key.value, res);
+  tag = luaH_getowned(t, &rooted_key.value, res);
   luaA_end(L, &scope);
   luaR_poproot(L, &rooted_key);
   return tag;
@@ -1430,10 +1431,7 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
   luaR_pushroot(L, &rooted_value);
   luaR_setroot(L, &rooted_value, value);
   luaA_begin(L, obj2gco(t), &scope);
-  invalidateTMcache(t);
-  rawset(L, t, &rooted_key.value, &rooted_value.value);
-  invalidateTMcache(t);
-  luaC_barrierback(L, obj2gco(t), &rooted_value.value);
+  luaH_setowned(L, t, &rooted_key.value, &rooted_value.value);
   luaA_end(L, &scope);
   luaR_poproot(L, &rooted_value);
   luaR_poproot(L, &rooted_key);

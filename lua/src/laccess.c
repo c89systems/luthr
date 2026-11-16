@@ -280,7 +280,7 @@ lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
   sethvalue(L, &owner.value, table);
   luaR_pushroot(L, &metatable);
   count = objectandmeta(L, &owner.value, &first, &second, &metatable);
-  tag = luaH_get(L, table, key, result);
+  tag = luaH_getowned(table, key, result);
   setnilvalue(&method->value);
   if (tagisempty(tag)) {
     Table *mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
@@ -307,14 +307,14 @@ int luaA_assign (lua_State *L, Table *table, const TValue *key,
   luaR_pushroot(L, &metatable);
   count = objectandmeta(L, &owner.value, &first, &second, &metatable);
   setnilvalue(&method->value);
-  handled = !tagisempty(luaH_get(L, table, key, &old));
+  handled = !tagisempty(luaH_getowned(table, key, &old));
   if (!handled) {
     Table *mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
     metafield(L, mt, G(L)->tmname[TM_NEWINDEX], method, TM_NEWINDEX);
     handled = ttisnil(&method->value);
   }
   if (handled)
-    luaH_set(L, table, key, value);
+    luaH_setowned(L, table, key, value);
   endpair(L, &first, &second, count);
   luaR_poproot(L, &metatable);
   luaR_poproot(L, &owner);
