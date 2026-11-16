@@ -170,27 +170,31 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
   luaR_poproot(L, &rooted_object);
 }
 
-/* Discover the metatable, then acquire both objects in address order. Recheck
-** discovery under ownership; no generation counters or opposite lock orders. */
+/* Discover under owner access and retain it when address order permits.
+** Recheck after acquiring both objects; GC can run during an ownership wait. */
 static int objectandmeta (lua_State *L, const TValue *object,
                           LuaObjectScope *first, LuaObjectScope *second,
                           LuaNativeRoot *metatable) {
   GCObject *owner = gcvalue(object);
   for (;;) {
     Table *mt;
-    luaA_getmetatable(L, object, metatable);
-    mt = ttistable(&metatable->value) ? hvalue(&metatable->value) : NULL;
+    luaA_begin(L, owner, first);
+    mt = objectmeta(object);
+    if (mt) { sethvalue(L, &metatable->value, mt); }
+    else setnilvalue(&metatable->value);
     if (mt == NULL || obj2gco(mt) == owner) {
-      luaA_begin(L, owner, first);
-      if (objectmeta(object) == mt)
-        return 1;
-      luaA_end(L, first);
+      return 1;
     }
     else {
       GCObject *other = obj2gco(mt);
       int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
-      luaA_begin(L, ownerfirst ? owner : other, first);
-      luaA_begin(L, ownerfirst ? other : owner, second);
+      if (ownerfirst)
+        luaA_begin(L, other, second);
+      else {
+        luaA_end(L, first);
+        luaA_begin(L, other, first);
+        luaA_begin(L, owner, second);
+      }
       if (objectmeta(object) == mt)
         return 2;
       luaA_end(L, second);

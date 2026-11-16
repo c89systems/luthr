@@ -56,7 +56,7 @@ add_test(NAME lua_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${benchmark_argumen
   -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkSmoke.cmake")
 set_tests_properties(lua_benchmark_smoke PROPERTIES LABELS "runtime;compatibility" TIMEOUT 30)
 
-foreach(case IN ITEMS language native files_modules)
+foreach(case IN ITEMS language native files_modules metatables)
   foreach(collector IN ITEMS incremental generational)
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${case}-${collector}/direct")
     add_test(NAME lua_e2e_${case}_${collector} COMMAND luthrum_test_host
