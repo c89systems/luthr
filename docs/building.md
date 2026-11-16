@@ -86,8 +86,50 @@ Raw samples, median summaries and run metadata are written under
 `build/<target>/<config>/benchmarks/lua/`. Ratios are Luthrum/upstream, so values
 above one mean slower. Timings are observations, not correctness thresholds;
 host load and CPU policy can affect them. The CTest smoke case verifies the
-benchmark path with reduced work. Shared-VM parallel scaling is a separate
-measurement because upstream Lua does not provide that execution model.
+benchmark path with reduced work.
+
+`make benchmark-parallel CONFIG=Release` measures shared-VM execution using a
+fixed, reusable host thread pool. The same C host, upstream public headers and
+portable `tests/e2e/parallel.lua` payload run against both libraries. Upstream
+runs with one worker; Luthrum runs with one and increasing worker counts. Each
+batch has 32 rooted coroutines, so workers execute multiple jobs. Integer loops,
+independent tables, a shared table with disjoint partitions, closures and
+allocation/GC run under both collectors. Every job and shared-table partition is
+checked; checksums must match all samples, widths and runtimes. No downstream
+module projects participate.
+
+The harness records its actual CPU affinity and the most restrictive visible
+cgroup v1/v2 quota through the ancestor hierarchy. An unreadable or unresolved
+quota is recorded as unknown. Default measured widths are powers of two plus the
+rounded-up effective CPU bound, limited by task count and the fixture's 64-worker
+ceiling. Unknown quota selects only one worker. These are benchmark choices,
+not a public scheduler sizing policy. Workers stay within inherited affinity;
+the fixture supports affinity masks up to `CPU_SETSIZE` and fails on larger masks.
+
+Raw samples, medians and metadata live under
+`build/<target>/<config>/benchmarks/parallel/`. They include process CPU time,
+batch wall time, job service and release-to-completion latency (including queue
+wait), Lua live/peak/retained allocation bytes, process resident high-water KiB,
+actual worker stack/guard bytes and dispatch counts. Job percentiles use nearest
+rank; summaries take the median across samples, averaging the middle two for an
+even count. `wall_ratio` is Luthrum/upstream (above one is slower), while
+`scaling_speedup` compares Luthrum's one-worker wall time with the measured width
+(above one is faster). Resident high-water comes from this executable's
+`/proc/self/status` and includes setup/warmup; zero means unavailable. Lua peaks
+are reset before each timed batch. The same atomic counting allocator instruments
+both runtimes and adds measurement overhead, especially during parallel
+allocation. Loading, preparation, full collection and result verification are
+outside timing; dispatch, job execution, automatic collection and worker
+rendezvous are inside it. Metadata records capacity, settings, source revision,
+dirty state and hashes of the Lua payload, host binaries and Luthrum library.
+
+This measures the free-threaded VM under a host pool: jobs run to completion and
+do not request application yields. It does not measure the private fiber
+scheduler's preemption, native-blocking compensation or cancellation. Those
+remain separate feasibility and performance gates before public scheduler
+interfaces or automatic worker limits can be selected. The parallel smoke test
+checks saved samples, checksums, medians and artifact identities using reduced
+work; direct tests exercise both collectors and an actual shared VM.
 
 The native build publishes `build/x86_64-linux-gnu/Debug/compile_commands.json`,
 which `.clangd` discovers normally. Run `make build` once before using the editor

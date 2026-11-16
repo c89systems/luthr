@@ -9,9 +9,9 @@ JOBS ?= 1
 LIFECYCLE_SCRIPTS_DIR ?= $(HOME)/.codex/skills/pkt-systems-cmake-lifecycle/scripts
 BUILD_DIR := $(ROOT)/build/$(TARGET)/$(CONFIG)
 
-.PHONY: help prepare configure build test benchmark memcheck racecheck install format format-check clean
+.PHONY: help prepare configure build test benchmark benchmark-parallel memcheck racecheck install format format-check clean
 help:
-	@printf '%s\n' 'make [build|test|benchmark|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: prepare the pinned toolchain, pristine Lua 5.5.1 reference and official tests' 'make benchmark CONFIG=Release: identical-code upstream/Luthrum CPU and wall-time comparisons' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
+	@printf '%s\n' 'make [build|test|benchmark|benchmark-parallel|memcheck|racecheck|install|format-check|clean]' 'TARGET=x86_64-linux-gnu|x86_64-linux-musl CONFIG=Debug|Release JOBS=1' 'make prepare: prepare the pinned toolchain, pristine Lua 5.5.1 reference and official tests' 'make benchmark CONFIG=Release: identical-code upstream/Luthrum CPU and wall-time comparisons' 'make benchmark-parallel CONFIG=Release: shared-VM host-pool scaling, latency and memory' 'LIFECYCLE_SCRIPTS_DIR selects the activated lifecycle skill scripts.'
 prepare:
 	"$(LIFECYCLE_SCRIPTS_DIR)/cpkt-toolchains.sh" ensure "$(TARGET)"
 	bash "$(ROOT)/tools/prepare_lua_reference.sh"
@@ -23,6 +23,8 @@ test: build
 	ctest --test-dir "$(BUILD_DIR)" --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 benchmark: configure
 	cmake --build "$(BUILD_DIR)" --target benchmark_lua --parallel "$(JOBS)"
+benchmark-parallel: configure
+	cmake --build "$(BUILD_DIR)" --target benchmark_parallel --parallel "$(JOBS)"
 memcheck: build
 	ctest --test-dir "$(BUILD_DIR)" -T MemCheck -L memcheck --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 racecheck: build

@@ -32,6 +32,58 @@ endforeach()
 
 target_link_options(upstream_lua PRIVATE -Wl,--export-dynamic)
 
+foreach(runtime IN ITEMS upstream luthrum)
+  luthrum_test_program(parallel_${runtime} parallel.c)
+  target_sources(parallel_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/tests/private/cpu_capacity.c")
+  set_target_properties(parallel_${runtime} PROPERTIES C_STANDARD 99)
+  target_compile_options(parallel_${runtime} PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(parallel_${runtime} BEFORE PRIVATE "${reference_dir}")
+  target_link_libraries(parallel_${runtime} PRIVATE Threads::Threads)
+  if(runtime STREQUAL "upstream")
+    target_link_libraries(parallel_${runtime} PRIVATE upstream_lua_reference)
+    set(workers 1)
+  else()
+    target_compile_definitions(parallel_${runtime} PRIVATE LUTHRUM_BENCH_SHARED_VM)
+    target_link_libraries(parallel_${runtime} PRIVATE luthrum_shared)
+    set(workers 2)
+  endif()
+  foreach(workload IN ITEMS integers independent_tables shared_table closures allocation_gc)
+    foreach(collector IN ITEMS incremental generational)
+      add_test(NAME lua_parallel_${runtime}_${workload}_${collector}
+        COMMAND parallel_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+          "${workload}" "${collector}" "${workers}" 8 256 2 1)
+      set_tests_properties(lua_parallel_${runtime}_${workload}_${collector}
+        PROPERTIES LABELS "runtime;benchmark;memcheck" TIMEOUT 30)
+      if(runtime STREQUAL "luthrum")
+        set_property(TEST lua_parallel_${runtime}_${workload}_${collector}
+          APPEND PROPERTY LABELS parallel)
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
+
+set(parallel_arguments
+  "-Dupstream=$<TARGET_FILE:parallel_upstream>" "-Dluthrum=$<TARGET_FILE:parallel_luthrum>"
+  "-Dlibrary=$<TARGET_FILE:luthrum_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
+  "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+  "-Dtarget=${LUTHRUM_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
+  "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+add_custom_target(benchmark_parallel
+  COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
+    "${CMAKE_COMMAND}" ${parallel_arguments}
+    "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/parallel"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkParallel.cmake"
+  DEPENDS parallel_upstream parallel_luthrum VERBATIM USES_TERMINAL)
+add_test(NAME lua_parallel_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${parallel_arguments}
+  -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=2048 "-Dlevels=1;2"
+  "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/parallel-smoke"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkParallelSmoke.cmake")
+add_test(NAME lua_parallel_arguments COMMAND "${CMAKE_COMMAND}" ${parallel_arguments}
+  "-Dwork_dir=${CMAKE_CURRENT_BINARY_DIR}/parallel-errors"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkArguments.cmake")
+set_tests_properties(lua_parallel_benchmark_smoke lua_parallel_arguments
+  PROPERTIES LABELS "runtime;benchmark" TIMEOUT 60)
+
 add_library(compat_fixture MODULE native.c)
 set_target_properties(compat_fixture PROPERTIES PREFIX "" C_STANDARD 99)
 target_include_directories(compat_fixture PRIVATE "${reference_dir}")

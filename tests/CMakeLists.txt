@@ -12,6 +12,13 @@ function(luthrum_test_program name source)
   endif()
 endfunction()
 
+luthrum_test_program(cpu_capacity_test cpu_capacity_test.c)
+target_sources(cpu_capacity_test PRIVATE private/cpu_capacity.c)
+set_target_properties(cpu_capacity_test PROPERTIES C_STANDARD 99)
+target_compile_options(cpu_capacity_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(cpu_capacity_test PRIVATE Threads::Threads)
+include("${CMAKE_CURRENT_SOURCE_DIR}/CapacityFixtures.cmake")
+
 find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
