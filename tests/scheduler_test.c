@@ -24,6 +24,8 @@ struct fixture {
   lua_State *main;
   pthread_mutex_t mutex;
   pthread_cond_t changed;
+  pthread_mutex_t idle_mutex;
+  pthread_cond_t idle_changed;
   pthread_barrier_t parallel;
   LuaWaiter *waiters;
   unsigned started, seen[TASKS];
@@ -31,6 +33,7 @@ struct fixture {
   unsigned pause_hold, pause_seen, pause_release;
   unsigned finalized;
   unsigned native_callback_done;
+  unsigned idle_entries, host_channel_entries;
   size_t live;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
@@ -40,6 +43,23 @@ static unsigned poll_locks, poll_calls;
 static int fail_mutex = -1, fail_condition = -1, fail_carrier = -1;
 static int fail_mapping, fail_protection;
 static unsigned live_stacks;
+static int observe_idle;
+static pthread_t idle_host;
+
+int __real_pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+int __wrap_pthread_cond_wait(pthread_cond_t *condition,
+                             pthread_mutex_t *mutex) {
+  if (observe_idle && mutex == &fixture->scheduler.mutex &&
+      !pthread_equal(pthread_self(), idle_host)) {
+    require(pthread_mutex_lock(&fixture->idle_mutex) == 0);
+    fixture->idle_entries++;
+    if (condition == &fixture->scheduler.changed)
+      fixture->host_channel_entries++;
+    require(pthread_cond_broadcast(&fixture->idle_changed) == 0);
+    require(pthread_mutex_unlock(&fixture->idle_mutex) == 0);
+  }
+  return __real_pthread_cond_wait(condition, mutex);
+}
 
 void *__real_mmap(void *, size_t, int, int, int, off_t);
 void *__wrap_mmap(void *address, size_t size, int protection, int flags, int fd,
@@ -145,6 +165,10 @@ static void init(struct fixture *f, unsigned slots) {
   luaL_openlibs(f->main);
   require(pthread_mutex_init(&f->mutex, NULL) == 0);
   require(pthread_cond_init(&f->changed, NULL) == 0);
+  if (observe_idle) {
+    require(pthread_mutex_init(&f->idle_mutex, NULL) == 0);
+    require(pthread_cond_init(&f->idle_changed, NULL) == 0);
+  }
   require(luaSC_init(f->main, &f->scheduler, &config) == 0);
   require(f->scheduler.created == slots + 1);
   if (slots == 2) {
@@ -157,6 +181,10 @@ static void finish(struct fixture *f) {
   require(luaSC_destroy(f->main, &f->scheduler) == 0);
   require(f->main->l_G->slot_caches == NULL);
   lua_close(f->main);
+  if (observe_idle) {
+    require(pthread_cond_destroy(&f->idle_changed) == 0);
+    require(pthread_mutex_destroy(&f->idle_mutex) == 0);
+  }
   require(pthread_cond_destroy(&f->changed) == 0);
   require(pthread_mutex_destroy(&f->mutex) == 0);
   if (f->parallel_check)
@@ -276,6 +304,17 @@ static int event_wait(lua_State *L) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   lua_pushinteger(L, 77);
   return 1;
+}
+
+static int pinned_wait(lua_State *L) {
+  LuaCarrierPin pin = {0};
+  pthread_t carrier = pthread_self();
+  int results;
+  require(luaQ_pincarrier(&pin) == LUA_OK);
+  results = event_wait(L);
+  require(luaQ_pinowner(&pin) && pthread_equal(pthread_self(), carrier));
+  luaQ_unpincarrier(&pin);
+  return results;
 }
 
 static void wake_before_publication(struct fixture *f, int generational) {
@@ -516,6 +555,76 @@ static void *backing(void *context, void *block, size_t old, size_t size) {
   return replacement;
 }
 
+static void idle_notifications(struct fixture *f) {
+  unsigned i;
+  observe_idle = 1;
+  idle_host = pthread_self();
+  init(f, 4);
+  require(pthread_mutex_lock(&f->idle_mutex) == 0);
+  while (f->idle_entries < f->scheduler.created)
+    require(pthread_cond_wait(&f->idle_changed, &f->idle_mutex) == 0);
+  fprintf(stderr, "idle carriers on host notification channel: %u\n",
+          f->host_channel_entries);
+  require(f->host_channel_entries == 0);
+  require(pthread_mutex_unlock(&f->idle_mutex) == 0);
+  for (i = 0; i < TASKS; i++)
+    submit(f, i, "local t={}; for i=1,300 do t[i]=i end; return t[300]", 0);
+  for (i = 0; i < TASKS; i++)
+    require(collect(f, i, LUA_OK) == 300);
+  finish(f);
+  observe_idle = 0;
+}
+
+static void idle_affinity(struct fixture *f) {
+  LuaScheduler *s = &f->scheduler;
+  unsigned observed, i;
+  observe_idle = 1;
+  idle_host = pthread_self();
+  init(f, 4);
+  managed(f->main, "pinned_wait", pinned_wait);
+  submit(f, 0, "return pinned_wait()", 0);
+  require(pthread_mutex_lock(&s->mutex) == 0);
+  while (!f->tasks[0].published)
+    require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
+  require(pthread_mutex_unlock(&s->mutex) == 0);
+  for (;;) {
+    require(pthread_mutex_lock(&f->idle_mutex) == 0);
+    observed = f->idle_entries;
+    require(pthread_mutex_unlock(&f->idle_mutex) == 0);
+    require(pthread_mutex_lock(&s->mutex) == 0);
+    for (i = 0; i < s->config.carriers; i++)
+      if (!s->carriers[i].sleeping)
+        break;
+    if (i == s->config.carriers) {
+      LuaCarrier *required = f->tasks[0].carrier;
+      LuaCarrier **link = &s->idle;
+      /* Put every ineligible sleeper ahead of the required carrier. */
+      while (*link != required)
+        link = &(*link)->idle_next;
+      *link = required->idle_next;
+      required->idle_next = NULL;
+      for (link = &s->idle; *link != NULL; link = &(*link)->idle_next) {
+      }
+      *link = required;
+      require(s->idle != required && f->tasks[0].affinity == required);
+      require(pthread_mutex_unlock(&s->mutex) == 0);
+      break;
+    }
+    require(pthread_mutex_unlock(&s->mutex) == 0);
+    require(pthread_mutex_lock(&f->idle_mutex) == 0);
+    while (observed == f->idle_entries)
+      require(pthread_cond_wait(&f->idle_changed, &f->idle_mutex) == 0);
+    require(pthread_mutex_unlock(&f->idle_mutex) == 0);
+  }
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  luaQ_wake(&f->changed, &f->waiters);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 77);
+  finish(f);
+  observe_idle = 0;
+}
+
 static void startup_failures(struct fixture *f) {
   LuaSchedulerConfig config = {2, 3, 1, 1, 1};
   LuaScheduler other = {0};
@@ -529,7 +638,7 @@ static void startup_failures(struct fixture *f) {
     require(f->main->l_G->scheduler == NULL &&
             f->main->l_G->slot_caches == NULL);
   }
-  for (i = 0; i < 2; i++) {
+  for (i = 0; i < 2 + config.carriers; i++) {
     fail_condition = (int)i;
     require(luaSC_init(f->main, &f->scheduler, &config) == EAGAIN);
     require(f->main->l_G->scheduler == NULL &&
@@ -595,6 +704,10 @@ int main(int argc, char **argv) {
     native_saturation(f, 1);
   else if (strcmp(argv[1], "startup_failures") == 0)
     startup_failures(f);
+  else if (strcmp(argv[1], "idle_notifications") == 0)
+    idle_notifications(f);
+  else if (strcmp(argv[1], "idle_affinity") == 0)
+    idle_affinity(f);
   else if (strcmp(argv[1], "callback_progress") == 0)
     callback_progress(f);
   else if (strcmp(argv[1], "parked") == 0)

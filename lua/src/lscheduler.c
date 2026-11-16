@@ -12,6 +12,19 @@
 
 enum { SC_READY, SC_RESOURCE, SC_DONE };
 
+static void wakework (LuaScheduler *s, int all);
+
+/* Remove a selected sleeper before signalling it, so later submissions choose
+** another carrier even if this one has not yet reacquired the engine mutex. */
+static void wakecarrier (LuaCarrier **link) {
+  LuaCarrier *carrier = *link;
+  lua_assert(carrier->sleeping);
+  *link = carrier->idle_next;
+  carrier->idle_next = NULL;
+  carrier->sleeping = 0;
+  luaX_checksync(pthread_cond_signal(&carrier->changed));
+}
+
 static void lock (LuaScheduler *s) {
   luaX_checksync(pthread_mutex_lock(&s->mutex));
 }
@@ -20,6 +33,8 @@ static void unlock (LuaScheduler *s) {
 }
 static void notify (LuaScheduler *s) {
   luaX_checksync(pthread_cond_broadcast(&s->changed));
+  if (s->stopping)
+    while (s->idle != NULL) wakecarrier(&s->idle);
 }
 static void changed (LuaScheduler *s) {
   luaX_checksync(pthread_cond_wait(&s->changed, &s->mutex));
@@ -52,6 +67,20 @@ static int eligible (LuaScheduledTask *task, LuaCarrier *carrier) {
   return !task->native_pending || reserved == NULL || reserved == task;
 }
 
+/* The engine and queue mutexes keep the queued task's routing fields stable.
+** A pinned/native-pending task must wake an eligible carrier, not an arbitrary
+** sleeper which might leave its required carrier asleep indefinitely. */
+static void wakequeued (LuaScheduler *s, LuaScheduledTask *task) {
+  LuaCarrier **link;
+  if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
+  for (link = &s->idle; *link != NULL; link = &(*link)->idle_next) {
+    if (eligible(task, *link)) {
+      wakecarrier(link);
+      return;
+    }
+  }
+}
+
 static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
   LuaScheduledTask **link = &slot->head, *previous = NULL;
   while (*link != NULL) {
@@ -78,6 +107,7 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   append(&slot->head, &slot->tail, task);
   slot->count++;
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_RELEASE);
+  wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
   notify(s);
 }
@@ -138,6 +168,7 @@ static void releaseslot (LuaScheduledTask *task) {
   __atomic_store_n(&slot->owner, NULL, __ATOMIC_RELEASE);
   lock(task->scheduler);
   notify(task->scheduler);
+  wakework(task->scheduler, 0);
   unlock(task->scheduler);
 }
 
@@ -146,6 +177,7 @@ static void flushrouting (LuaScheduler *s) {
       __atomic_exchange_n(&s->routing_request, 0, __ATOMIC_ACQ_REL)) {
     lock(s);
     notify(s);
+    wakework(s, 1);
     unlock(s);
   }
 }
@@ -217,6 +249,7 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     }
     __atomic_fetch_sub(&s->reentry_waiting, 1, __ATOMIC_RELEASE);
     notify(s);
+    wakework(s, 1);
     unlock(s);
   }
 }
@@ -315,6 +348,21 @@ static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
   return 0;
 }
 
+/* Capacity or routing changed without a newly queued task. Normal release
+** wakes one eligible sleeper; unpin/reentry can enable several routes. */
+static void wakework (LuaScheduler *s, int all) {
+  LuaCarrier **link;
+  if (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 ||
+      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
+  for (link = &s->idle; *link != NULL;) {
+    if (haswork(s, *link)) {
+      wakecarrier(link);
+      if (!all) return;
+    }
+    else link = &(*link)->idle_next;
+  }
+}
+
 static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
@@ -334,6 +382,7 @@ static void poll (LuaExecution *execution, lua_State *L) {
     epoch = s->handoff_epoch;
     __atomic_fetch_add(&s->external_yields, 1, __ATOMIC_RELEASE);
     notify(s);
+    wakework(s, 1);
     while (epoch == s->handoff_epoch &&
            __atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) != 0 &&
            haswork(s, NULL)) changed(s);
@@ -432,6 +481,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
       __atomic_store_n(&slot->owner, NULL, __ATOMIC_RELEASE);
       if (!locked) lock(s);
       notify(s);
+      wakework(s, 0);
       if (!locked) unlock(s);
       continue;
     }
@@ -452,7 +502,15 @@ static void *carrierentry (void *argument) {
     LuaScheduledTask *task = dispatch(carrier, 0);
     if (task == NULL) {
       lock(s);
-      while (!s->stopping && (task = dispatch(carrier, 1)) == NULL) changed(s);
+      while (!s->stopping && (task = dispatch(carrier, 1)) == NULL) {
+        lua_assert(!carrier->sleeping && carrier->idle_next == NULL);
+        carrier->idle_next = s->idle;
+        s->idle = carrier;
+        carrier->sleeping = 1;
+        do {
+          luaX_checksync(pthread_cond_wait(&carrier->changed, &s->mutex));
+        } while (carrier->sleeping);
+      }
       if (s->stopping) { unlock(s); return NULL; }
       unlock(s);
     }
@@ -490,6 +548,8 @@ static void freeengine (lua_State *L, LuaScheduler *s) {
     luaX_checksync(pthread_mutex_destroy(&s->slots[i].mutex));
   }
   luaM_free_(L, s->slots, sizeof(*s->slots) * s->config.slots);
+  for (i = 0; i < s->config.carriers; i++)
+    luaX_checksync(pthread_cond_destroy(&s->carriers[i].changed));
   luaM_free_(L, s->carriers, sizeof(*s->carriers) * s->config.carriers);
   s->slots = NULL;
   s->carriers = NULL;
@@ -503,7 +563,7 @@ static void freeengine (lua_State *L, LuaScheduler *s) {
 }
 
 int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config) {
-  unsigned i, initialized = 0;
+  unsigned i, initialized = 0, initialized_carriers = 0;
   int status;
   pthread_condattr_t attributes;
   if (s->ready || luaQ_current() != NULL || config == NULL ||
@@ -561,8 +621,17 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
       if (status != 0) break;
       initialized++;
     }
+    if (status == 0) {
+      for (i = 0; i < config->carriers; i++) {
+        status = pthread_cond_init(&s->carriers[i].changed, NULL);
+        if (status != 0) break;
+        initialized_carriers++;
+      }
+    }
   }
   if (status != 0) {
+    while (initialized_carriers != 0)
+      luaX_checksync(pthread_cond_destroy(&s->carriers[--initialized_carriers].changed));
     while (initialized != 0)
       luaX_checksync(pthread_mutex_destroy(&s->slots[--initialized].mutex));
     luaM_free_(L, s->slots, s->slots ? config->slots * sizeof(*s->slots) : 0);

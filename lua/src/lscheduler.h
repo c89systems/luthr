@@ -50,6 +50,9 @@ struct LuaCarrier {
   pthread_t thread;
   LuaContext context;
   LuaScheduledTask *reserved;  /* atomic; unrelated work must not enter C here */
+  pthread_cond_t changed;
+  LuaCarrier *idle_next;  /* scheduler mutex; unselected sleepers only */
+  int sleeping;
   unsigned cursor;
 };
 
@@ -63,6 +66,7 @@ struct LuaScheduler {
   LuaWaiter *native_waiters;
   LuaExecutionSlot *slots;
   LuaCarrier *carriers;
+  LuaCarrier *idle;
   LuaScheduledTask *tasks;
   unsigned runnable;  /* atomic; no-request polls only read this word */
   unsigned reentry_waiting;  /* atomic native-return/callback progress request */
