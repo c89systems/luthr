@@ -99,6 +99,8 @@ LUAI_FUNC void *luaM_growaux_ (lua_State *L, void *block, int nelems,
 LUAI_FUNC void *luaM_shrinkvector_ (lua_State *L, void *block, int *nelem,
                                     int final_n, unsigned size_elem);
 LUAI_FUNC void *luaM_malloc_ (lua_State *L, size_t size, int tag);
+struct CallInfo;
+LUAI_FUNC struct CallInfo *luaM_newframe (lua_State *L);
 
 #endif
 

@@ -86,7 +86,7 @@ void luaE_setdebt (global_State *g, l_mem debt) {
 
 CallInfo *luaE_extendCI (lua_State *L, int err) {
   CallInfo *ci;
-  ci = luaM_reallocvector(L, NULL, 0, 1, CallInfo);
+  ci = luaM_newframe(L);
   if (l_unlikely(ci == NULL)) {  /* allocation failed? */
     if (err)
       luaM_error(L);  /* raise the error */
@@ -374,7 +374,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->finalizer_count = 0;
-  for (i = 0; i < LUA_ALLOC_BINS; i++)
+  for (i = 0; i < LUA_ALLOC_POOLS; i++)
     L->allocation_cache[i] = NULL;
   for (i = 0; i < STRCACHE_N; i++)
     for (j = 0; j < STRCACHE_M; j++)
@@ -578,7 +578,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->policy_factory = NULL;
   g->policy_context = NULL;
   g->slot_caches = NULL;
-  for (i = 0; i < LUA_ALLOC_BINS; i++)
+  for (i = 0; i < LUA_ALLOC_POOLS; i++)
     g->allocation_available[i] = NULL;
   g->ud = ud;
   g->warnf = NULL;

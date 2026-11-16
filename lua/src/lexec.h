@@ -11,10 +11,11 @@ struct lua_longjmp;
 struct LuaWaiter;
 struct LuaTaskRoot;
 #define LUA_ALLOC_BINS 6
+#define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)  /* ordinary storage and call frames */
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
   struct global_State *global;
-  struct LuaAllocPage *pages[LUA_ALLOC_BINS];
+  struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
 } LuaAllocationCache;
 
 typedef struct LuaCallScope {

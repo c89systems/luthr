@@ -113,7 +113,7 @@ target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_loc
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_free_)
 foreach(case IN ITEMS no_requests stack_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
-    totals construction weak_resize incremental generational)
+    totals construction weak_resize incremental generational page_growth page_cap page_isolation)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
   set_tests_properties(memory_publication_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

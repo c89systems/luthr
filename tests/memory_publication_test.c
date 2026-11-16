@@ -32,8 +32,10 @@ struct handoff {
 
 struct allocator {
   size_t live;
+  size_t cap, max_request;
   unsigned failures;
   unsigned calls, fail_at;
+  unsigned denied_large, small_fallback;
   int deny;
 };
 
@@ -430,12 +432,21 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
   void *replacement;
   if (pointer == NULL)
     old = 0;
+  require(old <= allocator->live);
   if (size == 0) {
     allocator->live -= old;
     free(pointer);
     return NULL;
   }
   allocator->calls++;
+  if (size > allocator->max_request)
+    allocator->max_request = size;
+  if (allocator->cap != 0 && size > allocator->cap - (allocator->live - old)) {
+    allocator->failures++;
+    if (size > 4096)
+      allocator->denied_large++;
+    return NULL;
+  }
   if (allocator->fail_at != 0 && allocator->calls == allocator->fail_at) {
     allocator->failures++;
     return NULL;
@@ -445,9 +456,90 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
     return NULL;
   }
   replacement = realloc(pointer, size);
-  if (replacement != NULL)
+  if (replacement != NULL) {
     allocator->live = allocator->live - old + size;
+    if (size == 4096 && allocator->denied_large != 0)
+      allocator->small_fallback++;
+  }
   return replacement;
+}
+
+static void page_growth(int limited) {
+  struct allocator allocator = {0};
+  lua_State *state = lua_newstate(allocate, &allocator, 0);
+  unsigned char **blocks = calloc(1500, sizeof(*blocks));
+  size_t base;
+  unsigned count, i, j;
+  require(state != NULL && blocks != NULL);
+  lua_gc(state, LUA_GCSTOP);
+  base = allocator.live;
+  allocator.calls = 0;
+  allocator.max_request = 0;
+  if (limited)
+    allocator.cap = base + 4096;
+  luaX_lockstate(state);
+  for (count = 0; count < 1500; count++) {
+    blocks[count] = luaM_realloc_(state, NULL, 0, 64);
+    if (blocks[count] == NULL)
+      break;
+    memset(blocks[count], (int)count, 64);
+  }
+  if (limited) {
+    require(count < 1500 && allocator.live <= allocator.cap);
+    require(allocator.denied_large != 0 && allocator.small_fallback != 0);
+  } else {
+    fprintf(stderr, "pooled backing allocations: %u calls, largest %zu\n",
+            allocator.calls, allocator.max_request);
+    require(count == 1500 && allocator.calls < 20);
+    require(allocator.max_request > 4096 && allocator.max_request <= 65536);
+    require(allocator.live <= base + 262144);
+  }
+  for (i = 0; i < count; i++) {
+    for (j = 0; j < 64; j++)
+      require(blocks[i][j] == (unsigned char)i);
+    luaM_free_(state, blocks[i], 64);
+  }
+  luaX_unlockstate(state);
+  allocator.cap = 0;
+  lua_close(state);
+  require(allocator.live == 0);
+  free(blocks);
+}
+
+static void page_isolation(void) {
+  struct allocator allocator = {0};
+  lua_State *state = lua_newstate(allocate, &allocator, 0);
+  void **objects = calloc(1500, sizeof(*objects));
+  unsigned char *frame = NULL;
+  size_t base, frame_size = sizeof(CallInfo);
+  unsigned i;
+  require(state != NULL && objects != NULL);
+  lua_gc(state, LUA_GCSTOP);
+  base = allocator.live;
+  luaX_lockstate(state);
+  for (i = 0; i < 1500; i++) {
+    objects[i] = luaM_malloc_(state, frame_size, LUA_TTABLE);
+    if (i == 1000) {
+      frame = (unsigned char *)luaM_newframe(state);
+      require(frame != NULL);
+      memset(frame, 0x5a, frame_size);
+    }
+  }
+  for (i = 0; i < 1500; i++)
+    luaM_free_(state, objects[i], frame_size);
+  luaX_unlockstate(state);
+  lua_gc(state, LUA_GCCOLLECT);
+  fprintf(stderr, "retained pool bytes with one raw frame: %zu\n",
+          allocator.live > base ? allocator.live - base : 0);
+  require(allocator.live <= base + 16384);
+  luaX_lockstate(state);
+  for (i = 0; i < frame_size; i++)
+    require(frame[i] == 0x5a);
+  luaM_free_(state, frame, frame_size);
+  luaX_unlockstate(state);
+  lua_close(state);
+  require(allocator.live == 0);
+  free(objects);
 }
 
 static size_t counted(lua_State *state) {
@@ -516,10 +608,15 @@ static void construction(void) {
     allocator.fail_at = position;
     state = lua_newstate(allocate, &allocator, 0);
     if (state != NULL) {
-      require(allocator.failures == 0);
       lua_close(state);
-      require(allocator.live == 0 && failed > 1);
-      return;
+      require(allocator.live == 0 && allocator.failures <= 1);
+      if (allocator.failures == 0) {
+        require(failed > 1);
+        return;
+      }
+      /* Optional page growth can fail while the minimum refill succeeds.
+       * Continue injecting later call sites instead of stopping here. */
+      continue;
     }
     require(allocator.failures == 1 && allocator.live == 0);
     failed++;
@@ -550,6 +647,7 @@ static void *stale_step(void *context) {
 
 static void coalesced_gc(lua_State *state) {
   lua_State *waiter;
+  void *block;
   LuaWorld *world = &G(state)->world;
   pthread_t peer;
   execute(state, "keep={}; for i=1,4000 do keep[i]={i} end");
@@ -584,6 +682,13 @@ static void coalesced_gc(lua_State *state) {
   lua_gc(state, LUA_GCSTEP, (size_t)64);
   luaX_lockstate(state);
   require(G(state)->gcstate == GCSpause);
+  luaE_setdebt(G(state), 128);
+  block = luaM_malloc_(state, 256, 0);
+  require(G(state)->GCdebt > 0 && G(state)->GCdebt <= -state->allocation_debt);
+  /* Unpublished local allocations still require an automatic step. */
+  luaC_checkGC(state);
+  require(G(state)->gcstate != GCSpause);
+  luaM_free_(state, block, 256);
   luaX_unlockstate(state);
 }
 
@@ -755,12 +860,19 @@ int main(int argc, char **argv) {
     construction();
     return 0;
   }
+  if (strcmp(argv[1], "page_isolation") == 0) {
+    page_isolation();
+    return 0;
+  }
   if (strcmp(argv[1], "totals") == 0 ||
-      strcmp(argv[1], "allocation_cache") == 0) {
+      strcmp(argv[1], "allocation_cache") == 0 ||
+      strcmp(argv[1], "page_growth") == 0 || strcmp(argv[1], "page_cap") == 0) {
     if (strcmp(argv[1], "totals") == 0)
       totals();
-    else
+    else if (strcmp(argv[1], "allocation_cache") == 0)
       allocation_cache();
+    else
+      page_growth(strcmp(argv[1], "page_cap") == 0);
     return 0;
   }
   state = luaL_newstate();

@@ -406,7 +406,9 @@ static void *run(void *context) {
       {
         int status = lua_pcall(state, 0, LUA_MULTRET, 0);
         if (status == LUA_OK) {
-          require(test->failures == 0 && !lua_toboolean(state, -2));
+          /* A refused refill can recover from an already retained page.
+           * Successful preparation must still reject the busy target. */
+          require(!lua_toboolean(state, -2));
           require(strcmp(lua_tostring(state, -1),
                          "cannot resume non-suspended coroutine") == 0);
           lua_pop(state, 1);

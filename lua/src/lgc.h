@@ -235,8 +235,11 @@
 	{ if (gcrunning(G(L))) { pre; luaC_fullgc(L, emg); pos; } }
 #endif
 
+#define luaC_needstep(L) \
+    (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
+
 #define luaC_condGC(L,pre,pos) \
-    { if (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt) \
+    { if (luaC_needstep(L)) \
           { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 

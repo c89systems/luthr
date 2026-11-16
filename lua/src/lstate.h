@@ -370,7 +370,7 @@ struct lua_State {
   unsigned finalizer_count;
   GCObject *finalizers[LUA_BARRIER_CAPACITY];
   TString *strcache[STRCACHE_N][STRCACHE_M];
-  struct LuaAllocPage *allocation_cache[LUA_ALLOC_BINS];
+  struct LuaAllocPage *allocation_cache[LUA_ALLOC_POOLS];
 };
 
 
@@ -390,7 +390,7 @@ typedef struct global_State {
   LuaWorld world;
   struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages;
-  struct LuaAllocPage *allocation_available[LUA_ALLOC_BINS];
+  struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
   LuaAllocationCache *slot_caches;
   lua_Alloc frealloc;  /* function to reallocate memory */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */

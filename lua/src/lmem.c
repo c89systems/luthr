@@ -114,11 +114,14 @@ struct LuaAllocPage {
   LuaAllocPage *next;
   LuaAllocPage *available_next;
   LuaAllocBlock *free;
+  size_t bytes;
   unsigned live;
   unsigned bin;
+  unsigned pool;
 };
 
-#define ALLOC_PAGE_BYTES 4096
+#define ALLOC_PAGE_MIN 4096
+#define ALLOC_PAGE_MAX 65536
 #define ALLOC_PAGE_HEADER \
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
     * sizeof(LuaAllocBlock))
@@ -163,24 +166,24 @@ void luaM_reclaimpages (lua_State *L) {
   LuaAllocationCache *cache;
   LuaAllocPage **link;
   int i;
-  for (i = 0; i < LUA_ALLOC_BINS; i++)
+  for (i = 0; i < LUA_ALLOC_POOLS; i++)
     g->allocation_available[i] = NULL;
   for (participant = g->world.participants; participant != NULL;
        participant = participant->next)
-    for (i = 0; i < LUA_ALLOC_BINS; i++)
+    for (i = 0; i < LUA_ALLOC_POOLS; i++)
       participant->thread->allocation_cache[i] = NULL;
   for (cache = g->slot_caches; cache != NULL; cache = cache->next)
-    for (i = 0; i < LUA_ALLOC_BINS; i++) cache->pages[i] = NULL;
+    for (i = 0; i < LUA_ALLOC_POOLS; i++) cache->pages[i] = NULL;
   for (link = &g->allocation_pages; *link != NULL;) {
     LuaAllocPage *page = *link;
     if (__atomic_load_n(&page->live, __ATOMIC_RELAXED) == 0) {
       *link = page->next;
-      callfrealloc(g, page, ALLOC_PAGE_BYTES, 0);
+      callfrealloc(g, page, page->bytes, 0);
     }
     else {
       if (__atomic_load_n(&page->free, __ATOMIC_RELAXED) != NULL) {
-        page->available_next = g->allocation_available[page->bin];
-        g->allocation_available[page->bin] = page;
+        page->available_next = g->allocation_available[page->pool];
+        g->allocation_available[page->pool] = page;
       }
       link = &page->next;
     }
@@ -301,38 +304,49 @@ static void *tryagain (lua_State *L, void *block,
   else return NULL;  /* cannot run an emergency collection */
 }
 
-static LuaAllocPage *availablepage (lua_State *L, unsigned bin) {
-  LuaAllocPage *page = G(L)->allocation_available[bin];
+static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
+  LuaAllocPage *page = G(L)->allocation_available[pool];
   if (page != NULL) {
-    G(L)->allocation_available[bin] = page->available_next;
+    G(L)->allocation_available[pool] = page->available_next;
     page->available_next = NULL;
   }
   return page;
 }
 
-static LuaAllocPage *refill (lua_State *L, unsigned bin) {
+static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   global_State *g = G(L);
-  LuaAllocPage *page;
-  allocationcache(L)[bin] = NULL;
+  LuaAllocPage *page = allocationcache(L)[pool];
+  size_t bytes = page == NULL ? ALLOC_PAGE_MIN
+    : page->bytes < ALLOC_PAGE_MAX ? page->bytes * 2 : ALLOC_PAGE_MAX;
+  /* Copy the growth hint before metadata admission can collect the old page.
+  ** Cold bins remain small; hot bins amortize serialized backing allocation. */
+  allocationcache(L)[pool] = NULL;
   luaW_heapenter(L);
-  page = availablepage(L, bin);
+  page = availablepage(L, pool);
   if (page == NULL) {
-    page = cast(LuaAllocPage *, firsttry(g, NULL, 0, ALLOC_PAGE_BYTES));
+    page = cast(LuaAllocPage *, firsttry(g, NULL, 0, bytes));
+    if (page == NULL && bytes > ALLOC_PAGE_MIN) {
+      /* Growth is optional: a tight allocator can still supply a small page. */
+      bytes = ALLOC_PAGE_MIN;
+      page = cast(LuaAllocPage *, firsttry(g, NULL, 0, bytes));
+    }
     if (page == NULL && cantryagain(g)) {
       luaC_fullgc(L, 1);
-      page = availablepage(L, bin);
+      page = availablepage(L, pool);
       if (page != NULL) goto ready;
-      page = cast(LuaAllocPage *, callfrealloc(g, NULL, 0, ALLOC_PAGE_BYTES));
+      page = cast(LuaAllocPage *, callfrealloc(g, NULL, 0, bytes));
     }
     if (page != NULL) {
       size_t stride = sizeof(LuaAllocBlock) + binbytes(bin);
       size_t offset;
       page->free = NULL;
       page->bin = bin;
+      page->pool = pool;
       page->available_next = NULL;
       page->live = 0;
+      page->bytes = bytes;
       for (offset = ALLOC_PAGE_HEADER;
-           offset + stride <= ALLOC_PAGE_BYTES; offset += stride) {
+           offset + stride <= bytes; offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         block->block.page = page;
         block->block.next = page->free;
@@ -343,19 +357,21 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin) {
     }
   }
  ready:
-  allocationcache(L)[bin] = page;
+  allocationcache(L)[pool] = page;
   luaW_heapleave(L);
   return page;
 }
 
-static void *allocateblock (lua_State *L, size_t size, int tag) {
+static void *allocateblock (lua_State *L, size_t size, int tag,
+                            unsigned poolbase) {
   unsigned bin;
   for (bin = 0; bin < LUA_ALLOC_BINS; bin++) {
     if (size <= binbytes(bin)) {
-      LuaAllocPage *page = allocationcache(L)[bin];
+      unsigned pool = bin + poolbase;
+      LuaAllocPage *page = allocationcache(L)[pool];
       LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
       if (block == NULL) {
-        page = refill(L, bin);
+        page = refill(L, bin, pool);
         if (page == NULL) return NULL;
         block = takeblock(page);
         lua_assert(block != NULL);
@@ -419,7 +435,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     luaW_heapleave(L);
     return replacement != NULL ? replacement + 1 : NULL;
   }
-  newblock = allocateblock(L, nsize, 0);
+  newblock = allocateblock(L, nsize, 0, 0);
   if (newblock == NULL) return NULL;
   if (block != NULL) {
     int backing = allocation->block.page == NULL;
@@ -445,8 +461,14 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
   if (size == 0)
     return NULL;  /* that's all */
   else {
-    void *block = allocateblock(L, size, tag);
+    void *block = allocateblock(L, size, tag, 0);
     if (block == NULL) luaM_error(L);
     return block;
   }
+}
+
+/* Retained call frames must not pin large pages of short-lived table nodes
+** or objects. Unlike luaM_malloc_, this reports failure for optional frames. */
+CallInfo *luaM_newframe (lua_State *L) {
+  return cast(CallInfo *, allocateblock(L, sizeof(CallInfo), 0, LUA_ALLOC_BINS));
 }
