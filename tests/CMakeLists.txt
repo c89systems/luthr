@@ -16,6 +16,28 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(file_library_test file_library_test.c)
+set_target_properties(file_library_test PROPERTIES C_STANDARD 99)
+target_compile_options(file_library_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(file_library_test PRIVATE luthrum_static)
+target_link_options(file_library_test PRIVATE -Wl,--wrap=fopen -Wl,--wrap=fopen64 -Wl,--wrap=fclose)
+if(LUTHRUM_TARGET STREQUAL "x86_64-linux-gnu" AND NOT TARGET debug_worker_stack)
+  target_compile_definitions(file_library_test PRIVATE LUTHRUM_TEST_SMALL_NATIVE_STACK)
+endif()
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS semantics errors binary yield bom stdin snapshot admission oom stack)
+      add_test(NAME file_library_${backend}_${case}_${gc}
+        COMMAND file_library_test ${backend}_${case}_${gc} "${CMAKE_CURRENT_BINARY_DIR}")
+      set_tests_properties(file_library_${backend}_${case}_${gc}
+        PROPERTIES LABELS "runtime;memcheck" TIMEOUT 120)
+      if(case STREQUAL "stack")
+        set_tests_properties(file_library_${backend}_${case}_${gc}
+          PROPERTIES LABELS "stack;runtime;memcheck")
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(package_library_test package_library_test.c)
 set_target_properties(package_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(package_library_test PRIVATE -Wall -Wextra -Werror)
@@ -243,6 +265,13 @@ foreach(backend IN ITEMS raw facade)
         set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
           PROPERTIES TIMEOUT 180)
       endif()
+    endforeach()
+    foreach(case IN ITEMS file file_migrate file_callback file_movealloc_callback file_error)
+      add_test(NAME native_scheduler_task_${backend}_${case}_${gc}
+        COMMAND native_scheduler_test task_${backend}_${case}_${gc}
+          "${CMAKE_CURRENT_SOURCE_DIR}/dofile_body.lua")
+      set_tests_properties(native_scheduler_task_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;memcheck" TIMEOUT 180)
     endforeach()
   endforeach()
 endforeach()

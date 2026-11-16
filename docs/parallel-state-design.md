@@ -1354,6 +1354,42 @@ resource affinity and installed module workflows still require their own gates;
 this change does not establish their compatibility or bounded work throughout
 every package/core formatting and string operation.
 
+## Managed file execution
+
+`dofile` is now a managed closure. It calls the owned native `loadfile`
+implementation with its private filename snapshot, retires temporary roots,
+then invokes the loaded chunk with the ordinary yield-aware continuation. File
+opening, reading, compilation and closing retain native admission. The Lua chunk
+and its callbacks do not inherit that file-loading activation. An enclosing
+foreign caller still pins the entire nested operation to its original carrier.
+
+`loadfile` retains filename, mode and explicit environment snapshots privately
+through parsing and applies the selected environment after success. Its result
+handling is shared with `load`, including an explicitly supplied nil environment.
+Public signatures, fixed-buffer rejection and file/error behavior are unchanged.
+
+`file_library_*` covers text/binary files, stdin, BOM/shebang and empty input,
+return counts, environments, file/syntax/type/mode errors, yields, close, native
+admission, argument replacement and allocation denial with a moving allocator.
+The stdio fixture counts opens/closes, including parser failures, and creates
+only files under its build directory. Input snapshots retain external filename
+and mode strings plus a finalizable environment through collection.
+Recursive file execution checks recoverable stack overflow, balanced file cleanup
+and a usable VM afterward on default constrained GNU/native musl worker stacks
+(an explicitly sized 128 KiB worker in GNU Release).
+
+`native_scheduler_task_*file*` parks inside two actual loaded chunks before
+admitting two unchanged blocking bindings. Neither chunk may retain a native
+slot. After those slots are occupied, both Lua bodies must continue on two
+managed permits over four bounded carriers, with forced migration, collection,
+task waits, errors and retained result ownership. Nested native callbacks also
+load and execute a file while retaining the original carrier. Raw/C89 and both
+collector modes use the default constrained GNU/native musl worker stacks.
+
+This establishes the file-execution boundary, not complete I/O-library/resource
+affinity or compiler fairness. Debug/OS/I/O libraries, required native modules
+and the remaining scheduler lifecycle/performance gates remain open.
+
 ## Lua-specific proof obligations
 
 The following are observed in the owned Lua 5.5.1 source:

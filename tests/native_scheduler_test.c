@@ -450,7 +450,8 @@ static int block_binding(lua_State *state) {
           luaL_loadstring(
               child,
               pool->awaiting
-                  ? "if audit_utf8 then audit_utf8() end; "
+                  ? "if file_path then return dofile(file_path) end; "
+                    "if audit_utf8 then audit_utf8() end; "
                     "if audit_patterns then audit_patterns(0) end; "
                     "if audit_strings then audit_strings(0) end; "
                     "if audit_dump then audit_dump(0) end; "
@@ -1753,6 +1754,11 @@ static int helper_managed(lua_State *state) {
                         : execution->native_depth == 0);
   return 0;
 }
+static int file_task_id(lua_State *state) {
+  (void)helper_managed(state);
+  lua_pushinteger(state, ((struct task *)luaQ_current()->context)->id);
+  return 1;
+}
 static void install_utf8_audit(struct pool *pool) {
   static const char *const names[] = {"len", "offset", "char", "codepoint"};
   static const char source[] =
@@ -2084,7 +2090,7 @@ static void install_package_audit(struct pool *pool) {
   require(luaL_loadstring(state, source) == LUA_OK);
   require(lua_pcall(state, 0, 0, 0) == LUA_OK);
 }
-static int exercise_task_wait(const char *name) {
+static int exercise_task_wait(const char *name, const char *file_path) {
   struct pool *pool = calloc(1, sizeof(*pool));
   pthread_t workers[MAX_WORKERS];
   cpu_set_t available;
@@ -2101,6 +2107,7 @@ static int exercise_task_wait(const char *name) {
   int dump = strstr(name, "dump") != NULL;
   int load = strstr(name, "load") != NULL;
   int package = strstr(name, "package") != NULL;
+  int file = strstr(name, "file") != NULL;
   int helpers = utf8 || pattern || strings || dump || load || package;
   int movealloc = strstr(name, "movealloc") != NULL;
   static const char producer[] =
@@ -2211,6 +2218,17 @@ static int exercise_task_wait(const char *name) {
     install_load_audit(pool);
   if (package)
     install_package_audit(pool);
+  if (file) {
+    require(file_path != NULL);
+    lua_pushstring(pool->main, file_path);
+    lua_setglobal(pool->main, "file_path");
+    lua_newtable(pool->main);
+    lua_setglobal(pool->main, "file_bodies");
+    luaQ_pushmanaged(pool->main, file_task_id, 0);
+    lua_setglobal(pool->main, "file_task_id");
+    luaP_newpipe(pool->main, 1);
+    lua_setglobal(pool->main, "file_start");
+  }
   if (strstr(name, "generational") != NULL)
     (void)lua_gc(pool->main, LUA_GCGEN);
   for (id = 0; id < MAX_TASKS; ++id) {
@@ -2228,8 +2246,17 @@ static int exercise_task_wait(const char *name) {
       lua_pushinteger(pool->main, id);
       require(lua_pcall(pool->main, 2, 1, 0) == LUA_OK);
       task->state = lua_newthread(pool->main);
-      lua_pushvalue(pool->main, -2);
-      lua_xmove(pool->main, task->state, 1);
+      if (file) {
+        lua_getglobal(pool->main, "file_bodies");
+        lua_pushvalue(pool->main, -3);
+        lua_rawseti(pool->main, -2, id);
+        lua_pop(pool->main, 1);
+        require(luaL_loadstring(task->state, "return dofile(file_path)") ==
+                LUA_OK);
+      } else {
+        lua_pushvalue(pool->main, -2);
+        lua_xmove(pool->main, task->state, 1);
+      }
     } else {
       task->state = lua_newthread(pool->main);
       require(luaL_loadstring(
@@ -2272,15 +2299,35 @@ static int exercise_task_wait(const char *name) {
     }
     check(pthread_create(&workers[id], NULL, worker_entry, &pool->workers[id]));
   }
+  if (file) {
+    submit(pool, 2);
+    submit(pool, 3);
+    lock(pool);
+    while (!pool->tasks[2].published || !pool->tasks[3].published)
+      wait_change(pool);
+    require(pool->native == 0 && !pool->tasks[2].native &&
+            !pool->tasks[3].native);
+    unlock(pool);
+    (void)lua_gc(pool->main, LUA_GCCOLLECT);
+  }
   submit(pool, 0);
   submit(pool, 1);
   lock(pool);
   while (pool->entered != 2)
     wait_change(pool);
   require(pool->native == 2);
-  append(&pool->requests, &pool->requests_tail, &pool->tasks[2]);
-  append(&pool->requests, &pool->requests_tail, &pool->tasks[3]);
-  grant(pool);
+  if (file) {
+    unlock(pool);
+    lua_getglobal(pool->main, "file_start");
+    lua_getfield(pool->main, -1, "close");
+    lua_insert(pool->main, -2);
+    require(lua_pcall(pool->main, 1, 0, 0) == LUA_OK);
+    lock(pool);
+  } else {
+    append(&pool->requests, &pool->requests_tail, &pool->tasks[2]);
+    append(&pool->requests, &pool->requests_tail, &pool->tasks[3]);
+    grant(pool);
+  }
   if (helpers) {
     while (!pool->tasks[2].helper_held || !pool->tasks[3].helper_held) {
       require(!pool->tasks[2].finished && !pool->tasks[3].finished);
@@ -2438,9 +2485,9 @@ int main(int argc, char **argv) {
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
-  require(argc == 2);
+  require(argc == 2 || argc == 3);
   if (strncmp(argv[1], "task_", 5) == 0)
-    return exercise_task_wait(argv[1]);
+    return exercise_task_wait(argv[1], argc == 3 ? argv[2] : NULL);
   if (strncmp(argv[1], "stream_", 7) == 0)
     return exercise_stream(argv[1]);
   if (strncmp(argv[1], "wait_", 5) == 0)

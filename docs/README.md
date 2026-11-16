@@ -82,6 +82,9 @@ Public reader callbacks and file I/O retain native admission.
 Package `require` and its preload searcher now support managed orchestration,
 with private snapshots across loader callbacks and bounded search-error copying.
 File and dynamic-library searchers keep their native boundaries.
+`dofile` now releases file-loading admission before running the loaded chunk,
+including parked callbacks and yielded continuations. `loadfile` privately roots
+its filename, mode and environment while file reading/compilation remains native.
 Other libraries still require their audit.
 Resume/close operation scopes now reject overlap through argument/result
 transfer and cleanup, retaining both states through GC and protected unwinding.

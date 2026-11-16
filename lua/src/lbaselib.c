@@ -327,10 +327,10 @@ static int luaB_ipairs (lua_State *L) {
 }
 
 
-static int load_aux (lua_State *L, int status, int envidx) {
+static int load_aux (lua_State *L, int status, LuaNativeRoot *env) {
   if (l_likely(status == LUA_OK)) {
-    if (envidx != 0) {  /* 'env' parameter? */
-      lua_pushvalue(L, envidx);  /* environment for loaded function */
+    if (env != NULL) {  /* explicit environment, including nil */
+      luaL_pushrooted(L, env);
       if (!lua_setupvalue(L, -2, 1))  /* set it as 1st upvalue */
         lua_pop(L, 1);  /* remove 'env' if not used by previous call */
     }
@@ -344,22 +344,31 @@ static int load_aux (lua_State *L, int status, int envidx) {
 }
 
 
-static const char *getMode (lua_State *L, int idx) {
-  const char *mode = luaL_optstring(L, idx, NULL);
-  if (mode != NULL && strchr(mode, 'B') != NULL) {
-    /* Lua code cannot use fixed buffers */
-    luaL_argerror(L, idx, "invalid mode");
-  }
-  return mode;
+static const char *loadstringarg (lua_State *L, int arg,
+                                  LuaNativeRoot *root, size_t *len) {
+  if (!ttisstring(&root->value) && !cvt2str(&root->value))
+    luaL_typeerror(L, arg, "string");
+  return luaL_roottostring(L, root, len);
 }
 
 
 static int luaB_loadfile (lua_State *L) {
-  const char *fname = luaL_optstring(L, 1, NULL);
-  const char *mode = getMode(L, 2);
-  int env = (!lua_isnone(L, 3) ? 3 : 0);  /* 'env' index or 0 if no 'env' */
-  int status = luaL_loadfilex(L, fname, mode);
-  return load_aux(L, status, env);
+  LuaNativeRoot roots[3];  /* filename, mode, environment */
+  const char *fname = NULL, *mode = NULL;
+  size_t ignored;
+  int env = !lua_isnone(L, 3), status;
+  unsigned index;
+  for (index = 0; index < 3; ++index)
+    luaL_rootarg(L, cast_int(index + 1), &roots[index]);
+  if (!ttisnil(&roots[0].value))
+    fname = loadstringarg(L, 1, &roots[0], &ignored);
+  if (!ttisnil(&roots[1].value)) {
+    mode = loadstringarg(L, 2, &roots[1], &ignored);
+    luaL_argcheck(L, strchr(mode, 'B') == NULL, 2, "invalid mode");
+  }
+  status = luaL_loadfilex(L, fname, mode);
+  status = load_aux(L, status, env ? &roots[2] : NULL);
+  return luaL_rootresult(L, roots, 3, status);
 }
 
 
@@ -397,13 +406,6 @@ static const char *generic_reader (lua_State *L, void *ud, size_t *size) {
   return luaL_roottostring(L, reader->chunk, size);
 }
 
-static const char *loadstringarg (lua_State *L, int arg,
-                                  LuaNativeRoot *root, size_t *len) {
-  if (!ttisstring(&root->value) && !cvt2str(&root->value))
-    luaL_typeerror(L, arg, "string");
-  return luaL_roottostring(L, root, len);
-}
-
 static int luaB_load (lua_State *L) {
   LuaNativeRoot roots[5];  /* input/reader, name, mode, env, current fragment */
   LoadReader reader;
@@ -434,14 +436,7 @@ static int luaB_load (lua_State *L) {
     reader.function = &roots[0]; reader.chunk = &roots[4];
     status = luaA_load(L, generic_reader, &reader, chunkname, mode, 1);
   }
-  if (status == LUA_OK) {
-    if (env) {
-      luaL_pushrooted(L, &roots[3]);
-      if (!lua_setupvalue(L, -2, 1)) lua_pop(L, 1);
-    }
-    status = 1;
-  }
-  else { luaL_pushfail(L); lua_insert(L, -2); status = 2; }
+  status = load_aux(L, status, env ? &roots[3] : NULL);
   return luaL_rootresult(L, roots, 5, status);
 }
 
@@ -455,10 +450,21 @@ static int dofilecont (lua_State *L, int d1, lua_KContext d2) {
 
 
 static int luaB_dofile (lua_State *L) {
-  const char *fname = luaL_optstring(L, 1, NULL);
+  LuaNativeRoot filename;
+  size_t ignored;
+  luaL_rootarg(L, 1, &filename);
+  if (!ttisnil(&filename.value))
+    (void)loadstringarg(L, 1, &filename, &ignored);
   lua_settop(L, 1);
-  if (l_unlikely(luaL_loadfilex(L, fname, "bt") != LUA_OK))
+  /* Only reading/compiling the file occupies an ordinary native activation. */
+  lua_pushcfunction(L, luaB_loadfile);
+  luaL_pushrooted(L, &filename);
+  lua_pushliteral(L, "bt");
+  lua_call(L, 2, 2);
+  if (l_unlikely(lua_isnil(L, -2)))
     return lua_error(L);
+  lua_pop(L, 1);  /* discard the padded second result */
+  (void)luaL_rootresult(L, &filename, 1, 0);  /* no native roots across yield */
   lua_callk(L, 0, LUA_MULTRET, 0, dofilecont);
   return dofilecont(L, 0, 0);
 }
@@ -583,8 +589,7 @@ LUAMOD_API int luaopen_base (lua_State *L) {
   for (entry = base_funcs; entry->name != NULL; ++entry) {
     if (entry->func == NULL)
       lua_pushboolean(L, 0);
-    else if (entry->func == luaB_print || entry->func == luaB_loadfile ||
-             entry->func == luaB_dofile)
+    else if (entry->func == luaB_print || entry->func == luaB_loadfile)
       lua_pushcfunction(L, entry->func);  /* opaque I/O/reader paths */
     else
       luaQ_pushmanaged(L, entry->func, 0);

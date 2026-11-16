@@ -244,6 +244,21 @@ path probing and dynamic-library loading must still consume native admission.
 nested preloads, task-result waits, moved contexts, GC and pinned native reentry.
 This is package orchestration evidence, not native-module compatibility proof.
 
+`file_library_*` checks text/binary files, result counts, explicit environments,
+stdin, BOM/shebang handling, empty files, I/O/syntax/mode errors, yielded and
+closed continuations, native admission, snapshots and moving-allocation denial.
+Opening and closing are counted through both x86_64 stdio entrypoints, including
+every failed allocation attempt. Snapshot cases replace filename/mode/environment
+arguments during parsing and collect before the original environment is applied.
+Recursive file execution must report stack overflow, close every opened file and
+leave the VM usable on a 128 KiB worker stack.
+`native_scheduler_task_*file*` first parks inside two `dofile` chunks, verifies
+neither retains native admission, then saturates both native slots. The loaded
+Lua bodies must execute in parallel, migrate, park, collect and return or fail
+normally. Native callback variants load another file on the original carrier.
+File reading/compilation remains native; this does not prove bounded work or
+resource affinity for every I/O path.
+
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled
 for those processes, including child applications. Musl uses its defaults.
