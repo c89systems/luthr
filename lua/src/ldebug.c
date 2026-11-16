@@ -962,6 +962,10 @@ int luaG_traceexec (lua_State *L, const Instruction *pc) {
   lu_byte mask = cast_byte(gethookmask(L));
   const Proto *p = ci_func(ci)->p;
   int counthook;
+  /* A VM poll can refresh the trap before vararg setup. As at ordinary
+  ** entry, defer hooks until that setup has initialized the activation. */
+  if (GET_OPCODE(*pc) == OP_VARARGPREP)
+    return 0;
   if (!(mask & (LUA_MASKLINE | LUA_MASKCOUNT))) {  /* no hooks? */
     ci->u.l.trap = 0;  /* don't need to stop again */
     return 0;  /* turn off 'trap' */

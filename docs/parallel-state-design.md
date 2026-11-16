@@ -524,6 +524,9 @@ the mask at branch/call boundaries and its existing bounded instruction polls;
 stack relocation still sets frame traps under the existing ownership protocol.
 Hook dispatch, finalizer policy and child-coroutine inheritance use atomic reads
 too. No global bytecode lock or signal-time allocator/locking path is introduced.
+Poll-driven hook refresh defers events until vararg setup finishes, preserving
+upstream call, line and count behavior at function entry. Portable regressions
+vary entry across poll phases and trace large source-line gaps during GC.
 
 Each configuration component is atomic; installation and separate getters do
 not form a transactional settings tuple. As with upstream asynchronous hook
