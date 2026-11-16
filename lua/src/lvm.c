@@ -877,6 +877,31 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
 }
 
 
+/* Lower register writes to stable cells without changing the portable bytecode.
+** Conditional and loop writes are published at the branch that performs them;
+** call results are published by poscall, including yielded continuations. */
+static void storeinstruction (lua_State *L, CallInfo *ci, Instruction i,
+                               const Instruction *pc) {
+  OpCode op = GET_OPCODE(i);
+  StkId base = ci->func.p + 1;
+  int first = GETARG_A(i), count = 1;
+  if (op == OP_TESTSET || op == OP_FORLOOP || op == OP_FORPREP || op == OP_TFORLOOP ||
+      op == OP_CALL || op == OP_TAILCALL)
+    return;
+  if (OP_ADDI <= op && op <= OP_SHR && testMMMode(GET_OPCODE(*pc)))
+    return;  /* numeric fast path did not write a result */
+  if (testMMMode(op))
+    first = GETARG_A(*(pc - 2));
+  else if (!testAMode(op))
+    return;
+  if (op == OP_LOADNIL) count = GETARG_B(i) + 1;
+  else if (op == OP_SELF) count = 2;
+  else if (op == OP_VARARG)
+    count = GETARG_C(i) == 0 ? cast_int(L->top.p - (base + first))
+                            : GETARG_C(i) - 1;
+  luaF_storelocals(L, base + first, count);
+}
+
 /*
 ** finish execution of an opcode interrupted by a yield
 */
@@ -937,6 +962,8 @@ void luaV_finishOp (lua_State *L) {
       break;
     }
   }
+  if (L->openupval != NULL)
+    storeinstruction(L, ci, inst, ci->u.l.savedpc);
 }
 
 
@@ -1228,12 +1255,19 @@ void luaV_finishOp (lua_State *L) {
     trap = luaG_traceexec(L, pc);  /* handle hooks */ \
     updatebase(ci);  /* correct stack */ \
   } \
+  if (l_unlikely(L->openupval != NULL)) luaF_loadlocals(L, ci); \
   i = *(pc++); \
+}
+
+#define storeinstructionresults() { \
+  if (l_unlikely(L->openupval != NULL)) { \
+    savepc(ci); storeinstruction(L, ci, i, pc); updatebase(ci); \
+  } \
 }
 
 #define vmdispatch(o)	switch(o)
 #define vmcase(l)	case l:
-#define vmbreak		break
+#define vmbreak         storeinstructionresults(); break
 
 
 void luaV_execute (lua_State *L, CallInfo *ci) {
@@ -1766,6 +1800,11 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           pc++;
         else {
           setobj2s(L, ra, rb);
+          if (L->openupval != NULL) {
+            savepc(ci);
+            luaF_storelocals(L, ra, 1);
+            updatebase(ci);
+          }
           donextjump(ci);
         }
         vmbreak;
@@ -1849,6 +1888,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           L->top.p = base - 1;
           for (; l_unlikely(nres > 0); nres--)
             setnilvalue(s2v(L->top.p++));  /* all results are nil */
+          if (L->openupval != NULL)
+            luaF_storelocals(L, base - 1, cast_int(L->top.p - (base - 1)));
         }
         goto ret;
       }
@@ -1871,6 +1912,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
             L->top.p = base;
             for (; l_unlikely(nres > 1); nres--)
               setnilvalue(s2v(L->top.p++));  /* complete missing results */
+            if (L->openupval != NULL)
+              luaF_storelocals(L, base - 1, cast_int(L->top.p - (base - 1)));
           }
         }
        ret:  /* return from a Lua function */
@@ -1891,11 +1934,24 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
             chgivalue(s2v(ra), l_castU2S(count - 1));  /* update counter */
             idx = intop(+, idx, step);  /* add step to index */
             chgivalue(s2v(ra + 2), idx);  /* update control variable */
+            if (L->openupval != NULL) {
+              savepc(ci);
+              luaF_storelocals(L, ra, 1);
+              updatebase(ci);
+              luaF_storelocals(L, RA(i) + 2, 1);
+              updatebase(ci);
+            }
             pc -= GETARG_Bx(i);  /* jump back */
           }
         }
-        else if (floatforloop(L, ra))  /* float loop */
+        else if (floatforloop(L, ra)) {  /* float loop */
           pc -= GETARG_Bx(i);  /* jump back */
+          if (L->openupval != NULL) {
+            savepc(ci);
+            luaF_storelocals(L, ra + 2, 1);
+            updatebase(ci);
+          }
+        }
         updatetrap(ci);  /* allows a signal to break the loop */
         vmbreak;
       }
@@ -1904,6 +1960,11 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         savestate(L, ci);  /* in case of errors */
         if (forprep(L, ra))
           pc += GETARG_Bx(i) + 1;  /* skip the loop */
+        else if (L->openupval != NULL) {
+          savepc(ci);
+          luaF_storelocals(L, ra, 3);
+          updatebase(ci);
+        }
         vmbreak;
       }
       vmcase(OP_TFORPREP) {
@@ -1918,6 +1979,12 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
        setobj(L, &temp, s2v(ra + 3));
        setobjs2s(L, ra + 3, ra + 2);
        setobj2s(L, ra + 2, &temp);
+       if (L->openupval != NULL) {
+         savepc(ci);
+         luaF_storelocals(L, ra + 2, 2);
+         updatebase(ci);
+         ra = RA(i);
+       }
         /* create to-be-closed upvalue (if closing var. is not nil) */
         halfProtect(luaF_newtbcupval(L, ra + 2));
         pc += GETARG_Bx(i);  /* go to end of the loop */

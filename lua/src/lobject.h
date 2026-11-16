@@ -17,9 +17,13 @@
 #include "lgate.h"
 
 typedef struct LuaObjectLock {
-  LuaOwner owner;
+  void *owner;  /* atomic logical-execution token; NULL means unowned */
   unsigned depth;
+  unsigned waiting;  /* atomic; only real contention reaches the world wait queue */
 } LuaObjectLock;
+
+#define luaA_initlock(lock) \
+  ((lock)->owner = NULL, (lock)->depth = 0, (lock)->waiting = 0)
 
 /*
 ** Extra types for collectable non-values
@@ -686,17 +690,12 @@ typedef struct Proto {
 */
 typedef struct UpVal {
   CommonHeader;
-  union {
-    TValue *p;  /* points to stack or to its own value */
-    ptrdiff_t offset;  /* used while the stack is being reallocated */
-  } v;
-  union {
-    struct {  /* (when open) */
-      struct UpVal *next;  /* linked list */
-      struct UpVal **previous;
-    } open;
-    TValue value;  /* the value (when closed) */
-  } u;
+  TValue value;  /* stable shared cell, including while its local is live */
+  ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
+  struct {
+    struct UpVal *next;
+    struct UpVal **previous;
+  } open;
   pthread_mutex_t mutex;
   lua_State *owner;
   int mutex_ready;

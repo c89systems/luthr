@@ -10,6 +10,7 @@
 
 #include "lobject.h"
 struct LuaNativeRoot;
+struct CallInfo;
 
 
 #define sizeCclosure(n)  \
@@ -30,10 +31,11 @@ struct LuaNativeRoot;
 #define MAXUPVAL	255
 
 
-#define upisopen(up)	((up)->v.p != &(up)->u.value)
+#define upisopen(up)	((up)->owner != NULL)
 
 
-#define uplevel(up)	check_exp(upisopen(up), cast(StkId, (up)->v.p))
+#define uplevel(up) check_exp(upisopen(up), \
+  cast(StkId, cast_charp((up)->owner->stack.p) + (up)->level))
 
 
 /*
@@ -56,6 +58,11 @@ LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
                              struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
+/* Register shadows belong to the executing frame. Shared cells are authoritative;
+** refresh reads before dispatch and publish only the instruction's real writes. */
+LUAI_FUNC void luaF_loadlocals (lua_State *L, struct CallInfo *ci);
+LUAI_FUNC void luaF_storelocals (lua_State *L, StkId first, int count);
+LUAI_FUNC void luaF_loadlocal (lua_State *L, StkId slot);
 LUAI_FUNC void luaF_getcapture (lua_State *L, LClosure *closure, int n,
                                struct LuaNativeRoot *capture);
 LUAI_FUNC void luaF_readcapture (lua_State *L, LClosure *closure, int n,

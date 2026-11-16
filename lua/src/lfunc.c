@@ -29,7 +29,7 @@
 CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VCCL, sizeCclosure(nupvals));
   CClosure *c = gco2ccl(o);
-  c->access.depth = 0;
+  luaA_initlock(&c->access);
   c->managed = 0;
   c->managed_next = NULL;
   c->nupvalues = cast_byte(nupvals);
@@ -40,7 +40,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
 LClosure *luaF_newLclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VLCL, sizeLclosure(nupvals));
   LClosure *c = gco2lcl(o);
-  c->access.depth = 0;
+  luaA_initlock(&c->access);
   c->p = NULL;
   c->nupvalues = cast_byte(nupvals);
   while (nupvals--) c->upvals[nupvals] = NULL;
@@ -53,8 +53,8 @@ static UpVal *newupvalobject (lua_State *L) {
   UpVal *uv = gco2upv(object);
   uv->owner = NULL;
   uv->mutex_ready = 0;
-  uv->v.p = &uv->u.value;
-  setnilvalue(uv->v.p);
+  uv->level = 0;
+  setnilvalue(&uv->value);
   if (pthread_mutex_init(&uv->mutex, NULL) != 0)
     luaM_error(L);
   uv->mutex_ready = 1;
@@ -79,14 +79,17 @@ void luaF_initupvals (lua_State *L, LClosure *cl) {
 ** open upvalues of 'L' after entry 'prev'.
 **/
 static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
+  ptrdiff_t offset = savestack(L, level);
   UpVal *uv = newupvalobject(L);
   UpVal *next = *prev;
-  uv->v.p = s2v(level);  /* current value lives in the stack */
+  level = restorestack(L, offset);
+  uv->level = savestack(L, level);
+  setobj(L, &uv->value, s2v(level));
   uv->owner = L;
-  uv->u.open.next = next;  /* link it to list of open upvalues */
-  uv->u.open.previous = prev;
+  uv->open.next = next;
+  uv->open.previous = prev;
   if (next)
-    next->u.open.previous = &uv->u.open.next;
+    next->open.previous = &uv->open.next;
   *prev = uv;
   if (!isintwups(L)) {  /* thread not in list of threads with upvalues? */
     L->twups = G(L)->twups;  /* link it to the list */
@@ -95,47 +98,24 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
   return uv;
 }
 
-/* Read/write a captured value without holding two coroutine gates. The caller
-** owns its own gate. Roots keep the upvalue, owner, and transfer value alive
-** across the handoff. Writers acquire metadata ownership before the upvalue
-** mutex, so no mutex holder parks behind a collecting metadata owner. */
+/* A capture never borrows its owner's stack or execution gate. Readers and
+** writers copy complete values under the cell mutex. The deferred barrier
+** record belongs to this mutator and is drained before collection can proceed. */
 static void transferupval (lua_State *L, UpVal *uv, LuaNativeRoot *value,
                           int writing) {
-  LuaNativeRoot upvalue_root, owner_root;
-  lua_State *owner;
-  LuaWorldScope depth = {0, 0};
+  LuaNativeRoot upvalue_root;
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
-  luaR_pushroot(L, &owner_root);
-  if (writing)
-    luaW_heapenter(L);
   luaX_checksync(pthread_mutex_lock(&uv->mutex));
-  owner = uv->owner;
-  if (owner != NULL && owner != L) {
-    setthvalue(L, &owner_root.value, owner);
-    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
-    if (writing)
-      luaW_heapleave(L);
-    depth = luaW_detach(L);
-    luaX_lockstate(owner);
-    if (writing)
-      luaW_heapenter(owner);
-    luaX_checksync(pthread_mutex_lock(&uv->mutex));
-  }
   if (writing) {
-    setobj(L, uv->v.p, &value->value);
-    luaC_barrier(L, uv, &value->value);
+    setobj(L, &uv->value, &value->value);
   }
-  else
-    luaR_setroot(L, value, uv->v.p);
+  else {
+    luaR_setroot(L, value, &uv->value);
+  }
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   if (writing)
-    luaW_heapleave(owner != NULL && owner != L ? owner : L);
-  if (owner != NULL && owner != L) {
-    luaX_unlockstate(owner);
-    luaW_attach(L, depth);
-  }
-  luaR_poproot(L, &owner_root);
+    luaC_barrier(L, uv, &value->value);
   luaR_poproot(L, &upvalue_root);
 }
 
@@ -151,9 +131,51 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   luaR_poproot(L, &transfer);
 }
 
-/* Select a capture while its closure slot is stable, and retain that cell
-** before giving up ownership. Value transfers never retain a closure lock
-** across a foreign coroutine's stack-gate handoff. */
+void luaF_loadlocals (lua_State *L, CallInfo *ci) {
+  UpVal *uv;
+  ptrdiff_t first = savestack(L, ci->func.p + 1);
+  ptrdiff_t last = savestack(L, ci->top.p);
+  for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
+    if (uv->level < first) break;
+    if (uv->level < last) {
+      luaX_checksync(pthread_mutex_lock(&uv->mutex));
+      setobj2s(L, restorestack(L, uv->level), &uv->value);
+      luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    }
+  }
+}
+
+void luaF_loadlocal (lua_State *L, StkId slot) {
+  UpVal *uv;
+  ptrdiff_t level = savestack(L, slot);
+  for (uv = L->openupval; uv != NULL && uv->level >= level;
+       uv = uv->open.next) {
+    if (uv->level == level) {
+      luaX_checksync(pthread_mutex_lock(&uv->mutex));
+      setobj2s(L, slot, &uv->value);
+      luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+      break;
+    }
+  }
+}
+
+void luaF_storelocals (lua_State *L, StkId first, int count) {
+  UpVal *uv;
+  ptrdiff_t top = savestack(L, L->top.p);
+  ptrdiff_t from = savestack(L, first);
+  ptrdiff_t to = from + cast(ptrdiff_t, count) * sizeof(StackValue);
+  if (L->top.p < L->ci->top.p)
+    L->top.p = L->ci->top.p;
+  for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
+    if (uv->level < from) break;
+    if (uv->level < to)
+      luaF_writeupval(L, uv, s2v(restorestack(L, uv->level)));
+  }
+  L->top.p = restorestack(L, top);
+}
+
+/* Select a capture while its closure slot is stable, then retain the cell
+** independently of subsequent joins or closure replacement. */
 void luaF_getcapture (lua_State *L, LClosure *closure, int n,
                       LuaNativeRoot *capture) {
   LuaObjectScope scope;
@@ -225,7 +247,7 @@ UpVal *luaF_findupval (lua_State *L, StkId level) {
       luaW_heapleave(L);
       return p;  /* return it */
     }
-    pp = &p->u.open.next;
+    pp = &p->open.next;
   }
   /* not found: create a new upvalue after 'pp' */
   p = newupval(L, level, pp);
@@ -326,9 +348,9 @@ void luaF_newtbcupval (lua_State *L, StkId level) {
 
 void luaF_unlinkupval (UpVal *uv) {
   lua_assert(upisopen(uv));
-  *uv->u.open.previous = uv->u.open.next;
-  if (uv->u.open.next)
-    uv->u.open.next->u.open.previous = uv->u.open.previous;
+  *uv->open.previous = uv->open.next;
+  if (uv->open.next)
+    uv->open.next->open.previous = uv->open.previous;
 }
 
 
@@ -338,25 +360,34 @@ void luaF_unlinkupval (UpVal *uv) {
 void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
   ptrdiff_t offset;
+  LuaNativeRoot cell, value;
   if (L->openupval == NULL)
     return;
   offset = savestack(L, level);
   luaW_heapenter(L);
+  luaR_pushroot(L, &cell);
+  luaR_pushroot(L, &value);
   level = restorestack(L, offset);
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
-    TValue *slot = &uv->u.value;  /* new position for value */
+    int barrier;
+    setgcovalue(L, &cell.value, obj2gco(uv));
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
     lua_assert(uplevel(uv) < L->top.p);
     luaF_unlinkupval(uv);  /* remove upvalue from 'openupval' list */
-    setobj(L, slot, uv->v.p);  /* move value to upvalue slot */
-    uv->v.p = slot;  /* now current value lives here */
     uv->owner = NULL;
-    if (!iswhite(uv)) {  /* neither white nor dead? */
+    luaR_setroot(L, &value, &uv->value);
+    barrier = !iswhite(uv);
+    if (barrier) {  /* neither white nor dead? */
       nw2black(uv);  /* closed upvalues cannot be gray */
-      luaC_barrier(L, uv, slot);
     }
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    /* A full barrier buffer may rendezvous. No cell mutex crosses that wait. */
+    if (barrier)
+      luaC_barrier(L, uv, &value.value);
+    level = restorestack(L, offset);
   }
+  luaR_poproot(L, &value);
+  luaR_poproot(L, &cell);
   luaW_heapleave(L);
 }
 

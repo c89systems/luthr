@@ -298,6 +298,13 @@ typedef struct LuaNativeRoot {
   TValue value;
 } LuaNativeRoot;
 
+#define LUA_BARRIER_CAPACITY 64
+typedef struct LuaBarrierRecord {
+  GCObject *owner;
+  GCObject *value;
+  int back;
+} LuaBarrierRecord;
+
 /*
 ** 'per thread' state
 */
@@ -347,6 +354,8 @@ struct lua_State {
   unsigned heap_waiting;
   unsigned object_waiting;
   struct LuaObjectScope *object_scopes;
+  unsigned barrier_count;
+  LuaBarrierRecord barriers[LUA_BARRIER_CAPACITY];
 };
 
 

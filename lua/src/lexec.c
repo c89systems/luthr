@@ -155,6 +155,12 @@ int luaQ_isowner (const LuaOwner *owner) {
          (execution != NULL || pthread_equal(owner->carrier, pthread_self()));
 }
 
+void *luaQ_ownertoken (void) {
+  LuaExecution *execution = luaQ_current();
+  return execution != NULL ? cast(void *, execution)
+                           : cast(void *, &luaE_native_stack_context);
+}
+
 /* The caller has published roots and withdrawn collection participation where
 ** necessary. Registration and wake selection share the predicate's mutex.
 ** The wait callback handles notification before outgoing context publication.

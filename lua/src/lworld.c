@@ -9,6 +9,7 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lgate.h"
+#include "lgc.h"
 #include "lstate.h"
 #include "lworld.h"
 
@@ -70,8 +71,8 @@ void luaW_stop (lua_State *L) {
   luaW_heapenter(L);  /* collect only after pending metadata scopes finish */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
-  world->stopped = 1;
   luaQ_setowner(&world->collector);
+  __atomic_store_n(&world->stopped, 1, __ATOMIC_RELEASE);
   luaQ_wake(&world->changed, &world->waiters);
   lua_assert(world->active != 0);
   world->active--;
@@ -79,6 +80,7 @@ void luaW_stop (lua_State *L) {
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaC_drainbarriers(L);
 }
 
 void luaW_start (lua_State *L) {
@@ -90,10 +92,16 @@ void luaW_start (lua_State *L) {
   lua_assert(world->stopped && world->active == 0 &&
              luaQ_isowner(&world->collector));
   world->active = 1;  /* the collector resumes as an ordinary mutator */
-  world->stopped = 0;
+  __atomic_store_n(&world->stopped, 0, __ATOMIC_RELEASE);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaW_heapleave(L);
+}
+
+int luaW_iscollector (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  return __atomic_load_n(&world->stopped, __ATOMIC_ACQUIRE) &&
+         luaQ_isowner(&world->collector);
 }
 
 /* Reentrant within one execution (or unmanaged carrier), including operations

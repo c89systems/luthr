@@ -216,6 +216,7 @@ LUA_API const char *lua_getlocal (lua_State *L, const lua_Debug *ar, int n) {
     StkId pos = NULL;  /* to avoid warnings */
     name = luaG_findlocal(L, ar->i_ci, n, &pos);
     if (name) {
+      luaF_loadlocal(L, pos);
       setobjs2s(L, L->top.p, pos);
       api_incr_top(L);
     }
@@ -233,6 +234,7 @@ LUA_API const char *lua_setlocal (lua_State *L, const lua_Debug *ar, int n) {
   if (name) {
     api_checkpop(L, 1);
     setobjs2s(L, pos, L->top.p - 1);
+    luaF_storelocals(L, pos, 1);
     L->top.p--;  /* pop value */
   }
   lua_unlock(L);
@@ -695,9 +697,8 @@ static const char *getupvalname (lua_State *L, CallInfo *ci, const TValue *o,
     luaF_getcapture(L, c, i, &capture);
     uv = gco2upv(gcvalue(&capture.value));
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
-    /* A foreign open capture cannot alias this coroutine's register/root.
-    ** Its owner can relocate that stack without acquiring this gate. */
-    matches = (uv->owner == NULL || uv->owner == L) && uv->v.p == o;
+    matches = &uv->value == o ||
+      (uv->owner == L && s2v(restorestack(L, uv->level)) == o);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
     if (matches) {
       *name = upvalname(c->p, i);

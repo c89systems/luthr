@@ -19,6 +19,20 @@ target_compile_options(cpu_capacity_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(cpu_capacity_test PRIVATE Threads::Threads)
 include("${CMAKE_CURRENT_SOURCE_DIR}/CapacityFixtures.cmake")
 
+luthr_test_program(capture_cells_test capture_cells_test.c)
+set_target_properties(capture_cells_test PROPERTIES C_STANDARD 99)
+target_compile_options(capture_cells_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(capture_cells_test PRIVATE luthr_static)
+target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
+  -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
+  -Wl,--wrap=luaF_readcapture -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
+  -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS independent access semantics incremental generational)
+  add_test(NAME capture_cells_${case} COMMAND capture_cells_test ${case})
+  set_tests_properties(capture_cells_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
@@ -632,7 +646,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
-  lua_facade_static lua_facade_shared native_roots_test execution_wait_test)
+  lua_facade_static lua_facade_shared native_roots_test execution_wait_test capture_cells_test)
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

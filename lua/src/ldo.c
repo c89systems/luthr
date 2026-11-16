@@ -379,11 +379,8 @@ int luaD_checkminstack (lua_State *L) {
 */
 static void relstack (lua_State *L) {
   CallInfo *ci;
-  UpVal *up;
   L->top.offset = savestack(L, L->top.p);
   L->tbclist.offset = savestack(L, L->tbclist.p);
-  for (up = L->openupval; up != NULL; up = up->u.open.next)
-    up->v.offset = savestack(L, uplevel(up));
   for (ci = L->ci; ci != NULL; ci = ci->previous) {
     ci->top.offset = savestack(L, ci->top.p);
     ci->func.offset = savestack(L, ci->func.p);
@@ -396,12 +393,9 @@ static void relstack (lua_State *L) {
 */
 static void correctstack (lua_State *L, StkId oldstack) {
   CallInfo *ci;
-  UpVal *up;
   UNUSED(oldstack);
   L->top.p = restorestack(L, L->top.offset);
   L->tbclist.p = restorestack(L, L->tbclist.offset);
-  for (up = L->openupval; up != NULL; up = up->u.open.next)
-    up->v.p = s2v(restorestack(L, up->v.offset));
   for (ci = L->ci; ci != NULL; ci = ci->previous) {
     ci->top.p = restorestack(L, ci->top.offset);
     ci->func.p = restorestack(L, ci->func.offset);
@@ -424,14 +418,11 @@ static void relstack (lua_State *L) { UNUSED(L); }  /* do nothing */
 */
 static void correctstack (lua_State *L, StkId oldstack) {
   CallInfo *ci;
-  UpVal *up;
   StkId newstack = L->stack.p;
   if (oldstack == newstack)
     return;
   L->top.p = L->top.p - oldstack + newstack;
   L->tbclist.p = L->tbclist.p - oldstack + newstack;
-  for (up = L->openupval; up != NULL; up = up->u.open.next)
-    up->v.p = s2v(uplevel(up) - oldstack + newstack);
   for (ci = L->ci; ci != NULL; ci = ci->previous) {
     ci->top.p = ci->top.p - oldstack + newstack;
     ci->func.p = ci->func.p - oldstack + newstack;
@@ -744,6 +735,8 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
     rethook(L, ci, nres);
   /* move results to proper place */
   moveresults(L, ci->func.p, nres, fwanted);
+  if (L->openupval != NULL)
+    luaF_storelocals(L, ci->func.p, cast_int(L->top.p - ci->func.p));
   /* function cannot be in any of these cases when returning */
   lua_assert(!(ci->callstatus &
         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));

@@ -28,6 +28,36 @@ global metadata transaction intact. Replace ownership, publication, allocation,
 barriers and scheduler participation as coherent connected surfaces. Keep one
 implementation after each cutover; no legacy path or refactoring feature flag.
 
+## Shared-memory cutover in progress
+
+Mutable objects now carry an atomic execution-owner token and recursion depth.
+Uncontended acquisition/release touches the object; only real contention enters
+the shared wait queue. Tokens identify logical executions across carrier movement
+and permanent thread-local storage for unmanaged callers. Waiter publication and
+the release-side observer check order notification against the predicate recheck.
+The collector still bypasses suspended ownership under quiescence.
+
+Lua captures now store their complete value in a stable shared cell throughout
+their lifetime. A live binding records a stack offset, never a pointer into its
+owner's registers. Dispatch refreshes frame-local register shadows and publishes
+the instruction's actual writes. Call-result movement, yielded operations and
+debug local access use the same cell representation. Closing unlinks a binding;
+it does not copy an obsolete register shadow over a foreign writer's value.
+Bytecode remains portable; the interpreter lowers its register accesses.
+
+Pointer barriers append bounded records to the current coroutine's private
+buffer. Every collection rendezvous drains every buffer before advancing the
+collector, including buffers on otherwise unreachable threads. A full buffer
+requests a rendezvous solely to drain work. Collector-side barriers apply
+immediately, including close of another coroutine. A record cannot outlive a
+collector step that could reclaim either endpoint.
+
+This is an intermediate cutover within surface 1. Allocation/publication,
+interning, general metadata scopes and managed admission/polling still use the
+old global protocol and must be replaced before the memory surface satisfies
+the product specification. Dispatch's frame-wide capture refresh is provisional;
+the final performance gate must measure and constrain its cost.
+
 ## State ownership boundaries
 
 | Owner | State and responsibility |

@@ -39,5 +39,7 @@ LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);
 LUAI_FUNC LuaWorldScope luaW_detach (lua_State *L);
 LUAI_FUNC void luaW_attach (lua_State *L, LuaWorldScope scope);
+/* The caller is an admitted mutator or the collector itself. */
+LUAI_FUNC int luaW_iscollector (lua_State *L);
 
 #endif

@@ -24,6 +24,23 @@ static LuaObjectLock *objectlock (GCObject *object) {
   return &gco2u(object)->access;
 }
 
+static int tryaccess (LuaObjectLock *lock) {
+  void *token = luaQ_ownertoken();
+  void *owner = __atomic_load_n(&lock->owner, __ATOMIC_SEQ_CST);
+  if (owner == token) {
+    lua_assert(lock->depth != 0);
+    lock->depth++;
+    return 1;
+  }
+  if (owner == NULL && __atomic_compare_exchange_n(&lock->owner, &owner,
+          token, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+    lua_assert(lock->depth == 0);
+    lock->depth = 1;
+    return 1;
+  }
+  return 0;
+}
+
 void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
   LuaWorld *world = &G(L)->world;
   LuaObjectLock *lock = objectlock(object);
@@ -34,18 +51,17 @@ void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
   setgcovalue(L, &scope->root.value, object);
   scope->previous = L->object_scopes;
   L->object_scopes = scope;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
   /* A collector reads/mutates objects under quiescence, including ones whose
   ** owner is pinned at an allocation boundary. It must not wait on that owner. */
-  if (!(world->stopped && luaQ_isowner(&world->collector))) {
+  if (!luaW_iscollector(L)) {
     if (isLua(L->ci) && L->top.p < L->ci->top.p) {
       scope->saved_top = savestack(L, L->top.p);
       L->top.p = L->ci->top.p;  /* publish all registers before a possible wait */
     }
-    if (lock->depth != 0 && luaQ_isowner(&lock->owner))
-      lock->depth++;
-    else {
-      if (lock->depth != 0 || world->stopped) {
+    if (!tryaccess(lock)) {
+      luaX_checksync(pthread_mutex_lock(&world->mutex));
+      __atomic_fetch_add(&lock->waiting, 1, __ATOMIC_SEQ_CST);
+      if (world->stopped || !tryaccess(lock)) {
         /* Never acquire an unrelated object behind metadata ownership. */
         lua_assert(world->heap_depth == 0 ||
                    !luaQ_isowner(&world->heap_owner));
@@ -56,29 +72,34 @@ void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
         luaQ_wake(&world->changed, &world->waiters);
         do {
           luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-        } while (lock->depth != 0 || world->stopped);
+        } while (world->stopped || !tryaccess(lock));
         world->active++;
         L->object_waiting--;
         L->native_depth--;
       }
-      luaQ_setowner(&lock->owner);
-      lock->depth = 1;
+      __atomic_fetch_sub(&lock->waiting, 1, __ATOMIC_SEQ_CST);
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
     }
     scope->held = 1;
   }
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 static void releasescope (lua_State *L, LuaObjectScope *scope) {
   if (scope->held) {
     LuaWorld *world = &G(L)->world;
-    luaX_checksync(pthread_mutex_lock(&world->mutex));
     lua_assert(scope->lock->depth != 0 &&
-               luaQ_isowner(&scope->lock->owner));
+      __atomic_load_n(&scope->lock->owner, __ATOMIC_RELAXED) == luaQ_ownertoken());
     scope->held = 0;
-    if (--scope->lock->depth == 0)
-      luaQ_wake(&world->changed, &world->waiters);
-    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    if (--scope->lock->depth == 0) {
+      /* Order release/observer checks against the waiter's observer increment
+      ** and predicate recheck: either it sees unowned or this side wakes it. */
+      __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&scope->lock->waiting, __ATOMIC_SEQ_CST) != 0) {
+        luaX_checksync(pthread_mutex_lock(&world->mutex));
+        luaQ_wake(&world->changed, &world->waiters);
+        luaX_checksync(pthread_mutex_unlock(&world->mutex));
+      }
+    }
   }
 }
 

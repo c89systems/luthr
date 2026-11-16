@@ -368,6 +368,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthr_stack_limit = 0;
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
+  L->barrier_count = 0;
   L->callback_owner = NULL;
   L->callback_active = 0;
   L->operation = NULL;

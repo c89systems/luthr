@@ -284,24 +284,49 @@ void luaC_barrierback_ (lua_State *L, GCObject *o) {
     setage(o, G_TOUCHED1);  /* touched in current cycle */
 }
 
-/* Root both ends before metadata ownership can park this mutator. Collection
-** may change their colors while it waits; make the barrier decision afterward. */
-void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
-  LuaNativeRoot owner, value;
-  luaR_pushroot(L, &owner);
-  setgcovalue(L, &owner.value, o);
-  luaR_pushroot(L, &value);
-  setgcovalue(L, &value.value, v);
-  luaW_heapenter(L);
+static void applybarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
   if (isblack(o) && iswhite(v)) {
     if (back)
       luaC_barrierback_(L, o);
     else
       luaC_barrier_(L, o, v);
   }
-  luaW_heapleave(L);
-  luaR_poproot(L, &value);
-  luaR_poproot(L, &owner);
+}
+
+static void drainthreadbarriers (lua_State *L, lua_State *thread) {
+  unsigned i, count = thread->barrier_count;
+  thread->barrier_count = 0;
+  for (i = 0; i < count; i++) {
+    LuaBarrierRecord *record = &thread->barriers[i];
+    applybarrier(L, record->owner, record->value, record->back);
+  }
+}
+
+void luaC_drainbarriers (lua_State *L) {
+  GCObject *object;
+  drainthreadbarriers(L, mainthread(G(L)));
+  for (object = G(L)->allgc; object != NULL; object = object->next)
+    if (object->tt == LUA_VTHREAD)
+      drainthreadbarriers(L, gco2th(object));
+}
+
+/* Mutators append complete edges locally. Only a full buffer or a collection
+** transition needs shared coordination. No record survives a collector step. */
+void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
+  LuaBarrierRecord *record;
+  if (luaW_iscollector(L)) {
+    applybarrier(L, o, v, back);
+    return;
+  }
+  lua_assert(L->barrier_count < LUA_BARRIER_CAPACITY);
+  record = &L->barriers[L->barrier_count++];
+  record->owner = o;
+  record->value = v;
+  record->back = back;
+  if (L->barrier_count == LUA_BARRIER_CAPACITY) {
+    luaW_stop(L);
+    luaW_start(L);
+  }
 }
 
 
@@ -380,14 +405,14 @@ static void reallymarkobject (global_State *g, GCObject *o) {
       UpVal *uv = gco2upv(o);
       if (upisopen(uv)) {
         set2gray(uv);  /* open upvalues are kept gray */
-        /* A mutator barrier must not read a foreign running stack. Atomic
-        ** collection remarks visited open captures under the rendezvous. */
+        /* Stable cell contents are read under collector quiescence. The
+        ** mutator's register shadow is never the capture's source of truth. */
         if (g->world.stopped)
-          markvalue(g, uv->v.p);
+          markvalue(g, &uv->value);
       }
       else {
         set2black(uv);  /* closed upvalues are visited here */
-        markvalue(g, uv->v.p);
+        markvalue(g, &uv->value);
       }
       break;
     }
@@ -462,9 +487,9 @@ static void remarkupvals (global_State *g) {
   while ((thread = *p) != NULL) {
     if (!iswhite(thread) && thread->openupval != NULL) {
       UpVal *uv;
-      for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
+      for (uv = thread->openupval; uv != NULL; uv = uv->open.next) {
         if (!iswhite(uv))
-          markvalue(g, uv->v.p);
+          markvalue(g, &uv->value);
       }
       p = &thread->twups;  /* keep marked thread with upvalues in the list */
     }
@@ -473,11 +498,11 @@ static void remarkupvals (global_State *g) {
       lua_assert(!isold(thread) || thread->openupval == NULL);
       *p = thread->twups;  /* remove thread from the list */
       thread->twups = thread;  /* mark that it is out of list */
-      for (uv = thread->openupval; uv != NULL; uv = uv->u.open.next) {
+      for (uv = thread->openupval; uv != NULL; uv = uv->open.next) {
         lua_assert(getage(uv) <= getage(thread));
         if (!iswhite(uv)) {  /* upvalue already visited? */
           lua_assert(upisopen(uv) && isgray(uv));
-          markvalue(g, uv->v.p);  /* mark its value */
+          markvalue(g, &uv->value);
         }
       }
     }
@@ -783,7 +808,7 @@ static l_mem traversethread (global_State *g, lua_State *th) {
     markvalue(g, &root->value);
     native_work++;
   }
-  for (uv = th->openupval; uv != NULL; uv = uv->u.open.next)
+  for (uv = th->openupval; uv != NULL; uv = uv->open.next)
     markobject(g, uv);  /* open upvalues cannot be collected */
   if (g->gcstate == GCSatomic) {  /* final traversal? */
     if (!g->gcemergency && !th->heap_waiting && !th->object_waiting)

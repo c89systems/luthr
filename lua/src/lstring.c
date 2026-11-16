@@ -309,7 +309,7 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   o = luaC_newobj(L, LUA_VUSERDATA, sizeudata(nuvalue, s));
   u = gco2u(o);
   u->len = s;
-  u->access.depth = 0;
+  luaA_initlock(&u->access);
   u->nuvalue = nuvalue;
   u->metatable = NULL;
   for (i = 0; i < nuvalue; i++)
