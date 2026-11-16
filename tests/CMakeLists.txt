@@ -16,6 +16,35 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+luthrum_test_program(stop_wait_test stop_wait_test.c)
+set_target_properties(stop_wait_test PROPERTIES C_STANDARD 99)
+target_compile_options(stop_wait_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(stop_wait_test PRIVATE luthrum_static)
+target_link_options(stop_wait_test PRIVATE -Wl,--wrap=pthread_cond_wait
+  -Wl,--wrap=luaQ_waitstop -Wl,--wrap=luaQ_interrupt)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS recv send await driver pinned cleanup prestop prestop_send peer peer_head
+        oom_recv oom_send oom_await oom_driver race race_repeat race_close race_finalize)
+      add_test(NAME stop_wait_${backend}_${case}_${gc}
+        COMMAND stop_wait_test ${backend}_${case}_${gc})
+      set_tests_properties(stop_wait_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 120)
+    endforeach()
+  endforeach()
+endforeach()
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS recv send await driver migrate_recv migrate_send migrate_await migrate_driver
+        early_recv early_await early_driver migrate_early_recv migrate_early_driver
+        migrate_movealloc_recv migrate_movealloc_await)
+      add_test(NAME native_scheduler_stop_${backend}_${case}_${gc}
+        COMMAND native_scheduler_test stop_${backend}_${case}_${gc})
+      set_tests_properties(native_scheduler_stop_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;memcheck" TIMEOUT 180)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(task_stop_test task_stop_test.c)
 set_target_properties(task_stop_test PROPERTIES C_STANDARD 99)
 target_compile_options(task_stop_test PRIVATE -Wall -Wextra -Werror)

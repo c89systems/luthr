@@ -36,8 +36,16 @@ typedef struct LuaOwner {
 
 typedef struct LuaWaiter {
   struct LuaWaiter *next;
+  struct LuaWaiter **link;  /* predicate mutex; NULL after notification */
   LuaExecution *execution;
 } LuaWaiter;
+
+typedef struct LuaStopWait {
+  LuaWaiter waiter;
+  pthread_mutex_t *mutex;
+  pthread_cond_t *changed;
+  unsigned observers;  /* owning task's world mutex */
+} LuaStopWait;
 
 LUAI_FUNC LuaExecution *luaQ_current (void);
 /* Trusted runtime code only: body and continuations cannot retain foreign TLS
@@ -64,6 +72,13 @@ LUAI_FUNC void luaQ_setowner (LuaOwner *owner);
 LUAI_FUNC int luaQ_isowner (const LuaOwner *owner);
 LUAI_FUNC void luaQ_wait (lua_State *L, pthread_mutex_t *mutex,
                           pthread_cond_t *changed, LuaWaiter **waiters);
+/* Owned waits only. Returns with mutex held, after retiring registration and
+** all request-side borrows. A true result requires the caller to retire its
+** resource lease before delivery (or return STOPPED to a quiescent driver). */
+LUAI_FUNC int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex,
+                            pthread_cond_t *changed, LuaWaiter **waiters);
+/* Called with a request-side borrow; no world mutex remains held. */
+LUAI_FUNC void luaQ_interrupt (LuaStopWait *wait);
 LUAI_FUNC void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters);
 
 #endif

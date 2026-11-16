@@ -11,6 +11,7 @@
 #include "lgc.h"
 #include "lmem.h"
 #include "lpipe.h"
+#include "ltask.h"
 
 static const char identity;
 typedef struct Pipe {
@@ -97,17 +98,19 @@ static void retire (lua_State *L, Access *access) {
   leave(L, access);
 }
 
-static void waitforchange (lua_State *L, Access *access, unsigned *waiting) {
+static int waitforchange (lua_State *L, Access *access, unsigned *waiting) {
   Pipe *pipe = access->pipe;
+  int stopped;
   (*waiting)++;
   /* Stable userdata arguments and the detached C activation retain the owner.
   ** Only native queue bookkeeping remains under this mutex after withdrawal. */
   luaW_heapleave(L);
   luaA_end(L, &access->object);
   lua_unlock(L);
-  luaQ_wait(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
+  stopped = luaQ_waitstop(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
   (*waiting)--;
   luaX_checksync(pthread_mutex_unlock(&pipe->mutex));
+  return stopped;
 }
 
 static int sendchunk (lua_State *L) {
@@ -144,9 +147,14 @@ static int sendchunk (lua_State *L) {
       lua_pushinteger(L, cast(lua_Integer, size));
       return 1;
     }
-    waitforchange(L, &access, &pipe->sending);
+    int stopped = waitforchange(L, &access, &pipe->sending);
     pipe = enter(L, &access, owner);
     lua_assert(pipe->ready); /* This operation still owns its admission. */
+    if (stopped) {
+      retire(L, &access);
+      lua_lock(L);
+      luaTK_throwstop(L);
+    }
   }
 }
 
@@ -190,9 +198,14 @@ static int receivechunk (lua_State *L) {
       lua_pushnil(L);
       return 1;
     }
-    waitforchange(L, &access, &pipe->receiving);
+    int stopped = waitforchange(L, &access, &pipe->receiving);
     pipe = enter(L, &access, owner);
     lua_assert(pipe->ready);
+    if (stopped) {
+      retire(L, &access);
+      lua_lock(L);
+      luaTK_throwstop(L);
+    }
   }
 }
 

@@ -10,16 +10,40 @@
 
 int luaTK_requeststop (LuaTaskRoot *task) {
   LuaWorld *world;
+  LuaStopWait *wait = NULL;
   int status = LUA_TK_INVALID;
   if (task->global == NULL) return status;
   world = &task->global->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (task->phase == LUA_TASK_ADMITTED || task->phase == LUA_TASK_RUNNING) {
     __atomic_store_n(&task->stop_requested, 1, __ATOMIC_RELEASE);
+    wait = task->stop_wait;
+    if (wait != NULL) wait->observers++;
     status = LUA_OK;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (wait != NULL) {
+    luaQ_interrupt(wait);
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    lua_assert(wait->observers != 0);
+    if (--wait->observers == 0)
+      luaQ_wake(&world->changed, &world->waiters);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    /* No access to wait after its final borrow is published. */
+  }
   return status;
+}
+
+void luaTK_throwstop (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  LuaTaskRoot *task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
+  lua_assert(L->errorJmp != NULL && L->errorJmp == execution->protected);
+  lua_assert(task != NULL && task->global == G(L));
+  lua_assert(L->top.p < L->stack_last.p + EXTRA_STACK);
+  __atomic_store_n(&task->stop_delivered, 1, __ATOMIC_RELEASE);
+  setsvalue2s(L, L->top.p, G(L)->stoperrmsg);
+  L->top.p++;
+  luaD_throw(L, LUA_ERRRUN);
 }
 
 void luaTK_checkstop (lua_State *L) {
@@ -34,14 +58,7 @@ void luaTK_checkstop (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
   deliver = task->phase == LUA_TASK_RUNNING && L->close_active == 0;
   luaX_checksync(pthread_mutex_unlock(&task->global->world.mutex));
-  if (deliver) {
-    lua_assert(L->errorJmp != NULL);
-    lua_assert(L->top.p < L->stack_last.p + EXTRA_STACK);
-    __atomic_store_n(&task->stop_delivered, 1, __ATOMIC_RELEASE);
-    setsvalue2s(L, L->top.p, G(L)->stoperrmsg);
-    L->top.p++;
-    luaD_throw(L, LUA_ERRRUN);
-  }
+  if (deliver) luaTK_throwstop(L);
 }
 
 static int driver (LuaTaskRoot *task) {
@@ -51,6 +68,21 @@ static int driver (LuaTaskRoot *task) {
          execution->managed_depth == 0 && execution->native_depth == 0 &&
          execution->protected == NULL &&
          luaE_getnativestackcontext()->coroutine_scopes == NULL;
+}
+
+static int driverstopped (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  LuaTaskRoot *task;
+  int stopped;
+  if (execution == NULL) return 0;
+  task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
+  if (task == NULL || task->global != G(L) || task->thread != L || !driver(task))
+    return 0;
+  luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
+  stopped = task->phase == LUA_TASK_ADMITTED &&
+            __atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE);
+  luaX_checksync(pthread_mutex_unlock(&task->global->world.mutex));
+  return stopped;
 }
 
 int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
@@ -198,15 +230,26 @@ int luaTK_await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
     return LUA_TK_INVALID;
   /* Retire capacity granted to an initial driver dispatch, too. Ordinary Lua
   ** C activations already publish their roots and detach before this call. */
-  lua_lock(L);
-  lua_unlock(L);
   for (;;) {
+    int stopped = 0;
+    lua_lock(L);
+    luaTK_checkstop(L);
+    lua_unlock(L);
+    if (driverstopped(L)) return LUA_TK_STOPPED;
     result = luaTK_collect(L, task, status, results);
     if (result != LUA_TK_PENDING) return result;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     while (task->phase != LUA_TASK_FINISHED &&
            task->phase != LUA_TASK_COLLECTED)
-      luaQ_wait(L, &world->mutex, &world->changed, &task->waiters);
+      if (luaQ_waitstop(L, &world->mutex, &world->changed, &task->waiters)) {
+        stopped = 1;
+        break;
+      }
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    if (stopped) {
+      if (driverstopped(L)) return LUA_TK_STOPPED;
+      lua_lock(L);
+      luaTK_throwstop(L);
+    }
   }
 }

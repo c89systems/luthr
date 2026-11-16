@@ -267,7 +267,20 @@ and concurrent requests, protected calls, protected/unprotected native callbacks
 another VM, normal completion racing a request and cleanup errors. Denial checks separately
 prove request/delivery make no allocation attempts; explicit host GC runs outside
 the denial interval. A request/delivery flag never substitutes for completion.
-These tests do not establish interruptible resource waits or shutdown.
+These tests do not establish shutdown.
+
+`stop_wait_*` checks interruptible owned pipe/result waits, the driver STOPPED
+outcome, pre-publication requests, queue head/tail removal, notification/close/
+explicit-finalization races and concurrent notifier borrows. A stopped waiter
+must leave its peer and the target outcome intact. Moving-allocation denial
+requires request, registration retirement and delivery to make no allocation
+attempts. Pinned callers retain native owners after catching the stop; close
+cleanup waits remain exempt until ordinary notification.
+`native_scheduler_stop_*` requires those paths to finish on four reused carriers
+while two unchanged bindings occupy both native slots. Forced migration includes
+early notification before context publication and driver waits. Independent Lua
+work and the uncancelled result target must still return 42. Raw/C89 and both
+collectors include moving allocators and GC with saved wait stacks.
 
 Debug GNU test processes use 128 KiB default worker stacks and preserve guards,
 explicit stack-size requests and main-thread limits. The stack cache is disabled

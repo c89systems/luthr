@@ -6,7 +6,7 @@
 
 struct global_State;
 enum { LUA_TK_PENDING = -1, LUA_TK_INVALID = -2,
-       LUA_TK_COLLECTED = -3, LUA_TK_STACK = -4 };
+       LUA_TK_COLLECTED = -3, LUA_TK_STACK = -4, LUA_TK_STOPPED = -5 };
 enum { LUA_TASK_UNUSED, LUA_TASK_ADMITTED, LUA_TASK_RUNNING, LUA_TASK_RETURNED,
        LUA_TASK_FINISHING,
        LUA_TASK_FINISHED, LUA_TASK_COLLECTING, LUA_TASK_COLLECTED };
@@ -18,6 +18,7 @@ typedef struct LuaTaskRoot {
   lua_State *thread;
   LuaExecution *execution;
   LuaWaiter *waiters;
+  LuaStopWait *stop_wait;  /* world mutex; node outlives every borrowed notice */
   int phase;
   int status;
   int results;
@@ -48,13 +49,15 @@ LUAI_FUNC int luaTK_collect (lua_State *L, LuaTaskRoot *task,
                              int *status, int *results);
 /* Wait outside state gates, releasing managed capacity until completion or a
 ** collector changes the outcome. A task cannot await its own execution.
-** The receiver remains rooted by its caller throughout the entered call. */
+** The receiver remains rooted by its caller throughout the entered call.
+** Owned Lua waits deliver after retirement. A quiescent admitted driver instead
+** receives LUA_TK_STOPPED, with outputs and the target outcome unchanged. */
 LUAI_FUNC int luaTK_await (lua_State *L, LuaTaskRoot *task,
                            int *status, int *results);
 /* Private feasibility boundary. Publish a record to requesters only after
 ** successful admission. Requests accepted only while admitted/running;
 ** repeated requests are idempotent. No state gate, allocation or native join.
-** A request does not wake resource waits or acknowledge native completion. */
+** Owned registered waits are notified; this never acknowledges native completion. */
 LUAI_FUNC int luaTK_requeststop (LuaTaskRoot *task);
 /* State ownership and the current protected execution boundary are required.
 ** Delivery uses a fixed error, bypassing message handlers. Finishing/close
@@ -62,5 +65,7 @@ LUAI_FUNC int luaTK_requeststop (LuaTaskRoot *task);
 ** Unprotected sibling calls defer delivery until a protected boundary is owned.
 ** Never call this while resource bookkeeping still needs retirement. */
 LUAI_FUNC void luaTK_checkstop (lua_State *L);
+/* The wait has already established eligibility; all its leases are retired. */
+LUAI_FUNC l_noret luaTK_throwstop (lua_State *L);
 
 #endif

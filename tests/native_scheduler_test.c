@@ -73,6 +73,7 @@ struct pool {
   unsigned await_closed, await_ready[2];
   void *await_payloads[2];
   int awaiting;
+  int stop_waiting;
   lua_CFunction helper_work[MAX_HELPERS];
   int helper_count;
   unsigned done, entered, callback_done, release[2], finalized;
@@ -153,7 +154,10 @@ static void park(struct task *task, enum reason reason) {
   task->reason = reason;
   if (task->pool->force_migrate) {
     lock(task->pool);
-    if (!task->pool->awaiting)
+    if (task->pool->stop_waiting) {
+      if (task->id >= 2)
+        task->target = task->worker == 2 ? 3 : 2;
+    } else if (!task->pool->awaiting)
       task->target = 1 - task->worker;
     else if (task->id >= 2 && task->pool->parallel_arrivals == 2)
       task->target = task->worker == 2 ? 3 : 2;
@@ -2480,12 +2484,237 @@ static int exercise_task_wait(const char *name, const char *file_path) {
   free(pool);
   return 0;
 }
+static int stop_cleanup(lua_State *state) {
+  struct task *task = luaQ_current()->context;
+  (void)state;
+  require(task->id == 2 && task->root.phase == LUA_TASK_FINISHING);
+  lock(task->pool);
+  task->pool->stage++;
+  unlock(task->pool);
+  return 0;
+}
+static int stop_await(lua_State *state) {
+  struct task *task = luaQ_current()->context;
+  int status = -99, results = -99;
+  require(luaTK_await(state, &task->pool->tasks[3].root, &status, &results) ==
+          LUA_OK);
+  require(status == LUA_OK && results == 1);
+  return 1;
+}
+static void run_stop_driver(struct task *task) {
+  int status = -99, results = -99;
+  require(luaTK_await(task->state, &task->pool->tasks[3].root, &status,
+                      &results) == LUA_TK_STOPPED);
+  require(status == -99 && results == -99);
+  task->status = luaTK_resume(&task->root, 0, &task->results);
+}
+static void stop_before_wait(struct task *task) {
+  task->before_wait = NULL;
+  require(luaTK_requeststop(&task->root) == LUA_OK);
+}
+static int exercise_stop_wait(const char *name) {
+  static const int ids[] = {0, 1, 2, 3, 6};
+  struct pool *pool = calloc(1, sizeof(*pool));
+  pthread_t workers[MAX_WORKERS];
+  int facade = strstr(name, "facade") != NULL,
+      driver = strstr(name, "driver") != NULL;
+  int send = strstr(name, "send") != NULL,
+      awaiting = strstr(name, "await") != NULL || driver;
+  int early = strstr(name, "early") != NULL,
+      moving = strstr(name, "movealloc") != NULL;
+  require(pool != NULL);
+  fixture = pool;
+  pool->managed_limit = 2;
+  pool->stop_waiting = 1;
+  pool->force_migrate = strstr(name, "migrate") != NULL;
+  check(pthread_mutex_init(&pool->mutex, NULL));
+  check(pthread_cond_init(&pool->changed, NULL));
+  if (facade) {
+    static const unsigned char capture[] = "require('fixture')";
+    if (moving) {
+      luthrum_lua_runtime_allocator_config config = {0};
+      config.user = pool;
+      config.alloc_fn = utf8_host_allocate;
+      config.realloc_fn = utf8_allocate;
+      config.free_fn = utf8_host_free;
+      require(luthrum_lua_runtime_new_with_allocator(&pool->runtime, &config) ==
+              LUTHRUM_LUA_RUNTIME_OK);
+    } else
+      require(luthrum_lua_runtime_new(&pool->runtime) ==
+              LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_openlibs(pool->runtime) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_set_instruction_limit(pool->runtime, 2000000) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_register_c_module(pool->runtime, "fixture",
+                                                  open_fixture) ==
+            LUTHRUM_LUA_RUNTIME_OK);
+    require(luthrum_lua_runtime_run_buffer(pool->runtime, capture,
+                                           sizeof(capture) - 1, "stop-wait", 0,
+                                           NULL, 0) == LUTHRUM_LUA_RUNTIME_OK);
+  } else {
+    pool->main =
+        moving ? lua_newstate(utf8_allocate, pool, 0) : luaL_newstate();
+    require(pool->main != NULL);
+    luaL_openlibs(pool->main);
+  }
+  lua_pushcfunction(pool->main, block_binding);
+  lua_setglobal(pool->main, "block");
+  luaQ_pushmanaged(pool->main, stop_cleanup, 0);
+  lua_setglobal(pool->main, "stop_cleanup");
+  luaQ_pushmanaged(pool->main, stop_await, 0);
+  lua_setglobal(pool->main, "stop_await");
+  luaP_newpipe(pool->main, 1);
+  lua_setglobal(pool->main, "q");
+  if (send) {
+    require(luaL_loadstring(pool->main, "q:send('original')") == LUA_OK);
+    require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  }
+  lua_pushboolean(pool->main, awaiting);
+  lua_setglobal(pool->main, "stop_awaiting");
+  lua_pushboolean(pool->main, send);
+  lua_setglobal(pool->main, "stop_sending");
+  if (strstr(name, "generational"))
+    lua_gc(pool->main, LUA_GCGEN);
+  for (unsigned n = 0; n < sizeof(ids) / sizeof(ids[0]); ++n) {
+    int id = ids[n];
+    struct task *task = &pool->tasks[id];
+    task->state = lua_newthread(pool->main);
+    require(luaL_loadstring(
+                task->state,
+                id < 2    ? "return block(...)"
+                : id == 2 ? "local resource <close> =setmetatable({}, "
+                            "{__close=stop_cleanup}); "
+                            "if stop_awaiting then return stop_await() elseif "
+                            "stop_sending then return q:send('pending') "
+                            "else return q:recv() end"
+                : id == 3
+                    ? "return 42"
+                    : "local n=0; for i=1,4000 do n=n+i end; return 42") ==
+            LUA_OK);
+    if (id < 2) {
+      unsigned *payload;
+      lua_pushinteger(task->state, id);
+      payload = lua_newuserdatauv(task->state, sizeof(*payload), 0);
+      *payload = 12345;
+    }
+    init_task(pool, task, id, NULL);
+    task->target = id < 2 ? id : 2;
+    if (id == 2 && driver)
+      task->run = run_stop_driver;
+    if (id == 2 && early)
+      task->before_wait = stop_before_wait;
+    lua_settop(pool->main, 0);
+  }
+  for (int i = 0; i < MAX_WORKERS; ++i) {
+    pool->workers[i].pool = pool;
+    check(pthread_create(&workers[i], NULL, worker_entry, &pool->workers[i]));
+  }
+  submit(pool, 0);
+  submit(pool, 1);
+  lock(pool);
+  while (pool->entered != 2)
+    wait_change(pool);
+  unlock(pool);
+  submit(pool, 2);
+  lock(pool);
+  while (early ? !pool->tasks[2].finished : !pool->tasks[2].published)
+    wait_change(pool);
+  require(pool->native == 2);
+  unlock(pool);
+  submit(pool, 6);
+  lock(pool);
+  while (!pool->tasks[6].finished)
+    wait_change(pool);
+  require(pool->native == 2 && !pool->release[0] && !pool->release[1]);
+  unlock(pool);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  lua_gc(pool->main, LUA_GCCOLLECT);
+  if (!early)
+    require(luaTK_requeststop(&pool->tasks[2].root) == LUA_OK);
+  lock(pool);
+  while (!pool->tasks[2].finished)
+    wait_change(pool);
+  require(pool->native == 2 && pool->tasks[2].status == LUA_ERRRUN &&
+          pool->tasks[2].results == 1);
+  require(pool->tasks[2].resource_waits != 0 &&
+          pool->tasks[2].pinned_resource_waits == 0);
+  require(pool->stage == (driver ? 0 : 1));
+  if (early)
+    require(pool->tasks[2].early_wakes != 0);
+  if (pool->force_migrate)
+    require(pool->tasks[2].migrations != 0);
+  unlock(pool);
+  {
+    int status = -99, results = -99;
+    require(luaTK_collect(pool->main, &pool->tasks[2].root, &status,
+                          &results) == LUA_OK);
+    require(status == LUA_ERRRUN && results == 1 &&
+            strcmp(lua_tostring(pool->main, -1), "task stopped") == 0);
+    lua_pop(pool->main, 1);
+  }
+  require(pool->tasks[2].root.stop_wait == NULL);
+  require(
+      !__atomic_load_n(&pool->tasks[3].root.stop_requested, __ATOMIC_ACQUIRE));
+  submit(pool, 3);
+  lock(pool);
+  while (!pool->tasks[3].finished)
+    wait_change(pool);
+  require(pool->native == 2);
+  pool->release[0] = pool->release[1] = 1;
+  signal_change(pool);
+  while (pool->done != sizeof(ids) / sizeof(ids[0]))
+    wait_change(pool);
+  require(pool->managed_peak <= 2 && pool->native_peak == 2 &&
+          pool->native == 0 && pool->managed == 0);
+  pool->stop = 1;
+  signal_change(pool);
+  unlock(pool);
+  for (int i = 0; i < MAX_WORKERS; ++i)
+    check(pthread_join(workers[i], NULL));
+  for (unsigned n = 0; n < sizeof(ids) / sizeof(ids[0]); ++n) {
+    int id = ids[n];
+    if (id != 2) {
+      int status = -99, results = -99;
+      require(luaTK_collect(pool->main, &pool->tasks[id].root, &status,
+                            &results) == LUA_OK);
+      require(status == LUA_OK && results == pool->tasks[id].results);
+      if (id >= 3)
+        require(results == 1 && lua_tointeger(pool->main, -1) == 42);
+      lua_pop(pool->main, results);
+    }
+    test_fiber_destroy(&pool->tasks[id].fiber);
+  }
+  require(G(pool->main)->tasks == NULL);
+  if (send) {
+    require(luaL_loadstring(pool->main, "assert(q:recv()=='original')") ==
+            LUA_OK);
+    require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  }
+  require(luaL_loadstring(pool->main,
+                          "q:send('later'); assert(q:recv()=='later'); "
+                          "local s=q:stats(); assert(s.waiting_senders==0 and "
+                          "s.waiting_receivers==0)") == LUA_OK);
+  require(lua_pcall(pool->main, 0, 0, 0) == LUA_OK);
+  if (facade)
+    luthrum_lua_runtime_free(pool->runtime);
+  else
+    lua_close(pool->main);
+  if (moving)
+    require(pool->stream_live == 0);
+  check(pthread_cond_destroy(&pool->changed));
+  check(pthread_mutex_destroy(&pool->mutex));
+  free(pool);
+  return 0;
+}
 int main(int argc, char **argv) {
   struct pool *pool;
   pthread_t workers[WORKERS];
   int id, generational;
   static const unsigned char capture[] = "require('fixture')";
   require(argc == 2 || argc == 3);
+  if (strncmp(argv[1], "stop_", 5) == 0)
+    return exercise_stop_wait(argv[1]);
   if (strncmp(argv[1], "task_", 5) == 0)
     return exercise_task_wait(argv[1], argc == 3 ? argv[2] : NULL);
   if (strncmp(argv[1], "stream_", 7) == 0)

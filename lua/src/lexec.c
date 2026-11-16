@@ -5,6 +5,7 @@
 #include "lapi.h"
 #include "lexec.h"
 #include "lstate.h"
+#include "ltask.h"
 
 LuaExecution *luaQ_current (void) {
   return luaE_getnativestackcontext()->execution;
@@ -104,19 +105,24 @@ int luaQ_isowner (const LuaOwner *owner) {
 ** necessary. Registration and wake selection share the predicate's mutex.
 ** The wait callback handles notification before outgoing context publication.
 ** Reacquire execution capacity without retaining the predicate mutex. */
-void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
-                 LuaWaiter **waiters) {
+static void linkwaiter (LuaWaiter *waiter, LuaExecution *execution,
+                        LuaWaiter **waiters) {
+  waiter->execution = execution;
+  waiter->next = *waiters;
+  waiter->link = waiters;
+  if (waiter->next != NULL) waiter->next->link = &waiter->next;
+  *waiters = waiter;
+}
+
+static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
+                            pthread_cond_t *changed, LuaWaiter *waiter) {
   LuaExecution *execution = luaQ_current();
-  if (execution != NULL && execution->wait != NULL && execution->wake != NULL) {
-    LuaWaiter waiter;
+  if (waiter->execution != NULL) {
     unsigned depth = execution->managed_depth;
-    waiter.execution = execution;
-    waiter.next = *waiters;
-    *waiters = &waiter;
     execution->managed_depth = 0;
     if (depth != 0 && execution->managed_leave != NULL)
       execution->managed_leave(execution);
-    execution->wait(execution, mutex, &waiter);
+    execution->wait(execution, mutex, waiter);
     luaQ_entermanaged(L);
     if (depth == 0)
       luaQ_leavemanaged();  /* An opaque native resource needs no VM permit. */
@@ -124,8 +130,97 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
       execution->managed_depth = depth;
     luaX_checksync(pthread_mutex_lock(mutex));
   }
-  else
-    luaX_checksync(pthread_cond_wait(changed, mutex));
+  else {
+    while (waiter->link != NULL)
+      luaX_checksync(pthread_cond_wait(changed, mutex));
+  }
+  lua_assert(waiter->link == NULL);
+}
+
+void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
+                 LuaWaiter **waiters) {
+  LuaExecution *execution = luaQ_current();
+  if (execution != NULL && execution->wait != NULL && execution->wake != NULL) {
+    LuaWaiter waiter;
+    linkwaiter(&waiter, execution, waiters);
+    waitregistered(L, mutex, changed, &waiter);
+  }
+  else luaX_checksync(pthread_cond_wait(changed, mutex));
+}
+
+int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
+                    LuaWaiter **waiters) {
+  LuaExecution *execution = luaQ_current();
+  LuaTaskRoot *task;
+  LuaWorld *world;
+  LuaStopWait wait;
+  int same, eligible, stopped;
+  if (execution == NULL) goto ordinary;
+  task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
+  if (task == NULL || task->global != G(L)) goto ordinary;
+  world = &task->global->world;
+  same = mutex == &world->mutex;
+  if (!same) luaX_checksync(pthread_mutex_lock(&world->mutex));
+  eligible = L->close_active == 0 &&
+    ((task->phase == LUA_TASK_RUNNING && L->errorJmp != NULL &&
+      L->errorJmp == execution->protected) ||
+     (task->phase == LUA_TASK_ADMITTED && task->thread == L &&
+      execution->protected == NULL && execution->native_depth == 0 &&
+      execution->managed_depth == 0 &&
+      luaE_getnativestackcontext()->coroutine_scopes == NULL));
+  if (!eligible) {
+    if (!same) luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    goto ordinary;
+  }
+  if (__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) {
+    if (!same) luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    return 1;
+  }
+  lua_assert(task->stop_wait == NULL);
+  wait.mutex = mutex;
+  wait.changed = changed;
+  wait.observers = 0;
+  task->stop_wait = &wait;
+  linkwaiter(&wait.waiter,
+    execution->wait != NULL && execution->wake != NULL ? execution : NULL,
+    waiters);
+  if (!same) luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  waitregistered(L, mutex, changed, &wait.waiter);
+  if (!same) luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(task->stop_wait == &wait);
+  task->stop_wait = NULL;
+  if (!same) {
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    luaX_checksync(pthread_mutex_unlock(mutex));
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+  }
+  /* Requesters own a borrow, never a world-to-resource lock nesting. The
+  ** resource lease remains live until the last borrower has retired. */
+  while (wait.observers != 0)
+    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  stopped = __atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE);
+  if (!same) {
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    luaX_checksync(pthread_mutex_lock(mutex));
+  }
+  return stopped;
+ ordinary:
+  luaQ_wait(L, mutex, changed, waiters);
+  return 0;
+}
+
+void luaQ_interrupt (LuaStopWait *wait) {
+  LuaWaiter *waiter = &wait->waiter;
+  luaX_checksync(pthread_mutex_lock(wait->mutex));
+  if (waiter->link != NULL) {
+    *waiter->link = waiter->next;
+    if (waiter->next != NULL) waiter->next->link = waiter->link;
+    waiter->link = NULL;
+    luaX_checksync(pthread_cond_broadcast(wait->changed));
+    if (waiter->execution != NULL)
+      waiter->execution->wake(waiter->execution, waiter);
+  }
+  luaX_checksync(pthread_mutex_unlock(wait->mutex));
 }
 
 void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters) {
@@ -134,7 +229,9 @@ void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters) {
   luaX_checksync(pthread_cond_broadcast(changed));
   while (waiter != NULL) {
     LuaWaiter *next = waiter->next;
-    waiter->execution->wake(waiter->execution, waiter);
+    waiter->link = NULL;
+    if (waiter->execution != NULL)
+      waiter->execution->wake(waiter->execution, waiter);
     waiter = next;
   }
 }

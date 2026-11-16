@@ -1430,11 +1430,57 @@ Allocation denial surrounds request and delivery separately from host GC and
 finishing, and must record zero attempts to allocate. Cleanup executes a long
 Lua loop after delivery to prove the finishing exemption.
 
-Requests do not yet wake resource waits or remove registered waiters. Such waits
-still need cancellation-aware notification and lease retirement before delivery;
-throwing out of generic lock/ticket bookkeeping would be incorrect. Retained-stack
-cancellation, deadlines, admission shutdown and public outcome policy remain
-unproven. This experiment does not satisfy or narrow those required gates.
+Generic lock/ticket waits remain noninterruptible: throwing out of that bookkeeping
+would be incorrect. The owned-wait gate below adds notification and retirement
+for pipe and result waits. Deadlines, admission shutdown and public outcome policy
+remain unproven. This experiment does not narrow those required gates.
+
+## Interruptible owned waits
+
+An owned pipe or result wait publishes a stack-local `LuaStopWait` through its
+task record under the world mutex. Its intrusive queue link uses the predicate
+mutex. Normal notification and a stop request both remove that link before
+waking the execution, so only one can arrange its resumption. Unselected pthread
+waiters tolerate the stop's condition broadcast without leaving their own queue.
+Existing gate/object/metadata waits retain their ordinary noninterruptible path.
+
+A requester borrows the registration under the world mutex, releases that mutex,
+then acquires the resource predicate mutex. It never nests world ownership over
+a resource lock. Retirement first unpublishes the registration, releases the
+predicate mutex and waits for existing borrows to retire before reacquiring it.
+The enclosing resource lease stays live throughout that interval, including
+explicit pipe finalization. Result waits whose predicate is the world mutex
+use that ownership directly rather than recursively acquiring it. Bookkeeping
+waits used to drain request-side borrows remain noninterruptible.
+
+The wait returns a stop indication only after its registration and borrows are
+gone. Pipe operations then retire their call/wait counters and any finalization
+lease before raising the fixed stop error at the current protected receiver.
+An awaiting Lua task follows the same ordering without collecting its target's
+outcome. An admitted quiescent driver instead receives private `LUA_TK_STOPPED`
+with its outputs unchanged; it can resume its task to acknowledge the pending
+pre-start stop through the existing finish/collect lifecycle. Finishing/close,
+unprotected sibling and other-VM waits retain their prior exemption/opacity.
+Requests remain cooperative and do not roll back operations already completed.
+
+`stop_wait_*` gates registration-before-park, stop-before-publication, queue head
+and tail removal, an unaffected peer, driver and Lua result waits, allocation
+denial and notification/close/finalization races. A paused requester retains its
+borrow while the waiter withdraws and parks in retirement; GC and another request
+must not destroy its stack node or resource mutex. Native callers may catch the
+stop and keep running until their own acknowledgment. A close handler's pipe wait
+must remain live until an ordinary send, despite the sticky request.
+
+`native_scheduler_stop_*` runs pipe/result/driver stop paths on four reused
+carriers with both native slots occupied by unchanged blocked bindings. Runnable
+Lua still completes, forced migration preserves the stop receiver and cleanup,
+early notification waits for outgoing context publication, and the uncancelled
+target still returns its original result. Raw/C89, both collectors and moving
+allocators include GC while those retained stacks are parked.
+
+These are private feasibility interfaces. General resource affinity, other
+blocking resources, deadlines, admission shutdown and the public cancellation
+contract still require their acceptance gates.
 
 ## Lua-specific proof obligations
 
