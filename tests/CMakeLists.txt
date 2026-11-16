@@ -743,6 +743,10 @@ set_property(TEST lua_facade_static lua_facade_shared public_exports
 add_test(NAME clean_scope COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/clean.sh"
   "${PROJECT_SOURCE_DIR}/Makefile" "${CMAKE_CURRENT_BINARY_DIR}/clean-fixture")
 set_tests_properties(clean_scope PROPERTIES LABELS lifecycle TIMEOUT 10)
+
+add_test(NAME make_defaults COMMAND "${CMAKE_COMMAND}"
+  "-Dsource_dir=${PROJECT_SOURCE_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/MakeDefaults.cmake")
+set_tests_properties(make_defaults PROPERTIES LABELS "lifecycle;unit" TIMEOUT 10)
 if(LUTHR_TARGET STREQUAL "x86_64-linux-gnu" AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_test(NAME toolchain_required COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/toolchain-required.sh"
     "${PROJECT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/no-toolchain")

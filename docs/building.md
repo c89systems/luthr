@@ -22,7 +22,8 @@ checked-in files under `src/`.
 ## Commands
 
 `TARGET`, `CONFIG` (`Debug` or `Release`) and `JOBS` select the build. The
-defaults are GNU, Debug and one worker. Run operations serially, keeping sources
+defaults are GNU, Debug and one worker; benchmark targets default to Release.
+Run operations serially, keeping sources
 and prepared tools stable until each operation finishes.
 
 ```sh
@@ -89,13 +90,18 @@ panic/longjmp case runs under Helgrind instead. It is not suppressed or omitted.
 ## Benchmarks
 
 ```sh
-make benchmark CONFIG=Release
-make benchmark-parallel CONFIG=Release
-make benchmark-scheduler CONFIG=Release
+make benchmark
+make benchmark-parallel
+make benchmark-scheduler
 ```
 
 The serial benchmark compares identical Lua workloads on pristine Lua and
-Luthr. The parallel benchmark measures shared-VM execution with host workers.
+Luthr. It prints a table of median wall-time ratios for both collectors and
+saves `comparison.txt`, `samples.csv`, `summary.csv` and `metadata.json` under
+`build/<target>/<config>/benchmarks/lua/`. A ratio above 1 means Luthr takes
+longer; CPU-time medians are retained in the CSV summary. `CONFIG` can override
+the Release default for diagnostic runs.
+The parallel benchmark measures shared-VM execution with host workers.
 The scheduler benchmark exercises the public task API, including mixed native
 work, completion latency, carrier limits and allocator/RSS observations.
 Drivers validate results and retain raw samples and summaries under

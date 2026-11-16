@@ -67,10 +67,15 @@ concurrency/lifecycle tests and relocated SDK consumers. Benchmarks use the same
 Lua workloads for both runtimes:
 
 ```sh
-make benchmark CONFIG=Release
-make benchmark-parallel CONFIG=Release
-make benchmark-scheduler CONFIG=Release
+make benchmark
+make benchmark-parallel
+make benchmark-scheduler
 ```
+
+Benchmark targets default to Release builds. `make benchmark` prints a comparison
+table and saves it alongside raw samples and CPU/wall medians under
+`build/<target>/Release/benchmarks/lua/`. Ratios are Luthr/upstream elapsed time:
+`2.000x` means Luthr takes twice as long. `CONFIG` overrides the build mode.
 
 ## Embed Luthr
 
