@@ -62,6 +62,61 @@ foreach(runtime IN ITEMS upstream luthr)
   endforeach()
 endforeach()
 
+foreach(runtime IN ITEMS upstream luthr)
+  luthr_test_program(scheduled_${runtime} scheduled.c)
+  target_sources(scheduled_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
+  set_target_properties(scheduled_${runtime} PROPERTIES C_STANDARD 99)
+  target_compile_options(scheduled_${runtime} PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(scheduled_${runtime} BEFORE PRIVATE "${reference_dir}")
+  if(runtime STREQUAL "upstream")
+    target_link_libraries(scheduled_${runtime} PRIVATE upstream_lua_reference)
+    set(scheduled_slots 1)
+    set(scheduled_native 0)
+  else()
+    target_compile_definitions(scheduled_${runtime} PRIVATE LUTHR_BENCH_SCHEDULER)
+    target_link_libraries(scheduled_${runtime} PRIVATE luthr_shared)
+    set(scheduled_slots 2)
+    set(scheduled_native 1)
+  endif()
+  foreach(workload IN ITEMS integers independent_tables shared_table closures allocation_gc)
+    foreach(collector IN ITEMS incremental generational)
+      add_test(NAME lua_scheduled_${runtime}_${workload}_${collector}
+        COMMAND scheduled_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+          "${workload}" "${collector}" "${scheduled_slots}" "${scheduled_native}"
+          8 256 2 1 1000)
+      set_tests_properties(lua_scheduled_${runtime}_${workload}_${collector}
+        PROPERTIES LABELS "runtime;benchmark;memcheck" TIMEOUT 30)
+      if(runtime STREQUAL "luthr")
+        set_property(TEST lua_scheduled_${runtime}_${workload}_${collector}
+          APPEND PROPERTY LABELS parallel)
+      endif()
+    endforeach()
+  endforeach()
+endforeach()
+
+set(scheduled_arguments
+  "-Dupstream=$<TARGET_FILE:scheduled_upstream>" "-Dluthr=$<TARGET_FILE:scheduled_luthr>"
+  "-Dlibrary=$<TARGET_FILE:luthr_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
+  "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+  "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
+  "-Dsanitizer=${LUTHR_THREAD_SANITIZER}"
+  "-Dcompiler=${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+add_custom_target(benchmark_scheduler
+  COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
+    "${CMAKE_COMMAND}" ${scheduled_arguments}
+    "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/scheduler"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduled.cmake"
+  DEPENDS scheduled_upstream scheduled_luthr VERBATIM USES_TERMINAL)
+add_test(NAME lua_scheduled_smoke COMMAND "${CMAKE_COMMAND}" ${scheduled_arguments}
+  -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=2048 -Ddelay_us=1000 "-Dlevels=1;2;0"
+  "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/scheduled-smoke"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduledSmoke.cmake")
+add_test(NAME lua_scheduled_arguments COMMAND "${CMAKE_COMMAND}" ${scheduled_arguments}
+  "-Dwork_dir=${CMAKE_CURRENT_BINARY_DIR}/scheduled-errors"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduledArguments.cmake")
+set_tests_properties(lua_scheduled_smoke lua_scheduled_arguments
+  PROPERTIES LABELS "runtime;benchmark" TIMEOUT 60)
+
 set(parallel_arguments
   "-Dupstream=$<TARGET_FILE:parallel_upstream>" "-Dluthr=$<TARGET_FILE:parallel_luthr>"
   "-Dlibrary=$<TARGET_FILE:luthr_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"
