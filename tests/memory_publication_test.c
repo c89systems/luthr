@@ -419,24 +419,47 @@ static int exhausted(lua_State *state) {
 static void totals(void) {
   struct allocator allocator = {0};
   lua_State *state = lua_newstate(allocate, &allocator, 0);
+  void *block;
+  size_t before, populated;
   int i;
   require(state != NULL && lua_checkstack(state, 80));
-  require(counted(state) == allocator.live);
+  require(counted(state) <= allocator.live);
+  lua_gc(state, LUA_GCSTOP);
+  before = counted(state);
+  luaX_lockstate(state);
+  block = luaM_malloc_(state, 17, 0);
+  luaX_unlockstate(state);
+  require(counted(state) == before + 17);
+  luaX_lockstate(state);
+  block = luaM_realloc_(state, block, 17, 19);
+  require(block != NULL);
+  luaX_unlockstate(state);
+  require(counted(state) == before + 19);
+  luaX_lockstate(state);
+  block = luaM_realloc_(state, block, 19, 100000);
+  require(block != NULL);
+  luaX_unlockstate(state);
+  require(counted(state) == before + 100000);
+  luaX_lockstate(state);
+  luaM_free_(state, block, 100000);
+  luaX_unlockstate(state);
+  require(counted(state) == before);
   for (i = 0; i < 64; i++) {
     lua_createtable(state, 2, 0);
     lua_pushinteger(state, i);
     lua_rawseti(state, -2, 1);
   }
-  require(counted(state) == allocator.live);
+  populated = counted(state);
+  require(populated > before && populated <= allocator.live);
   lua_settop(state, 0);
   lua_pushcfunction(state, exhausted);
   allocator.deny = 1;
   require(lua_pcall(state, 0, 1, 0) == LUA_ERRMEM && allocator.failures != 0);
   allocator.deny = 0;
-  require(counted(state) == allocator.live);
+  require(counted(state) <= allocator.live);
   lua_settop(state, 0);
   lua_gc(state, LUA_GCCOLLECT);
-  require(counted(state) == allocator.live);
+  require(counted(state) < populated && counted(state) <= allocator.live);
   lua_close(state);
   require(allocator.live == 0);
 }
@@ -529,7 +552,7 @@ static void allocation_cache(void) {
     luaM_free_(state, blocks[i], 512);
   luaX_unlockstate(state);
   lua_gc(state, LUA_GCCOLLECT);
-  require(allocator.live < peak && counted(state) == allocator.live);
+  require(allocator.live < peak && counted(state) <= allocator.live);
   lua_close(state);
   require(allocator.live == 0);
 }

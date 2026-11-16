@@ -253,7 +253,19 @@ static void *run(void *context) {
     lua_getglobal(state, "math");
     lua_getfield(state, -1, "random");
     lua_remove(state, -2);
-    lua_pushliteral(state, "invalid random bound");
+    /* A long public type name requires backing storage to format the error;
+     * a short diagnostic can be satisfied by already allocated pages. */
+    (void)lua_newuserdatauv(state, 1, 0);
+    lua_newtable(state);
+    {
+      char *name = malloc(8192);
+      require(name != NULL);
+      memset(name, 'x', 8192);
+      lua_pushlstring(state, name, 8192);
+      free(name);
+    }
+    lua_setfield(state, -2, "__name");
+    lua_setmetatable(state, -2);
     (void)lua_gc(state, LUA_GCSTOP); /* Keep the already warmed call frames. */
     test->deny = 1;
     require(lua_pcall(state, 1, 1, 0) == LUA_ERRMEM);

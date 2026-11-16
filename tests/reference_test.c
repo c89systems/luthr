@@ -174,6 +174,14 @@ static void *run(void *context) {
   }
   if (strstr(test->mode, "oom")) {
     lua_State *child = test->children[0];
+    /* Fill a large reference table so the next insertion requires backing
+     * storage even when small allocations can reuse existing pages. */
+    lua_createtable(child, 4096, 0);
+    for (int key = 1; key <= 4096; ++key) {
+      lua_pushinteger(child, key == 1 ? 0 : key);
+      lua_rawseti(child, -2, key);
+    }
+    lua_setglobal(child, "references");
     lua_settop(child, 0);
     lua_pushcfunction(child, once);
     lua_getglobal(child, "references");

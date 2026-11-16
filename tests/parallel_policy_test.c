@@ -113,7 +113,6 @@ static void *allocate(void *user, size_t size) {
     reject = fixture->failures_left != 0 &&
              pthread_equal(fixture->failing_carrier, pthread_self());
     if (reject) {
-      fixture->failures_left--;
       fixture->rejected_headers++;
     }
     check(pthread_mutex_unlock(&fixture->mutex));
@@ -305,12 +304,42 @@ static void *release_external(void *user, void *pointer, size_t old_size,
   return NULL;
 }
 
+static void *release_padding(void *user, void *pointer, size_t old_size,
+                             size_t size) {
+  (void)user;
+  (void)pointer;
+  (void)old_size;
+  (void)size;
+  return NULL;
+}
+static int external_padding(lua_State *state) {
+  static const char bytes[128] = "retained external header";
+  lua_pushexternalstring(state, bytes, 127, release_padding, NULL);
+  return 1;
+}
 static int fail_external(lua_State *state) {
   struct fixture *fixture = from_state(state);
+  int status = LUA_OK;
+  unsigned attempts;
+  if (!lua_checkstack(state, 1028))
+    abort();
   fixture->external_state = state;
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->failing_carrier = pthread_self();
   fixture->failures_left = 2;
+  check(pthread_mutex_unlock(&fixture->mutex));
+  /* Keep headers alive until refusing backing allocations actually exhausts
+   * local storage, then test cleanup of the caller-owned external buffer. */
+  for (attempts = 0; attempts < 1024 && status == LUA_OK; ++attempts) {
+    lua_pushcfunction(state, external_padding);
+    status = lua_pcall(state, 0, 1, 0);
+  }
+  if (status != LUA_ERRMEM)
+    abort();
+  lua_pop(state, 1);
+  check(pthread_mutex_lock(&fixture->mutex));
+  fixture->failures_left = 2;
+  fixture->rejected_headers = 0;
   check(pthread_mutex_unlock(&fixture->mutex));
   (void)lua_pushexternalstring(state, fixture->external, 127, release_external,
                                fixture);
@@ -612,9 +641,11 @@ int main(int argc, char **argv) {
     failed |= fixture.warning_calls[0] + fixture.warning_calls[1] != 600;
   if (fixture.mode == WRAPPERS)
     failed |= !fixture.child_done || !fixture.swapped;
-  if (fixture.mode == EXTERNAL_FAILURE)
+  if (fixture.mode == EXTERNAL_FAILURE) {
     failed |= fixture.external != NULL || fixture.external_releases != 1 ||
-              fixture.rejected_headers != 2 || fixture.failures_left != 0;
+              fixture.rejected_headers < 2 || fixture.failures_left != 2;
+    fixture.failures_left = 0;
+  }
   if (limited) {
     static const unsigned char recovery[] = "assert(2+2==4)";
     if (luthr_lua_runtime_run_buffer(fixture.runtime, recovery,

@@ -597,6 +597,12 @@ static void init_task(struct pool *pool, struct task *task, int id,
   task->run = run;
   check(test_fiber_create(&task->fiber, task_entry, task));
   init_execution(task);
+  if (pool->budget || (pool->trace && id != 2 && id != 5)) {
+    task->fiber.execution.policy =
+        G(task->state)
+            ->policy_factory(task->state, NULL, G(task->state)->policy_context);
+    require(task->fiber.execution.policy != NULL);
+  }
   if (run == NULL)
     require(luaTK_admit(task->state, &task->root, &task->fiber.execution) ==
             LUA_OK);
@@ -608,6 +614,14 @@ static void collect_task(struct task *task) {
             LUA_OK);
     require(status == task->status && results == task->results);
     lua_pop(task->pool->main, results);
+  }
+  if (task->fiber.execution.policy != NULL) {
+    luaX_lockstate(task->pool->main);
+    __atomic_store_n(&task->fiber.execution.policy->active, 0,
+                     __ATOMIC_RELEASE);
+    luaCP_release(task->pool->main, task->fiber.execution.policy);
+    task->fiber.execution.policy = NULL;
+    luaX_unlockstate(task->pool->main);
   }
 }
 static void resource_body(lua_State *state, void *argument) {
@@ -1159,7 +1173,9 @@ static int exercise_callback(const char *name) {
   free(test);
   return 0;
 }
-enum { STREAM_CHUNKS = 1024, STREAM_HEAP_LIMIT = 128 * 1024 };
+/* Include coroutine/control metadata while staying well below the 1 MiB
+ * transported payload. The pipe's retained bytes are checked separately. */
+enum { STREAM_CHUNKS = 1024, STREAM_HEAP_LIMIT = 256 * 1024 };
 static void *stream_allocate(void *context, void *old, size_t old_size,
                              size_t size) {
   struct pool *pool = context;
@@ -1422,6 +1438,13 @@ static int exercise_stream(const char *name) {
       *payload = 12345U;
     }
     init_task(pool, task, id, run_stream_task);
+    if (facade) {
+      task->fiber.execution.policy =
+          G(task->state)
+              ->policy_factory(task->state, NULL,
+                               G(task->state)->policy_context);
+      require(task->fiber.execution.policy != NULL);
+    }
     require(luaTK_admit(task->state, &task->root, &task->fiber.execution) ==
             LUA_OK);
   }
@@ -1452,8 +1475,9 @@ static int exercise_stream(const char *name) {
     for (id = 3; id < 3 + consumers; ++id) {
       submit(pool, id);
       lock(pool);
-      while (!pool->tasks[id].published)
+      while (!pool->tasks[id].published && !pool->tasks[id].finished)
         wait_change(pool);
+      require(pool->tasks[id].published);
       unlock(pool);
     }
   }
@@ -3192,10 +3216,6 @@ int main(int argc, char **argv) {
   if (pool->budget) {
     require(luthr_lua_runtime_set_instruction_limit(pool->runtime, 60000) ==
             LUTHR_LUA_RUNTIME_OK);
-    /* The facade owns invocation boundaries and resets the shared budget. */
-    require(luthr_lua_runtime_run_buffer(pool->runtime, capture,
-                                         sizeof(capture) - 1, "budget-start", 0,
-                                         NULL, 0) == LUTHR_LUA_RUNTIME_OK);
   }
   if (pool->trace)
     require(luthr_lua_runtime_set_trace_callback(pool->runtime, observe,

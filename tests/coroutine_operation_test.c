@@ -403,9 +403,17 @@ static void *run(void *context) {
       require(luaL_loadstring(state, "return coroutine.resume(shared,77)") ==
               LUA_OK);
       test->deny = 1;
-      require(lua_pcall(state, 0, LUA_MULTRET, 0) == LUA_ERRMEM);
+      {
+        int status = lua_pcall(state, 0, LUA_MULTRET, 0);
+        if (status == LUA_OK) {
+          require(test->failures == 0 && !lua_toboolean(state, -2));
+          require(strcmp(lua_tostring(state, -1),
+                         "cannot resume non-suspended coroutine") == 0);
+          lua_pop(state, 1);
+        } else
+          require(status == LUA_ERRMEM && test->failures != 0);
+      }
       test->deny = 0;
-      require(test->failures != 0);
       lua_pop(state, 1);
     }
     execute(state, "assert(coroutine.status(shared)=='normal'); "

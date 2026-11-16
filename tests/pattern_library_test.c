@@ -380,15 +380,22 @@ static void oom(struct fixture *test) {
   unsigned index, kind;
   execute(state, "string.gmatch('a','a')()");
   for (index = 0; index < 2; ++index) {
-    function(state, "gmatch");
-    lua_pushliteral(state, "a");
-    lua_pushliteral(state, "a");
+    unsigned attempts;
+    int top = lua_gettop(state), status = LUA_OK;
+    require(lua_checkstack(state, 1028));
     test->remaining = index;
     test->deny = 1;
-    require(lua_pcall(state, 2, 1, 0) == LUA_ERRMEM);
+    /* Retain successful iterators until local pages need a backing refill. */
+    for (attempts = 0; attempts < 1024 && status == LUA_OK; ++attempts) {
+      function(state, "gmatch");
+      lua_pushliteral(state, "a");
+      lua_pushliteral(state, "a");
+      status = lua_pcall(state, 2, 1, 0);
+    }
     test->deny = 0;
+    require(status == LUA_ERRMEM);
     require(test->failures != 0 && state->native_roots == NULL);
-    lua_pop(state, 1);
+    lua_settop(state, top);
     (void)lua_gc(state, LUA_GCCOLLECT);
   }
   execute(state, "text=string.rep('a',8194)");

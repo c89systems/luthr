@@ -176,7 +176,6 @@ void luaM_reclaimpages (lua_State *L) {
     if (__atomic_load_n(&page->live, __ATOMIC_RELAXED) == 0) {
       *link = page->next;
       callfrealloc(g, page, ALLOC_PAGE_BYTES, 0);
-      account(L, ALLOC_PAGE_BYTES);
     }
     else {
       if (__atomic_load_n(&page->free, __ATOMIC_RELAXED) != NULL) {
@@ -282,9 +281,9 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
   else {
     luaW_heapenter(L);
     callfrealloc(G(L), allocation, osize + sizeof(LuaAllocBlock), 0);
-    account(L, cast(l_mem, osize + sizeof(LuaAllocBlock)));
     luaW_heapleave(L);
   }
+  account(L, cast(l_mem, osize));
 }
 
 
@@ -341,7 +340,6 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin) {
       }
       page->next = g->allocation_pages;
       g->allocation_pages = page;
-      account(L, -ALLOC_PAGE_BYTES);
     }
   }
  ready:
@@ -362,6 +360,7 @@ static void *allocateblock (lua_State *L, size_t size, int tag) {
         block = takeblock(page);
         lua_assert(block != NULL);
       }
+      account(L, -cast(l_mem, size));
       return block + 1;
     }
   }
@@ -376,7 +375,7 @@ static void *allocateblock (lua_State *L, size_t size, int tag) {
       block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
     if (block != NULL) {
       block->block.page = NULL;
-      account(L, -cast(l_mem, bytes));
+      account(L, -cast(l_mem, size));
     }
     luaW_heapleave(L);
     return block != NULL ? block + 1 : NULL;
@@ -397,8 +396,10 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   }
   allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
   if (allocation != NULL && allocation->block.page != NULL &&
-      nsize <= binbytes(allocation->block.page->bin))
+      nsize <= binbytes(allocation->block.page->bin)) {
+    account(L, cast(l_mem, osize) - cast(l_mem, nsize));
     return block;
+  }
   if (allocation != NULL && allocation->block.page == NULL &&
       nsize > binbytes(LUA_ALLOC_BINS - 1)) {
     global_State *g = G(L);

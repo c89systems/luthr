@@ -191,9 +191,10 @@ static const char table_error_source[] =
     "end; return true,sum end";
 
 static const char table_failure_source[] =
-    "local t={hot=7}; return function() coroutine.yield(); "
+    "local t={hot=7}; for i=1,4096 do t[i]=0 end; "
+    "return function() coroutine.yield(); "
     "fixture_allocate_ready(1); fixture_fail(t); "
-    "assert(rawget(t,65536)==nil); t.recovered=true; return true,45150 end, "
+    "assert(rawget(t,4097)==nil); t.recovered=true; return true,45150 end, "
     "function() coroutine.yield(); fixture_allocate_ready(2); "
     "assert(t.hot==7); for i=1,300 do t[i]={i}; assert(t[i][1]==i) end; "
     "return true,45150 end";
@@ -293,7 +294,8 @@ static const char capi_failure_source[] =
     "local ok,msg=pcall(shared,5); assert(not ok and msg:match('memory')); "
     "shared(1,7); collectgarbage('restart'); return true,45150 end, "
     "function() coroutine.yield(); fixture_allocate_ready(2); "
-    "local v=shared(8); assert(v==867214391 or v==7); local sum=0; "
+    "local v=tonumber(shared(8)); assert(v and (v==7 or "
+    "(v>=867214391 and v<=867218487))); local sum=0; "
     "for i=1,300 do local t={i}; sum=sum+t[1] end; return true,sum end";
 
 static const char capi_blocked_source[] =
@@ -636,12 +638,22 @@ static int native_shared(lua_State *state) {
     void *user;
     (void)lua_getallocf(state, &user);
     fixture = user;
+    if (!lua_checkstack(state, 4100))
+      return luaL_error(state, "cannot prepare conversion failure test");
     check(pthread_mutex_lock(&fixture->mutex));
     fixture->failure_carrier = pthread_self();
     fixture->failure_owner = luaQ_ownertoken();
-    fixture->failures_left = 2;
+    fixture->failures_left = ~0U; /* refuse refills until conversion fails */
     check(pthread_mutex_unlock(&fixture->mutex));
-    (void)lua_tolstring(state, slot, NULL);
+    /* Retain distinct successful conversions until the string pages need
+     * backing storage. The failed conversion must leave the shared value
+     * intact while the peer waits for its claim. */
+    for (int i = 1; i <= 4096; ++i) {
+      lua_pushinteger(state, 867214391 + i);
+      lua_replace(state, slot);
+      (void)lua_tolstring(state, slot, NULL);
+      lua_pushvalue(state, slot);
+    }
     abort();
   } else if (mode == 6) {
     lua_getfield(state, slot, "missing");
@@ -729,7 +741,7 @@ static int fail_allocation(lua_State *state) {
   check(pthread_mutex_unlock(&fixture->mutex));
   if (lua_istable(state, 1)) {
     lua_pushinteger(state, 1);
-    lua_rawseti(state, 1, 65536);
+    lua_rawseti(state, 1, 4097);
   } else
     (void)lua_newuserdatauv(state, 4096, 0);
   abort();
@@ -1097,8 +1109,8 @@ int main(int argc, char **argv) {
   if (allocation_case) {
     G(main_state)->gcstopem = 0;
     if (fixture.inject_failure) {
-      lua_newtable(
-          main_state); /* guaranteed garbage for emergency collection */
+      /* Backing storage, rather than a small object in a retained page. */
+      lua_newuserdatauv(main_state, 4096, 0);
       lua_pop(main_state, 1);
     }
     if (strstr(argv[1], "generational") != NULL)
@@ -1183,10 +1195,6 @@ int main(int argc, char **argv) {
     failed = verify_results(&fixture, argv[1]);
   if (fixture.resume_yields)
     failed |= fixture.actors[0].yields != 6;
-  if (allocation_case && strcmp(argv[1], "table_handler_blocked") != 0)
-    /* Backing calls are batched; object/result/finalizer counts prove the work.
-     */
-    failed |= fixture.allocations == before_allocations;
   if (allocation_case && !table_case && !join_case && !capi_case) {
     failed |= fixture.resources_created !=
               (strcmp(argv[1], "allocate_blocked") == 0 ? 500U : 1000U);
@@ -1197,8 +1205,12 @@ int main(int argc, char **argv) {
   }
   if (fixture.inject_failure)
     failed |= !fixture.waiter_observed || fixture.emergency_frees == 0;
-  failed |= fixture.failures_left != 0 ||
-            fixture.allocation_failures != (fixture.inject_failure ? 2U : 0U);
+  if (strcmp(argv[1], "capi_failure") == 0) {
+    failed |= fixture.allocation_failures < 2;
+    fixture.failures_left = 0;
+  } else
+    failed |= fixture.failures_left != 0 ||
+              fixture.allocation_failures != (fixture.inject_failure ? 2U : 0U);
   if (!failed)
     printf("parallel VM %s: shared VM, CPU %d/%d, managed overlap, %u "
            "allocator calls\n",

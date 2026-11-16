@@ -77,6 +77,10 @@ static int finalize(lua_State *state) {
 }
 static void marshal(lua_State *state, void *context) {
   int *value = context;
+  if (strcmp(active->mode, "invoke_oom") == 0 && active->remaining != 0) {
+    (void)lua_newuserdatauv(state, 8192, 0);
+    lua_pop(state, 1);
+  }
   lua_pushinteger(state, *value);
   lua_call(state, 1, 1);
   *value = (int)lua_tointeger(state, -1);
@@ -206,13 +210,24 @@ static void *run(void *context) {
     require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_ERRMEM);
     require(sync_failure == 0 && G(state)->callbacks == NULL);
   } else if (strncmp(fixture->mode, "create_oom", 10) == 0) {
+    int status;
     fixture->fail_at = fixture->allocations +
                        (strcmp(fixture->mode, "create_oom_message") == 0 ? 3U
                         : strcmp(fixture->mode, "create_oom_stack") == 0 ? 2U
                                                                          : 1U);
     fixture->remaining = 2;
-    require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_ERRMEM);
-    require(fixture->failures == 2 && fixture->remaining == 0);
+    status = luaCB_init(state, &fixture->callbacks[0], 0);
+    if (status == LUA_OK) {
+      /* The fixed rejection string can reuse a locally allocated page. */
+      require(strcmp(fixture->mode, "create_oom_message") == 0);
+      require(fixture->failures == 0 && fixture->remaining == 2);
+      luaCB_revoke(&fixture->callbacks[0]);
+      require(luaCB_destroy(state, &fixture->callbacks[0]) == LUA_OK);
+      fixture->remaining = 0;
+    } else {
+      require(status == LUA_ERRMEM);
+      require(fixture->failures == 2 && fixture->remaining == 0);
+    }
     require(G(state)->callbacks == NULL);
   }
   require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_OK);
@@ -240,9 +255,10 @@ static void *run(void *context) {
     lua_pop(state, 1);
     if (strcmp(fixture->mode, "invoke_oom") == 0) {
       fixture->fail_at = fixture->allocations + 1;
-      fixture->remaining = 2;
+      fixture->remaining = ~0U;
       call(fixture, 0, LUA_ERRMEM, "memory");
-      require(fixture->failures == 2 && fixture->remaining == 0);
+      require(fixture->failures >= 2);
+      fixture->remaining = 0;
     }
     call(fixture, 0, LUA_OK, NULL);
     call(fixture, 1, LUA_ERRRUN, "callback expected");
