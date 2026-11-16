@@ -47,6 +47,8 @@ LUAI_FUNC const char *luaG_findlocal (lua_State *L, CallInfo *ci, int n,
                                                     StkId *pos);
 LUAI_FUNC l_noret luaG_typeerror (lua_State *L, const TValue *o,
                                                 const char *opname);
+LUAI_FUNC l_noret luaG_upvaltypeerror (lua_State *L, const TValue *o,
+                                      int upvalue, const char *opname);
 LUAI_FUNC l_noret luaG_callerror (lua_State *L, const TValue *o);
 LUAI_FUNC l_noret luaG_forerror (lua_State *L, const TValue *o,
                                                const char *what);

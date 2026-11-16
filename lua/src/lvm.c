@@ -290,9 +290,10 @@ static int floatforloop (lua_State *L, StkId ra) {
 
 /*
 ** Finish the table access 'val = t[key]' and return the tag of the result.
+** 'upvalue' is the captured receiver's slot plus one, or zero for other sources.
 */
-lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
-                                      StkId val, lu_byte tag) {
+static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
+                          StkId val, lu_byte tag, unsigned upvalue) {
   LuaNativeRoot object, rooted_key, method;
   int loop;
   luaR_pushroot(L, &object);
@@ -309,8 +310,13 @@ lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
     }
     else {
       luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
-      if (ttisnil(&method.value))
-        luaG_typeerror(L, &object.value, "index");
+      if (ttisnil(&method.value)) {
+        if (loop == 0 && upvalue != 0)
+          luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");
+        /* The first receiver still names its live register/upvalue. Later
+        ** receivers are metamethod snapshots, with no such source identity. */
+        luaG_typeerror(L, loop == 0 ? t : &object.value, "index");
+      }
     }
     if (ttisfunction(&method.value)) {
       tag = luaT_callTMres(L, &method.value, &object.value,
@@ -327,14 +333,19 @@ lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
   return tag;
 }
 
+lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
+                        StkId val, lu_byte tag) {
+  return finishget(L, t, key, val, tag, 0);
+}
+
 
 /*
 ** Finish a table assignment 't[key] = val'.
 ** Recheck the key and metamethod together under object ownership. No slot
 ** from an earlier fast-path miss survives an ownership boundary.
 */
-void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
-                      TValue *val, int hres) {
+static void finishset (lua_State *L, const TValue *t, TValue *key,
+                        TValue *val, int hres, unsigned upvalue) {
   LuaNativeRoot object, rooted_key, value, method;
   int loop;
   UNUSED(hres);
@@ -353,8 +364,11 @@ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
     }
     else {
       luaT_gettmbyobj(L, &object.value, TM_NEWINDEX, &method);
-      if (ttisnil(&method.value))
-        luaG_typeerror(L, &object.value, "index");
+      if (ttisnil(&method.value)) {
+        if (loop == 0 && upvalue != 0)
+          luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");
+        luaG_typeerror(L, loop == 0 ? t : &object.value, "index");
+      }
     }
     if (ttisfunction(&method.value)) {
       luaT_callTM(L, &method.value, &object.value, &rooted_key.value, &value.value);
@@ -368,6 +382,11 @@ void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
   luaR_poproot(L, &value);
   luaR_poproot(L, &rooted_key);
   luaR_poproot(L, &object);
+}
+
+void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
+                     TValue *val, int hres) {
+  finishset(L, t, key, val, hres, 0);
 }
 
 
@@ -1339,7 +1358,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         ra = RA(i);
         luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
         if (tagisempty(tag))
-          Protect(luaV_finishget(L, upval, rc, ra, tag));
+          Protect(finishget(L, upval, rc, ra, tag, GETARG_B(i) + 1u));
         luaR_poproot(L, &snapshot);
         vmbreak;
       }
@@ -1395,7 +1414,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         rc = RKC(i);
         luaV_fastset(upval, key, rc, hres, luaH_psetshortstr);
         if (hres != HOK)
-          Protect(luaV_finishset(L, upval, rb, rc, hres));
+          Protect(finishset(L, upval, rb, rc, hres, GETARG_A(i) + 1u));
         luaR_poproot(L, &snapshot);
         vmbreak;
       }

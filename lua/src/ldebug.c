@@ -759,6 +759,15 @@ l_noret luaG_typeerror (lua_State *L, const TValue *o, const char *op) {
   typeerror(L, o, op, varinfo(L, o));
 }
 
+/* Captured-value snapshots have identity by slot, not by a borrowed address. */
+l_noret luaG_upvaltypeerror (lua_State *L, const TValue *o, int upvalue,
+                            const char *op) {
+  const char *name;
+  lua_assert(isLua(L->ci));
+  name = upvalname(ci_func(L->ci)->p, upvalue);
+  typeerror(L, o, op, formatvarinfo(L, strupval, name));
+}
+
 
 /*
 ** Raise an error for calling a non-callable object. Try to find a name
