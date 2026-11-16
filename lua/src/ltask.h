@@ -24,6 +24,7 @@ typedef struct LuaTaskRoot {
   int results;
   int stop_requested;  /* atomic, sticky until the record is retired */
   int stop_delivered;  /* atomic diagnostic, not completion acknowledgment */
+  int shutdown_notified;  /* world mutex; claims at most one shutdown notice */
 } LuaTaskRoot;
 
 /* The record and execution are initially zeroed and outlive all entered calls,
@@ -59,6 +60,14 @@ LUAI_FUNC int luaTK_await (lua_State *L, LuaTaskRoot *task,
 ** repeated requests are idempotent. No state gate, allocation or native join.
 ** Owned registered waits are notified; this never acknowledges native completion. */
 LUAI_FUNC int luaTK_requeststop (LuaTaskRoot *task);
+/* Private, irreversible VM task-admission gate. Requests stop for every
+** admitted/running task, then notifies owned waits without retaining the world
+** mutex across resource locks. No state gate, allocation, task join, or result
+** discard. PENDING means task roots still exist, including finished outcomes;
+** OK means all admitted outcomes have been collected. Repeated/concurrent
+** callers may cooperate on notices. Neither result joins other entered calls:
+** the VM and task records must still outlive every operation using them. */
+LUAI_FUNC int luaTK_shutdown (struct global_State *global);
 /* State ownership and the current protected execution boundary are required.
 ** Delivery uses a fixed error, bypassing message handlers. Finishing/close
 ** cleanup is exempt. Other VMs entered by a native caller remain opaque work.

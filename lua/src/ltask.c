@@ -8,6 +8,17 @@
 #include "lgc.h"
 #include "ltask.h"
 
+static void notifywait (LuaWorld *world, LuaStopWait *wait) {
+  if (wait == NULL) return;
+  luaQ_interrupt(wait);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(wait->observers != 0);
+  if (--wait->observers == 0)
+    luaQ_wake(&world->changed, &world->waiters);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  /* No access to wait after its final borrow is published. */
+}
+
 int luaTK_requeststop (LuaTaskRoot *task) {
   LuaWorld *world;
   LuaStopWait *wait = NULL;
@@ -22,15 +33,37 @@ int luaTK_requeststop (LuaTaskRoot *task) {
     status = LUA_OK;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  if (wait != NULL) {
-    luaQ_interrupt(wait);
-    luaX_checksync(pthread_mutex_lock(&world->mutex));
-    lua_assert(wait->observers != 0);
-    if (--wait->observers == 0)
-      luaQ_wake(&world->changed, &world->waiters);
+  notifywait(world, wait);
+  return status;
+}
+
+int luaTK_shutdown (global_State *global) {
+  LuaWorld *world = &global->world;
+  LuaTaskRoot *task;
+  int status;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  global->task_admission_closed = 1;
+  for (task = global->tasks; task != NULL; task = task->next)
+    if (task->phase == LUA_TASK_ADMITTED || task->phase == LUA_TASK_RUNNING)
+      __atomic_store_n(&task->stop_requested, 1, __ATOMIC_RELEASE);
+  for (;;) {
+    LuaStopWait *wait = NULL;
+    for (task = global->tasks; task != NULL; task = task->next)
+      if (!task->shutdown_notified && task->stop_wait != NULL) {
+        task->shutdown_notified = 1;
+        wait = task->stop_wait;
+        wait->observers++;
+        break;
+      }
+    if (wait == NULL) break;
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
-    /* No access to wait after its final borrow is published. */
+    notifywait(world, wait);
+    /* Collection can retire any record while the world is unlocked. Rescan
+    ** from the root, never from a previously borrowed task/list link. */
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
   }
+  status = global->tasks == NULL ? LUA_OK : LUA_TK_PENDING;
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
   return status;
 }
 
@@ -94,7 +127,8 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
     return status;
   lua_lock(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  if (L != mainthread(G(L)) && L->task_owner == NULL &&
+  if (!G(L)->task_admission_closed &&
+      L != mainthread(G(L)) && L->task_owner == NULL &&
       L->callback_owner == NULL && L->operation == NULL &&
       L->owned_operations == 0 && L->resume_active == 0 && L->close_active == 0 &&
       (L->status == LUA_YIELD ||

@@ -371,6 +371,7 @@ typedef struct global_State {
   CClosure *managed_functions;  /* stable identities for zero-capture code */
   struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
   struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
+  int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   TString *operation_error;
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */

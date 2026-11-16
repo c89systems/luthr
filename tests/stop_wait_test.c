@@ -206,7 +206,11 @@ static void *run_actor(void *context) {
             test->tasks[0].phase == LUA_TASK_ADMITTED);
   }
   test->status[id] = luaTK_resume(&test->tasks[id], 0, &test->results[id]);
-  require(test->status[id] == (id == 0 ? LUA_ERRRUN : LUA_OK));
+  require(test->status[id] ==
+          (id == 0 || __atomic_load_n(&test->tasks[id].stop_requested,
+                                      __ATOMIC_ACQUIRE)
+               ? LUA_ERRRUN
+               : LUA_OK));
   if (id == 0 && strstr(test->mode, "oom")) {
     lock(test);
     test->returned = 1;
@@ -225,7 +229,10 @@ static void *run_actor(void *context) {
 }
 static void *request(void *context) {
   struct fixture *test = context;
-  require(luaTK_requeststop(&test->tasks[0]) == LUA_OK);
+  if (strstr(test->mode, "shutdown"))
+    require(luaTK_shutdown(G(test->main)) == LUA_TK_PENDING);
+  else
+    require(luaTK_requeststop(&test->tasks[0]) == LUA_OK);
   return NULL;
 }
 static void gc(struct fixture *test) {
@@ -257,6 +264,8 @@ static void *run(void *context) {
   int denial = strstr(test->mode, "oom") != NULL;
   int pin = strstr(test->mode, "pinned") != NULL;
   int cleaning = strstr(test->mode, "cleanup") != NULL;
+  int shutdown = strstr(test->mode, "shutdown") != NULL;
+  int target_collected = 0;
   lua_State *state;
   require(pthread_mutex_init(&test->mutex, NULL) == 0);
   require(pthread_cond_init(&test->changed, NULL) == 0);
@@ -354,6 +363,14 @@ static void *run(void *context) {
     while (!test->notify_entered)
       waitfor(test);
     unlock(test);
+    if (shutdown) {
+      /* Retire a different root while shutdown owns a borrowed wait notice.
+       * A second control caller must not duplicate that notice or join it. */
+      run_actor(&actors[2]);
+      collect(test, 2, 1);
+      target_collected = 1;
+      require(luaTK_shutdown(G(state)) == LUA_TK_PENDING);
+    }
     if (strstr(test->mode, "repeat"))
       require(luaTK_requeststop(&test->tasks[0]) == LUA_OK);
     if (strstr(test->mode, "finalize"))
@@ -376,7 +393,7 @@ static void *run(void *context) {
     unlock(test);
     require(pthread_join(requester, NULL) == 0);
   } else {
-    require(luaTK_requeststop(&test->tasks[0]) == LUA_OK);
+    request(test);
     if (prestop) {
       lock(test);
       test->before_release = 1;
@@ -423,18 +440,25 @@ static void *run(void *context) {
   collect(test, 0, 1);
   require(luaTK_requeststop(&test->tasks[0]) == LUA_TK_INVALID);
   if (paired) {
-    require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
-    require(test->tasks[1].stop_wait != NULL);
-    require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
-    execute(state, "q:send('peer')");
+    if (!shutdown) {
+      require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
+      require(test->tasks[1].stop_wait != NULL);
+      require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
+      execute(state, "q:send('peer')");
+    }
     require(pthread_join(peer, NULL) == 0);
-    collect(test, 1, 0);
+    collect(test, 1, shutdown);
   }
   if (awaiting) {
-    require(!__atomic_load_n(&test->tasks[2].stop_requested, __ATOMIC_ACQUIRE));
+    require(__atomic_load_n(&test->tasks[2].stop_requested, __ATOMIC_ACQUIRE) ==
+            shutdown);
   }
-  run_actor(&actors[2]);
-  collect(test, 2, 0);
+  if (!target_collected) {
+    run_actor(&actors[2]);
+    collect(test, 2, shutdown);
+  }
+  if (shutdown)
+    require(luaTK_shutdown(G(state)) == LUA_OK);
   if (strstr(test->mode, "finalize"))
     execute(
         state,

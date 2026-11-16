@@ -1432,8 +1432,8 @@ Lua loop after delivery to prove the finishing exemption.
 
 Generic lock/ticket waits remain noninterruptible: throwing out of that bookkeeping
 would be incorrect. The owned-wait gate below adds notification and retirement
-for pipe and result waits. Deadlines, admission shutdown and public outcome policy
-remain unproven. This experiment does not narrow those required gates.
+for pipe and result waits. The private admission-shutdown gate is described below;
+deadlines and public outcome policy remain unproven.
 
 ## Interruptible owned waits
 
@@ -1479,8 +1479,46 @@ target still returns its original result. Raw/C89, both collectors and moving
 allocators include GC while those retained stacks are parked.
 
 These are private feasibility interfaces. General resource affinity, other
-blocking resources, deadlines, admission shutdown and the public cancellation
-contract still require their acceptance gates.
+blocking resources, deadlines and the public cancellation contract still require
+their acceptance gates.
+
+## Private admission shutdown
+
+`luaTK_shutdown` irreversibly closes the VM's private task-admission gate and
+latches stop requests for all admitted/running tasks under the same world mutex
+used to publish admission. An admission racing shutdown either publishes a rooted
+task that receives the request or fails without acquiring ownership. Rejected
+fresh/yielded coroutines remain available to their original embedding owner.
+Ordinary embedding calls remain available for cleanup and outcome collection.
+
+Shutdown notifies existing owned waits using the same borrowed registrations as
+single-task stop. A per-record claim prevents concurrent shutdown callers from
+duplicating that notice. The world mutex is released before resource locking;
+after notification, traversal restarts at the live root list because collection
+can retire a different record during that interval. New owned waits observe the
+sticky stop before publishing. Shutdown allocates no storage and takes no state
+gate, native join or result ownership.
+
+The private return value is `LUA_TK_PENDING` while any task root remains,
+including returned tasks, active cleanup and finished but uncollected outcomes.
+`LUA_OK` means all admitted outcomes have been collected. Neither value joins
+concurrent API calls or grants permission to destroy a VM still in use: the
+existing caller-owned record/VM lifetime contract applies. No native activation
+is killed, no result discarded and no pipe automatically closed. Native work
+that never returns keeps its task pending indefinitely; process termination
+remains an embedding decision.
+
+`task_shutdown_*` adds admission-before/after/racing closure, shutdown while a
+state gate is retained by another owner, empty shutdown, allocation denial,
+pre-start/yielded tasks, CPU/parser polls, opaque native calls and callbacks,
+late normal results and finishing cleanup. `wait_shutdown_*` adds simultaneous
+waiters, a stopped dependency and collection during a paused notice, including a
+second concurrent shutdown caller. `native_scheduler_shutdown_*` retains two
+unchanged blocking native bindings on four reused carriers while other owned
+waits stop and migrate. Native owners remain uncollectible until explicitly
+released, and the peer outcome completed before shutdown remains unchanged.
+Raw/C89 backends, both collectors and moving-allocation variants exercise the
+same gates. Public shutdown policy, deadlines and scheduler sizing remain open.
 
 ## Lua-specific proof obligations
 

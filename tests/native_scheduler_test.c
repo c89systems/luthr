@@ -2522,6 +2522,7 @@ static int exercise_stop_wait(const char *name) {
       awaiting = strstr(name, "await") != NULL || driver;
   int early = strstr(name, "early") != NULL,
       moving = strstr(name, "movealloc") != NULL;
+  int shutdown = strstr(name, "shutdown") != NULL;
   require(pool != NULL);
   fixture = pool;
   pool->managed_limit = 2;
@@ -2630,8 +2631,12 @@ static int exercise_stop_wait(const char *name) {
   unlock(pool);
   lua_gc(pool->main, LUA_GCCOLLECT);
   lua_gc(pool->main, LUA_GCCOLLECT);
-  if (!early)
-    require(luaTK_requeststop(&pool->tasks[2].root) == LUA_OK);
+  if (!early) {
+    if (shutdown)
+      require(luaTK_shutdown(G(pool->main)) == LUA_TK_PENDING);
+    else
+      require(luaTK_requeststop(&pool->tasks[2].root) == LUA_OK);
+  }
   lock(pool);
   while (!pool->tasks[2].finished)
     wait_change(pool);
@@ -2654,13 +2659,25 @@ static int exercise_stop_wait(const char *name) {
     lua_pop(pool->main, 1);
   }
   require(pool->tasks[2].root.stop_wait == NULL);
-  require(
-      !__atomic_load_n(&pool->tasks[3].root.stop_requested, __ATOMIC_ACQUIRE));
+  require(__atomic_load_n(&pool->tasks[3].root.stop_requested,
+                          __ATOMIC_ACQUIRE) == shutdown);
   submit(pool, 3);
   lock(pool);
   while (!pool->tasks[3].finished)
     wait_change(pool);
   require(pool->native == 2);
+  unlock(pool);
+  if (shutdown) {
+    int status = -99, results = -99;
+    require(luaTK_shutdown(G(pool->main)) == LUA_TK_PENDING);
+    require(luaTK_collect(pool->main, &pool->tasks[0].root, &status,
+                          &results) == LUA_TK_PENDING);
+    require(status == -99 && results == -99);
+    lua_gc(pool->main, LUA_GCCOLLECT);
+    lua_gc(pool->main, LUA_GCCOLLECT);
+  }
+  lock(pool);
+  require(pool->native == 2 && !pool->release[0] && !pool->release[1]);
   pool->release[0] = pool->release[1] = 1;
   signal_change(pool);
   while (pool->done != sizeof(ids) / sizeof(ids[0]))
@@ -2678,14 +2695,21 @@ static int exercise_stop_wait(const char *name) {
       int status = -99, results = -99;
       require(luaTK_collect(pool->main, &pool->tasks[id].root, &status,
                             &results) == LUA_OK);
-      require(status == LUA_OK && results == pool->tasks[id].results);
-      if (id >= 3)
+      int stopped = shutdown && id != 6;
+      require(status == (stopped ? LUA_ERRRUN : LUA_OK) &&
+              results == pool->tasks[id].results);
+      if (stopped)
+        require(results == 1 &&
+                strcmp(lua_tostring(pool->main, -1), "task stopped") == 0);
+      else if (id >= 3)
         require(results == 1 && lua_tointeger(pool->main, -1) == 42);
       lua_pop(pool->main, results);
     }
     test_fiber_destroy(&pool->tasks[id].fiber);
   }
   require(G(pool->main)->tasks == NULL);
+  if (shutdown)
+    require(luaTK_shutdown(G(pool->main)) == LUA_OK);
   if (send) {
     require(luaL_loadstring(pool->main, "assert(q:recv()=='original')") ==
             LUA_OK);

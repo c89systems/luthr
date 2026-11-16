@@ -16,6 +16,31 @@ find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
   NO_CMAKE_FIND_ROOT_PATH REQUIRED)
 configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
+foreach(backend IN ITEMS raw facade)
+  foreach(gc IN ITEMS incremental generational)
+    foreach(case IN ITEMS prestart cpu catch xpcall native native_oom continuation callback unprotected foreign_vm oom parser parser_oom yield cleanup_error cleanup_wait request_race late
+        admission_empty admission_before admission_after admission_race admission_gate admission_oom)
+      add_test(NAME task_shutdown_${backend}_${case}_${gc}
+        COMMAND task_stop_test shutdown_${backend}_${case}_${gc})
+      set_tests_properties(task_shutdown_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 120)
+    endforeach()
+    foreach(case IN ITEMS recv send await driver pinned cleanup prestop prestop_send peer peer_head
+        oom_recv oom_send oom_await oom_driver race race_repeat race_close race_finalize)
+      add_test(NAME wait_shutdown_${backend}_${case}_${gc}
+        COMMAND stop_wait_test shutdown_${backend}_${case}_${gc})
+      set_tests_properties(wait_shutdown_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 120)
+    endforeach()
+    foreach(case IN ITEMS recv send await driver migrate_recv migrate_send migrate_await migrate_driver
+        migrate_movealloc_recv migrate_movealloc_await)
+      add_test(NAME native_scheduler_shutdown_${backend}_${case}_${gc}
+        COMMAND native_scheduler_test stop_shutdown_${backend}_${case}_${gc})
+      set_tests_properties(native_scheduler_shutdown_${backend}_${case}_${gc}
+        PROPERTIES LABELS "parallel;memcheck" TIMEOUT 180)
+    endforeach()
+  endforeach()
+endforeach()
 luthrum_test_program(stop_wait_test stop_wait_test.c)
 set_target_properties(stop_wait_test PROPERTIES C_STANDARD 99)
 target_compile_options(stop_wait_test PRIVATE -Wall -Wextra -Werror)

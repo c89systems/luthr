@@ -1,3 +1,4 @@
+#include <lapi.h>
 #include <lauxlib.h>
 #include <ldo.h>
 #include <ltask.h>
@@ -19,12 +20,13 @@ struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *main;
+  lua_State *candidate;
   luthrum_lua_runtime *runtime;
   LuaTaskRoot roots[2];
   LuaExecution executions[2];
   const char *mode;
   size_t live;
-  unsigned failures, started, closed, finalized, handlers;
+  unsigned failures, started, closed, finalized, handlers, attempts;
   int armed, entered, release, returned, finish, yielded, resume;
   int callback_request, callback_done, deny, status[2], results[2];
   int cleanup_entered, cleanup_release;
@@ -72,6 +74,8 @@ static void *allocate(void *context, void *old, size_t old_size, size_t size) {
     free(old);
     return NULL;
   }
+  if (test->deny)
+    test->attempts++;
   if (test->deny && size > old_size) {
     test->failures++;
     return NULL;
@@ -310,11 +314,112 @@ static void gc(struct fixture *test) {
   lua_gc(test->main, LUA_GCCOLLECT);
   lua_gc(test->main, LUA_GCCOLLECT);
 }
+static void request_stop(struct fixture *test) {
+  if (strstr(test->mode, "shutdown"))
+    require(luaTK_shutdown(G(test->main)) == LUA_TK_PENDING);
+  else
+    require(luaTK_requeststop(&test->roots[0]) == LUA_OK);
+}
 static void *request(void *context) {
   struct fixture *test = context;
   for (int i = 0; i < 32; ++i)
-    require(luaTK_requeststop(&test->roots[0]) == LUA_OK);
+    request_stop(test);
   return NULL;
+}
+static void *admission_actor(void *context) {
+  struct actor *actor = context;
+  struct fixture *test = actor->test;
+  lock(test);
+  test->started++;
+  notify(test);
+  while (!test->release)
+    waitfor(test);
+  unlock(test);
+  test->status[actor->index] =
+      actor->index == 0
+          ? luaTK_admit(test->candidate, &test->roots[0], &test->executions[0])
+          : luaTK_shutdown(G(test->main));
+  return NULL;
+}
+static void admission(struct fixture *test) {
+  lua_State *state = test->main, *child = lua_newthread(state), *yielded;
+  int results = -99, status = -99, accepted;
+  int before = strstr(test->mode, "before") != NULL;
+  int race = strstr(test->mode, "race") != NULL;
+  int gate = strstr(test->mode, "gate") != NULL;
+  int denial = strstr(test->mode, "oom") != NULL;
+  struct actor actors[2] = {{test, 0}, {test, 1}};
+  pthread_t threads[2];
+  require(luaL_loadstring(child, "return 42") == LUA_OK);
+  test->candidate = child;
+  yielded = lua_newthread(state);
+  require(luaL_loadstring(yielded, "coroutine.yield(); return 42") == LUA_OK);
+  require(lua_resume(yielded, NULL, 0, &results) == LUA_YIELD && results == 0);
+  if (race) {
+    for (int i = 0; i < 2; ++i)
+      require(pthread_create(&threads[i], NULL, admission_actor, &actors[i]) ==
+              0);
+    lock(test);
+    while (test->started != 2)
+      waitfor(test);
+    test->release = 1;
+    notify(test);
+    unlock(test);
+    for (int i = 0; i < 2; ++i)
+      require(pthread_join(threads[i], NULL) == 0);
+    accepted = test->status[0] == LUA_OK;
+    require(test->status[0] == (accepted ? LUA_OK : LUA_TK_INVALID));
+    require(test->status[1] == (accepted ? LUA_TK_PENDING : LUA_OK));
+  } else {
+    accepted = before || gate;
+    if (accepted)
+      require(luaTK_admit(child, &test->roots[0], &test->executions[0]) ==
+              LUA_OK);
+    if (gate) {
+      /* Host shutdown must return while another owner retains a state gate. */
+      lua_lock(child);
+      test->release = 1;
+      require(pthread_create(&threads[1], NULL, admission_actor, &actors[1]) ==
+              0);
+      require(pthread_join(threads[1], NULL) == 0);
+      require(test->status[1] == LUA_TK_PENDING);
+      lua_unlock(child);
+    } else {
+      test->deny = denial;
+      require(luaTK_shutdown(G(state)) == (accepted ? LUA_TK_PENDING : LUA_OK));
+      require(test->attempts == 0);
+      test->deny = 0;
+    }
+    if (!accepted)
+      require(luaTK_admit(child, &test->roots[0], &test->executions[0]) ==
+              LUA_TK_INVALID);
+  }
+  require(luaTK_admit(yielded, &test->roots[1], &test->executions[1]) ==
+          LUA_TK_INVALID);
+  require(test->roots[1].phase == LUA_TASK_UNUSED &&
+          test->roots[1].global == NULL && test->executions[1].task == NULL &&
+          yielded->task_owner == NULL);
+  require(lua_resume(yielded, NULL, 0, &results) == LUA_OK && results == 1 &&
+          lua_tointeger(yielded, -1) == 42);
+  if (accepted) {
+    struct actor actor = {test, 0};
+    require(__atomic_load_n(&test->roots[0].stop_requested, __ATOMIC_ACQUIRE));
+    test->finish = 1;
+    run_actor(&actor);
+    require(luaTK_shutdown(G(state)) == LUA_TK_PENDING);
+    require(luaTK_collect(state, &test->roots[0], &status, &results) == LUA_OK);
+    require(status == LUA_ERRRUN && results == 1 &&
+            strcmp(lua_tostring(state, -1), "task stopped") == 0);
+    lua_pop(state, 1);
+  } else {
+    require(test->roots[0].global == NULL && test->executions[0].task == NULL &&
+            child->task_owner == NULL);
+    require(lua_resume(child, NULL, 0, &results) == LUA_OK && results == 1 &&
+            lua_tointeger(child, -1) == 42);
+  }
+  require(luaTK_shutdown(G(state)) == LUA_OK);
+  lua_settop(state, 0);
+  gc(test);
 }
 static void *run(void *context) {
   struct fixture *test = context;
@@ -386,14 +491,18 @@ static void *run(void *context) {
   lua_setglobal(state, "cleanup_fail");
   execute(state, "pending='--'..string.rep(' ',8192)..'\\nreturn 42'; "
                  "assert(assert(load(pending))()==42)");
+  if (strstr(test->mode, "admission")) {
+    admission(test);
+    goto finished;
+  }
   create_tasks(test);
   {
     LuaTaskRoot empty = {0};
     require(luaTK_requeststop(&empty) == LUA_TK_INVALID);
   }
   if (prestart) {
-    require(luaTK_requeststop(&test->roots[0]) == LUA_OK);
     collect_peer(test);
+    request_stop(test);
     gc(test);
     require(test->finalized == 0);
   }
@@ -407,8 +516,8 @@ static void *run(void *context) {
     collect_peer(test);
     if (denial)
       test->deny = 1;
-    require(luaTK_requeststop(&test->roots[0]) == LUA_OK);
-    require(luaTK_requeststop(&test->roots[0]) == LUA_OK);
+    request_stop(test);
+    request_stop(test);
     if (strstr(test->mode, "request_race")) {
       pthread_t requests[4];
       for (int i = 0; i < 4; ++i)
@@ -466,6 +575,8 @@ static void *run(void *context) {
     test->deny = 0;
   }
   require(luaTK_requeststop(&test->roots[0]) == LUA_TK_INVALID);
+  if (strstr(test->mode, "shutdown"))
+    require(luaTK_shutdown(G(state)) == LUA_TK_PENDING);
   lock(test);
   test->finish = 1;
   notify(test);
@@ -477,6 +588,8 @@ static void *run(void *context) {
       waitfor(test);
     unlock(test);
     require(luaTK_requeststop(&test->roots[0]) == LUA_TK_INVALID);
+    if (strstr(test->mode, "shutdown"))
+      require(luaTK_shutdown(G(state)) == LUA_TK_PENDING);
     require(luaTK_collect(state, &test->roots[0], &status, &results) ==
             LUA_TK_PENDING);
     require(status == -99 && results == -99);
@@ -488,6 +601,8 @@ static void *run(void *context) {
     unlock(test);
   }
   require(pthread_join(actor_thread, NULL) == 0);
+  if (strstr(test->mode, "shutdown"))
+    require(luaTK_shutdown(G(state)) == LUA_TK_PENDING);
   require(luaTK_requeststop(&test->roots[0]) == LUA_TK_INVALID);
   require(test->started == (prestart ? 0u : 1u) &&
           test->closed == (prestart || late || continuation ? 0u : 1u));
@@ -517,7 +632,20 @@ static void *run(void *context) {
   require(luaTK_requeststop(&test->roots[0]) == LUA_TK_INVALID);
   gc(test);
   require(test->finalized == 1 && G(state)->tasks == NULL);
+  if (strstr(test->mode, "shutdown")) {
+    LuaTaskRoot rejected = {0};
+    LuaExecution execution = {0};
+    lua_State *child = lua_newthread(state);
+    require(luaL_loadstring(child, "return 42") == LUA_OK);
+    require(luaTK_shutdown(G(state)) == LUA_OK);
+    require(luaTK_admit(child, &rejected, &execution) == LUA_TK_INVALID);
+    require(rejected.phase == LUA_TASK_UNUSED && rejected.global == NULL &&
+            execution.task == NULL && child->task_owner == NULL);
+    require(luaTK_shutdown(G(state)) == LUA_OK);
+    lua_pop(state, 1);
+  }
   execute(state, "assert(6*7==42)");
+finished:
   if (test->runtime)
     luthrum_lua_runtime_free(test->runtime);
   else
