@@ -282,7 +282,7 @@ int main(int argc, char **argv) {
     world = &G(fixture.main)->world;
     check(pthread_mutex_lock(&world->mutex));
     while (!world->stopped)
-      check(pthread_cond_wait(&world->changed, &world->mutex));
+      luaQ_wait(fixture.main, &world->mutex, &world->changed, &world->waiters);
     check(pthread_mutex_unlock(&world->mutex));
     check(pthread_mutex_lock(&fixture.mutex));
     fixture.allow_poll = 1;

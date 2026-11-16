@@ -1161,7 +1161,7 @@ int main(int argc, char **argv) {
       while (((table_case || capi_case)
                   ? fixture.actors[1].state->object_waiting
                   : fixture.actors[1].state->heap_waiting) == 0)
-        check(pthread_cond_wait(&world->changed, &world->mutex));
+        luaQ_wait(main_state, &world->mutex, &world->changed, &world->waiters);
       failed |=
           world->active != 1 || world->heap_depth == 0 ||
           fixture.actors[1].state->native_depth == 0 ||

@@ -98,6 +98,10 @@ LUAI_FUNC void luaQ_setmanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC int luaQ_ismanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC void luaQ_setowner (LuaOwner *owner);
 LUAI_FUNC int luaQ_isowner (const LuaOwner *owner);
+/* All waits/observers register under the predicate mutex. Ordinary OS-thread
+** waits retire registration on return, including spurious/direct POSIX signals;
+** scheduler waits retire on notification. Callers recheck their predicate.
+** A wake with no registrations is a no-op. */
 LUAI_FUNC void luaQ_wait (lua_State *L, pthread_mutex_t *mutex,
                           pthread_cond_t *changed, LuaWaiter **waiters);
 /* Owned waits only. Returns with mutex held, after retiring registration and

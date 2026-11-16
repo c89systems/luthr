@@ -330,7 +330,7 @@ static void *run(void *context) {
       require(pthread_mutex_lock(&world->mutex) == 0);
       while (test->actors[1].state->object_waiting == 0 &&
              !test->actors[1].done)
-        require(pthread_cond_wait(&world->changed, &world->mutex) == 0);
+        luaQ_wait(state, &world->mutex, &world->changed, &world->waiters);
       require(!test->actors[1].done &&
               test->actors[1].state->object_waiting != 0);
       require(pthread_mutex_unlock(&world->mutex) == 0);

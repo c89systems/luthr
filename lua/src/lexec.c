@@ -168,6 +168,14 @@ static void linkwaiter (LuaWaiter *waiter, LuaExecution *execution,
   *waiters = waiter;
 }
 
+static void unlinkwaiter (LuaWaiter *waiter) {
+  if (waiter->link != NULL) {
+    *waiter->link = waiter->next;
+    if (waiter->next != NULL) waiter->next->link = waiter->link;
+    waiter->link = NULL;
+  }
+}
+
 static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
                             pthread_cond_t *changed, LuaWaiter *waiter) {
   LuaExecution *execution = luaQ_current();
@@ -194,12 +202,16 @@ static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
 void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
                  LuaWaiter **waiters) {
   LuaExecution *execution = luaQ_current();
-  if (execution != NULL && execution->wait != NULL && execution->wake != NULL) {
-    LuaWaiter waiter;
-    linkwaiter(&waiter, execution, waiters);
+  LuaWaiter waiter;
+  linkwaiter(&waiter,
+    execution != NULL && execution->wait != NULL && execution->wake != NULL
+      ? execution : NULL, waiters);
+  if (waiter.execution != NULL)
     waitregistered(L, mutex, changed, &waiter);
+  else {
+    luaX_checksync(pthread_cond_wait(changed, mutex));
+    unlinkwaiter(&waiter);  /* also retire after a spurious/direct POSIX signal */
   }
-  else luaX_checksync(pthread_cond_wait(changed, mutex));
 }
 
 int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
@@ -267,9 +279,7 @@ void luaQ_interrupt (LuaStopWait *wait) {
   LuaWaiter *waiter = &wait->waiter;
   luaX_checksync(pthread_mutex_lock(wait->mutex));
   if (waiter->link != NULL) {
-    *waiter->link = waiter->next;
-    if (waiter->next != NULL) waiter->next->link = waiter->link;
-    waiter->link = NULL;
+    unlinkwaiter(waiter);
     luaX_checksync(pthread_cond_broadcast(wait->changed));
     if (waiter->execution != NULL)
       waiter->execution->wake(waiter->execution, waiter);
@@ -279,6 +289,7 @@ void luaQ_interrupt (LuaStopWait *wait) {
 
 void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters) {
   LuaWaiter *waiter = *waiters;
+  if (waiter == NULL) return;
   *waiters = NULL;
   luaX_checksync(pthread_cond_broadcast(changed));
   while (waiter != NULL) {
