@@ -150,9 +150,17 @@ static LuaAllocBlock *takeblock (LuaAllocPage *page) {
   return NULL;
 }
 
+static LuaAllocPage **allocationcache (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  return execution != NULL && execution->allocation_cache != NULL &&
+         execution->allocation_cache->global == G(L)
+    ? execution->allocation_cache->pages : L->allocation_cache;
+}
+
 void luaM_reclaimpages (lua_State *L) {
   global_State *g = G(L);
   LuaParticipation *participant;
+  LuaAllocationCache *cache;
   LuaAllocPage **link;
   int i;
   for (i = 0; i < LUA_ALLOC_BINS; i++)
@@ -161,6 +169,8 @@ void luaM_reclaimpages (lua_State *L) {
        participant = participant->next)
     for (i = 0; i < LUA_ALLOC_BINS; i++)
       participant->thread->allocation_cache[i] = NULL;
+  for (cache = g->slot_caches; cache != NULL; cache = cache->next)
+    for (i = 0; i < LUA_ALLOC_BINS; i++) cache->pages[i] = NULL;
   for (link = &g->allocation_pages; *link != NULL;) {
     LuaAllocPage *page = *link;
     if (__atomic_load_n(&page->live, __ATOMIC_RELAXED) == 0) {
@@ -304,7 +314,7 @@ static LuaAllocPage *availablepage (lua_State *L, unsigned bin) {
 static LuaAllocPage *refill (lua_State *L, unsigned bin) {
   global_State *g = G(L);
   LuaAllocPage *page;
-  L->allocation_cache[bin] = NULL;
+  allocationcache(L)[bin] = NULL;
   luaW_heapenter(L);
   page = availablepage(L, bin);
   if (page == NULL) {
@@ -335,7 +345,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin) {
     }
   }
  ready:
-  L->allocation_cache[bin] = page;
+  allocationcache(L)[bin] = page;
   luaW_heapleave(L);
   return page;
 }
@@ -344,7 +354,7 @@ static void *allocateblock (lua_State *L, size_t size, int tag) {
   unsigned bin;
   for (bin = 0; bin < LUA_ALLOC_BINS; bin++) {
     if (size <= binbytes(bin)) {
-      LuaAllocPage *page = L->allocation_cache[bin];
+      LuaAllocPage *page = allocationcache(L)[bin];
       LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
       if (block == NULL) {
         page = refill(L, bin);

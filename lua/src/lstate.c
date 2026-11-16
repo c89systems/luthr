@@ -566,6 +566,8 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   incnny(L);  /* main thread is always non yieldable */
   g->frealloc = f;
   g->allocation_pages = NULL;
+  g->scheduler = NULL;
+  g->slot_caches = NULL;
   for (i = 0; i < LUA_ALLOC_BINS; i++)
     g->allocation_available[i] = NULL;
   g->ud = ud;
@@ -631,6 +633,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
 LUA_API void lua_close (lua_State *L) {
   L = mainthread(G(L));  /* only the main thread can be closed */
   lua_lock(L);
+  lua_assert(G(L)->scheduler == NULL);  /* retire carriers before the VM */
   close_state(L, 1);
 }
 

@@ -19,6 +19,22 @@ target_compile_options(cpu_capacity_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(cpu_capacity_test PRIVATE Threads::Threads)
 include("${CMAKE_CURRENT_SOURCE_DIR}/CapacityFixtures.cmake")
 
+luthr_test_program(scheduler_test scheduler_test.c)
+set_target_properties(scheduler_test PROPERTIES C_STANDARD 99)
+target_compile_options(scheduler_test PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
+target_link_libraries(scheduler_test PRIVATE luthr_static)
+target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
+  -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=pthread_mutex_init
+  -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_create -Wl,--wrap=mmap
+  -Wl,--wrap=mprotect -Wl,--wrap=munmap)
+foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational
+    native shutdown yield saturation cancel_admission startup_failures callback_progress
+    parked cancel_parked)
+  add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
+  set_tests_properties(scheduler_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(capture_cells_test capture_cells_test.c)
 set_target_properties(capture_cells_test PROPERTIES C_STANDARD 99)
 target_compile_options(capture_cells_test PRIVATE -Wall -Wextra -Werror)
@@ -47,10 +63,6 @@ foreach(case IN ITEMS no_requests intern_hits ordinary_operations allocation_cac
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
-find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
-  NO_CMAKE_FIND_ROOT_PATH REQUIRED)
-configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
-  "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
 luthr_test_program(reference_test reference_test.c)
 set_target_properties(reference_test PROPERTIES C_STANDARD 99)
 target_compile_options(reference_test PRIVATE -Wall -Wextra -Werror)
@@ -369,7 +381,7 @@ foreach(case IN ITEMS mutex condition create_oom create_oom_stack create_oom_mes
   set_tests_properties(callback_entry_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
 endforeach()
 luthr_test_program(fiber_vm_test fiber_vm_test.c)
-target_sources(fiber_vm_test PRIVATE private/context.c private/context_x86_64.S)
+target_sources(fiber_vm_test PRIVATE private/context_x86_64.S)
 set_target_properties(fiber_vm_test PROPERTIES C_STANDARD 99)
 target_include_directories(fiber_vm_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
 target_compile_options(fiber_vm_test PRIVATE
@@ -385,7 +397,7 @@ add_test(NAME fiber_execution_boundary COMMAND fiber_vm_test execution_boundary)
 set_tests_properties(fiber_execution_boundary PROPERTIES LABELS runtime TIMEOUT 10)
 
 luthr_test_program(native_scheduler_test native_scheduler_test.c)
-target_sources(native_scheduler_test PRIVATE private/context.c private/context_x86_64.S)
+target_sources(native_scheduler_test PRIVATE private/context_x86_64.S)
 set_target_properties(native_scheduler_test PROPERTIES C_STANDARD 99)
 target_include_directories(native_scheduler_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
 target_compile_options(native_scheduler_test PRIVATE
@@ -661,7 +673,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test)
+  capture_cells_test memory_publication_test scheduler_test)
 set_property(TEST lua_facade_static lua_facade_shared public_exports
   native_roots_retain_incremental native_roots_nested_error
   native_roots_allocation_failure native_roots_publish execution_wait_empty

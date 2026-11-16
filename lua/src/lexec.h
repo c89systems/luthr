@@ -9,6 +9,13 @@
 struct lua_longjmp;
 struct LuaWaiter;
 struct LuaTaskRoot;
+#define LUA_ALLOC_BINS 6
+typedef struct LuaAllocationCache {
+  struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
+  struct global_State *global;
+  struct LuaAllocPage *pages[LUA_ALLOC_BINS];
+} LuaAllocationCache;
+
 typedef struct LuaExecution {
   void *context;
   void (*managed_enter)(struct LuaExecution *, lua_State *);
@@ -35,6 +42,7 @@ typedef struct LuaExecution {
   unsigned native_depth;
   unsigned pin_depth;
   pthread_t pinned_carrier;
+  LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
 } LuaExecution;
 
 enum { LUA_PIN_INVALID = -1, LUA_PIN_UNAVAILABLE = -2, LUA_PIN_OVERFLOW = -3 };

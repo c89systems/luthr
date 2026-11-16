@@ -15,6 +15,10 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 set(MEMORYCHECK_COMMAND_OPTIONS "--error-exitcode=1 --leak-check=full --errors-for-leak-kinds=definite,indirect --show-leak-kinds=definite,indirect --fair-sched=yes")
 find_package(Threads REQUIRED)
+find_path(VALGRIND_CLIENT_INCLUDE_DIR valgrind.h PATH_SUFFIXES valgrind
+  NO_CMAKE_FIND_ROOT_PATH REQUIRED)
+configure_file("${VALGRIND_CLIENT_INCLUDE_DIR}/valgrind.h"
+  "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client/valgrind.h" COPYONLY)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(CTest)
 include(cmake/LocalRuntime.cmake)
@@ -47,15 +51,18 @@ add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
 add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
-  laccess lapi lcallback lcode lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
-  lparser lpipe lroots lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
+  laccess lapi lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
+  lparser lpipe lroots lscheduler lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "lua/src/")
 list(TRANSFORM lua_sources APPEND ".c")
-add_library(luthr_lua_objects OBJECT ${lua_sources})
+add_library(luthr_lua_objects OBJECT ${lua_sources} lua/src/lcontext_x86_64.S)
+target_include_directories(luthr_lua_objects PRIVATE
+  "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
 set_target_properties(luthr_lua_objects PROPERTIES
   C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
-target_compile_options(luthr_lua_objects PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
+target_compile_options(luthr_lua_objects PRIVATE
+  "$<$<COMPILE_LANGUAGE:C>:-Wall;-Wextra;-Werror;-mtls-dialect=gnu2>")
 target_compile_definitions(luthr_lua_objects PRIVATE LUA_USE_LINUX)
 target_compile_definitions(luthr_lua_objects PRIVATE
   "$<$<CONFIG:Debug>:LUAI_ASSERT;LUA_USE_APICHECK>")

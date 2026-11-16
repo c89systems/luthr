@@ -305,7 +305,6 @@ typedef struct LuaNativeRoot {
 } LuaNativeRoot;
 
 #define LUA_BARRIER_CAPACITY 64
-#define LUA_ALLOC_BINS 6
 typedef struct LuaBarrierRecord {
   GCObject *owner;
   GCObject *value;
@@ -388,8 +387,10 @@ typedef struct LX {
 */
 typedef struct global_State {
   LuaWorld world;
+  struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages;
   struct LuaAllocPage *allocation_available[LUA_ALLOC_BINS];
+  LuaAllocationCache *slot_caches;
   lua_Alloc frealloc;  /* function to reallocate memory */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
