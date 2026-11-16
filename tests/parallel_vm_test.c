@@ -37,6 +37,7 @@ struct fixture {
   pthread_t failure_carrier;
   void *failure_owner;
   unsigned failures_left;
+  size_t failure_minimum;
   unsigned allocation_failures;
   unsigned emergency_frees;
   global_State *global;
@@ -366,6 +367,7 @@ static void *allocate(void *context, void *pointer, size_t old_size,
     fixture->emergency_frees++;
   if (fixture->failures_left != 0 &&
       pthread_equal(fixture->failure_carrier, pthread_self()) && size != 0 &&
+      size >= fixture->failure_minimum &&
       (pointer == NULL || size > old_size)) {
     if (!fixture->allocator_blocked) {
       fixture->allocator_blocked = 1;
@@ -736,15 +738,19 @@ static int native_udnew(lua_State *state) {
 static int fail_allocation(lua_State *state) {
   struct fixture *fixture;
   void *user;
+  int table = lua_istable(state, 1);
   (void)lua_getallocf(state, &user);
   fixture = user;
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->failure_carrier = pthread_self();
   fixture->failure_owner = luaQ_ownertoken();
+  /* Refilling a small page can recover from a failed allocator call. Target
+   * the actual array growth so both failures belong to that allocation. */
+  fixture->failure_minimum = table ? 4096 * sizeof(Value) : 0;
   fixture->failures_left =
       2; /* original attempt, then the emergency-GC retry */
   check(pthread_mutex_unlock(&fixture->mutex));
-  if (lua_istable(state, 1)) {
+  if (table) {
     lua_pushinteger(state, 1);
     lua_rawseti(state, 1, 4097);
   } else

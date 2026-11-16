@@ -496,6 +496,32 @@ static void *return_from_peer(void *context) {
   return NULL;
 }
 
+static void marking_cache(lua_State *state) {
+  void *block;
+  lua_gc(state, LUA_GCSTOP);
+  execute(state, "keep={}; for i=1,400 do keep[i]={i} end");
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPSTEPMUL, 100);
+  luaX_lockstate(state);
+  block = luaM_malloc_(state, 64, 0);
+  luaM_free_(state, block, 64);
+  luaX_unlockstate(state);
+  lua_gc(state, LUA_GCSTEP, (size_t)0);
+  luaX_lockstate(state);
+  require(G(state)->gcstate == GCSpropagate);
+  watched = &G(state)->world;
+  world_locks = 0;
+  measured++;
+  block = luaM_malloc_(state, 64, 0);
+  luaM_free_(state, block, 64);
+  measured--;
+  fprintf(stderr, "allocation after marking: %u world locks\n", world_locks);
+  require(world_locks == 0);
+  watched = NULL;
+  luaX_unlockstate(state);
+}
+
 static void allocation_cache(void) {
   struct allocator allocator = {0};
   struct returned_block returned;
@@ -654,6 +680,8 @@ int main(int argc, char **argv) {
     intern_hits(state);
   else if (strcmp(argv[1], "ordinary_operations") == 0)
     ordinary_operations(state);
+  else if (strcmp(argv[1], "marking_cache") == 0)
+    marking_cache(state);
   else if (strcmp(argv[1], "handoff") == 0 ||
            strcmp(argv[1], "paired_handoff") == 0)
     gate_handoff(state, strcmp(argv[1], "paired_handoff") == 0);

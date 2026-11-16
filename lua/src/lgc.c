@@ -1884,6 +1884,7 @@ static void incstep (lua_State *L, global_State *g) {
 */
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
+  int reclaim = 0;
   luaW_stop(L);
   lua_assert(!g->gcemergency);
   if (!gcrunning(g)) {  /* not running? */
@@ -1895,15 +1896,20 @@ void luaC_step (lua_State *L) {
     switch (g->gckind) {
       case KGC_INC: case KGC_GENMAJOR:
         incstep(L, g);
+        reclaim = g->gcstate == GCSpause || g->gckind == KGC_GENMINOR;
         break;
       case KGC_GENMINOR:
         youngcollection(L, g);
         setminordebt(g);
+        reclaim = 1;
         break;
     }
     luai_tracegc(L, 0);  /* for internal debugging */
   }
-  luaM_reclaimpages(L);
+  /* Retiring all allocation caches and scanning every page belongs to a
+  ** completed collection, not each marking/partial-sweep step. Emergency and
+  ** explicit full collections still reclaim before retrying an allocation. */
+  if (reclaim) luaM_reclaimpages(L);
   luaW_start(L);
 }
 
