@@ -45,9 +45,10 @@ racecheck:
 	ctest --test-dir "$(RACE_BUILD_DIR)" -L parallel -E '^cross_api_foreign_error$$' --parallel 1 --stop-on-failure --output-on-failure --no-tests=error
 install: build
 	cmake --install "$(BUILD_DIR)" --prefix "$(ROOT)/build/sdk/$(TARGET)/$(CONFIG)"
+# Runtime sources retain Lua's formatting; format the SDK and tests here.
 format:
-	cd "$(ROOT)" && rg --files src include tests -g '*.[ch]' -0 | xargs -0 clang-format -i
+	cd "$(ROOT)" && rg --files src include tests -g '*.[ch]' -g '!src/runtime/**' -0 | xargs -0 clang-format -i
 format-check:
-	cd "$(ROOT)" && rg --files src include tests -g '*.[ch]' -0 | xargs -0 clang-format --dry-run --Werror
+	cd "$(ROOT)" && rg --files src include tests -g '*.[ch]' -g '!src/runtime/**' -0 | xargs -0 clang-format --dry-run --Werror
 clean:
 	rm -rf -- "$(ROOT)/build" "$(ROOT)/dist" "$(ROOT)/.cache"

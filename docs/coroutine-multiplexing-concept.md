@@ -24,7 +24,7 @@ observable semantics. An overhaul comparable in scope to free-threaded CPython
 is authorized; retaining an implementation merely because it already passes
 tests is not a reason to preserve it.
 
-The baseline remains checksum-pinned Lua 5.5.1, owned directly under lua/.
+The baseline remains checksum-pinned Lua 5.5.1, owned directly under src/runtime/.
 Upstream source and license provenance remain in [lua-source.md](lua-source.md).
 No patch application or source acquisition occurs during configure/build.
 
@@ -166,7 +166,7 @@ The product name is luthr: interpreter luthr, compiler luthrc, static/shared
 libluthr, CMake package/namespace luthr, pkg-config luthr.pc, and strict C89
 headers under include/luthr. Project-owned facade/policy names use luthr_/LUTHR_;
 upstream Lua API names and Lua's reported version remain upstream-compatible.
-The checkout is /home/mike/g/luthr and the repository is c89systems/luthr.
+The repository is c89systems/luthr.
 This pre-release rename is a clean cutover without old-name API shims.
 
 Initial supported targets are x86_64 Linux GNU and musl. Follow the selected

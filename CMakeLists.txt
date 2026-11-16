@@ -56,13 +56,13 @@ set(export_map "${CMAKE_CURRENT_BINARY_DIR}/generated/exports.map")
 add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
   COMMAND "${CMAKE_COMMAND}" -E env PYTHONDONTWRITEBYTECODE=1
     "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_lua_c89_facade.py"
-    --include-dir "${CMAKE_CURRENT_SOURCE_DIR}/lua/src"
+    --include-dir "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime"
     --header "${facade_header}" --source "${facade_source}"
     --runtime-header "${CMAKE_CURRENT_SOURCE_DIR}/include/luthr/lua_runtime.h"
     --task-header "${CMAKE_CURRENT_SOURCE_DIR}/include/luthr/tasks.h"
     --exports "${export_map}"
   DEPENDS tools/generate_lua_c89_facade.py tools/generated_output_paths.py
-    lua/src/lua.h lua/src/luaconf.h lua/src/lauxlib.h lua/src/lualib.h
+    src/runtime/lua.h src/runtime/luaconf.h src/runtime/lauxlib.h src/runtime/lualib.h
     include/luthr/lua_runtime.h include/luthr/tasks.h
   VERBATIM)
 add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
@@ -71,9 +71,9 @@ set(lua_sources
   laccess lapi lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
   lparser lpipe lpolicy lscheduler lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
-list(TRANSFORM lua_sources PREPEND "lua/src/")
+list(TRANSFORM lua_sources PREPEND "src/runtime/")
 list(TRANSFORM lua_sources APPEND ".c")
-add_library(luthr_lua_objects OBJECT ${lua_sources} lua/src/lcontext_x86_64.S)
+add_library(luthr_lua_objects OBJECT ${lua_sources} src/runtime/lcontext_x86_64.S)
 target_include_directories(luthr_lua_objects PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}/valgrind-client")
 set_target_properties(luthr_lua_objects PROPERTIES
@@ -96,14 +96,14 @@ target_compile_definitions(luthr_facade_objects PRIVATE
   LLONG_MAX=9223372036854775807LL LLONG_MIN=-9223372036854775807LL-1LL
   ULLONG_MAX=18446744073709551615ULL)
 target_include_directories(luthr_facade_objects PRIVATE
-  include "${generated_include}" lua/src)
+  include "${generated_include}" src/runtime)
 
 add_library(luthr_task_objects OBJECT src/policy.c src/tasks.c src/cpu_capacity.c)
 add_dependencies(luthr_task_objects luthr_facade_header)
 set_target_properties(luthr_task_objects PROPERTIES
   C_STANDARD 99 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
 target_compile_options(luthr_task_objects PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
-target_include_directories(luthr_task_objects PRIVATE include "${generated_include}" lua/src)
+target_include_directories(luthr_task_objects PRIVATE include "${generated_include}" src/runtime)
 target_link_libraries(luthr_task_objects PRIVATE Threads::Threads)
 
 foreach(linkage IN ITEMS static shared)
@@ -116,7 +116,7 @@ foreach(linkage IN ITEMS static shared)
   target_include_directories(luthr_${linkage} PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
     "$<BUILD_INTERFACE:${generated_include}>"
-    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lua/src>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/runtime>"
     "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
   target_link_libraries(luthr_${linkage} PUBLIC m ${CMAKE_DL_LIBS} Threads::Threads)
 endforeach()
@@ -128,11 +128,11 @@ target_link_options(luthr_shared PRIVATE
 set_property(TARGET luthr_shared APPEND PROPERTY LINK_DEPENDS
   "${export_map}")
 
-add_executable(luthr lua/src/lua.c)
+add_executable(luthr src/runtime/lua.c)
 target_compile_definitions(luthr PRIVATE LUA_USE_LINUX)
 set_target_properties(luthr PROPERTIES C_STANDARD 99 INSTALL_RPATH "$ORIGIN/../lib")
 target_link_libraries(luthr PRIVATE luthr_shared)
-add_executable(luthrc lua/src/luac.c)
+add_executable(luthrc src/runtime/luac.c)
 set_target_properties(luthrc PROPERTIES C_STANDARD 99)
 target_link_libraries(luthrc PRIVATE luthr_static)
 
@@ -141,13 +141,11 @@ install(TARGETS luthr_static luthr_shared luthr luthrc
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES "${facade_header}" include/luthr/lua_runtime.h include/luthr/tasks.h
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/luthr)
-install(FILES lua/src/lua.h lua/src/luaconf.h lua/src/lauxlib.h
-  lua/src/lualib.h lua/src/lua.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES src/runtime/lua.h src/runtime/luaconf.h src/runtime/lauxlib.h
+  src/runtime/lualib.h src/runtime/lua.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/docs)
 install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr)
-install(DIRECTORY lua/doc/ DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua/doc)
-install(FILES lua/README DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua)
-install(FILES lua/src/lua.h DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/lua/src)
+install(FILES src/runtime/lua.h DESTINATION ${CMAKE_INSTALL_DATADIR}/luthr/src/runtime)
 configure_package_config_file(cmake/luthrConfig.cmake.in
   "${CMAKE_CURRENT_BINARY_DIR}/luthrConfig.cmake"
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/luthr)

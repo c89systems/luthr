@@ -1,6 +1,6 @@
 # Luthr delivery plan
 
-Status: active overhaul plan, 2026-11-16.
+Status: implementation and verification plan, 2026-11-16.
 The [product specification](coroutine-multiplexing-concept.md) and
 [architecture](parallel-state-design.md) are authoritative. Compatibility means
 observable upstream behavior; existing internal mechanisms may be replaced.
@@ -9,7 +9,7 @@ observable upstream behavior; existing internal mechanisms may be replaced.
 
 Land substantial, coherent surfaces. A surface may span compiler, VM, allocator,
 collector, scheduler, C API and tests when those pieces share one invariant.
-Do not turn the overhaul into a sequence of small fixes to the rejected global
+Do not turn implementation into a sequence of small fixes to the rejected global
 ownership design. Temporary integration rough edges are acceptable while moving
 toward the specified architecture; report them rather than adding legacy paths.
 

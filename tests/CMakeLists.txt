@@ -695,7 +695,7 @@ if(TARGET debug_worker_stack)
   set_tests_properties(debug_worker_guard PROPERTIES LABELS stack TIMEOUT 10)
 endif()
 
-luthr_test_program(luthr_test_host "${PROJECT_SOURCE_DIR}/lua/src/lua.c")
+luthr_test_program(luthr_test_host "${PROJECT_SOURCE_DIR}/src/runtime/lua.c")
 set_target_properties(luthr_test_host PROPERTIES C_STANDARD 99)
 target_compile_definitions(luthr_test_host PRIVATE LUA_USE_LINUX)
 target_link_libraries(luthr_test_host PRIVATE luthr_shared)
