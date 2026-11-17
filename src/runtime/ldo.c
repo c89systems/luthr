@@ -847,6 +847,8 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
       ci->top.p = func + 1 + fsize;  /* top for new function */
       lua_assert(ci->top.p <= L->stack_last.p);
       ci->u.l.savedpc = p->code;  /* starting point */
+      ci->u.l.captures = 0;
+      ci->u.l.rootpc = NULL;
       ci->callstatus |= CIST_TAIL;
       L->top.p = func + narg1;  /* set top */
       return -1;
@@ -889,6 +891,8 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
       checkstackp(L, fsize, func);
       L->ci = ci = prepCallInfo(L, func, status, func + 1 + fsize);
       ci->u.l.savedpc = p->code;  /* starting point */
+      ci->u.l.captures = 0;
+      ci->u.l.rootpc = NULL;
       for (; narg < nfixparams; narg++)
         setnilvalue2s(L->top.p++);  /* complete missing arguments */
       lua_assert(ci->top.p <= L->stack_last.p);

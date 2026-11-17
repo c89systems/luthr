@@ -12,6 +12,7 @@
 #include "lmem.h"
 #include "lstate.h"
 #include "ltable.h"
+#include "lvm.h"
 
 static __thread LuaGCFrame *host_gcframe;
 
@@ -100,8 +101,19 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
     return;
   luaC_traceobject(L, obj2gco(thread));
   if (thread->stack.p != NULL) {
-    for (slot = thread->stack.p; slot < thread->top.p; slot++)
-      luaC_tracevalue(L, s2v(slot));
+    /* Cells, not their register shadows, own captured bindings. A shadow is a
+    ** temporary root only while an operation can still use it (including a
+    ** partial result at an allocation boundary). Do not retain an obsolete
+    ** referent merely because the owner has not read this local again. */
+    upvalue = thread->openupval;
+    for (slot = thread->top.p; slot > thread->stack.p;) {
+      ptrdiff_t level = savestack(thread, --slot);
+      while (upvalue != NULL && upvalue->level > level)
+        upvalue = upvalue->open.next;
+      if (upvalue == NULL || upvalue->level != level ||
+          luaV_shadowroot(thread, slot))
+        luaC_tracevalue(L, s2v(slot));
+    }
   }
   for (root = thread->native_roots; root != NULL; root = root->previous) {
     luaC_tracevalue(L, &root->value);

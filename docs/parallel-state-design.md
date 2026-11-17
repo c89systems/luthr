@@ -40,11 +40,16 @@ roots and change collection phases.
 
 Lua captures now store their complete value in a stable shared cell throughout
 their lifetime. A live binding records a stack offset, never a pointer into its
-owner's registers. Dispatch refreshes frame-local register shadows and publishes
-the instruction's actual writes. Call-result movement, yielded operations and
-debug local access use the same cell representation. Closing unlinks a binding;
-it does not copy an obsolete register shadow over a foreign writer's value.
+owner's registers. Operand access refreshes only captured registers that an
+instruction reads, and publishes its actual writes. A conservative frame filter
+avoids cell-list searches for unrelated registers. Call-result movement, yielded
+operations and debug local access use the same cell representation. Closing
+unlinks a binding; it does not copy an obsolete register shadow over a foreign
+writer's value.
 Bytecode remains portable; the interpreter lowers its register accesses.
+Root publication traces cells as bindings and uses the suspended instruction to
+retain only register shadows still needed as operands or partial results. An
+obsolete shadow cannot keep a replaced value alive while its owner is parked.
 
 Pointer barriers atomically claim gray objects and publish them on the current
 coroutine's work queues. Each object uses its existing allocation link; repeated
@@ -77,8 +82,7 @@ allowance without enlarging its baseline until the next cycle.
 
 Backing allocation and page handoff, logical sweep/finalizer classification,
 general metadata scopes and managed admission still need further scaling work.
-Dispatch's frame-wide capture refresh is provisional; the final performance gate
-must measure and constrain its cost.
+Capture access and operation/root metadata remain part of the performance gate.
 
 ## State ownership boundaries
 

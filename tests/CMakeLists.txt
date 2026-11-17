@@ -98,8 +98,9 @@ target_link_libraries(capture_cells_test PRIVATE luthr_static)
 target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
   -Wl,--wrap=luaF_readcapture -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
-  -Wl,--wrap=luaF_loadlocals)
-foreach(case IN ITEMS independent readers access uncaptured semantics incremental generational)
+  -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
+foreach(case IN ITEMS independent readers access uncaptured operands semantics incremental generational
+    shadow_incremental shadow_generational)
   add_test(NAME capture_cells_${case} COMMAND capture_cells_test ${case})
   set_tests_properties(capture_cells_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

@@ -162,19 +162,19 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   luaR_poproot(L, &transfer);
 }
 
-void luaF_loadlocals (lua_State *L, CallInfo *ci) {
+void luaF_loadrange (lua_State *L, StkId first, int count) {
   UpVal *uv;
-  ptrdiff_t first = savestack(L, ci->func.p + 1);
-  ptrdiff_t last = savestack(L, ci->top.p);
+  ptrdiff_t from = savestack(L, first);
+  ptrdiff_t to = from + cast(ptrdiff_t, count) * sizeof(StackValue);
   for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
-    if (uv->level < first) break;
-    if (uv->level < last) {
+    if (uv->level < from) break;
+    if (uv->level < to) {
       loadupval(uv, s2v(restorestack(L, uv->level)));
     }
   }
 }
 
-void luaF_loadlocal (lua_State *L, StkId slot) {
+StkId luaF_loadlocal (lua_State *L, StkId slot) {
   UpVal *uv;
   ptrdiff_t level = savestack(L, slot);
   for (uv = L->openupval; uv != NULL && uv->level >= level;
@@ -184,6 +184,7 @@ void luaF_loadlocal (lua_State *L, StkId slot) {
       break;
     }
   }
+  return slot;
 }
 
 void luaF_storelocals (lua_State *L, StkId first, int count) {
@@ -268,6 +269,8 @@ void luaF_joincaptures (lua_State *L, LClosure *to, int target,
 UpVal *luaF_findupval (lua_State *L, StkId level) {
   UpVal **pp;
   UpVal *p;
+  lua_assert(isLua(L->ci) && level > L->ci->func.p && level < L->ci->top.p);
+  L->ci->u.l.captures |= luaF_capturebit(level - (L->ci->func.p + 1));
   pp = &L->openupval;
   while ((p = *pp) != NULL && uplevel(p) >= level) {  /* search for it */
     lua_assert(!isdead(G(L), p));
@@ -388,6 +391,11 @@ void luaF_closeupval (lua_State *L, StkId level) {
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
     lua_assert(uplevel(uv) < L->top.p);
+    /* Preserve the authoritative binding for to-be-closed/debug operands after
+    ** unlink. This also runs for dead threads: copy without inspecting the
+    ** referent, which may already be logically retired by this collection. */
+    s2v(uplevel(uv))->value_ = uv->value.value_;
+    s2v(uplevel(uv))->tt_ = uv->value.tt_;
     luaF_unlinkupval(uv);  /* remove upvalue from 'openupval' list */
     uv->owner = NULL;
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));

@@ -56,10 +56,22 @@ LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
                              struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
 /* Register shadows belong to the executing frame. Shared cells are authoritative;
-** refresh reads before dispatch and publish only the instruction's real writes. */
-LUAI_FUNC void luaF_loadlocals (lua_State *L, struct CallInfo *ci);
+** refresh only operands that are read and publish only actual writes. A frame's
+** filter may keep false positives after close, collection or register collisions. */
+#define luaF_capturebit(reg) (UINT64_C(1) << (cast_uint(reg) & 63))
+
+l_sinline uint64_t luaF_capturerange (int first, int count) {
+  uint64_t bits;
+  unsigned shift = cast_uint(first) & 63;
+  if (count <= 0) return 0;
+  if (count >= 64) return UINT64_MAX;
+  bits = UINT64_MAX >> (64 - count);
+  return (bits << shift) | (bits >> ((64 - shift) & 63));
+}
+
+LUAI_FUNC void luaF_loadrange (lua_State *L, StkId first, int count);
 LUAI_FUNC void luaF_storelocals (lua_State *L, StkId first, int count);
-LUAI_FUNC void luaF_loadlocal (lua_State *L, StkId slot);
+LUAI_FUNC StkId luaF_loadlocal (lua_State *L, StkId slot);
 LUAI_FUNC void luaF_getcapture (lua_State *L, LClosure *closure, int n,
                                struct LuaNativeRoot *capture);
 LUAI_FUNC void luaF_readcapture (lua_State *L, LClosure *closure, int n,

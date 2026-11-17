@@ -1,7 +1,10 @@
 #include <laccess.h>
 #include <lauxlib.h>
 #include <ldebug.h>
+#include <ldo.h>
 #include <lfunc.h>
+#include <lgc.h>
+#include <lopcodes.h>
 #include <lstate.h>
 #include <lua.h>
 #include <lualib.h>
@@ -18,6 +21,7 @@ struct fixture {
   int release;
   int status;
   int results;
+  int retain_gate;
 };
 
 static struct fixture *current;
@@ -32,6 +36,8 @@ static __thread unsigned reader_ownership;
 static __thread unsigned write_calls;
 static const void *measured_function;
 static unsigned local_loads;
+static int collect_pending, collected_pending;
+static int collect_lookup, collected_lookup;
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaA_begin(lua_State *state, GCObject *object,
@@ -42,7 +48,28 @@ void __real_luaF_readcapture(lua_State *state, LClosure *closure, int n,
 void __real_luaF_writecapture(lua_State *state, LClosure *closure, int n,
                               const TValue *value);
 void __real_luaF_storelocals(lua_State *state, StkId first, int count);
-void __real_luaF_loadlocals(lua_State *state, CallInfo *ci);
+StkId __real_luaF_loadlocal(lua_State *state, StkId slot);
+void __real_luaF_loadrange(lua_State *state, StkId first, int count);
+void __real_luaX_pollrequests(lua_State *state);
+
+void __wrap_luaX_pollrequests(lua_State *state) {
+  CallInfo *ci = state->ci;
+  if (collect_pending && !collected_pending && isLua(ci) &&
+      ci->u.l.rootpc != NULL && GET_OPCODE(*ci->u.l.rootpc) == OP_CLOSURE) {
+    StkId slot = ci->func.p + 1 + GETARG_A(*ci->u.l.rootpc);
+    UpVal *cell;
+    for (cell = state->openupval; cell != NULL; cell = cell->open.next) {
+      if (cell->level == savestack(state, slot)) {
+        /* The recursive closure has been constructed, but the instruction
+         * has not published its result to the captured binding yet. */
+        collected_pending = 1;
+        luaC_fullgc(state, 0);
+        break;
+      }
+    }
+  }
+  __real_luaX_pollrequests(state);
+}
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   if (reading)
     reader_mutexes++;
@@ -53,6 +80,24 @@ int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
 
 void __wrap_luaA_begin(lua_State *state, GCObject *object,
                        LuaObjectScope *scope) {
+  CallInfo *ci = state->ci;
+  if (collect_lookup && !collected_lookup && isLua(ci) &&
+      ci->u.l.rootpc != NULL && GET_OPCODE(*ci->u.l.rootpc) == OP_GETFIELD) {
+    StkId slot = ci->func.p + 1 + GETARG_A(*ci->u.l.rootpc);
+    UpVal *cell;
+    for (cell = state->openupval; cell != NULL; cell = cell->open.next) {
+      if (cell->level == savestack(state, slot)) {
+        ptrdiff_t top = savestack(state, state->top.p);
+        collected_lookup = 1;
+        state->top.p = ci->top.p;
+        /* Model a collector observing the pending lookup at object admission.
+         * An emergency collection preserves the borrowed stack addresses. */
+        luaC_fullgc(state, 1);
+        state->top.p = restorestack(state, top);
+        break;
+      }
+    }
+  }
   if (reading)
     reader_ownership++;
   measured++;
@@ -91,10 +136,16 @@ void __wrap_luaF_storelocals(lua_State *state, StkId first, int count) {
   measured--;
 }
 
-void __wrap_luaF_loadlocals(lua_State *state, CallInfo *ci) {
-  if (ci_func(ci) == measured_function)
+StkId __wrap_luaF_loadlocal(lua_State *state, StkId slot) {
+  if (isLua(state->ci) && ci_func(state->ci) == measured_function)
     local_loads++;
-  __real_luaF_loadlocals(state, ci);
+  return __real_luaF_loadlocal(state, slot);
+}
+
+void __wrap_luaF_loadrange(lua_State *state, StkId first, int count) {
+  if (isLua(state->ci) && ci_func(state->ci) == measured_function)
+    local_loads++;
+  __real_luaF_loadrange(state, first, count);
 }
 
 static int select_frame(lua_State *state) {
@@ -119,14 +170,16 @@ static void run(lua_State *state, const char *source) {
 /* Deliberately retain the owner's execution gate. A shared capture must make
  * progress without a reservation on this unrelated execution resource. */
 static int hold_owner(lua_State *state) {
-  luaX_lockstate(state);
+  if (current->retain_gate)
+    luaX_lockstate(state);
   require(pthread_mutex_lock(&current->mutex) == 0);
   current->held = 1;
   require(pthread_cond_broadcast(&current->changed) == 0);
   while (!current->release)
     require(pthread_cond_wait(&current->changed, &current->mutex) == 0);
   require(pthread_mutex_unlock(&current->mutex) == 0);
-  luaX_unlockstate(state);
+  if (current->retain_gate)
+    luaX_unlockstate(state);
   return 0;
 }
 
@@ -142,6 +195,7 @@ static void independent(lua_State *state) {
   pthread_t thread;
   int results;
   memset(&fixture, 0, sizeof(fixture));
+  fixture.retain_gate = 1;
   require(pthread_mutex_init(&fixture.mutex, NULL) == 0);
   require(pthread_cond_init(&fixture.changed, NULL) == 0);
   current = &fixture;
@@ -250,6 +304,170 @@ static const char barriers[] =
     "for n=1,140 do write({n=n}) end; "
     "collectgarbage('collect'); assert(read().n==140); ";
 
+static const char operands[] =
+    "local function work() "
+    " local cell=17; local function read() return cell end; "
+    " local sum=0; for i=1,20000 do sum=sum+i end; "
+    " assert(read()==17); return sum+cell-17 "
+    "end; select_frame(work); assert(work()==200010000)";
+
+/* Writes through a closure leave the owner's register shadow obsolete. Each
+ * subsequent operation must observe the cell, including direct A operands and
+ * contiguous call/return ranges, without a blanket frame refresh. */
+static const char operand_semantics[] =
+    "local x,y,t,k,f; local function write(a,b,c,d,e) x,y,t,k,f=a,b,c,d,e end; "
+    "write(7,3,{answer=41,[3]=42},3,function(a,b) return a+b end); "
+    "assert(x+1==8 and x+y==10 and x-1==6 and x*y==21); "
+    "assert(-x==-7 and ~x==~7 and not (not x)); "
+    "assert(x//y==2 and x%y==1 and x<<y==56 and x>>y==0); "
+    "assert((x&y)==3 and (x|y)==7 and (x~y)==4); "
+    "assert(x>y and y<x and x>=y and y<=x and x==7 and x~=y); "
+    "assert(t[k]==42 and t[3]==42 and t.answer==41); "
+    "t[k]=43; t[1]=44; t.answer=45; "
+    "assert(t[3]==43 and t[1]==44 and t.answer==45); "
+    "assert(f(x,y)==10); local z=x or y; assert(z==7); "
+    "write('ab','cd',setmetatable({}, {__len=function() return 13 end}),0,f); "
+    "assert(x..y=='abcd' and #x==2 and #t==13); "
+    "write(false,23,{method=function(self,v) return v+1 end},0,f); "
+    "if x then error('stale truth value') end; z=x or y; assert(z==23); "
+    "assert(t:method(y)==24); local list={x,y}; "
+    "assert(list[1]==false and list[2]==23); "
+    "local function returns() local value=0; "
+    " local function set(v) value=v end; set(91); return value end; "
+    "assert(returns()==91); "
+    "local function tail() local fn=function() return 1 end; "
+    " local function set(v) fn=v end; set(function() return 92 end); "
+    " return fn() end; assert(tail()==92); "
+    "local function many() local a,b=0,0; "
+    " local function set() a,b=93,94 end; set(); return a,b end; "
+    "local a,b=many(); assert(a==93 and b==94); "
+    "local function varargs(...) local a,b=...; "
+    " local function set() a,b=b,a end; set(); return a,b,... end; "
+    "local a,b,c,d=varargs(95,96); assert(a==96 and b==95 and c==95 and "
+    "d==96); "
+    "local function reuse(n) if n==0 then return 97 end; "
+    " do local v=n; local function read() return v end; assert(read()==n) end; "
+    " return reuse(n-1) end; assert(reuse(200)==97); ";
+
+static const char shadow_roots[] =
+    "local weak=setmetatable({}, {__mode='v'}); "
+    "local value={}; weak[1]=value; "
+    "local function replace(v) value=v end; replace(nil); "
+    "collectgarbage('collect'); collectgarbage('collect'); "
+    "assert(weak[1]==nil, 'obsolete capture shadow retained a value'); "
+    "assert(value==nil); ";
+
+static const char snapshot_semantics[] =
+    "local function work() "
+    " local x,y,t; local function set(a,b,c) x,y,t=a,b,c end; "
+    " set(7,3,{answer=41}); "
+    " debug.sethook(function() collectgarbage('collect') end,'',1); "
+    " assert(x+y==10 and x+1==8 and -x==-7 and x<8 and x>y); "
+    " assert(t.answer==41); t.answer=x+y; assert(t.answer==10); "
+    " set('left','right',{method=function(self,v) return v..'!' end}); "
+    " x=x..y; assert(x=='leftright'); assert(t:method(x)=='leftright!'); "
+    " x=setmetatable({}, {__add=function() collectgarbage('collect'); "
+    " return {answer=42} end}); x=x+1; assert(x.answer==42); "
+    " x=(function() collectgarbage('collect'); return {answer=43} end)(); "
+    " assert(x.answer==43); "
+    " x={answer=44}; assert(x.answer==44); "
+    " x=function() return {answer=45} end; assert(x().answer==45); "
+    " debug.sethook(); return x "
+    "end; assert(work()().answer==45); ";
+
+static const char lookup_roots[] =
+    "local value={}; local weak=setmetatable({value},{__mode='v'}); "
+    "local function replace(v) value=v end; replace(nil); "
+    "collectgarbage('collect'); collectgarbage('collect'); "
+    "assert(weak[1]==nil); "
+    "local source={payload={answer=46}}; value=source.payload; "
+    "assert(value.answer==46); ";
+
+/* A detached native owner need not resume or read the binding for a foreign
+ * writer's obsolete value to become collectible. Reclamation must not depend
+ * on the owner's dispatch frequency. */
+static void foreign_shadow(lua_State *state) {
+  struct fixture fixture;
+  lua_State *reader;
+  pthread_t thread;
+  int results;
+  memset(&fixture, 0, sizeof(fixture));
+  require(pthread_mutex_init(&fixture.mutex, NULL) == 0);
+  require(pthread_cond_init(&fixture.changed, NULL) == 0);
+  current = &fixture;
+  lua_pushcfunction(state, hold_owner);
+  lua_setglobal(state, "hold_owner");
+  fixture.owner = lua_newthread(state);
+  require(luaL_loadstring(
+              fixture.owner,
+              "local value={}; "
+              "local weak=setmetatable({value},{__mode='v'}); "
+              "local function read() return value end; "
+              "local function write(v) value=v end; "
+              "coroutine.yield(read,write,weak); hold_owner(); return value") ==
+          LUA_OK);
+  require(lua_resume(fixture.owner, NULL, 0, &results) == LUA_YIELD &&
+          results == 3);
+  lua_xmove(fixture.owner, state, 3);
+  reader = lua_newthread(state);
+  require(luaL_loadstring(
+              reader, "local read,write,weak=...; write(nil); "
+                      "collectgarbage('collect'); collectgarbage('collect'); "
+                      "assert(weak[1]==nil); assert(read()==nil)") == LUA_OK);
+  lua_pushvalue(state, -4);
+  lua_pushvalue(state, -4);
+  lua_pushvalue(state, -4);
+  lua_xmove(state, reader, 3);
+  require(pthread_create(&thread, NULL, resume_owner, &fixture) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.held)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(lua_resume(reader, NULL, 3, &results) == LUA_OK);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  fixture.release = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  require(fixture.status == LUA_OK && fixture.results == 1);
+  require(lua_isnil(fixture.owner, -1));
+  require(pthread_cond_destroy(&fixture.changed) == 0);
+  require(pthread_mutex_destroy(&fixture.mutex) == 0);
+}
+
+/* High registers, colliding filter bits and stack movement must retain full
+ * semantics. Generate source here to avoid an unreadable fixture.
+ */
+static void wide_operands(lua_State *state) {
+  luaL_Buffer source;
+  int i;
+  luaL_buffinit(state, &source);
+  luaL_addstring(&source, "return function(...) local ");
+  for (i = 0; i < 140; i++) {
+    char name[24];
+    snprintf(name, sizeof(name), "%sv%d", i ? "," : "", i);
+    luaL_addstring(&source, name);
+  }
+  luaL_addstring(
+      &source,
+      "; local function write() v0=3; v63=7; v64=11; v127=13; "
+      "v139=17 end; write(); "
+      "assert(v0+v64==14 and v63+v127==20 and v139==17); "
+      "local function grow(n) if n==0 then return end; "
+      "grow(n-1); end; grow(100); "
+      "assert(v0==3 and v63==7 and v64==11 and v127==13 and v139==17); "
+      "return v0,v63,v64,v127,v139 end");
+  luaL_pushresult(&source);
+  require(luaL_loadstring(state, lua_tostring(state, -1)) == LUA_OK);
+  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+  require(lua_pcall(state, 0, 5, 0) == LUA_OK);
+  require(lua_tointeger(state, -5) == 3);
+  require(lua_tointeger(state, -4) == 7);
+  require(lua_tointeger(state, -3) == 11);
+  require(lua_tointeger(state, -2) == 13);
+  require(lua_tointeger(state, -1) == 17);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -283,6 +501,33 @@ int main(int argc, char **argv) {
                "select_frame(work); "
                "assert(work()==200010000 and read()==17)");
     require(local_loads == 0);
+  } else if (strcmp(argv[1], "operands") == 0) {
+    lua_pushcfunction(state, select_frame);
+    lua_setglobal(state, "select_frame");
+    run(state, operands);
+    fprintf(stderr, "capture operand refreshes=%u\n", local_loads);
+    require(local_loads > 0 && local_loads < 50);
+    measured_function = NULL;
+    run(state, operand_semantics);
+    wide_operands(state);
+    lua_settop(state, 0);
+    run(state, shadow_roots);
+  } else if (strcmp(argv[1], "shadow_incremental") == 0 ||
+             strcmp(argv[1], "shadow_generational") == 0) {
+    if (strcmp(argv[1], "shadow_generational") == 0)
+      lua_gc(state, LUA_GCGEN);
+    collect_pending = 1;
+    run(state, "local function recursive(n) if n==0 then return 42 end; "
+               "return recursive(n-1) end; assert(recursive(5)==42)");
+    require(collected_pending == 1);
+    collect_pending = 0;
+    collect_lookup = 1;
+    run(state, lookup_roots);
+    require(collected_lookup == 1);
+    collect_lookup = 0;
+    run(state, shadow_roots);
+    run(state, snapshot_semantics);
+    foreign_shadow(state);
   } else if (strcmp(argv[1], "semantics") == 0)
     run(state, semantics);
   else {
