@@ -105,11 +105,13 @@ joining. Stack-backed captures are optional. Stable shared cells, heap-backed
 frames or other representations may replace them throughout the compiler/VM.
 
 Root publication, allocation, barriers and reclamation must be designed
-together. Local allocation/publication records and local barrier buffers avoid
+together. Local allocation/publication records and local barrier work avoid
 a VM-wide metadata transaction per ordinary operation. The collector observes
 a coherent published view, with safe-point or epoch coordination as required.
-The collector may be replaced; concurrent collection is an implementation
-choice, not a requirement to reproduce Go's algorithm literally.
+Bulk marking and sweeping must overlap application workers, with short measured
+synchronization phases. The collector and other internals may be replaced;
+research and measurements select the design rather than prescribing CMS, G1 or
+Go's algorithm.
 
 Native roots, parked tasks, callbacks, errors, finalizers and resurrection remain
 safe during collection and allocation failure. Finalizers and arbitrary user

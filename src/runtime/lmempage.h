@@ -10,7 +10,7 @@ typedef union LuaAllocBlock LuaAllocBlock;
 union LuaAllocBlock {
   struct {
     LuaAllocPage *page;
-    LuaAllocBlock *next;
+    LuaAllocBlock *next;  /* free list, or collector work while allocated */
   } block;
   union { LUAI_MAXALIGN; } alignment;
 };

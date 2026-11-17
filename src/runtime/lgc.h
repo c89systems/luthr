@@ -21,7 +21,8 @@
 ** object and all its references are marked.  The main invariant of the
 ** garbage collector, while marking objects, is that a black object can
 ** never point to a white one. Moreover, any gray object must be in a
-** "gray list" (gray, grayagain, weak, allweak, ephemeron) so that it
+** "gray list" (gray, grayagain, weak, allweak, ephemeron), or claimed
+** for a coroutine's collector publication queue, so that it
 ** can be visited again before finishing the collection cycle. (Open
 ** upvalues are an exception to this rule, as they are attached to
 ** a corresponding thread.)  These lists have no meaning when the
@@ -274,8 +275,10 @@ LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
 LUAI_FUNC void luaC_barrier_ (lua_State *L, GCObject *o, GCObject *v);
 LUAI_FUNC void luaC_barrierback_ (lua_State *L, GCObject *o);
 LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back);
-/* Collector-only: participants are quiescent and all record storage is live. */
+/* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
+/* Private work-list inspection; caller owns quiescent collection. */
+LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
 /* Collector or exclusive incomplete-VM cleanup only. Publish complete local
 ** construction lists, exact allocation totals and finalizer registrations. */
 LUAI_FUNC void luaC_publish (lua_State *L);

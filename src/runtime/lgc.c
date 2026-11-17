@@ -23,6 +23,7 @@
 #include "lfunc.h"
 #include "lgc.h"
 #include "lmem.h"
+#include "lmempage.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "lroots.h"
@@ -293,12 +294,52 @@ static void applybarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
   }
 }
 
+/* A live object's allocator link is unused until reclamation. Reuse it for
+** claimed work rather than allocating records or growing coroutine buffers.
+** The main thread is embedded in global_State and is never a barrier target:
+** restartcollection marks it before admitting any mutator. */
+static LuaAllocBlock *barrierblock (GCObject *o) {
+  char *memory = cast_charp(o);
+  if (o->tt == LUA_VTHREAD)
+    memory -= offsetof(LX, l);
+  return cast(LuaAllocBlock *, memory) - 1;
+}
+
+GCObject *luaC_barriernext (GCObject *o) {
+  return cast(GCObject *, barrierblock(o)->block.next);
+}
+
+static void publishbarrier (global_State *g, GCObject **queue, GCObject *o) {
+  LuaAllocBlock *block;
+  GCObject *head = __atomic_load_n(queue, __ATOMIC_RELAXED);
+  lua_assert(o != obj2gco(mainthread(g)));
+  UNUSED(g);
+  block = barrierblock(o);
+  do {
+    block->block.next = cast(LuaAllocBlock *, head);
+  } while (!__atomic_compare_exchange_n(queue, &head, o, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
 static void drainthreadbarriers (lua_State *L, lua_State *thread) {
-  unsigned i, count = thread->barrier_count;
-  thread->barrier_count = 0;
-  for (i = 0; i < count; i++) {
-    LuaBarrierRecord *record = &thread->barriers[i];
-    applybarrier(L, record->owner, record->value, record->back);
+  global_State *g = G(L);
+  GCObject *o = __atomic_exchange_n(&thread->barrier_back, NULL, __ATOMIC_ACQUIRE);
+  while (o != NULL) {
+    GCObject *next = luaC_barriernext(o);
+    lua_assert(isgray(o));
+    *getgclist(o) = g->grayagain;
+    g->grayagain = o;
+    o = next;
+  }
+  o = __atomic_exchange_n(&thread->barrier_forward, NULL, __ATOMIC_ACQUIRE);
+  while (o != NULL) {
+    GCObject *next = luaC_barriernext(o);
+    lua_assert(isgray(o));
+    /* Claiming did not inspect mutable fields. Trace only after participants
+    ** have completed their publications and stopped changing those fields. */
+    set2black(o);
+    reallymarkobject(g, o);
+    o = next;
   }
 }
 
@@ -309,33 +350,36 @@ void luaC_drainbarriers (lua_State *L) {
     drainthreadbarriers(L, participant->thread);
 }
 
-/* Forward barriers retain complete edges; backward barriers remember dirty
-** owners. Repeated writes to one owner need only one rescan. The small cache
-** holds indices, never roots: validate against the current buffer after every
-** drain or collision. No record survives a collector step. */
+/* The colour transition claims the object's one work-list link. Other writers
+** observe gray and need no further record. Participation covers the interval
+** from claiming to release-publication, so termination cannot miss a producer.
+** No allocation, ownership wait or safepoint occurs on this path. */
 void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
-  LuaBarrierRecord *record;
+  global_State *g = G(L);
+  GCObject *target = back ? o : v;
+  lu_byte marked, claimed;
   if (luaW_iscollector(L)) {
     applybarrier(L, o, v, back);
     return;
   }
-  lua_assert(L->barrier_count < LUA_BARRIER_CAPACITY);
-  if (back) {
-    unsigned bucket = (point2uint(o) >> 4) % LUA_BARRIER_CACHE;
-    unsigned index = L->barrier_back_cache[bucket];
-    if (index < L->barrier_count && L->barriers[index].back &&
-        L->barriers[index].owner == o)
+  if (!back && !keepinvariant(g)) {
+    makewhite(g, o);  /* sweeping needs no referent publication */
+    return;
+  }
+  marked = getmarked(target);
+  do {
+    if (back ? !testbit(marked, BLACKBIT) : !testbits(marked, WHITEBITS))
       return;
-    L->barrier_back_cache[bucket] = cast_byte(L->barrier_count);
-  }
-  record = &L->barriers[L->barrier_count++];
-  record->owner = o;
-  record->value = v;
-  record->back = back;
-  if (L->barrier_count == LUA_BARRIER_CAPACITY) {
-    luaW_stop(L);
-    luaW_start(L);
-  }
+    claimed = cast_byte(marked & ~maskcolors);
+    if (back && (marked & AGEBITS) > G_SURVIVAL)
+      claimed = cast_byte((claimed & ~AGEBITS) | G_TOUCHED1);
+    else if (!back && isold(o))
+      claimed = cast_byte((claimed & ~AGEBITS) | G_OLD0);
+  } while (!__atomic_compare_exchange_n(&target->marked, &marked, claimed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  /* TOUCHED2 is already on grayagain. Its existing link remains authoritative. */
+  if (!back || (marked & AGEBITS) != G_TOUCHED2)
+    publishbarrier(g, back ? &L->barrier_back : &L->barrier_forward, target);
 }
 
 
@@ -1234,9 +1278,9 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
   else if (luaW_iscollector(L))
     registerfinalizer(L, o);
   else {
-    lua_assert(L->finalizer_count < LUA_BARRIER_CAPACITY);
+    lua_assert(L->finalizer_count < LUA_FINALIZER_CAPACITY);
     L->finalizers[L->finalizer_count++] = o;
-    if (L->finalizer_count == LUA_BARRIER_CAPACITY) {
+    if (L->finalizer_count == LUA_FINALIZER_CAPACITY) {
       luaW_stop(L);
       luaW_start(L);
     }

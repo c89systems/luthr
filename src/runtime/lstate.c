@@ -370,9 +370,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
   L->policy = NULL;
-  L->barrier_count = 0;
-  for (i = 0; i < LUA_BARRIER_CACHE; i++)
-    L->barrier_back_cache[i] = 0;
+  L->barrier_forward = L->barrier_back = NULL;
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->finalizer_count = 0;

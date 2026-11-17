@@ -304,13 +304,7 @@ typedef struct LuaNativeRoot {
   const Table *table_view;  /* borrowed resize image, strongly traced until pop */
 } LuaNativeRoot;
 
-#define LUA_BARRIER_CAPACITY 64
-#define LUA_BARRIER_CACHE 16
-typedef struct LuaBarrierRecord {
-  GCObject *owner;
-  GCObject *value;
-  int back;
-} LuaBarrierRecord;
+#define LUA_FINALIZER_CAPACITY 64
 
 /*
 ** 'per thread' state
@@ -363,14 +357,13 @@ struct lua_State {
   unsigned heap_waiting;
   unsigned object_waiting;
   struct LuaObjectScope *object_scopes;
-  unsigned barrier_count;
-  LuaBarrierRecord barriers[LUA_BARRIER_CAPACITY];
-  lu_byte barrier_back_cache[LUA_BARRIER_CACHE];  /* validated record indices */
+  GCObject *barrier_forward;  /* atomic; uniquely claimed untraced objects */
+  GCObject *barrier_back;  /* atomic; uniquely claimed dirty owners */
   GCObject *new_objects;
   GCObject *new_objects_tail;
   l_mem allocation_debt;
   unsigned finalizer_count;
-  GCObject *finalizers[LUA_BARRIER_CAPACITY];
+  GCObject *finalizers[LUA_FINALIZER_CAPACITY];
   TString *strcache[STRCACHE_N][STRCACHE_M];
   struct LuaAllocPage *allocation_cache[LUA_ALLOC_POOLS];
 };

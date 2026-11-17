@@ -2,6 +2,7 @@
 #include <lauxlib.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,8 +15,8 @@
     }                                                                          \
   } while (0)
 
-static unsigned stops;
-static int measured;
+static __thread unsigned stops;
+static __thread int measured;
 void __real_luaW_stop(lua_State *);
 void __wrap_luaW_stop(lua_State *L) {
   if (measured)
@@ -81,8 +82,7 @@ static void forward(lua_State *L) {
     require(lua_setupvalue(L, 1, 1) != NULL);
   }
   measured = 0;
-  require(stops >=
-          4); /* Distinct forward edges must retain bounded draining. */
+  require(stops == 0); /* Publication must not stop other workers. */
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_getupvalue(L, 1, 1) != NULL && lua_istable(L, -1));
 }
@@ -110,37 +110,164 @@ static void mixed(lua_State *L) {
   require(lua_rawgeti(L, 1, 2) == LUA_TTABLE);
 }
 
+enum { OWNERS = 160, ACTORS = 4, WRITES = 256 };
+
 static void collisions(lua_State *L, int reset) {
   unsigned round, i;
-  /* More owners than cache buckets also exercises collisions and eviction. */
-  for (i = 1; i <= 40; i++)
+  /* More distinct owners than the former buffer capacity. */
+  for (i = 1; i <= OWNERS; i++)
     lua_newtable(L);
   for (round = 0; round < (reset ? 3U : 1U); round++) {
     prepare(L);
     lua_newtable(L);
-    for (i = 1; i <= 40; i++) {
-      unsigned index = round & 1 ? 41 - i : i;
+    measured = 1;
+    for (i = 1; i <= OWNERS; i++) {
+      unsigned index = round & 1 ? OWNERS + 1 - i : i;
       require(isblack(object(L, (int)index)));
-      lua_pushvalue(L, 41);
+      lua_pushvalue(L, OWNERS + 1);
       lua_rawseti(L, (int)index, (lua_Integer)round + 1);
-      lua_pushvalue(L, 41);
+      lua_pushvalue(L, OWNERS + 1);
       lua_rawseti(L, (int)index, (lua_Integer)round + 1);
     }
+    measured = 0;
+    require(stops == 0);
     drain(L);
-    for (i = 1; i <= 40; i++)
+    for (i = 1; i <= OWNERS; i++)
       require(isgray(object(L, (int)i)));
-    lua_settop(L, 40);
+    lua_settop(L, OWNERS);
   }
   lua_gc(L, LUA_GCCOLLECT);
-  for (i = 1; i <= 40; i++) {
+  for (i = 1; i <= OWNERS; i++) {
     require(lua_rawgeti(L, (int)i, 1) == LUA_TTABLE);
     lua_pop(L, 1);
   }
 }
 
+struct actor {
+  lua_State *state;
+  unsigned id, stops;
+  pthread_barrier_t *start;
+};
+
+static void *publish(void *argument) {
+  struct actor *actor = argument;
+  lua_State *L = actor->state;
+  unsigned i;
+  int status = pthread_barrier_wait(actor->start);
+  require(status == 0 || status == PTHREAD_BARRIER_SERIAL_THREAD);
+  measured = 1;
+  for (i = 0; i < WRITES; i++) {
+    /* Distinct closures claim one shared referent. Distinct keys dirty one
+     * shared owner. Both claims race across independent stack owners. */
+    lua_pushvalue(L, 2);
+    require(lua_setupvalue(L, 1, 1) != NULL);
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, 3, (lua_Integer)(actor->id * WRITES + i + 1));
+  }
+  actor->stops = stops;
+  measured = 0;
+  return NULL;
+}
+
+static void parallel(lua_State *L, int collect) {
+  struct actor actors[ACTORS];
+  pthread_t workers[ACTORS];
+  pthread_barrier_t start;
+  unsigned i;
+  require(pthread_barrier_init(&start, NULL, ACTORS) == 0);
+  lua_newtable(L); /* shared referent */
+  lua_newtable(L); /* shared owner */
+  for (i = 0; i < ACTORS; i++) {
+    lua_State *thread = lua_newthread(L);
+    actors[i].state = thread;
+    actors[i].id = i;
+    actors[i].stops = 0;
+    actors[i].start = &start;
+    lua_pushnil(thread);
+    lua_pushcclosure(thread, closure, 1);
+    lua_pushvalue(L, 1);
+    lua_xmove(L, thread, 1);
+    lua_pushvalue(L, 2);
+    lua_xmove(L, thread, 1);
+  }
+  prepare(L);
+  lua_newtable(L); /* a white referent shared with all actors */
+  for (i = 0; i < ACTORS; i++) {
+    lua_pushvalue(L, -1);
+    lua_xmove(L, actors[i].state, 1);
+    lua_replace(actors[i].state, 2);
+    require(pthread_create(&workers[i], NULL, publish, &actors[i]) == 0);
+  }
+  if (collect)
+    for (i = 0; i < 10; i++)
+      lua_gc(L, LUA_GCCOLLECT);
+  for (i = 0; i < ACTORS; i++) {
+    require(pthread_join(workers[i], NULL) == 0);
+    require(actors[i].stops == 0);
+  }
+  drain(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  for (i = 0; i < ACTORS * WRITES; i++) {
+    require(lua_rawgeti(L, 2, (lua_Integer)i + 1) == LUA_TTABLE);
+    require(lua_rawequal(L, -1, -2));
+    lua_pop(L, 1);
+  }
+  require(pthread_barrier_destroy(&start) == 0);
+}
+
+static void targets(lua_State *L) {
+  const char *chunk = "return function() return {} end";
+  unsigned i;
+  lua_pushnil(L);
+  lua_pushcclosure(L, closure, 1);
+  prepare(L);
+  measured = 1;
+  for (i = 0; i < 135; i++) {
+    switch (i % 9) {
+    case 0:
+      lua_pushfstring(L, "short-%d", (int)i);
+      break;
+    case 1: {
+      char value[128];
+      memset(value, (int)i, sizeof(value));
+      lua_pushlstring(L, value, sizeof(value));
+      break;
+    }
+    case 2:
+      lua_newtable(L);
+      break;
+    case 3:
+      lua_newuserdatauv(L, 8, 0);
+      break;
+    case 4:
+      lua_newuserdatauv(L, 8, 2);
+      break;
+    case 5:
+      lua_newthread(L); /* GC header follows LX extra space. */
+      break;
+    case 6:
+      require(luaL_loadstring(L, chunk) == LUA_OK);
+      break;
+    case 7:
+      lua_pushthread(L); /* The embedded main thread is already marked. */
+      break;
+    default:
+      lua_pushnil(L);
+      lua_pushcclosure(L, closure, 1);
+      break;
+    }
+    require(lua_setupvalue(L, 1, 1) != NULL);
+  }
+  measured = 0;
+  require(stops == 0);
+  drain(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getupvalue(L, 1, 1) != NULL && lua_iscfunction(L, -1));
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
-  require(L != NULL && argc == 3 && lua_checkstack(L, 100));
+  require(L != NULL && argc == 3 && lua_checkstack(L, OWNERS + 10));
   if (strcmp(argv[2], "generational") == 0)
     lua_gc(L, LUA_GCGEN);
   else
@@ -152,6 +279,11 @@ int main(int argc, char **argv) {
     forward(L);
   else if (strcmp(argv[1], "mixed") == 0)
     mixed(L);
+  else if (strcmp(argv[1], "parallel") == 0 ||
+           strcmp(argv[1], "parallel_gc") == 0)
+    parallel(L, strcmp(argv[1], "parallel_gc") == 0);
+  else if (strcmp(argv[1], "targets") == 0)
+    targets(L);
   else {
     require(strcmp(argv[1], "collisions") == 0 ||
             strcmp(argv[1], "reset") == 0);

@@ -45,12 +45,12 @@ debug local access use the same cell representation. Closing unlinks a binding;
 it does not copy an obsolete register shadow over a foreign writer's value.
 Bytecode remains portable; the interpreter lowers its register accesses.
 
-Pointer barriers append bounded records to the current coroutine's private
-buffer. Every collection rendezvous drains every buffer before advancing the
-collector, including buffers on otherwise unreachable threads. A full buffer
-requests a rendezvous solely to drain work. Collector-side barriers apply
-immediately, including close of another coroutine. A record cannot outlive a
-collector step that could reclaim either endpoint.
+Pointer barriers atomically claim gray objects and publish them on the current
+coroutine's work queues. Each object uses its existing allocation link; repeated
+claims need no additional storage. Publication cannot allocate, wait or request
+a global rendezvous. Collection drains every queue before tracing or reclaiming
+objects, including queues on otherwise unreachable threads. Tracing itself
+still requires quiescence at this intermediate stage.
 
 This is an intermediate cutover within surface 1. Allocation/publication,
 interning, general metadata scopes and managed admission/polling still use the

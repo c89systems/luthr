@@ -204,21 +204,14 @@ void __wrap_luaC_drainbarriers(lua_State *L) {
     started = now();
     for (participant = G(L)->world.participants; participant != NULL;
          participant = participant->next) {
-      lua_State *thread = participant->thread;
-      GCObject *seen[LUA_BARRIER_CAPACITY];
-      unsigned count = 0, i, j;
-      record->barrier_records += thread->barrier_count;
-      for (i = 0; i < thread->barrier_count; i++) {
-        LuaBarrierRecord *edge = &thread->barriers[i];
-        if (!edge->back)
-          continue;
+      GCObject *object;
+      for (object = participant->thread->barrier_forward; object != NULL;
+           object = luaC_barriernext(object))
+        record->barrier_records++;
+      for (object = participant->thread->barrier_back; object != NULL;
+           object = luaC_barriernext(object)) {
+        record->barrier_records++;
         record->back_records++;
-        for (j = 0; j < count && seen[j] != edge->owner; j++)
-          ;
-        if (j == count)
-          seen[count++] = edge->owner;
-        else
-          record->repeated_back_records++;
       }
     }
     record->inspection_ns += now() - started;
