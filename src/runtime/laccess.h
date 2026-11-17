@@ -16,6 +16,14 @@ typedef struct LuaObjectScope {
 } LuaObjectScope;
 
 LUAI_FUNC void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope);
+/* Opaque native bytes may stay borrowed while execution is detached. Managed
+** user values and metatables retain ordinary object ownership. */
+LUAI_FUNC void luaA_beginpayload (lua_State *L, Udata *object,
+                                 LuaObjectScope *scope);
+/* A scanner must defer busy objects; it cannot wait on a mutator which may
+** itself be awaiting collection. Success is released with luaA_endscan. */
+LUAI_FUNC int luaA_tryscan (GCObject *object);
+LUAI_FUNC void luaA_endscan (lua_State *L, GCObject *object);
 /* A VM-owned partition has permanent storage and needs no collectable root. */
 LUAI_FUNC void luaA_beginlock (lua_State *L, LuaObjectLock *lock,
                               LuaObjectScope *scope);

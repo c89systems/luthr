@@ -372,10 +372,16 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->native_roots = NULL;
   L->policy = NULL;
   L->barrier_forward = L->barrier_back = NULL;
+  L->trace_snapshot = 0;
+  L->trace_trimmed = 0;
+  L->trace_assisting = 0;
+  L->trace_bytes = 0;
+  L->building_protos = NULL;
   L->retired = L->retired_tail = NULL;
   L->reclaiming = L->reclaim_pages = 0;
   L->reclaim_next = NULL;
   L->reclaim_workers = 0;
+  L->reclaim_registered = 0;
   L->assist_debt = 0;
   L->assist_epoch = 0;
   L->new_objects = L->new_objects_tail = NULL;
@@ -403,6 +409,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->native_depth = L->world_depth = 0;
   L->heap_waiting = 0;
   L->object_waiting = 0;
+  L->root_waiting = 0;
+  L->stack_peer = NULL;
   L->object_scopes = NULL;
   L->errorJmp = NULL;
   L->hook = NULL;
@@ -464,10 +472,23 @@ static void close_state (lua_State *L, int owns_gate) {
 }
 
 
+static void buildthread (lua_State *L, void *context) {
+  lua_State *thread = cast(lua_State *, context);
+  luaW_register(thread);
+  luaCP_bind(thread, L->policy);
+  lua_sethook(thread, gethook(L), gethookmask(L), getbasehookcount(L));
+  memcpy(lua_getextraspace(thread), lua_getextraspace(mainthread(G(L))),
+         LUA_EXTRASPACE);
+  luai_userstatethread(L, thread);
+  stack_init(thread, L);
+}
+
 LUA_API lua_State *lua_newthread (lua_State *L) {
   global_State *g = G(L);
   GCObject *o;
   lua_State *L1;
+  int reservation;
+  TStatus status;
   lua_lock(L);
   luaC_checkGC(L);
   /* create new thread */
@@ -478,14 +499,15 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   api_incr_top(L);
   if (preinit_thread(L1, g) != 0)
     luaM_error(L);
-  luaW_register(L1);
-  luaCP_bind(L1, L->policy);
-  lua_sethook(L1, gethook(L), gethookmask(L), getbasehookcount(L));
-  /* initialize L1 extra space */
-  memcpy(lua_getextraspace(L1), lua_getextraspace(mainthread(g)),
-         LUA_EXTRASPACE);
-  luai_userstatethread(L, L1);
-  stack_init(L1, L);  /* init stack */
+  /* No safepoint has exposed this fresh gate. Retain it while stack allocation
+  ** can park the parent, so a concurrent scanner cannot read partial bounds.
+  ** The parent supplies participation; the child must not add an active entry
+  ** which would prevent collection while its allocator is waiting. */
+  reservation = luaX_tryreserve(L1);
+  lua_assert(reservation == 1);
+  status = luaD_rawrunprotected(L, buildthread, L1);
+  luaX_endreserve(L1, reservation);
+  if (status != LUA_OK) luaD_throw(L, status);
   lua_unlock(L);
   return L1;
 }
@@ -632,6 +654,14 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCdebt = 0;
   g->GCreclaimed = 0;
   g->gcstep_pending = 0;
+  g->trace_active = g->trace_epoch = g->trace_busy = 0;
+  g->trace_weakcutoff = 0;
+  memset(&g->trace_plan, 0, sizeof(g->trace_plan));
+  g->trace_interrupt = 0;
+  g->trace_changes = 0;
+  g->trace_ready = 0;
+  g->trace_deferred = NULL;
+  g->trace_tail = &g->trace_deferred;
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g, PAUSE, LUAI_GCPAUSE);
   setgcparam(g, STEPMUL, LUAI_GCMUL);

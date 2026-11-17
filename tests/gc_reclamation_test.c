@@ -160,6 +160,10 @@ int main(int argc, char **argv) {
   fixture.detached = strcmp(argv[1], "collect_again") == 0;
   fixture.handshake = strcmp(argv[1], "handshake") == 0;
   fixture.assist = strcmp(argv[1], "assist") == 0;
+  /* Automatic tracing can now overlap older destruction too. Model the held
+   * allocator wait as withdrawn participation, just like collect_again. */
+  if (fixture.assist)
+    fixture.detached = 1;
   require(fixture.detached || fixture.handshake || fixture.assist ||
           strcmp(argv[1], "overlap") == 0);
   require(pthread_mutex_init(&fixture.mutex, NULL) == 0);
@@ -194,6 +198,17 @@ int main(int argc, char **argv) {
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(!fixture.done && !fixture.freed);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  if (fixture.assist) {
+    lua_lock(fixture.worker);
+    fixture.worker->assist_debt = MAX_LMEM;
+    fixture.worker->assist_epoch = G(fixture.worker)->world.work_epoch;
+    luaC_assistreclaim(fixture.worker);
+    lua_unlock(fixture.worker);
+    /* All shared work is gone; only the deliberately held claim remains.
+     * Assistance must return and allow ordinary allocation to continue. */
+    require(fixture.collector->retired == NULL &&
+            fixture.collector->reclaim_workers == 1);
+  }
   /* This must finish while destruction is held, including backing allocation,
    * shared string interning and ordinary Lua execution on another carrier. */
   require(luaL_dostring(fixture.worker, progress) == LUA_OK);

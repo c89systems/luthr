@@ -38,12 +38,40 @@ void gc_probe_add(GcProbe *total, const GcProbe *record) {
 #define GC_PROBE_ADD(name) total->name += record->name;
   GC_PROBE_COUNTERS(GC_PROBE_ADD)
 #undef GC_PROBE_ADD
+#define GC_PROBE_MAX(name)                                                     \
+  if (record->name > total->name)                                              \
+    total->name = record->name;
+  GC_PROBE_MAXIMA(GC_PROBE_MAX)
+#undef GC_PROBE_MAX
 }
 
 void gc_probe_emit(const GcProbe *record) {
 #define GC_PROBE_EMIT(name) printf(",\"gc_" #name "\":%" PRIu64, record->name);
   GC_PROBE_COUNTERS(GC_PROBE_EMIT)
+  GC_PROBE_MAXIMA(GC_PROBE_EMIT)
 #undef GC_PROBE_EMIT
+}
+
+void gc_probe_allocation(uint64_t live) {
+  GcProbe *record = host_probe;
+  uint64_t *peak, previous;
+  global_State *g;
+  if (record == NULL || !record->enabled)
+    return;
+  g = G(host);
+  if (luaC_tracing(host))
+    peak = &record->mark_peak_bytes;
+  else if (g->gcstate >= GCSswpallgc && g->gcstate <= GCSswpend)
+    peak = &record->sweep_peak_bytes;
+  else if (luaC_hasreclaimers(host))
+    peak = &record->reclaim_peak_bytes;
+  else
+    peak = &record->idle_peak_bytes;
+  previous = __atomic_load_n(peak, __ATOMIC_RELAXED);
+  while (previous < live &&
+         !__atomic_compare_exchange_n(peak, &previous, live, 0,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+  }
 }
 
 static void coordination_begin(GcProbe *record) {
@@ -58,15 +86,21 @@ static void coordination_end(GcProbe *record) {
 void __real_luaW_stop(lua_State *);
 void __real_luaW_start(lua_State *);
 void __real_luaW_heapenter(lua_State *);
+void __real_luaW_collectenter(lua_State *);
 void __real_luaW_heapleave(lua_State *);
 void __real_luaC_step(lua_State *);
 void __real_luaC_fullgc(lua_State *, int);
+void __real_luaC_finishtrace(lua_State *);
 void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *, int);
 void __real_luaC_publish(lua_State *);
 void __real_luaC_drainbarriers(lua_State *);
 void __real_luaC_reclaim(lua_State *);
 void __real_luaC_assistreclaim(lua_State *);
-void __real_luaW_waitreclaim(lua_State *);
+lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
+void __real_luaC_assisttrace(lua_State *);
+void __real_luaC_snapshot(lua_State *, lua_State *);
+void __real_luaC_checksnapshot(lua_State *);
+void __real_luaW_waitcollector(lua_State *);
 void __real_luaM_reclaimpages(lua_State *);
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
@@ -106,25 +140,31 @@ void __wrap_luaW_start(lua_State *L) {
   record->resume_ns += now() - started;
 }
 
-void __wrap_luaW_heapenter(lua_State *L) {
+static void heapenter(lua_State *L, void (*enter)(lua_State *)) {
   GcProbe *record = probe(L);
   uint64_t waits = 0, wait_ns = 0;
   int collector = 0;
   if (record != NULL) {
     waits = record->metadata_waits;
     wait_ns = record->metadata_wait_ns;
-    collector = record->gc_depth != 0;
+    collector = record->gc_depth != 0 || enter == __real_luaW_collectenter;
     record->heap_entries++;
     record->heap_gc_entries += collector;
     coordination_begin(record);
   }
-  __real_luaW_heapenter(L);
+  enter(L);
   if (record != NULL) {
     coordination_end(record);
     record->heap_contended_entries += record->metadata_waits != waits;
     if (collector)
       record->heap_gc_wait_ns += record->metadata_wait_ns - wait_ns;
   }
+}
+void __wrap_luaW_heapenter(lua_State *L) {
+  heapenter(L, __real_luaW_heapenter);
+}
+void __wrap_luaW_collectenter(lua_State *L) {
+  heapenter(L, __real_luaW_collectenter);
 }
 void __wrap_luaW_heapleave(lua_State *L) {
   GcProbe *record = probe(L);
@@ -176,6 +216,13 @@ void __wrap_luaC_fullgc(lua_State *L, int emergency) {
   collect(L, 1, emergency);
 }
 
+void __wrap_luaC_finishtrace(lua_State *L) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->trace_cycles++;
+  __real_luaC_finishtrace(L);
+}
+
 void __wrap_luaC_syncbarrier(lua_State *L, GCObject *owner, GCObject *value,
                              int back) {
   GcProbe *record = probe(L);
@@ -192,6 +239,10 @@ void __wrap_luaC_syncbarrier(lua_State *L, GCObject *owner, GCObject *value,
 void __wrap_luaC_publish(lua_State *L) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
+  /* World stop invokes publication after every mutator has withdrawn. The
+   * first snapshot check on resume ends this interval, before root work. */
+  if (record != NULL && L->world_depth == 1 && !record->stopped_start)
+    record->stopped_start = started;
   __real_luaC_publish(L);
   if (record != NULL) {
     record->publish_calls++;
@@ -208,11 +259,13 @@ void __wrap_luaC_drainbarriers(lua_State *L) {
     for (participant = G(L)->world.participants; participant != NULL;
          participant = participant->next) {
       GCObject *object;
-      for (object = participant->thread->barrier_forward; object != NULL;
-           object = luaC_barriernext(object))
+      for (object = __atomic_load_n(&participant->thread->barrier_forward,
+                                    __ATOMIC_ACQUIRE);
+           object != NULL; object = luaC_barriernext(object))
         record->barrier_records++;
-      for (object = participant->thread->barrier_back; object != NULL;
-           object = luaC_barriernext(object)) {
+      for (object = __atomic_load_n(&participant->thread->barrier_back,
+                                    __ATOMIC_ACQUIRE);
+           object != NULL; object = luaC_barriernext(object)) {
         record->barrier_records++;
         record->back_records++;
       }
@@ -275,16 +328,87 @@ static void reclaim(lua_State *L, int assist) {
 void __wrap_luaC_reclaim(lua_State *L) { reclaim(L, 0); }
 void __wrap_luaC_assistreclaim(lua_State *L) { reclaim(L, 1); }
 
-void __wrap_luaW_waitreclaim(lua_State *L) {
+lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
+  lu_mem marked = __real_luaC_tracebatch(L, limit);
+  if (record != NULL) {
+    uint64_t elapsed = now() - started;
+    record->trace_calls++;
+    record->trace_ns += elapsed;
+    record->trace_work_bytes += marked;
+    if (!record->gc_depth)
+      record->collector_body_ns += elapsed;
+  }
+  return marked;
+}
+
+void __wrap_luaC_assisttrace(lua_State *L) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->trace_assist_calls++;
+  __real_luaC_assisttrace(L);
+}
+
+static unsigned snapshot_needed(lua_State *L, lua_State *thread) {
+  return luaC_tracing(L) &&
+         __atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) !=
+             G(L)->trace_epoch;
+}
+
+static void snapshot(lua_State *L, lua_State *thread) {
+  GcProbe *record = probe(L);
+  uint64_t started = 0;
+  unsigned count = 0;
+  int outer = 0;
+  if (record != NULL) {
+    outer = record->root_depth++ == 0;
+    if (thread == NULL && record->stopped_start && L->world_depth == 0) {
+      record->stopped_ns += now() - record->stopped_start;
+      record->stopped_start = 0;
+    }
+    if (outer) {
+      count = snapshot_needed(L, thread != NULL ? thread : L);
+      if (thread == NULL && L->stack_peer != NULL)
+        count += snapshot_needed(L, L->stack_peer);
+      if (count)
+        started = now();
+    }
+  }
+  if (thread != NULL)
+    __real_luaC_snapshot(L, thread);
+  else
+    __real_luaC_checksnapshot(L);
+  if (record != NULL) {
+    if (outer && count) {
+      record->root_snapshot_calls += count;
+      record->root_snapshot_ns += now() - started;
+    }
+    record->root_depth--;
+  }
+}
+
+void __wrap_luaC_snapshot(lua_State *L, lua_State *thread) {
+  snapshot(L, thread);
+}
+void __wrap_luaC_checksnapshot(lua_State *L) { snapshot(L, NULL); }
+
+void __wrap_luaW_waitcollector(lua_State *L) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  int tracing = luaC_tracing(L);
   if (record != NULL)
     coordination_begin(record);
-  __real_luaW_waitreclaim(L);
+  __real_luaW_waitcollector(L);
   if (record != NULL) {
     coordination_end(record);
-    record->reclaim_waits++;
-    record->reclaim_wait_ns += now() - started;
+    if (tracing) {
+      record->trace_waits++;
+      record->trace_wait_ns += now() - started;
+    } else {
+      record->reclaim_waits++;
+      record->reclaim_wait_ns += now() - started;
+    }
   }
 }
 

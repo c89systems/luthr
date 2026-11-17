@@ -58,6 +58,7 @@ typedef struct LuaExecution {
   pthread_t pinned_carrier;
   LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
   LuaCallScope *trusted;  /* runtime-owned C frames, including nested callbacks */
+  struct LuaGCFrame *gc_frame;  /* execution-local collector reentrancy */
 } LuaExecution;
 
 enum { LUA_PIN_INVALID = -1, LUA_PIN_UNAVAILABLE = -2, LUA_PIN_OVERFLOW = -3 };

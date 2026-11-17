@@ -46,7 +46,7 @@ static void check(int status) {
 static void *allocate(lua_State *L, size_t size) {
   void *block;
   lua_lock(L);
-  block = luaM_realloc_(L, NULL, 0, size);
+  block = luaM_alloccontrol(L, size);
   if (block != NULL)
     memset(block, 0, size);
   lua_unlock(L);

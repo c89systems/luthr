@@ -71,10 +71,12 @@ static void leave (lua_State *L, Access *access) {
   lua_unlock(L);
 }
 
-static void discard (Access *access) {
+static void discard (lua_State *L, Access *access) {
   unsigned i;
-  for (i = 0; i < access->pipe->capacity; ++i)
+  for (i = 0; i < access->pipe->capacity; ++i) {
+    luaC_tracevalue(L, &access->owner->uv[i].uv);
     setnilvalue(&access->owner->uv[i].uv);
+  }
   access->pipe->head = access->pipe->count = 0;
   access->pipe->bytes = 0;
 }
@@ -132,6 +134,7 @@ static int sendchunk (lua_State *L) {
       const TValue *chunk = s2v(L->ci->func.p + 2);
       unsigned slot = (pipe->head + pipe->count) % pipe->capacity;
       lua_assert(ttisstring(chunk) && tsslen(tsvalue(chunk)) == size);
+      luaC_prewrite(L, &owner->uv[slot].uv, chunk);
       setobj(L, &owner->uv[slot].uv, chunk);
       luaC_barrier(L, owner, chunk);
       pipe->count++;
@@ -170,7 +173,7 @@ static int receivechunk (lua_State *L) {
       size_t size;
       if (!ttisstring(chunk) || (size = tsslen(tsvalue(chunk))) > LUA_PIPE_CHUNK_MAX ||
           size > pipe->bytes) {
-        discard(&access);
+        discard(L, &access);
         pipe->closed = 1;
         luaQ_wake(&pipe->changed, &pipe->waiters);
         retire(L, &access);
@@ -180,6 +183,7 @@ static int receivechunk (lua_State *L) {
       ** body. Preserve its root before retiring the slot. */
       setobj2s(L, L->top.p, chunk);
       api_incr_top(L);
+      luaC_tracevalue(L, chunk);
       setnilvalue(chunk);
       pipe->head = (pipe->head + 1) % pipe->capacity;
       pipe->count--;
@@ -212,7 +216,7 @@ static int closepipe (lua_State *L, int finalizing) {
     pipe->closed = 1;
     if (finalizing) {
       pipe->finalizing = 1;
-      discard(&access);
+      discard(L, &access);
     }
     luaQ_wake(&pipe->changed, &pipe->waiters);
     /* Reuse retirement so explicit finalization and real GC obey one path. */

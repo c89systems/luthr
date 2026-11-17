@@ -411,8 +411,7 @@ LClosure *luaU_undump (lua_State *L, ZIO *Z, Table *anchor, const char *name,
   S.nstr = 0;
   cl = luaF_newLclosure(L, loadByte(&S));
   luaD_anchorobj(L, anchor, obj2gco(cl));
-  cl->p = luaF_newproto(L);
-  luaC_objbarrier(L, cl, cl->p);
+  luaF_setproto(L, cl, luaF_newproto(L));
   loadFunction(&S, cl->p);
   if (cl->nupvalues != cl->p->sizeupvalues)
     error(&S, "corrupted chunk");

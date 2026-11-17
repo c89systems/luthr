@@ -126,6 +126,7 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
     luaA_begin(L, obj2gco(closure), &scope);
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
+    luaC_prewrite(L, target, value);
     setobj(L, target, value);
     luaC_barrier(L, closure, value);
     luaA_end(L, &scope);
@@ -136,6 +137,7 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
       luaA_beginlock(L, &G(L)->registry_access, &access);
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
+    if (idx == LUA_REGISTRYINDEX) luaC_prewrite(L, target, value);
     setobj(L, target, value);
     /* The collector revisits the registry before completing collection. */
     if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
@@ -156,6 +158,7 @@ static int stringindex (lua_State *L, int idx, LuaNativeRoot *value) {
     luaR_setroot(L, value, target);
     if (cvt2str(&value->value)) {
       luaO_tostring(L, &value->value);
+      luaC_prewrite(L, target, &value->value);
       setobj(L, target, &value->value);
       luaC_barrier(L, closure, &value->value);
       converted = 1;
@@ -225,6 +228,7 @@ LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
   api_check(from, to->ci->top.p - to->top.p >= n, "stack overflow");
   from->top.p -= n;
   for (i = 0; i < n; i++) {
+    luaC_tracevalue(to, s2v(from->top.p + i));
     setobjs2s(to, to->top.p, from->top.p + i);
     to->top.p++;  /* stack already checked by previous 'api_check' */
   }
@@ -858,8 +862,7 @@ static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
     cl->managed = cast_byte(managed);
     for (i = 0; i < n; i++) {
       setobj2n(L, &cl->upvalue[i], s2v(L->top.p - n + i));
-      /* does not need barrier because closure is white */
-      lua_assert(iswhite(cl));
+      luaC_tracevalue(L, &cl->upvalue[i]);
     }
     L->top.p -= n;
     setclCvalue(L, s2v(L->top.p), cl);
@@ -1373,6 +1376,7 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
   if (!(cast_uint(n) - 1u < cast_uint(uvalue(o)->nuvalue)))
     res = 0;  /* 'n' not in [1, uvalue(o)->nuvalue] */
   else {
+    luaC_prewrite(L, &uvalue(o)->uv[n - 1].uv, s2v(L->top.p - 1));
     setobj(L, &uvalue(o)->uv[n - 1].uv, s2v(L->top.p - 1));
     luaC_barrierback(L, gcvalue(o), s2v(L->top.p - 1));
     res = 1;
@@ -1554,10 +1558,22 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
   va_list argp;
   int res = 0;
   global_State *g = G(L);
+  LuaGCFrame gcframe;
   lua_lock(L);
-  luaW_stop(L);
+  if (luaC_ingc(L)) {
+    lua_unlock(L);
+    return -1;
+  }
+  luaC_entergc(L, &gcframe);
+  do {
+    luaC_waittrace(L);
+    luaW_stop(L);
+    if (!luaC_tracing(L)) break;
+    luaW_start(L);
+  } while (1);
   if (g->gcstp & (GCSTPGC | GCSTPCLS)) {  /* internal stop? */
     luaW_start(L);
+    luaC_leavegc(L, &gcframe);
     lua_unlock(L);
     return -1;  /* all options are invalid when stopped */
   }
@@ -1586,11 +1602,9 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       break;
     }
     case LUA_GCSTEP: {
-      lu_byte oldstp = g->gcstp;
       l_mem n = cast(l_mem, va_arg(argp, size_t));
       l_mem newdebt;
       int work = 0;  /* true if GC did some work */
-      g->gcstp = 0;  /* allow GC to run (other bits must be zero here) */
       if (n <= 0)
         newdebt = 0;  /* force to run one basic step */
       else if (g->GCdebt >= n - MAX_LMEM)  /* no overflow? */
@@ -1598,10 +1612,12 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       else  /* overflow */
         newdebt = -MAX_LMEM;  /* set debt to mininum value */
       luaE_setdebt(g, newdebt);
-      luaC_condGC(L, (void)0, work = 1);
+      if (luaC_needstep(L)) {
+        luaC_step(L);
+        work = 1;
+      }
       if (work && g->gcstate == GCSpause)  /* end of cycle? */
         res = 1;  /* signal it */
-      g->gcstp = oldstp;  /* restore previous state */
       break;
     }
     case LUA_GCISRUNNING: {
@@ -1631,6 +1647,7 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
   }
   va_end(argp);
   luaW_start(L);
+  luaC_leavegc(L, &gcframe);
   lua_unlock(L);
   return res;
 }
@@ -1845,6 +1862,7 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
     else {
       LuaObjectScope scope;
       luaA_begin(L, owner, &scope);
+      luaC_prewrite(L, val, s2v(L->top.p - 1));
       setobj(L, val, s2v(L->top.p - 1));
       luaC_barrier(L, owner, val);
       luaA_end(L, &scope);

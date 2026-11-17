@@ -89,6 +89,9 @@ static void *allocate(void *context, void *old, size_t old_size, size_t size) {
          !__atomic_compare_exchange_n(&memory->peak, &peak, live, 0,
                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
   }
+#ifdef LUTHR_BENCH_GC_PROBE
+  gc_probe_allocation(live);
+#endif
   return result;
 }
 static int pause_native(lua_State *L) {

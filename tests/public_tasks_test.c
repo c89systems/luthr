@@ -521,6 +521,7 @@ static void callbacks(struct fixture *f, int mode) {
   }
   require(pthread_create(&thread, NULL, provider, &call) == 0);
   if (mode == 2) {
+    luthr_lua_runtime_status shutdown;
     do {
       execute(f, "receiving=event:stats().waiting_receivers");
       luthr_lua_getglobal(f->state, "receiving");
@@ -530,8 +531,11 @@ static void callbacks(struct fixture *f, int mode) {
         sched_yield();
     } while (mode == 2);
     require(luthr_lua_callback_free(f->callback) == LUTHR_LUA_RUNTIME_BUSY);
-    require(luthr_lua_scheduler_shutdown(f->scheduler) ==
-            LUTHR_LUA_RUNTIME_PENDING);
+    shutdown = luthr_lua_scheduler_shutdown(f->scheduler);
+    /* Cancellation can retire the callback before shutdown takes its final
+     * snapshot. Both results are valid; the provider must still acknowledge. */
+    require(shutdown == LUTHR_LUA_RUNTIME_PENDING ||
+            shutdown == LUTHR_LUA_RUNTIME_OK);
   }
   require(pthread_join(thread, NULL) == 0);
   require(call.status == (mode == 4   ? LUTHR_LUA_RUNTIME_ERR_ALLOC
@@ -540,6 +544,8 @@ static void callbacks(struct fixture *f, int mode) {
                                       : LUTHR_LUA_RUNTIME_OK));
   if (mode == 0)
     require(call.value == 42 && f->contexts[1].calls == 3);
+  if (mode == 3)
+    require(luthr_lua_scheduler_shutdown(f->scheduler) == LUTHR_LUA_RUNTIME_OK);
   require(luthr_lua_callback_revoke(f->callback) == LUTHR_LUA_RUNTIME_OK);
   require(luthr_lua_callback_free(f->callback) == LUTHR_LUA_RUNTIME_OK);
   finish(f);

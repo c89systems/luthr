@@ -91,6 +91,23 @@ static void release (lua_State *L) {
   }
 }
 
+int luaX_tryreserve (lua_State *target) {
+  LuaStackGate *gate = &target->stack_gate;
+  unsigned long turn;
+  if (luaQ_isowner(&gate->owner)) return 2;
+  turn = __atomic_load_n(&gate->serving, __ATOMIC_ACQUIRE);
+  if (!__atomic_compare_exchange_n(&gate->next_ticket, &turn, turn + 1, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    return 0;
+  lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
+  luaQ_setowner(&gate->owner);
+  return 1;
+}
+
+void luaX_endreserve (lua_State *target, int reservation) {
+  if (reservation == 1) release(target);
+}
+
 void luaX_lockstate (lua_State *L) {
   luaQ_entermanaged(L);
   reserve(L);
@@ -103,7 +120,7 @@ void luaX_lockstate (lua_State *L) {
 void luaX_unlockstate (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
-  if (!L->reclaiming && (L->retired != NULL || L->reclaim_pages))
+  if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
   lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
@@ -133,8 +150,14 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
   if (second != first) reserve(second);
   lua_assert(first->admission == &first->participation &&
              second->admission == &second->participation);
+  lua_assert(first->stack_peer == NULL && second->stack_peer == NULL);
+  if (second != first) {
+    first->stack_peer = second;
+    second->stack_peer = first;
+  }
   second->admission = &first->participation;
   luaW_enter(first);
+  if (second != first) luaC_checksnapshot(second);
   luaCP_apply(first);
   if (second != first) luaCP_apply(second);
   if (first->errorJmp == NULL && luaQ_current() != NULL)
@@ -152,6 +175,7 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
     second = swap;
   }
   participant = first->admission;
+  first->stack_peer = second->stack_peer = NULL;
   second->admission = &second->participation;
   if (first->errorJmp == NULL && luaQ_current() != NULL) {
     first->luthr_stack_context = NULL;
@@ -191,6 +215,7 @@ void luaX_pollrequests (lua_State *L) {
 
 void luaX_poll (lua_State *L) {
   luaQ_poll(L);
+  luaC_trimstack(L);
   /* Internal poll handlers execute as managed VM code, with stack ownership.
   ** They are not ordinary C bindings and do not detach automatically. */
   if (L->state_poll != NULL)

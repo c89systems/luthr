@@ -96,6 +96,7 @@ void __wrap_luaX_pollrequests(lua_State *state) {
   struct fixture *fixture = active_fixture;
   if (fixture != NULL && fixture->vm_case && fixture->armed &&
       state == fixture->worker) {
+    LuaWorldScope parked;
     check(pthread_mutex_lock(&fixture->mutex));
     fixture->snapshot_ready = 1;
     check(pthread_cond_broadcast(&fixture->changed));
@@ -104,11 +105,16 @@ void __wrap_luaX_pollrequests(lua_State *state) {
      * its result, before this request check decides whether to hand off. */
     while (!__atomic_load_n(&G(state)->world.stopped, __ATOMIC_SEQ_CST))
       sched_yield();
-    __real_luaX_pollrequests(state);
+    /* Hold this rooted handoff through the collection. Normal concurrent
+     * marking can resume the VM before stack trimming, so a host wait must
+     * return both participation and the gate until the stack has moved. */
+    parked = luaW_detach(state);
     check(pthread_mutex_lock(&fixture->mutex));
     while (!fixture->replacement_ready)
       check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
     check(pthread_mutex_unlock(&fixture->mutex));
+    luaW_attach(state, parked);
+    __real_luaX_pollrequests(state);
   } else
     __real_luaX_pollrequests(state);
 }

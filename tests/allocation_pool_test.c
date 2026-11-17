@@ -1,5 +1,6 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <lgc.h>
 #include <lmem.h>
 #include <lmempage.h>
 #include <pthread.h>
@@ -193,10 +194,58 @@ static void batch(int capped, int collect_during_init) {
   require(capped || collect_during_init || total == 1);
 }
 
+static void control_lifetime(void) {
+  enum { CONTROLS = 32, CONTROL_BYTES = 128 };
+  struct allocator allocator = {0};
+  unsigned char *controls[CONTROLS], *blocks[BLOCKS];
+  lua_State *L = lua_newstate(allocate, &allocator, 0);
+  size_t baseline;
+  unsigned i, j;
+  require(L != NULL);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCCOLLECT);
+  baseline = allocator.live;
+  for (i = 0; i < CONTROLS; i++) {
+    lua_lock(L);
+    /* Make the ordinary size class hot before retaining a control record.
+     * A shared page would retain an entire hot slab for this one record. */
+    for (j = 0; j < BLOCKS; j++) {
+      blocks[j] = luaM_malloc_(L, CONTROL_BYTES, 0);
+      require(blocks[j] != NULL);
+    }
+    controls[i] = luaM_alloccontrol(L, CONTROL_BYTES);
+    require(controls[i] != NULL);
+    memset(controls[i], (int)i, CONTROL_BYTES);
+    for (j = 0; j < BLOCKS; j++)
+      luaM_free_(L, blocks[j], CONTROL_BYTES);
+    lua_unlock(L);
+    lua_gc(L, LUA_GCCOLLECT);
+  }
+  require(allocator.live <= baseline + 65536);
+  lua_lock(L);
+  allocator.cap = allocator.live;
+  G(L)->gcstopem = 1;
+  require(luaM_alloccontrol(L, CONTROL_BYTES) == NULL && allocator.denied != 0);
+  G(L)->gcstopem = 0;
+  allocator.cap = 0;
+  for (i = 0; i < CONTROLS; i++) {
+    for (j = 0; j < CONTROL_BYTES; j++)
+      require(controls[i][j] == i);
+    luaM_free_(L, controls[i], CONTROL_BYTES);
+  }
+  lua_unlock(L);
+  lua_close(L);
+  require(allocator.live == 0);
+}
+
 int main(int argc, char **argv) {
   struct allocator allocator = {0};
   lua_State *L;
   require(argc == 2);
+  if (strcmp(argv[1], "control_lifetime") == 0) {
+    control_lifetime();
+    return 0;
+  }
   if (strcmp(argv[1], "batch") == 0 || strcmp(argv[1], "cap") == 0 ||
       strcmp(argv[1], "init_gc") == 0) {
     batch(strcmp(argv[1], "cap") == 0, strcmp(argv[1], "init_gc") == 0);

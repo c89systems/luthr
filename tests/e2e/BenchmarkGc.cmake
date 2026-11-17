@@ -50,6 +50,9 @@ set(metrics wall_ns cpu_ns lua_peak_bytes lua_retained_bytes threads)
 set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   collector_running_calls collector_body_ns collector_disabled_ns coordination_ns
   stop_request_ns resume_ns heap_entries heap_gc_entries heap_contended_entries
+  stopped_ns trace_calls trace_ns trace_work_bytes trace_assist_calls trace_cycles
+  mark_peak_bytes sweep_peak_bytes reclaim_peak_bytes idle_peak_bytes
+  trace_waits trace_wait_ns root_snapshot_calls root_snapshot_ns
   heap_gc_wait_ns quiesce_waits quiesce_wait_ns metadata_waits metadata_wait_ns
   mutator_stop_waits mutator_stop_wait_ns publish_calls publish_ns drain_calls
   drain_ns barrier_records back_records repeated_back_records reclaim_calls
@@ -65,7 +68,7 @@ foreach(key IN ITEMS target config compiler samples warmups tasks work_divisor)
 endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 string(JSON metadata SET "${metadata}" notes
-  "\"Counters are invocation-local. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and excludes coordination and page reclamation. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; counters measure remaining coordination. Explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
+  "\"Counters are invocation-local wall durations. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and trace assists, excludes coordination and page reclamation, and can include scheduler suspension. Trace batches exclude cooperative suspension; roots are measured separately. Stopped time starts after quiescence and ends before resumed root work. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)
   file(SHA256 "${${input}}" digest)
   string(JSON metadata SET "${metadata}" "${input}_sha256" "\"${digest}\"")

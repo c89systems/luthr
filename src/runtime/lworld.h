@@ -26,7 +26,7 @@ typedef struct LuaWorld {
   struct LuaHeapWaiter **heap_tail;
   LuaParticipation *participants;
   lua_State *reclaimers;  /* atomic head; list/work ownership uses mutex */
-  uint64_t reclaim_epoch;
+  uint64_t work_epoch;
   unsigned heap_depth;
   int stopped;
   int ready;
@@ -46,6 +46,7 @@ LUAI_FUNC unsigned luaW_activecount (LuaWorld *world);
 /* Admission records are local to a coroutine, not managed execution permits.
 ** These transitions require world.mutex or the entry/exit handshake below. */
 LUAI_FUNC void luaW_activate (lua_State *L);
+LUAI_FUNC void luaW_resume (lua_State *L);
 LUAI_FUNC void luaW_deactivate (lua_State *L);
 LUAI_FUNC void luaW_enter (lua_State *L);
 /* Cached before releasing stack ownership; never dereference its former owner
@@ -54,9 +55,10 @@ LUAI_FUNC void luaW_leave (LuaWorld *world, LuaParticipation *participant);
 LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);
+LUAI_FUNC void luaW_collectenter (lua_State *L);
 LUAI_FUNC void luaW_heapleave (lua_State *L);
 /* Caller owns world.mutex, retains native depth and borrows no shared work. */
-LUAI_FUNC void luaW_waitreclaim (lua_State *L);
+LUAI_FUNC void luaW_waitcollector (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_scope (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);

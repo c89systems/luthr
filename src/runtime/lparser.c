@@ -2176,8 +2176,8 @@ LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor, Mbuffer *buff,
   lexstate.h = anchor;  /* table for scanner */
   cl = luaF_newLclosure(L, 1);  /* create main closure */
   luaD_anchorobj(L, anchor, obj2gco(cl));  /* anchor it in scanner table */
-  funcstate.f = cl->p = luaF_newproto(L);
-  luaC_objbarrier(L, cl, cl->p);
+  funcstate.f = luaF_newproto(L);
+  luaF_setproto(L, cl, funcstate.f);
   funcstate.f->source = luaS_new(L, name);  /* create and anchor TString */
   luaC_objbarrier(L, funcstate.f, funcstate.f->source);
   lexstate.buff = buff;

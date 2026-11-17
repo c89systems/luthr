@@ -857,11 +857,15 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
   ptrdiff_t target_offset = savestack(L, ra);
   int i;
   LClosure *ncl;
+  LuaObjectScope construction;
   luaR_pushroot(L, &closure);
   luaR_pushroot(L, &capture);
   ncl = luaF_newLclosure(L, nup);
-  ncl->p = p;
   setclLvalue(L, &closure.value, ncl);
+  luaA_begin(L, obj2gco(ncl), &construction);
+  luaC_tracepointer(L, p);
+  ncl->p = p;
+  luaC_objbarrier(L, ncl, p);
   for (i = 0; i < nup; i++) {  /* fill in its upvalues */
     if (uv[i].instack)  /* upvalue refers to local variable? */
       ncl->upvals[i] = luaF_findupval(L, restorestack(L, base_offset) + uv[i].idx);
@@ -871,6 +875,7 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
     }
     luaC_objbarrier(L, ncl, ncl->upvals[i]);
   }
+  luaA_end(L, &construction);
   setclLvalue2s(L, restorestack(L, target_offset), ncl);
   luaR_poproot(L, &capture);
   luaR_poproot(L, &closure);

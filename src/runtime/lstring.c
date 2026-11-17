@@ -231,6 +231,7 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
       /* found! */
       if (isdead(g, ts))  /* dead (but not collected yet)? */
         changewhite(ts);  /* resurrect it */
+      luaC_tracepointer(L, ts);  /* weak interning becomes a strong reference */
       luaA_end(L, &access);
       return ts;
     }
@@ -286,6 +287,7 @@ TString *luaS_new (lua_State *L, const char *str) {
   for (j = 0; j < STRCACHE_M; j++) {
     if (p[j] != NULL && strcmp(str, getstr(p[j])) == 0) { /* hit? */
       result = p[j];
+      luaC_tracepointer(L, result);
       return result;  /* that is it */
     }
   }
@@ -309,8 +311,10 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   u = gco2u(o);
   u->len = s;
   luaA_initlock(&u->access);
+  luaA_initlock(&u->payload_access);
   u->nuvalue = nuvalue;
   u->metatable = NULL;
+  u->gclist = NULL;
   for (i = 0; i < nuvalue; i++)
     setnilvalue(&u->uv[i].uv);
   return u;

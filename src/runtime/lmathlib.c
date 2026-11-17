@@ -585,7 +585,7 @@ static RanState *random_enter (lua_State *L, LuaObjectScope *access) {
     luaL_error(L, "invalid random generator state");
     return NULL;
   }
-  luaA_begin(L, obj2gco(owner), access);
+  luaA_beginpayload(L, owner, access);
   state = cast(RanState *, getudatamem(owner));
   if (owner->len != sizeof(RanState) || state->identity != &random_identity) {
     luaA_end(L, access);

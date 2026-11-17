@@ -52,6 +52,7 @@ static UpVal *newupvalobject (lua_State *L) {
   GCObject *object = luaC_newobj(L, LUA_VUPVAL, sizeof(UpVal));
   UpVal *uv = gco2upv(object);
   uv->owner = NULL;
+  uv->gclist = NULL;
   uv->mutex_ready = 0;
   uv->level = 0;
   uv->sequence = 0;
@@ -68,11 +69,24 @@ static UpVal *newupvalobject (lua_State *L) {
 */
 void luaF_initupvals (lua_State *L, LClosure *cl) {
   int i;
+  LuaObjectScope scope;
+  luaA_begin(L, obj2gco(cl), &scope);
   for (i = 0; i < cl->nupvalues; i++) {
+    lua_assert(cl->upvals[i] == NULL);
     UpVal *uv = newupvalobject(L);
     cl->upvals[i] = uv;
     luaC_objbarrier(L, cl, uv);
   }
+  luaA_end(L, &scope);
+}
+
+void luaF_setproto (lua_State *L, LClosure *cl, Proto *proto) {
+  LuaObjectScope scope;
+  luaA_begin(L, obj2gco(cl), &scope);
+  luaC_prewriteptr(L, cl->p, proto);
+  cl->p = proto;
+  luaC_objbarrier(L, cl, proto);
+  luaA_end(L, &scope);
 }
 
 
@@ -122,6 +136,7 @@ static void loadupval (UpVal *uv, TValue *value) {
 void luaF_readupval (lua_State *L, UpVal *uv, LuaNativeRoot *value) {
   UNUSED(L);
   loadupval(uv, &value->value);
+  luaC_tracevalue(L, &value->value);
   value->table_view = NULL;
 }
 
@@ -133,6 +148,7 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
   luaX_checksync(pthread_mutex_lock(&uv->mutex));
+  luaC_prewrite(L, &uv->value, &transfer.value);
   sequence = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
   lua_assert((sequence & 1) == 0);
   __atomic_store_n(&uv->sequence, sequence + 1, __ATOMIC_RELEASE);
@@ -196,6 +212,7 @@ void luaF_getcapture (lua_State *L, LClosure *closure, int n,
   uv = __atomic_load_n(&closure->upvals[n], __ATOMIC_ACQUIRE);
   lua_assert(uv != NULL);
   setgcovalue(L, &capture->value, obj2gco(uv));
+  luaC_tracepointer(L, uv);
 }
 
 void luaF_readcapture (lua_State *L, LClosure *closure, int n,
@@ -233,6 +250,7 @@ void luaF_joincaptures (lua_State *L, LClosure *to, int target,
   if (pair)
     luaA_begin(L, obj2gco(targetfirst ? from : to), &second);
   lua_assert(to->upvals[target] != NULL && from->upvals[source] != NULL);
+  luaC_prewriteptr(L, to->upvals[target], from->upvals[source]);
   __atomic_store_n(&to->upvals[target],
     __atomic_load_n(&from->upvals[source], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
   luaC_objbarrier(L, to, to->upvals[target]);
@@ -430,6 +448,11 @@ Proto *luaF_newproto (lua_State *L) {
   f->linedefined = 0;
   f->lastlinedefined = 0;
   f->source = NULL;
+  f->builder = L;
+  f->build_next = L->building_protos;
+  f->trace_snapshot = 0;
+  f->trace_bytes = 0;
+  L->building_protos = f;
   return f;
 }
 

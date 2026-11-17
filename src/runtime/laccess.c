@@ -41,6 +41,27 @@ static int tryaccess (LuaObjectLock *lock) {
   return 0;
 }
 
+int luaA_tryscan (GCObject *object) {
+  return tryaccess(objectlock(object));
+}
+
+void luaA_endscan (lua_State *L, GCObject *object) {
+  LuaObjectLock *lock = objectlock(object);
+  lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
+             luaQ_ownertoken() && lock->depth != 0);
+  if (--lock->depth == 0) {
+    __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
+    /* A scanner never parks with ownership. Existing mutator waiters need
+    ** the same notification handshake as an ordinary scoped release. */
+    if (__atomic_load_n(&lock->waiting, __ATOMIC_SEQ_CST) != 0) {
+      LuaWorld *world = &G(L)->world;
+      luaX_checksync(pthread_mutex_lock(&world->mutex));
+      luaQ_wake(&world->changed, &world->waiters);
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    }
+  }
+}
+
 static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
                          LuaObjectScope *scope) {
   LuaWorld *world = &G(L)->world;
@@ -49,6 +70,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
   scope->saved_top = -1;
   luaR_pushroot(L, &scope->root);
   if (object != NULL) { setgcovalue(L, &scope->root.value, object); }
+  if (object != NULL) luaC_tracepointer(L, object);
   scope->previous = L->object_scopes;
   L->object_scopes = scope;
   /* A collector reads/mutates objects under quiescence, including ones whose
@@ -73,7 +95,8 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
         do {
           luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
         } while (world->stopped || !tryaccess(lock));
-        luaW_activate(L);
+        luaW_resume(L);
+        luaC_checksnapshot(L);
         L->object_waiting--;
         L->native_depth--;
       }
@@ -81,11 +104,17 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
     }
     scope->held = 1;
+    if (object != NULL && object->tt == LUA_VTABLE && luaC_tracing(L))
+      luaC_prepareweak(L, gco2t(object));
   }
 }
 
 void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope) {
   beginaccess(L, objectlock(object), object, scope);
+}
+
+void luaA_beginpayload (lua_State *L, Udata *object, LuaObjectScope *scope) {
+  beginaccess(L, &object->payload_access, obj2gco(object), scope);
 }
 
 void luaA_beginlock (lua_State *L, LuaObjectLock *lock, LuaObjectScope *scope) {
@@ -179,6 +208,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
+    luaC_prewriteptr(L, objectmeta(object), mt);
     if (ttistable(object)) hvalue(object)->metatable = mt;
     else uvalue(object)->metatable = mt;
     if (mt) {
@@ -192,6 +222,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int type = ttype(object);
     LuaObjectScope access;
     luaA_beginlock(L, &G(L)->metatable_access[type], &access);
+    luaC_prewriteptr(L, G(L)->mt[type], mt);
     G(L)->mt[type] = mt;
     luaA_end(L, &access);
   }
@@ -311,6 +342,7 @@ lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
   luaR_pushroot(L, &metatable);
   count = objectandmeta(L, &owner.value, &first, &second, &metatable);
   tag = luaH_getowned(table, key, result);
+  if (!tagisempty(tag)) luaC_tracevalue(L, result);
   setnilvalue(&method->value);
   if (tagisempty(tag)) {
     Table *mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;

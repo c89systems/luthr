@@ -721,6 +721,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   LuaNativeRoot image;
   unsigned oldasize;
   Value *newarray;
+  luaC_traceview(L, t);
   oldasize = t->asize;
   if (newasize > MAXASIZE)
     luaG_runerror(L, "table overflow");
@@ -731,6 +732,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   newt.node = NULL;
   luaR_pushroot(L, &image);
   image.table_view = &newt;
+  luaC_traceview(L, &newt);
   setnodevector(L, &newt, nhsize);
   if (newasize < oldasize) {  /* will array shrink? */
     /* re-insert into the new hash the elements from vanishing slice */
@@ -814,6 +816,10 @@ Table *luaH_new (lua_State *L) {
   Table *t = gco2t(o);
   luaA_initlock(&t->access);
   t->metatable = NULL;
+  t->weak_epoch = 0;
+  t->gcweak = 0;
+  t->weak_cleared = 0;
+  t->weak_initial_cutoff = 0;
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
   t->asize = 0;
@@ -928,6 +934,8 @@ static void newcheckedkey (Table *t, const TValue *key, TValue *value) {
 
 static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value) {
+  luaC_tracevalue(L, key);
+  luaC_tracevalue(L, value);
   if (!ttisnil(value)) {  /* do not insert nil values */
     int done = insertkey(t, key, value);
     if (!done) {  /* could not find a free place? */
@@ -1068,8 +1076,17 @@ static int retpsetcode (Table *t, const TValue *slot) {
 }
 
 
-static int finishnodeset (Table *t, const TValue *slot, TValue *val) {
+static void tracenodewrite (lua_State *L, const TValue *slot, TValue *val) {
+  if (luaC_tracing(L)) {
+    const Node *node = cast(const Node *, slot);
+    if (keyiscollectable(node)) luaC_traceobject(L, gckey(node));
+    luaC_prewrite(L, slot, val);
+  }
+}
+
+static int finishnodeset (lua_State *L, Table *t, const TValue *slot, TValue *val) {
   if (!ttisnil(slot)) {
+    tracenodewrite(L, slot, val);
     setobj(((lua_State*)NULL), cast(TValue*, slot), val);
     return HOK;  /* success */
   }
@@ -1078,33 +1095,43 @@ static int finishnodeset (Table *t, const TValue *slot, TValue *val) {
 }
 
 
-static int rawfinishnodeset (const TValue *slot, TValue *val) {
+static int rawfinishnodeset (lua_State *L, const TValue *slot, TValue *val) {
   if (isabstkey(slot))
     return 0;  /* no slot with that key */
   else {
+    tracenodewrite(L, slot, val);
     setobj(((lua_State*)NULL), cast(TValue*, slot), val);
     return 1;  /* success */
   }
 }
 
 
-static int rawpsetint (Table *t, lua_Integer key, TValue *val) {
+static int rawpsetint (lua_State *L, Table *t, lua_Integer key, TValue *val) {
   lua_assert(!ikeyinarray(t, key));
-  return finishnodeset(t, getintfromhash(t, key), val);
+  return finishnodeset(L, t, getintfromhash(t, key), val);
 }
 
 
-static int psetint (Table *t, lua_Integer key, TValue *val) {
+static void tracearraywrite (lua_State *L, Table *t, unsigned i, TValue *val) {
+  if (luaC_tracing(L)) {
+    if (*getArrTag(t, i) & BIT_ISCOLLECTABLE)
+      luaC_traceobject(L, getArrVal(t, i)->gc);
+    luaC_tracevalue(L, val);
+  }
+}
+
+static int psetint (lua_State *L, Table *t, lua_Integer key, TValue *val) {
   lua_Unsigned u = l_castS2U(key) - 1u;
   if (u < t->asize) {
     lu_byte *tag = getArrTag(t, u);
     if (!tagisempty(*tag)) {
+      tracearraywrite(L, t, cast_uint(u), val);
       fval2arr(t, u, tag, val);
       return HOK;
     }
     return ~cast_int(u);
   }
-  return rawpsetint(t, key, val);
+  return rawpsetint(L, t, key, val);
 }
 
 
@@ -1116,9 +1143,10 @@ static int psetint (Table *t, lua_Integer key, TValue *val) {
 ** it is not old/black, and it already has space for the key.
 */
 
-static int rawpsetshortstr (Table *t, TString *key, TValue *val) {
+static int rawpsetshortstr (lua_State *L, Table *t, TString *key, TValue *val) {
   const TValue *slot = luaH_Hgetshortstr(t, key);
   if (!ttisnil(slot)) {  /* key already has a value? (all too common) */
+    tracenodewrite(L, slot, val);
     setobj(((lua_State*)NULL), cast(TValue*, slot), val);  /* update it */
     return HOK;  /* done */
   }
@@ -1129,28 +1157,29 @@ static int rawpsetshortstr (Table *t, TString *key, TValue *val) {
 }
 
 
-static int rawpsetstr (Table *t, TString *key, TValue *val) {
+static int rawpsetstr (lua_State *L, Table *t, TString *key, TValue *val) {
   if (strisshr(key))
-    return rawpsetshortstr(t, key, val);
+    return rawpsetshortstr(L, t, key, val);
   else
-    return finishnodeset(t, Hgetlongstr(t, key), val);
+    return finishnodeset(L, t, Hgetlongstr(t, key), val);
 }
 
 
-static int rawpset (Table *t, const TValue *key, TValue *val) {
+static int rawpset (lua_State *L, Table *t, const TValue *key, TValue *val) {
+  luaC_tracevalue(L, key);
   switch (ttypetag(key)) {
-    case LUA_VSHRSTR: return rawpsetshortstr(t, tsvalue(key), val);
-    case LUA_VLNGSTR: return rawpsetstr(t, tsvalue(key), val);
-    case LUA_VNUMINT: return psetint(t, ivalue(key), val);
+    case LUA_VSHRSTR: return rawpsetshortstr(L, t, tsvalue(key), val);
+    case LUA_VLNGSTR: return rawpsetstr(L, t, tsvalue(key), val);
+    case LUA_VNUMINT: return psetint(L, t, ivalue(key), val);
     case LUA_VNIL: return HNOTFOUND;
     case LUA_VNUMFLT: {
       lua_Integer k;
       if (luaV_flttointeger(fltvalue(key), &k, F2Ieq)) /* integral index? */
-        return psetint(t, k, val);  /* use specialized version */
+        return psetint(L, t, k, val);  /* use specialized version */
       /* else... */
     }  /* FALLTHROUGH */
     default:
-      return finishnodeset(t, getgeneric(t, key, 0), val);
+      return finishnodeset(L, t, getgeneric(t, key, 0), val);
   }
 }
 
@@ -1189,10 +1218,12 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
     luaH_newkey(L, t, actk, value);
   }
   else if (hres > 0) {  /* regular Node? */
+    tracenodewrite(L, gval(gnode(t, hres - HFIRSTNODE)), value);
     setobj2t(L, gval(gnode(t, hres - HFIRSTNODE)), value);
   }
   else {  /* array entry */
     hres = ~hres;  /* real index */
+    tracearraywrite(L, t, cast_uint(hres), value);
     obj2arr(t, cast_uint(hres), value);
   }
 }
@@ -1202,7 +1233,7 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
 void luaH_setowned (lua_State *L, Table *t, const TValue *key, TValue *value) {
   int hres;
   invalidateTMcache(t);
-  hres = rawpset(t, key, value);
+  hres = rawpset(L, t, key, value);
   if (hres != HOK)
     rawfinishset(L, t, key, value, hres);
   invalidateTMcache(t);
@@ -1216,10 +1247,12 @@ void luaH_setowned (lua_State *L, Table *t, const TValue *key, TValue *value) {
 */
 static void rawsetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   unsigned ik = ikeyinarray(t, key);
-  if (ik > 0)
+  if (ik > 0) {
+    tracearraywrite(L, t, ik - 1, value);
     obj2arr(t, ik - 1, value);
+  }
   else {
-    int ok = rawfinishnodeset(getintfromhash(t, key), value);
+    int ok = rawfinishnodeset(L, getintfromhash(t, key), value);
     if (!ok) {
       TValue k;
       setivalue(&k, key);
@@ -1364,6 +1397,7 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   luaR_setroot(L, &rooted_key, key);
   luaA_begin(L, obj2gco(t), &scope);
   tag = luaH_getowned(t, &rooted_key.value, res);
+  if (!tagisempty(tag)) luaC_tracevalue(L, res);
   luaA_end(L, &scope);
   luaR_poproot(L, &rooted_key);
   return tag;
@@ -1374,6 +1408,7 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   lu_byte tag;
   luaA_begin(L, obj2gco(t), &scope);
   tag = rawgetint(t, key, res);
+  if (!tagisempty(tag)) luaC_tracevalue(L, res);
   luaA_end(L, &scope);
   return tag;
 }
@@ -1386,6 +1421,7 @@ lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   setsvalue(L, &rooted_key.value, key);
   luaA_begin(L, obj2gco(t), &scope);
   tag = rawgetstr(t, key, res);
+  if (!tagisempty(tag)) luaC_tracevalue(L, res);
   luaA_end(L, &scope);
   luaR_poproot(L, &rooted_key);
   return tag;
@@ -1405,7 +1441,7 @@ int luaH_pset (lua_State *L, Table *t, const TValue *key, TValue *value) {
   luaR_setroot(L, &rooted_value, value);
   luaA_begin(L, obj2gco(t), &scope);
   invalidateTMcache(t);
-  result = rawpset(t, &rooted_key.value, &rooted_value.value);
+  result = rawpset(L, t, &rooted_key.value, &rooted_value.value);
   invalidateTMcache(t);
   if (result == HOK)
     luaC_barrierback(L, obj2gco(t), &rooted_value.value);
@@ -1476,6 +1512,10 @@ int luaH_next (lua_State *L, Table *t, StkId key) {
   int result;
   luaA_begin(L, obj2gco(t), &scope);
   result = rawnext(L, t, key);
+  if (result) {
+    luaC_tracevalue(L, s2v(key));
+    luaC_tracevalue(L, s2v(key + 1));
+  }
   luaA_end(L, &scope);
   return result;
 }

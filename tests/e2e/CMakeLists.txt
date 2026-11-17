@@ -115,9 +115,10 @@ foreach(mode IN ITEMS control profile)
 endforeach()
 target_sources(scheduled_gc_profile PRIVATE gc_probe.c)
 target_compile_definitions(scheduled_gc_profile PRIVATE LUTHR_BENCH_GC_PROBE)
-foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_heapleave
+foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter luaW_heapleave
     luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
-    luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitreclaim)
+    luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector
+    luaC_tracebatch luaC_assisttrace luaC_snapshot luaC_checksnapshot luaC_finishtrace)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
 set(gc_arguments

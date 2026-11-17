@@ -13,6 +13,9 @@
 #include "lstring.h"
 #include "ltable.h"
 
+static void registerreclaimer (lua_State *L, LuaWorld *world);
+static void unregisterreclaimer (lua_State *L, LuaWorld *world);
+
 static void freeupval (lua_State *L, UpVal *uv) {
   lua_assert(!upisopen(uv));  /* retirement has detached all stack links */
   if (uv->mutex_ready)
@@ -92,30 +95,44 @@ void luaC_retireobject (lua_State *L, GCObject *o) {
     luaW_unregister(thread);
     if (thread->reclaim_pages) L->reclaim_pages = 1;
     /* An abandoned protected collection may leave private garbage behind. */
-    if (thread->retired != NULL) {
-      thread->retired_tail->next = L->retired;
-      if (L->retired == NULL) L->retired_tail = thread->retired_tail;
-      L->retired = thread->retired;
-      thread->retired = thread->retired_tail = NULL;
+    if (luaC_retired(thread) != NULL) {
+      thread->retired_tail->next = luaC_retired(L);
+      if (luaC_retired(L) == NULL) L->retired_tail = thread->retired_tail;
+      __atomic_store_n(&L->retired, luaC_retired(thread), __ATOMIC_RELEASE);
+      __atomic_store_n(&thread->retired, NULL, __ATOMIC_RELEASE);
+      thread->retired_tail = NULL;
+    }
+    if (thread->reclaim_registered) {
+      luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+      lua_assert(thread->reclaim_workers == 0);
+      unregisterreclaimer(thread, &G(L)->world);
+      luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
     }
   }
   o->next = NULL;
   if (L->retired_tail != NULL) L->retired_tail->next = o;
-  else L->retired = o;
+  else __atomic_store_n(&L->retired, o, __ATOMIC_RELEASE);
   L->retired_tail = o;
+  /* Publish retirement while still quiescent. Helpers must not wait for the
+  ** retiring execution to leave its API/VM frame before seeing this work. */
+  if (!(G(L)->gcstp & GCSTPCLS) && !L->reclaim_registered) {
+    luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+    registerreclaimer(L, &G(L)->world);
+    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+  }
 }
 
 /* Claim a bounded private chain while the work owner remains registered.
 ** The owner's worker count retains its state until every claimant returns. */
 static GCObject *takework (lua_State *owner) {
-  GCObject *head = owner->retired;
+  GCObject *head = luaC_retired(owner);
   GCObject *last = head;
   unsigned count = 1;
   if (head == NULL) return NULL;
   while (count++ < 64 && last->next != NULL) last = last->next;
-  owner->retired = last->next;
+  __atomic_store_n(&owner->retired, last->next, __ATOMIC_RELEASE);
   last->next = NULL;
-  if (owner->retired == NULL) owner->retired_tail = NULL;
+  if (luaC_retired(owner) == NULL) owner->retired_tail = NULL;
   owner->reclaim_workers++;
   return head;
 }
@@ -123,6 +140,13 @@ static GCObject *takework (lua_State *owner) {
 static int canpark (lua_State *L) {
   return L->world_depth == 0 && L->object_scopes == NULL &&
          luaW_scope(L).heap == 0;
+}
+
+static void pollreclaimer (lua_State *L) {
+  if (canpark(L)) {
+    luaX_pollrequests(L);
+    luaQ_poll(L);
+  }
 }
 
 static lu_mem destroywork (lua_State *L, GCObject *head) {
@@ -136,37 +160,38 @@ static lu_mem destroywork (lua_State *L, GCObject *head) {
     freeobj(L, o);
   }
   luaM_flushdebt(L);
-  if (canpark(L)) {
-    luaX_pollrequests(L);
-    luaQ_poll(L);
-  }
   return bytes;
 }
 
-static void completework (lua_State *L, lua_State *owner) {
+static int completework (lua_State *L, lua_State *owner) {
   LuaWorld *world = &G(L)->world;
+  int finished;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(owner->reclaim_workers != 0);
   owner->reclaim_workers--;
+  finished = luaC_retired(owner) == NULL && owner->reclaim_workers == 0;
+  if (finished && owner->reclaim_registered)
+    unregisterreclaimer(owner, world);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  return finished;
 }
 
 static void registerreclaimer (lua_State *L, LuaWorld *world) {
   lua_State *head;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(!L->reclaim_registered);
   head = __atomic_load_n(&world->reclaimers, __ATOMIC_RELAXED);
-  if (head == NULL)
-    __atomic_fetch_add(&world->reclaim_epoch, 1, __ATOMIC_RELEASE);
+  if (head == NULL && !luaC_tracing(L))
+    __atomic_fetch_add(&world->work_epoch, 1, __ATOMIC_RELEASE);
   L->reclaim_next = head;
+  L->reclaim_registered = 1;
   __atomic_store_n(&world->reclaimers, L, __ATOMIC_RELEASE);
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 /* Caller owns world.mutex and has no outstanding claimed chunks. */
 static void unregisterreclaimer (lua_State *L, LuaWorld *world) {
   lua_State *head = __atomic_load_n(&world->reclaimers, __ATOMIC_RELAXED);
-  lua_assert(L->retired == NULL && L->reclaim_workers == 0);
+  lua_assert(luaC_retired(L) == NULL && L->reclaim_workers == 0);
   if (head == L)
     __atomic_store_n(&world->reclaimers, L->reclaim_next, __ATOMIC_RELEASE);
   else {
@@ -177,6 +202,7 @@ static void unregisterreclaimer (lua_State *L, LuaWorld *world) {
     previous->reclaim_next = L->reclaim_next;
   }
   L->reclaim_next = NULL;
+  L->reclaim_registered = 0;
   luaQ_wake(&world->changed, &world->waiters);
 }
 
@@ -185,33 +211,44 @@ void luaC_reclaim (lua_State *L) {
   if (L->reclaiming) return;  /* another entry borrowed a parked stack */
   L->reclaiming = 1;
   L->native_depth++;
-  if (L->retired != NULL && canpark(L)) {
-    registerreclaimer(L, world);
+  if (canpark(L)) {
     for (;;) {
       GCObject *work;
       luaX_checksync(pthread_mutex_lock(&world->mutex));
+      if (luaC_retired(L) != NULL && !L->reclaim_registered)
+        registerreclaimer(L, world);
       work = takework(L);
       if (work == NULL) {
         if (L->reclaim_workers == 0) {
-          unregisterreclaimer(L, world);
+          if (L->reclaim_registered) unregisterreclaimer(L, world);
           luaX_checksync(pthread_mutex_unlock(&world->mutex));
           break;
         }
-        luaW_waitreclaim(L);
+        luaW_waitcollector(L);
         luaX_checksync(pthread_mutex_unlock(&world->mutex));
         continue;
       }
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
       destroywork(L, work);
-      completework(L, L);
+      if (completework(L, L)) luaC_finishreclaim(L);
+      pollreclaimer(L);  /* no claimed work remains on this C stack */
     }
   }
   else {
     /* Emergency retries and teardown keep their existing exclusive scope. */
-    while (L->retired != NULL) {
-      GCObject *work = takework(L);
+    for (;;) {
+      GCObject *work;
+      luaX_checksync(pthread_mutex_lock(&world->mutex));
+      work = takework(L);
+      if (work == NULL) {
+        if (L->reclaim_registered && L->reclaim_workers == 0)
+          unregisterreclaimer(L, world);
+        luaX_checksync(pthread_mutex_unlock(&world->mutex));
+        break;
+      }
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
       destroywork(L, work);
-      L->reclaim_workers--;
+      completework(L, L);
     }
   }
   luaM_flushdebt(L);
@@ -230,7 +267,7 @@ void luaC_assistreclaim (lua_State *L) {
   L->assist_debt = 0;
   if (budget < LUA_GC_ASSIST_BYTES || L->reclaiming || !canpark(L) ||
       L->assist_epoch !=
-        __atomic_load_n(&world->reclaim_epoch, __ATOMIC_ACQUIRE))
+        __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE))
     return;
   L->reclaiming = 1;
   L->native_depth++;
@@ -245,21 +282,20 @@ void luaC_assistreclaim (lua_State *L) {
       if (work != NULL) break;
     }
     if (work == NULL) {
-      if (__atomic_load_n(&world->reclaimers, __ATOMIC_RELAXED) == NULL) {
-        luaX_checksync(pthread_mutex_unlock(&world->mutex));
-        break;
-      }
-      luaW_waitreclaim(L);
+      /* Outstanding claims are bounded private batches. No shared work is
+      ** available to pay this allocation's debt; waiting could depend on a
+      ** callback which needs this very mutator to make progress. */
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
-      continue;
+      break;
     }
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     done = destroywork(L, work);
-    completework(L, owner);
+    if (completework(L, owner)) luaC_finishreclaim(L);
     budget = done >= budget ? 0 : budget - done;
+    pollreclaimer(L);
   }
   L->native_depth--;
   L->reclaiming = 0;
-  if (L->retired != NULL || L->reclaim_pages)
+  if (luaC_retired(L) != NULL || L->reclaim_pages)
     luaC_reclaim(L);
 }

@@ -98,7 +98,7 @@ LuaPolicy *luthr_policy_new(lua_State *L, const luthr_lua_task_options *options,
   Invocation *invocation;
   luaQ_setmanagedhook(L, hook);
   lua_lock(L);
-  invocation = luaM_realloc_(L, NULL, 0, sizeof(*invocation));
+  invocation = luaM_alloccontrol(L, sizeof(*invocation));
   if (invocation != NULL) {
     memset(invocation, 0, sizeof(*invocation));
     if (pthread_mutex_init(&invocation->observer, NULL) != 0) {

@@ -14,6 +14,23 @@
 #include "lobject.h"
 #include "lstate.h"
 
+typedef struct LuaGCFrame {
+  struct LuaGCFrame *previous;
+  global_State *global;
+} LuaGCFrame;
+
+enum {
+  TRACE_INIT, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
+  TRACE_CLEAR, TRACE_VERIFY
+};
+enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
+
+LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
+LUAI_FUNC void luaC_restoregcframe (LuaGCFrame *frame);
+LUAI_FUNC int luaC_ingc (lua_State *L);
+LUAI_FUNC void luaC_entergc (lua_State *L, LuaGCFrame *frame);
+LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
+
 /*
 ** Collectable objects may have one of three colors: white, which means
 ** the object is not marked; gray, which means the object is marked, but
@@ -240,32 +257,40 @@
     (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
 
 #define LUA_GC_ASSIST_BYTES 65536
+#define luaC_retired(L) __atomic_load_n(&(L)->retired, __ATOMIC_ACQUIRE)
 #define luaC_hasreclaimers(L) \
     (__atomic_load_n(&G(L)->world.reclaimers, __ATOMIC_ACQUIRE) != NULL)
 #define luaC_needassist(L) \
     ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
+#define luaC_needtraceassist(L) \
+    ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && !(L)->trace_assisting && \
+     !(L)->reclaiming && luaC_tracing(L))
 
 #define luaC_condGC(L,pre,pos) \
-    { if (gcrunning(G(L)) && luaC_needstep(L) && \
+    { if (!luaC_ingc(L)) { \
+      if (luaC_needtraceassist(L)) { pre; luaC_assisttrace(L); pos; } \
+      else { \
+        if (gcrunning(G(L)) && luaC_needassist(L)) \
+          { pre; luaC_assistreclaim(L); pos; } \
+        if (gcrunning(G(L)) && luaC_needstep(L) && \
           ((L)->world_depth != 0 || \
-           ((!__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED) && \
-             !luaC_hasreclaimers(L)) || luaC_needassist(L)))) \
-          { pre; luaC_step(L); pos;}; \
-	  condchangemem(L,pre,pos,0); }
+           !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED))) \
+          { pre; luaC_step(L); pos; } } \
+	  condchangemem(L,pre,pos,0); } }
 
 /* more often than not, 'pre'/'pos' are empty */
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
 
 #define luaC_objbarrier(L,p,o) \
-        ((isblack(p) && iswhite(o)) ? \
+        ((luaC_tracing(L) || (isblack(p) && iswhite(o))) ? \
          luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 0) : cast_void(0))
 
 #define luaC_barrier(L,p,v) (  \
 	iscollectable(v) ? luaC_objbarrier(L,p,gcvalue(v)) : cast_void(0))
 
 #define luaC_objbarrierback(L,p,o) \
-        ((isblack(p) && iswhite(o)) ? \
+        ((luaC_tracing(L) || (isblack(p) && iswhite(o))) ? \
          luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 1) : cast_void(0))
 
 #define luaC_barrierback(L,p,v) (  \
@@ -286,6 +311,43 @@ LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int bac
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
 /* Private work-list inspection; caller owns quiescent collection. */
 LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
+/* A hybrid deletion/insertion barrier shades before mutation. No allocator,
+** object ownership or collection request is permitted on these paths. */
+#define luaC_tracing(L) \
+  (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE) != 0)
+#define luaC_tracevalue(L,v) \
+  { const TValue *trace_v_ = (v); \
+    if (luaC_tracing(L) && iscollectable(trace_v_)) \
+      luaC_traceobject((L), gcvalue(trace_v_)); }
+#define luaC_prewrite(L,old,newv) \
+  { if (luaC_tracing(L)) { luaC_tracevalue((L),(old)); \
+      luaC_tracevalue((L),(newv)); } }
+#define luaC_tracepointer(L,p) \
+  { if (luaC_tracing(L)) { GCObject *trace_p_ = cast(GCObject *, (p)); \
+      if (trace_p_ != NULL) luaC_traceobject((L), trace_p_); } }
+#define luaC_prewriteptr(L,old,newp) \
+  { luaC_tracepointer((L),(old)); luaC_tracepointer((L),(newp)); }
+LUAI_FUNC void luaC_traceobject (lua_State *L, GCObject *object);
+LUAI_FUNC void luaC_snapshot (lua_State *L, lua_State *thread);
+LUAI_FUNC int luaC_snapshotparked (lua_State *L, lua_State *thread);
+LUAI_FUNC void luaC_snapshotproto (lua_State *L, Proto *proto);
+LUAI_FUNC void luaC_traceview (lua_State *L, const Table *view);
+LUAI_FUNC void luaC_checksnapshot (lua_State *L);
+LUAI_FUNC void luaC_trimstack (lua_State *L);
+LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
+/* Specialized graph walk; the batch coordinator owns trace_busy. */
+LUAI_FUNC void luaC_traceobjects (lua_State *L, unsigned limit);
+LUAI_FUNC void luaC_advancetrace (lua_State *L);
+LUAI_FUNC void luaC_initialtrace (lua_State *L);
+LUAI_FUNC void luaC_finalizetrace (lua_State *L);
+LUAI_FUNC void luaC_finishtrace (lua_State *L);
+LUAI_FUNC lu_mem luaC_ephemeronwork (lua_State *L, unsigned limit);
+LUAI_FUNC lu_mem luaC_weakwork (lua_State *L, unsigned limit);
+LUAI_FUNC void luaC_assisttrace (lua_State *L);
+/* Caller owns the table. Resolve the current weak cutoff before publishing
+** a result or deciding whether an entry exists. New stores shade both edges. */
+LUAI_FUNC void luaC_prepareweak (lua_State *L, Table *table);
+LUAI_FUNC void luaC_waittrace (lua_State *L);
 /* Destroy privately retired garbage. Normal collection calls this after
 ** resuming mutators; exclusive VM teardown also uses the same path. */
 LUAI_FUNC void luaC_reclaim (lua_State *L);

@@ -121,7 +121,7 @@ target_compile_options(allocation_pool_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(allocation_pool_test PRIVATE luthr_static)
 target_link_options(allocation_pool_test PRIVATE -Wl,--wrap=luaW_heapenter
   -Wl,--wrap=luaMP_initpage)
-foreach(case IN ITEMS serial parallel batch cap init_gc)
+foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime)
   add_test(NAME allocation_pool_${case} COMMAND allocation_pool_test ${case})
   set_tests_properties(allocation_pool_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -131,7 +131,8 @@ luthr_test_program(gc_requests_test gc_requests_test.c)
 set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_requests_test PRIVATE luthr_static)
-target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter)
+target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
+  -Wl,--wrap=luaW_collectenter)
 foreach(case IN ITEMS incremental generational explicit stopped)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
@@ -151,6 +152,20 @@ foreach(collector IN ITEMS incremental generational)
     set_tests_properties(gc_reclamation_${case}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
   endforeach()
+endforeach()
+
+luthr_test_program(gc_tracing_test gc_tracing_test.c)
+set_target_properties(gc_tracing_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_tracing_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_tracing_test PRIVATE luthr_static)
+target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
+  -Wl,--wrap=luaA_tryscan -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_stop
+  -Wl,--wrap=luaM_malloc_)
+foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak intern cache
+    concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons)
+  add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})
+  set_tests_properties(gc_tracing_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
 luthr_test_program(gc_barriers_test gc_barriers_test.c)
@@ -177,7 +192,7 @@ target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_loc
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
 foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational page_growth page_cap page_isolation
-    metadata_handoff metadata_spurious metadata_collect metadata_contention stopped_gc refill_recheck)
+    metadata_handoff metadata_spurious metadata_collect metadata_priority metadata_contention stopped_gc refill_recheck)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
   set_tests_properties(memory_publication_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -421,7 +436,7 @@ luthr_test_program(math_library_test math_library_test.c)
 set_target_properties(math_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(math_library_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(math_library_test PRIVATE luthr_static)
-target_link_options(math_library_test PRIVATE -Wl,--wrap=luaA_begin)
+target_link_options(math_library_test PRIVATE -Wl,--wrap=luaA_beginpayload)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS sequence errors bindings oom capture parallel_full parallel_bounded reseed)
@@ -795,7 +810,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test memory_publication_test allocation_pool_test gc_pacing_test
-  gc_barriers_test gc_requests_test gc_reclamation_test
+  gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)

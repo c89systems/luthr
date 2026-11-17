@@ -37,12 +37,11 @@ struct fixture {
 };
 static struct fixture *active;
 static __thread struct actor *current;
-void __real_luaA_begin(lua_State *, GCObject *, LuaObjectScope *);
-void __wrap_luaA_begin(lua_State *state, GCObject *object,
-                       LuaObjectScope *scope) {
-  __real_luaA_begin(state, object, scope);
-  if (state == active->actors[0].state && object->tt == LUA_VUSERDATA &&
-      active->armed) {
+void __real_luaA_beginpayload(lua_State *, Udata *, LuaObjectScope *);
+void __wrap_luaA_beginpayload(lua_State *state, Udata *object,
+                              LuaObjectScope *scope) {
+  __real_luaA_beginpayload(state, object, scope);
+  if (state == active->actors[0].state && active->armed) {
     active->armed = 0;
     require(state->native_depth != 0);
     luaX_unlockstate(state); /* Keep the payload claim and its explicit root. */

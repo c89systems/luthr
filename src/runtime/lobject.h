@@ -503,6 +503,7 @@ typedef struct Udata {
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
   LuaObjectLock access;
+  LuaObjectLock payload_access;  /* opaque native bytes, not collector edges */
   struct Table *metatable;
   GCObject *gclist;
   UValue uv[1];  /* user values */
@@ -510,10 +511,8 @@ typedef struct Udata {
 
 
 /*
-** Header for userdata with no user values. These userdata do not need
-** to be gray during GC, and therefore do not need a 'gclist' field.
-** To simplify, the code always use 'Udata' for both kinds of userdata,
-** making sure it never accesses 'gclist' on userdata with no user values.
+** Header for userdata with no user values. Both forms have the same
+** collector prefix so their metatables can be traced under object ownership.
 ** This structure here is used only to compute the correct size for
 ** this representation. (The 'bindata' field in its end ensures correct
 ** alignment for binary data following this header.)
@@ -523,7 +522,9 @@ typedef struct Udata0 {
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
   LuaObjectLock access;
+  LuaObjectLock payload_access;
   struct Table *metatable;
+  GCObject *gclist;
   union {LUAI_MAXALIGN;} bindata;
 } Udata0;
 
@@ -634,6 +635,10 @@ typedef struct Proto {
   LocVar *locvars;  /* information about local variables (debug information) */
   TString  *source;  /* used for debug information */
   GCObject *gclist;
+  lua_State *builder;  /* atomic; NULL after construction freezes */
+  struct Proto *build_next;
+  uint64_t trace_snapshot;
+  lu_mem trace_bytes;
 } Proto;
 
 /* }================================================================== */
@@ -690,6 +695,7 @@ typedef struct Proto {
 */
 typedef struct UpVal {
   CommonHeader;
+  GCObject *gclist;
   TValue value;  /* stable shared cell, including while its local is live */
   uint64_t sequence;  /* even published value; odd during a writer's stores */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
@@ -798,6 +804,10 @@ typedef struct Table {
   struct Table *metatable;
   GCObject *gclist;
   LuaObjectLock access;
+  uint64_t weak_epoch;
+  lu_byte gcweak;  /* weakness selected for this collection cycle */
+  lu_byte weak_cleared;
+  lu_byte weak_initial_cutoff;
 } Table;
 
 

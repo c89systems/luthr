@@ -97,9 +97,9 @@ static void accountassist (lua_State *L, l_mem change) {
   uint64_t epoch;
   lu_mem bytes;
   if (change >= 0 || L->reclaiming || !completestate(G(L)) ||
-      !luaC_hasreclaimers(L))
+      (!luaC_hasreclaimers(L) && !luaC_tracing(L)))
     return;
-  epoch = __atomic_load_n(&world->reclaim_epoch, __ATOMIC_ACQUIRE);
+  epoch = __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE);
   if (L->assist_epoch != epoch) {
     L->assist_epoch = epoch;
     L->assist_debt = 0;
@@ -480,6 +480,30 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   return page;
 }
 
+static void *allocatebacking (lua_State *L, size_t size, int tag) {
+  LuaAllocBlock *block;
+  size_t bytes;
+  global_State *g = G(L);
+  if (size > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
+  bytes = size + sizeof(LuaAllocBlock);
+  luaW_heapenter(L);
+  block = cast(LuaAllocBlock *, firsttry(g, NULL, cast_sizet(tag), bytes));
+  if (block == NULL)
+    block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
+  if (block != NULL) {
+    block->block.page = NULL;
+    account(L, -cast(l_mem, size));
+  }
+  luaW_heapleave(L);
+  return block != NULL ? block + 1 : NULL;
+}
+
+/* Persistent SDK records must not pin transient object pages. Retain normal
+** accounting and retry behavior, while allocating their exact backing size. */
+void *luaM_alloccontrol (lua_State *L, size_t size) {
+  return allocatebacking(L, size, 0);
+}
+
 static void *allocateblock (lua_State *L, size_t size, int tag,
                             unsigned poolbase) {
   unsigned bin;
@@ -498,22 +522,7 @@ static void *allocateblock (lua_State *L, size_t size, int tag,
       return block + 1;
     }
   }
-  if (size > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
-  else {
-    LuaAllocBlock *block;
-    size_t bytes = size + sizeof(LuaAllocBlock);
-    global_State *g = G(L);
-    luaW_heapenter(L);
-    block = cast(LuaAllocBlock *, firsttry(g, NULL, cast_sizet(tag), bytes));
-    if (block == NULL)
-      block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
-    if (block != NULL) {
-      block->block.page = NULL;
-      account(L, -cast(l_mem, size));
-    }
-    luaW_heapleave(L);
-    return block != NULL ? block + 1 : NULL;
-  }
+  return allocatebacking(L, size, tag);
 }
 
 

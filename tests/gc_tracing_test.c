@@ -1,0 +1,842 @@
+#include <laccess.h>
+#include <lapi.h>
+#include <lauxlib.h>
+#include <ldo.h>
+#include <lfunc.h>
+#include <lgc.h>
+#include <lmem.h>
+#include <lroots.h>
+#include <lstate.h>
+#include <ltable.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define require(c)                                                             \
+  do {                                                                         \
+    if (!(c)) {                                                                \
+      fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c);                  \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+
+struct collection {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *main, *collector, *worker;
+  size_t live;
+  unsigned allocating, failures, fail, assisted, stops;
+  int entered, release, done, emergency, minor, help;
+};
+static struct collection *collecting;
+static lua_State *weak_marker;
+static GCObject *weak_table, *weak_key, *weak_target;
+static unsigned weak_deferred_seen, weak_rescans, weak_target_scanned;
+static struct closure_builder {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *worker;
+  lua_State *child;
+  LClosure *closure;
+  int entered, release, thread_build, fail;
+} *building_closure;
+
+void *__real_luaM_malloc_(lua_State *, size_t, int);
+void *__wrap_luaM_malloc_(lua_State *L, size_t size, int tag) {
+  struct closure_builder *builder = building_closure;
+  if (builder != NULL && L == builder->worker &&
+      size == (builder->thread_build
+                   ? (BASIC_STACK_SIZE + EXTRA_STACK) * sizeof(StackValue)
+                   : sizeof(UpVal))) {
+    LuaWorldScope scope = {0, 0};
+    if (builder->fail)
+      luaM_error(L);
+    if (builder->thread_build)
+      scope = luaW_detach(L);
+    /* Pause before allocation. The existing header is reachable, and the
+     * fixture exposes no uninitialized payload allocation to the marker. */
+    require(pthread_mutex_lock(&builder->mutex) == 0);
+    builder->entered = 1;
+    require(pthread_cond_broadcast(&builder->changed) == 0);
+    while (!builder->release)
+      require(pthread_cond_wait(&builder->changed, &builder->mutex) == 0);
+    require(pthread_mutex_unlock(&builder->mutex) == 0);
+    if (builder->thread_build)
+      luaW_attach(L, scope);
+  }
+  return __real_luaM_malloc_(L, size, tag);
+}
+
+void __real_luaW_stop(lua_State *);
+void __wrap_luaW_stop(lua_State *L) {
+  if (collecting != NULL && L == collecting->collector && L->world_depth == 0 &&
+      luaC_tracing(L))
+    collecting->stops++;
+  __real_luaW_stop(L);
+}
+
+lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
+lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
+  lu_mem marked = __real_luaC_tracebatch(L, limit);
+  if (collecting != NULL && L == collecting->worker && marked != 0 &&
+      L->world_depth == 0) {
+    collecting->assisted++;
+  }
+  return marked;
+}
+
+int __real_luaA_tryscan(GCObject *);
+int __wrap_luaA_tryscan(GCObject *object) {
+  int acquired = __real_luaA_tryscan(object);
+  if (acquired && weak_marker != NULL && luaC_tracing(weak_marker)) {
+    if (object == weak_table) {
+      if (iswhite(weak_key))
+        weak_deferred_seen = 1;
+      else if (!weak_target_scanned) {
+        require(!G(weak_marker)->world.stopped && !weak_marker->world_depth);
+        weak_rescans++;
+      }
+    }
+    if (object == weak_target) {
+      require(!G(weak_marker)->world.stopped && !weak_marker->world_depth);
+      weak_target_scanned++;
+    }
+  }
+  return acquired;
+}
+
+static void *backing(void *context, void *pointer, size_t old, size_t size) {
+  struct collection *collection = context;
+  void *replacement;
+  require(__atomic_fetch_add(&collection->allocating, 1, __ATOMIC_ACQUIRE) ==
+          0);
+  if (pointer == NULL)
+    old = 0;
+  require(collection->live >= old);
+  if (size >= 1024 * 1024 &&
+      __atomic_exchange_n(&collection->fail, 0, __ATOMIC_ACQ_REL)) {
+    collection->failures++;
+    replacement = NULL;
+  } else if (size == 0) {
+    collection->live -= old;
+    free(pointer);
+    replacement = NULL;
+  } else {
+    replacement = realloc(pointer, size);
+    if (replacement != NULL)
+      collection->live = collection->live - old + size;
+  }
+  require(__atomic_fetch_sub(&collection->allocating, 1, __ATOMIC_RELEASE) ==
+          1);
+  return replacement;
+}
+
+void __real_luaQ_poll(lua_State *);
+void __wrap_luaQ_poll(lua_State *L) {
+  struct collection *collection = collecting;
+  if (collection != NULL && L == collection->collector && luaC_tracing(L) &&
+      !collection->entered &&
+      __atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE)) {
+    LuaWorldScope scope = {0, 0};
+    require(L->world_depth == 0 && !G(L)->world.stopped && !G(L)->trace_busy);
+    if (collection->emergency || collection->help)
+      scope = luaW_detach(L); /* a real safepoint with no claimed graph work */
+    require(pthread_mutex_lock(&collection->mutex) == 0);
+    collection->entered = 1;
+    require(pthread_cond_broadcast(&collection->changed) == 0);
+    while (!collection->release)
+      require(pthread_cond_wait(&collection->changed, &collection->mutex) == 0);
+    require(pthread_mutex_unlock(&collection->mutex) == 0);
+    if (collection->emergency || collection->help)
+      luaW_attach(L, scope);
+  }
+  __real_luaQ_poll(L);
+}
+
+/* Start at a real published graph boundary. The normal collector driver will
+ * own this phase transition; these units isolate the graph protocol from its
+ * scheduling and pacing policy. */
+static lua_State *newstate(void) {
+  lua_State *L = luaL_newstate();
+  require(L != NULL);
+  lua_gc(L, LUA_GCINC);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCSTOP);
+  return L;
+}
+
+static void begin(lua_State *L) {
+  global_State *g = G(L);
+  lua_lock(L);
+  luaW_stop(L);
+  require(g->gray == NULL && g->grayagain == NULL);
+  g->trace_epoch++;
+  g->GCmarked = 0;
+  g->trace_changes = 0;
+  g->gcstate = GCSpropagate;
+  setmarked(L, (getmarked(L) & ~(WHITEBITS | (1 << BLACKBIT))));
+  L->gclist = NULL;
+  g->gray = obj2gco(L);
+  __atomic_store_n(&g->trace_active, 1, __ATOMIC_RELEASE);
+  luaC_tracevalue(L, &g->l_registry);
+  luaW_start(L);
+  lua_unlock(L);
+}
+
+static void drain(lua_State *L) {
+  unsigned rounds;
+  lua_lock(L);
+  for (rounds = 0; rounds < 10000; rounds++) {
+    luaC_tracebatch(L, 64);
+    if (G(L)->gray == NULL && L->barrier_forward == NULL)
+      break;
+  }
+  require(rounds < 10000);
+  lua_unlock(L);
+}
+
+static void finish(lua_State *L) {
+  drain(L);
+  lua_lock(L);
+  luaW_stop(L);
+  require(G(L)->trace_deferred == NULL && !G(L)->trace_busy);
+  __atomic_store_n(&G(L)->trace_active, 0, __ATOMIC_RELEASE);
+  G(L)->trace_weakcutoff = 0;
+  luaW_start(L);
+  lua_unlock(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_close(L);
+}
+
+static int noresult(lua_State *L) {
+  (void)L;
+  return 0;
+}
+
+static void overwrite(const char *kind) {
+  lua_State *L = newstate();
+  GCObject *child, *descendant;
+  require(L != NULL);
+  /* Put the only child reference in a heap edge; retain its descendant only
+   * through that child. No C pointer below is registered as a collector root.
+   */
+  lua_newtable(L);
+  child = (GCObject *)lua_topointer(L, -1);
+  lua_newtable(L);
+  descendant = (GCObject *)lua_topointer(L, -1);
+  lua_rawseti(L, -2, 1);
+  if (strcmp(kind, "array") == 0 || strcmp(kind, "hash") == 0) {
+    lua_newtable(L);
+    lua_pushvalue(L, 1);
+    if (strcmp(kind, "array") == 0)
+      lua_rawseti(L, -2, 1);
+    else
+      lua_setfield(L, -2, "child");
+  } else if (strcmp(kind, "userdata") == 0) {
+    lua_newuserdatauv(L, 1, 1);
+    lua_pushvalue(L, 1);
+    require(lua_setiuservalue(L, -2, 1));
+  } else if (strcmp(kind, "cclosure") == 0) {
+    lua_pushvalue(L, 1);
+    lua_pushcclosure(L, noresult, 1);
+  } else if (strcmp(kind, "capture") == 0) {
+    require(luaL_loadstring(
+                L, "local value=...; return function() return value end") ==
+            LUA_OK);
+    lua_pushvalue(L, 1);
+    require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  } else {
+    require(strcmp(kind, "metatable") == 0);
+    lua_newtable(L);
+    lua_pushvalue(L, 1);
+    require(lua_setmetatable(L, -2));
+  }
+  lua_remove(L, 1);
+  begin(L);
+  require(iswhite(child) && iswhite(descendant));
+  lua_pushnil(L);
+  if (strcmp(kind, "array") == 0)
+    lua_rawseti(L, 1, 1);
+  else if (strcmp(kind, "hash") == 0)
+    lua_setfield(L, 1, "child");
+  else if (strcmp(kind, "userdata") == 0)
+    require(lua_setiuservalue(L, 1, 1));
+  else if (strcmp(kind, "cclosure") == 0 || strcmp(kind, "capture") == 0)
+    require(lua_setupvalue(L, 1, 1) != NULL);
+  else
+    require(lua_setmetatable(L, 1));
+  require(!iswhite(child));
+  drain(L);
+  require(isblack(child) && isblack(descendant));
+  finish(L);
+}
+
+static void stack_snapshot(void) {
+  lua_State *L = newstate();
+  lua_State *worker = lua_newthread(L);
+  GCObject *child;
+  lua_newtable(worker);
+  child = (GCObject *)lua_topointer(worker, -1);
+  begin(L);
+  require(iswhite(child));
+  lua_settop(worker, 0); /* admission must snapshot before removing the root */
+  require(worker->trace_snapshot == G(L)->trace_epoch && !iswhite(child));
+  drain(L);
+  require(isblack(child));
+  finish(L);
+}
+
+struct busy {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *worker;
+  Table *table;
+  int entered, release;
+};
+
+static void *hold(void *context) {
+  struct busy *busy = context;
+  LuaObjectScope scope;
+  lua_lock(busy->worker);
+  luaA_begin(busy->worker, obj2gco(busy->table), &scope);
+  require(pthread_mutex_lock(&busy->mutex) == 0);
+  busy->entered = 1;
+  require(pthread_cond_broadcast(&busy->changed) == 0);
+  while (!busy->release)
+    require(pthread_cond_wait(&busy->changed, &busy->mutex) == 0);
+  require(pthread_mutex_unlock(&busy->mutex) == 0);
+  luaA_end(busy->worker, &scope);
+  lua_unlock(busy->worker);
+  return NULL;
+}
+
+static void busy_object(void) {
+  lua_State *L = newstate();
+  struct busy busy = {0};
+  pthread_t thread;
+  GCObject *independent;
+  require(pthread_mutex_init(&busy.mutex, NULL) == 0);
+  require(pthread_cond_init(&busy.changed, NULL) == 0);
+  busy.worker = lua_newthread(L);
+  lua_newtable(L);
+  busy.table = (Table *)lua_topointer(L, -1);
+  lua_newtable(L);
+  independent = (GCObject *)lua_topointer(L, -1);
+  begin(L);
+  require(pthread_create(&thread, NULL, hold, &busy) == 0);
+  require(pthread_mutex_lock(&busy.mutex) == 0);
+  while (!busy.entered)
+    require(pthread_cond_wait(&busy.changed, &busy.mutex) == 0);
+  require(pthread_mutex_unlock(&busy.mutex) == 0);
+  lua_lock(L);
+  luaC_tracebatch(L, 256);
+  require(!G(L)->world.stopped && L->world_depth == 0);
+  require(isgray(busy.table) && isblack(independent));
+  lua_unlock(L);
+  require(pthread_mutex_lock(&busy.mutex) == 0);
+  busy.release = 1;
+  require(pthread_cond_broadcast(&busy.changed) == 0);
+  require(pthread_mutex_unlock(&busy.mutex) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  drain(L);
+  require(isblack(busy.table));
+  require(pthread_cond_destroy(&busy.changed) == 0);
+  require(pthread_mutex_destroy(&busy.mutex) == 0);
+  finish(L);
+}
+
+static void *initialize_closure(void *context) {
+  struct closure_builder *builder = context;
+  if (builder->thread_build)
+    builder->child = lua_newthread(builder->worker);
+  else {
+    lua_lock(builder->worker);
+    luaF_initupvals(builder->worker, builder->closure);
+    lua_unlock(builder->worker);
+  }
+  return NULL;
+}
+
+static void closure_construction(int thread_build) {
+  lua_State *L = newstate();
+  struct closure_builder builder = {0};
+  pthread_t thread;
+  GCObject *independent;
+  Proto *proto;
+  require(pthread_mutex_init(&builder.mutex, NULL) == 0);
+  require(pthread_cond_init(&builder.changed, NULL) == 0);
+  builder.thread_build = thread_build;
+  builder.worker = lua_newthread(L);
+  if (!thread_build) {
+    require(luaL_loadstring(builder.worker, "return _ENV") == LUA_OK);
+    lua_lock(builder.worker);
+    proto = clLvalue(s2v(builder.worker->top.p - 1))->p;
+    builder.closure = luaF_newLclosure(builder.worker, 1);
+    luaF_setproto(builder.worker, builder.closure, proto);
+    setclLvalue2s(builder.worker, builder.worker->top.p - 1, builder.closure);
+    lua_unlock(builder.worker);
+  }
+  lua_newtable(L);
+  independent = (GCObject *)lua_topointer(L, -1);
+  if (!thread_build)
+    begin(L);
+  building_closure = &builder;
+  require(pthread_create(&thread, NULL, initialize_closure, &builder) == 0);
+  require(pthread_mutex_lock(&builder.mutex) == 0);
+  while (!builder.entered)
+    require(pthread_cond_wait(&builder.changed, &builder.mutex) == 0);
+  require(pthread_mutex_unlock(&builder.mutex) == 0);
+  if (thread_build) {
+    begin(L);
+    lua_lock(builder.worker);
+    builder.child = thvalue(s2v(builder.worker->top.p - 1));
+    lua_unlock(builder.worker);
+  }
+  lua_lock(L);
+  luaC_tracebatch(L, 256);
+  require(!G(L)->world.stopped &&
+          isgray(thread_build ? obj2gco(builder.child)
+                              : obj2gco(builder.closure)) &&
+          isblack(independent));
+  lua_unlock(L);
+  require(pthread_mutex_lock(&builder.mutex) == 0);
+  builder.release = 1;
+  require(pthread_cond_broadcast(&builder.changed) == 0);
+  require(pthread_mutex_unlock(&builder.mutex) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  building_closure = NULL;
+  drain(L);
+  if (thread_build) {
+    require(isblack(builder.child));
+    require(luaL_loadstring(builder.child, "return 42") == LUA_OK);
+    require(lua_pcall(builder.child, 0, 1, 0) == LUA_OK);
+    require(lua_tointeger(builder.child, -1) == 42);
+  } else {
+    require(isblack(builder.closure) && isblack(builder.closure->upvals[0]));
+    lua_pushglobaltable(builder.worker);
+    require(lua_setupvalue(builder.worker, 1, 1) != NULL);
+    require(lua_pcall(builder.worker, 0, 1, 0) == LUA_OK);
+    lua_pushglobaltable(builder.worker);
+    require(lua_rawequal(builder.worker, -1, -2));
+  }
+  require(pthread_cond_destroy(&builder.changed) == 0);
+  require(pthread_mutex_destroy(&builder.mutex) == 0);
+  finish(L);
+}
+
+static int create_child(lua_State *L) {
+  lua_newthread(L);
+  return 1;
+}
+
+static void thread_construction_error(void) {
+  lua_State *L = newstate();
+  struct closure_builder builder = {0};
+  builder.worker = L;
+  builder.thread_build = builder.fail = 1;
+  lua_pushcfunction(L, create_child);
+  building_closure = &builder;
+  require(lua_pcall(L, 0, 1, 0) == LUA_ERRMEM);
+  building_closure = NULL;
+  lua_settop(L, 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(luaL_dostring(L, "return 42") == LUA_OK);
+  require(lua_tointeger(L, -1) == 42);
+  lua_close(L);
+}
+
+struct parser {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *worker;
+  unsigned reads;
+  int entered, release;
+};
+
+static const char *read_source(lua_State *L, void *context, size_t *size) {
+  struct parser *parser = context;
+  static const char prefix[] = "return function() local a=";
+  static const char suffix[] = "{}; return a end";
+  (void)L;
+  if (parser->reads++ == 0) {
+    *size = sizeof(prefix) - 1;
+    return prefix;
+  }
+  if (parser->reads == 2) {
+    require(pthread_mutex_lock(&parser->mutex) == 0);
+    parser->entered = 1;
+    require(pthread_cond_broadcast(&parser->changed) == 0);
+    while (!parser->release)
+      require(pthread_cond_wait(&parser->changed, &parser->mutex) == 0);
+    require(pthread_mutex_unlock(&parser->mutex) == 0);
+    *size = sizeof(suffix) - 1;
+    return suffix;
+  }
+  *size = 0;
+  return NULL;
+}
+
+static void *parse(void *context) {
+  struct parser *parser = context;
+  require(lua_load(parser->worker, read_source, parser, "trace-parser", "t") ==
+          LUA_OK);
+  return NULL;
+}
+
+static void parser_snapshot(void) {
+  lua_State *L = newstate();
+  struct parser parser = {0};
+  pthread_t thread;
+  Proto *proto;
+  require(pthread_mutex_init(&parser.mutex, NULL) == 0);
+  require(pthread_cond_init(&parser.changed, NULL) == 0);
+  parser.worker = lua_newthread(L);
+  require(pthread_create(&thread, NULL, parse, &parser) == 0);
+  require(pthread_mutex_lock(&parser.mutex) == 0);
+  while (!parser.entered)
+    require(pthread_cond_wait(&parser.changed, &parser.mutex) == 0);
+  require(pthread_mutex_unlock(&parser.mutex) == 0);
+  require(parser.worker->building_protos != NULL);
+  begin(L);
+  drain(L);
+  for (proto = parser.worker->building_protos; proto != NULL;
+       proto = proto->build_next)
+    require(proto->trace_snapshot == G(L)->trace_epoch && isblack(proto));
+  require(pthread_mutex_lock(&parser.mutex) == 0);
+  parser.release = 1;
+  require(pthread_cond_broadcast(&parser.changed) == 0);
+  require(pthread_mutex_unlock(&parser.mutex) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  require(parser.worker->building_protos == NULL);
+  proto = clLvalue(s2v(parser.worker->top.p - 1))->p;
+  require(proto->builder == NULL && proto->p[0]->builder == NULL);
+  require(lua_pcall(parser.worker, 0, 1, 0) == LUA_OK);
+  require(lua_pcall(parser.worker, 0, 1, 0) == LUA_OK);
+  require(lua_istable(parser.worker, -1));
+  require(isblack((GCObject *)lua_topointer(parser.worker, -1)));
+  require(pthread_cond_destroy(&parser.changed) == 0);
+  require(pthread_mutex_destroy(&parser.mutex) == 0);
+  finish(L);
+}
+
+static void weak_cutoff(const char *kind) {
+  lua_State *L = newstate();
+  int keys = strcmp(kind, "weakkeys") == 0;
+  int array = strcmp(kind, "weakarray") == 0;
+  GCObject *child;
+  lua_newtable(L);
+  lua_newtable(L);
+  child = (GCObject *)lua_topointer(L, -1);
+  if (keys) {
+    lua_pushinteger(L, 42);
+    lua_rawset(L, 1);
+  } else if (array)
+    lua_rawseti(L, 1, 1);
+  else
+    lua_setfield(L, 1, "child");
+  lua_newtable(L);
+  lua_pushstring(L, keys ? "k" : "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, 1);
+  begin(L);
+  drain(L);
+  require(iswhite(child));
+  lua_lock(L);
+  luaW_stop(L);
+  __atomic_store_n(&G(L)->trace_weakcutoff, keys ? 3 : 1, __ATOMIC_RELEASE);
+  luaW_start(L);
+  lua_unlock(L);
+  if (keys) {
+    lua_pushnil(L);
+    require(lua_next(L, 1) == 0);
+  } else if (array) {
+    require(lua_rawlen(L, 1) == 0);
+    require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
+    lua_pop(L, 1);
+  } else {
+    require(lua_getfield(L, 1, "child") == LUA_TNIL);
+    lua_pop(L, 1);
+  }
+  require(iswhite(child)); /* resolving a dead weak edge must not promote it */
+  /* A new entry after the cutoff remains valid. The first read must not
+   * repeat an old clearing decision against new allocations. */
+  lua_newtable(L);
+  require(isblack((GCObject *)lua_topointer(L, -1)));
+  lua_setfield(L, 1, "new");
+  require(lua_getfield(L, 1, "new") == LUA_TTABLE);
+  lua_pop(L, 1);
+  finish(L);
+}
+
+static void resurrected_weak(void) {
+  lua_State *L = newstate();
+  Table *inner;
+  GCObject *child;
+  /* A weak table which the initial strong closure cannot reach. Finalization
+   * later publishes it as a root; its values belong to that later decision. */
+  lua_newtable(L);
+  inner = (Table *)lua_topointer(L, 1);
+  lua_newtable(L);
+  child = (GCObject *)lua_topointer(L, -1);
+  lua_setfield(L, 1, "child");
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, 1);
+  lua_pop(L, 1);
+  begin(L);
+  drain(L);
+  require(iswhite(inner) && iswhite(child));
+  lua_lock(L);
+  luaW_stop(L);
+  __atomic_store_n(&G(L)->trace_weakcutoff, 1, __ATOMIC_RELEASE);
+  luaC_traceobject(L, obj2gco(inner));
+  sethvalue2s(L, L->top.p++, inner);
+  luaW_start(L);
+  lua_unlock(L);
+  drain(L);
+  require(inner->weak_epoch == G(L)->trace_epoch && iswhite(child));
+  /* A weak-value decision from before resurrection cannot erase this edge.
+   * The read promotes it; completing the later cutoff must retain that root. */
+  require(lua_getfield(L, 1, "child") == LUA_TTABLE);
+  drain(L);
+  require(isblack(child));
+  lua_lock(L);
+  luaW_stop(L);
+  __atomic_store_n(&G(L)->trace_weakcutoff, 3, __ATOMIC_RELEASE);
+  luaW_start(L);
+  lua_unlock(L);
+  require(lua_getfield(L, 1, "child") == LUA_TTABLE);
+  finish(L);
+}
+
+static void string_lookup(int cache) {
+  lua_State *L = newstate();
+  static const char interned[] = "trace-interned-string";
+  static const char cached[] =
+      "trace-cached-string-long-enough-to-have-no-short-string-interning-entry";
+  GCObject *string;
+  if (cache)
+    lua_pushstring(L, cached);
+  else
+    lua_pushlstring(L, interned, sizeof(interned) - 1);
+  string = gcvalue(s2v(L->top.p - 1));
+  lua_pop(L, 1);
+  begin(L);
+  require(iswhite(string));
+  if (cache)
+    lua_pushstring(L, cached);
+  else
+    lua_pushlstring(L, interned, sizeof(interned) - 1);
+  require(gcvalue(s2v(L->top.p - 1)) == string && !iswhite(string));
+  drain(L);
+  require(isblack(string));
+  finish(L);
+}
+
+static void *collect_graph(void *context) {
+  struct collection *collection = context;
+  if (collection->minor)
+    require(lua_gc(collection->collector, LUA_GCSTEP, (size_t)0) >= 0);
+  else
+    require(lua_gc(collection->collector, LUA_GCCOLLECT) == 0);
+  require(!luaC_tracing(collection->collector) &&
+          !G(collection->collector)->trace_busy);
+  require(pthread_mutex_lock(&collection->mutex) == 0);
+  collection->done = 1;
+  require(pthread_cond_broadcast(&collection->changed) == 0);
+  require(pthread_mutex_unlock(&collection->mutex) == 0);
+  return NULL;
+}
+
+static void concurrent_collection(const char *kind) {
+  struct collection collection = {0};
+  pthread_t collector;
+  unsigned length = 0;
+  uint64_t interrupted;
+  int generational = strstr(kind, "generational") != NULL ||
+                     strstr(kind, "minor") != NULL ||
+                     strcmp(kind, "help_to_incremental") == 0;
+  int to_generation = strcmp(kind, "help_to_generational") == 0;
+  int to_incremental = strcmp(kind, "help_to_incremental") == 0;
+  if (to_generation)
+    generational = 0;
+  require(pthread_mutex_init(&collection.mutex, NULL) == 0);
+  require(pthread_cond_init(&collection.changed, NULL) == 0);
+  collection.emergency = strncmp(kind, "emergency", 9) == 0;
+  collection.help = strncmp(kind, "help", 4) == 0;
+  collection.minor = strstr(kind, "minor") != NULL;
+  collection.main = lua_newstate(backing, &collection, 0);
+  require(collection.main != NULL);
+  lua_gc(collection.main, LUA_GCSTOP);
+  lua_gc(collection.main, LUA_GCINC);
+  /* Leave an otherwise unreachable old dirty table on the remembered list.
+   * Emergency marking may free it while the original controller is parked. */
+  lua_newtable(collection.main);
+  lua_newtable(collection.main);
+  lua_setglobal(collection.main, "retained");
+  if (generational) {
+    lua_gc(collection.main, LUA_GCGEN);
+    lua_gc(collection.main, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  } else
+    lua_gc(collection.main, LUA_GCCOLLECT);
+  lua_newtable(collection.main);
+  lua_rawseti(collection.main, -2, 1);
+  lua_pop(collection.main, 1);
+  require(luaL_loadstring(
+              collection.main,
+              "local head; for i=1,10000 do head={head} end; return head") ==
+          LUA_OK);
+  require(lua_pcall(collection.main, 0, 1, 0) == LUA_OK);
+  collection.worker = lua_newthread(collection.main);
+  collection.collector = lua_newthread(collection.main);
+  lua_pushvalue(collection.main, 1);
+  lua_xmove(collection.main, collection.collector, 1);
+  interrupted = G(collection.main)->trace_interrupt;
+  collecting = &collection;
+  require(pthread_create(&collector, NULL, collect_graph, &collection) == 0);
+  require(pthread_mutex_lock(&collection.mutex) == 0);
+  while (!collection.entered)
+    require(pthread_cond_wait(&collection.changed, &collection.mutex) == 0);
+  require(!collection.done);
+  require(pthread_mutex_unlock(&collection.mutex) == 0);
+  /* Actual Lua execution, object construction and compilation must finish
+   * while a normal collection still has graph work pending. */
+  require(luaL_loadstring(collection.worker,
+                          "local n=0; for i=1,2000 do local t={i,i+1}; "
+                          "n=n+t[2] end; return n") == LUA_OK);
+  require(lua_pcall(collection.worker, 0, 1, 0) == LUA_OK);
+  require(lua_tointeger(collection.worker, -1) == 2003000);
+  require(collection.assisted != 0);
+  if (collection.minor && !collection.emergency) {
+    /* An old owner receives a black object allocated during the minor. Its
+     * descendants must remain reachable through subsequent minor cycles,
+     * after this worker has dropped every local reference to the new graph. */
+    require(luaL_loadstring(collection.worker, "retained[1]={{42}}") == LUA_OK);
+    require(lua_pcall(collection.worker, 0, 0, 0) == LUA_OK);
+  }
+  if (collection.emergency) {
+    __atomic_store_n(&collection.fail, 1, __ATOMIC_RELEASE);
+    require(lua_newuserdatauv(collection.worker, 1024 * 1024, 0) != NULL);
+    require(collection.failures == 1 &&
+            G(collection.main)->trace_interrupt != interrupted);
+  }
+  if (collection.help) {
+    unsigned assisted = collection.assisted;
+    /* The host has parked the original driver. Collection on another stack
+     * must complete before that driver resumes, without aborting and globally
+     * restarting the trace. The helper must perform real concurrent marking. */
+    require(lua_gc(collection.worker, to_generation    ? LUA_GCGEN
+                                      : to_incremental ? LUA_GCINC
+                                                       : LUA_GCCOLLECT) >= 0);
+    require(!luaC_tracing(collection.worker));
+    require(G(collection.main)->trace_interrupt == interrupted);
+    require(collection.assisted > assisted);
+  }
+  require(pthread_mutex_lock(&collection.mutex) == 0);
+  require(!collection.done);
+  collection.release = 1;
+  require(pthread_cond_broadcast(&collection.changed) == 0);
+  require(pthread_mutex_unlock(&collection.mutex) == 0);
+  require(pthread_join(collector, NULL) == 0);
+  collecting = NULL;
+  require(collection.done && !collection.collector->native_depth);
+  /* Ten thousand retained objects require over 150 mark batches. Global
+   * synchronization must follow phases, rather than stopping at every batch. */
+  require(collection.stops < 64);
+  if (to_generation)
+    require(G(collection.main)->gckind == KGC_GENMINOR);
+  if (to_incremental)
+    require(G(collection.main)->gckind == KGC_INC);
+  if (collection.minor && !collection.emergency) {
+    unsigned cycle;
+    for (cycle = 0; cycle < 6; cycle++)
+      require(lua_gc(collection.main, LUA_GCSTEP, (size_t)0) >= 0);
+    require(G(collection.main)->gckind == KGC_GENMINOR);
+    require(luaL_loadstring(collection.worker, "return retained[1][1][1]") ==
+            LUA_OK);
+    require(lua_pcall(collection.worker, 0, 1, 0) == LUA_OK);
+    require(lua_tointeger(collection.worker, -1) == 42);
+  }
+  lua_pushvalue(collection.main, 1);
+  while (lua_istable(collection.main, -1)) {
+    lua_rawgeti(collection.main, -1, 1);
+    lua_remove(collection.main, -2);
+    length++;
+  }
+  require(length == 10000);
+  lua_close(collection.main);
+  require(collection.live == 0 && !collection.allocating);
+  require(pthread_cond_destroy(&collection.changed) == 0);
+  require(pthread_mutex_destroy(&collection.mutex) == 0);
+}
+
+static void ephemerons(void) {
+  lua_State *L = newstate();
+  lua_newtable(L); /* second ephemeron, visited before its key becomes live */
+  weak_table = (GCObject *)lua_topointer(L, 1);
+  lua_newtable(L); /* first ephemeron */
+  lua_newtable(L); /* first key, independently rooted */
+  lua_newtable(L); /* second key, reachable only through first's value */
+  weak_key = (GCObject *)lua_topointer(L, 4);
+  lua_newtable(L); /* conditional value: must be traced concurrently */
+  weak_target = (GCObject *)lua_topointer(L, 5);
+  lua_pushvalue(L, 4);
+  lua_pushvalue(L, 5);
+  lua_rawset(L, 1);
+  lua_newtable(L); /* first value holds the second key */
+  lua_pushvalue(L, 4);
+  lua_rawseti(L, 6, 1);
+  lua_pushvalue(L, 3);
+  lua_pushvalue(L, 6);
+  lua_rawset(L, 2);
+  lua_pop(L, 3);
+  lua_newtable(L);
+  lua_pushliteral(L, "k");
+  lua_setfield(L, -2, "__mode");
+  lua_pushvalue(L, -1);
+  lua_setmetatable(L, 1);
+  lua_setmetatable(L, 2);
+  weak_marker = L;
+  require(lua_gc(L, LUA_GCCOLLECT) == 0);
+  require(weak_deferred_seen && weak_rescans && weak_target_scanned);
+  lua_pushvalue(L, 3);
+  require(lua_rawget(L, 2) == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
+  require(lua_rawget(L, 1) == LUA_TTABLE);
+  require(lua_topointer(L, -1) == weak_target);
+  weak_marker = NULL;
+  weak_table = weak_key = weak_target = NULL;
+  lua_close(L);
+}
+
+int main(int argc, char **argv) {
+  require(argc == 2);
+  if (strcmp(argv[1], "stack") == 0)
+    stack_snapshot();
+  else if (strcmp(argv[1], "busy") == 0)
+    busy_object();
+  else if (strcmp(argv[1], "parser") == 0)
+    parser_snapshot();
+  else if (strcmp(argv[1], "closure_builder") == 0 ||
+           strcmp(argv[1], "thread_builder") == 0)
+    closure_construction(strcmp(argv[1], "thread_builder") == 0);
+  else if (strcmp(argv[1], "thread_builder_error") == 0)
+    thread_construction_error();
+  else if (strcmp(argv[1], "resurrected_weak") == 0)
+    resurrected_weak();
+  else if (strcmp(argv[1], "intern") == 0 || strcmp(argv[1], "cache") == 0)
+    string_lookup(strcmp(argv[1], "cache") == 0);
+  else if (strncmp(argv[1], "concurrent", 10) == 0 ||
+           strncmp(argv[1], "emergency", 9) == 0 ||
+           strncmp(argv[1], "help", 4) == 0)
+    concurrent_collection(argv[1]);
+  else if (strcmp(argv[1], "ephemerons") == 0)
+    ephemerons();
+  else if (strncmp(argv[1], "weak", 4) == 0)
+    weak_cutoff(argv[1]);
+  else
+    overwrite(argv[1]);
+  return 0;
+}

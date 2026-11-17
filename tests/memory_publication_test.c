@@ -45,7 +45,7 @@ struct metadata_handoff {
   pthread_cond_t *first_condition;
   lua_State *states[2];
   unsigned waits[2], order[2], count;
-  int grant, first_returned, release_first, second_arrived, collect;
+  int grant, first_returned, release_first, second_arrived, collect, priority;
 };
 static struct metadata_handoff *metadata;
 static lua_State *frame_refill_probe;
@@ -792,9 +792,11 @@ static void marking_cache(lua_State *state) {
   block = luaM_malloc_(state, 64, 0);
   luaM_free_(state, block, 64);
   luaX_unlockstate(state);
-  lua_gc(state, LUA_GCSTEP, (size_t)0);
   luaX_lockstate(state);
-  require(G(state)->gcstate == GCSpropagate);
+  luaW_stop(state);
+  luaC_runtilstate(state, GCSpropagate, 0);
+  luaW_start(state);
+  require(luaC_tracing(state));
   watched = &G(state)->world;
   world_locks = 0;
   measured++;
@@ -805,6 +807,7 @@ static void marking_cache(lua_State *state) {
   require(world_locks == 0);
   watched = NULL;
   luaX_unlockstate(state);
+  lua_gc(state, LUA_GCCOLLECT);
 }
 
 static void allocation_cache(void) {
@@ -962,7 +965,10 @@ static void *metadata_worker(void *context) {
     metadata_order(fixture, index);
   } else {
     luaX_lockstate(state);
-    luaW_heapenter(state);
+    if (index == 1 && fixture->priority)
+      luaW_collectenter(state);
+    else
+      luaW_heapenter(state);
     metadata_order(fixture, index);
     luaW_heapleave(state);
     luaX_unlockstate(state);
@@ -970,7 +976,8 @@ static void *metadata_worker(void *context) {
   return NULL;
 }
 
-static void metadata_handoff(lua_State *state, int spurious, int collect) {
+static void metadata_handoff(lua_State *state, int spurious, int collect,
+                             int priority) {
   struct metadata_handoff fixture = {0};
   pthread_t first, second;
   int bypassed;
@@ -979,6 +986,7 @@ static void metadata_handoff(lua_State *state, int spurious, int collect) {
   fixture.states[0] = lua_newthread(state);
   fixture.states[1] = lua_newthread(state);
   fixture.collect = collect;
+  fixture.priority = priority;
   metadata = &fixture;
   luaX_lockstate(state);
   luaW_heapenter(state);
@@ -988,6 +996,25 @@ static void metadata_handoff(lua_State *state, int spurious, int collect) {
   while (fixture.waits[0] == 0)
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  if (priority) {
+    /* Queue the collector behind an ordinary waiter before granting either.
+     * Its admission must precede the refill, without a timing assumption. */
+    require(pthread_create(&second, NULL, metadata_worker,
+                           (void *)(uintptr_t)1) == 0);
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    while (!fixture.second_arrived)
+      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+    luaW_heapleave(state);
+    luaX_unlockstate(state);
+    require(pthread_join(first, NULL) == 0 && pthread_join(second, NULL) == 0);
+    require(fixture.count == 2 && fixture.order[0] == 1 &&
+            fixture.order[1] == 0);
+    metadata = NULL;
+    require(pthread_cond_destroy(&fixture.changed) == 0);
+    require(pthread_mutex_destroy(&fixture.mutex) == 0);
+    return;
+  }
   if (spurious) {
     require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
     require(pthread_cond_broadcast(fixture.first_condition) == 0);
@@ -1117,9 +1144,11 @@ int main(int argc, char **argv) {
     metadata_contention(state);
   else if (strcmp(argv[1], "metadata_handoff") == 0 ||
            strcmp(argv[1], "metadata_spurious") == 0 ||
+           strcmp(argv[1], "metadata_priority") == 0 ||
            strcmp(argv[1], "metadata_collect") == 0)
     metadata_handoff(state, strcmp(argv[1], "metadata_spurious") == 0,
-                     strcmp(argv[1], "metadata_collect") == 0);
+                     strcmp(argv[1], "metadata_collect") == 0,
+                     strcmp(argv[1], "metadata_priority") == 0);
   else if (strcmp(argv[1], "stopped_gc") == 0)
     stopped_gc(state);
   else if (strcmp(argv[1], "intern_hits") == 0)

@@ -68,6 +68,7 @@ typedef struct lua_longjmp {
   LuaExecution *execution;
   unsigned execution_native_depth;
   LuaCallScope *execution_trusted;
+  LuaGCFrame *gc_frame;
   volatile pthread_t carrier;
   intptr_t b[5];  /* compiler-owned stack context; no libc thread encoding */
   volatile TStatus status;  /* error code */
@@ -259,12 +260,14 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.luthr_stack_overflow = L->luthr_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
+  lj.gc_frame = luaC_gcframe();
   lj.world_scope = luaW_scope(L);
   lj.object_scopes = L->object_scopes;
   lj.coroutine_scopes = luaE_getnativestackcontext()->coroutine_scopes;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
+  luaC_restoregcframe(lj.gc_frame);
   /* Retire the jump buffer before any cleanup callback can park this stack. */
   if (lj.execution != NULL) {
     lj.execution->protected = lj.execution_previous;
@@ -1347,6 +1350,7 @@ TStatus luaD_protectedparser (lua_State *L, ZIO *z, const char *name,
                                             const char *mode) {
   struct SParser p;
   TStatus status;
+  Proto *building = L->building_protos;
   incnny(L);  /* cannot yield during parsing */
   p.z = z; p.name = name; p.mode = mode;
   p.dyd.actvar.arr = NULL; p.dyd.actvar.size = 0;
@@ -1358,6 +1362,15 @@ TStatus luaD_protectedparser (lua_State *L, ZIO *z, const char *name,
   luaM_freearray(L, p.dyd.actvar.arr, cast_sizet(p.dyd.actvar.size));
   luaM_freearray(L, p.dyd.gt.arr, cast_sizet(p.dyd.gt.size));
   luaM_freearray(L, p.dyd.label.arr, cast_sizet(p.dyd.label.size));
+  /* Both successful and abandoned parser graphs now have stable, initialized
+  ** bounds. A concurrent scanner may inspect them without borrowing this
+  ** execution's stack gate after the release below. */
+  while (L->building_protos != building) {
+    Proto *proto = L->building_protos;
+    L->building_protos = proto->build_next;
+    proto->build_next = NULL;
+    __atomic_store_n(&proto->builder, NULL, __ATOMIC_RELEASE);
+  }
   decnny(L);
   return status;
 }

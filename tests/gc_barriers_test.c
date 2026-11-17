@@ -29,13 +29,26 @@ static GCObject *object(lua_State *L, int index) {
 }
 
 static void prepare(lua_State *L) {
+  unsigned batches = 0;
   lua_gc(L, LUA_GCCOLLECT);
   lua_lock(L);
   luaW_stop(L);
   if (G(L)->gckind == KGC_INC)
     luaC_runtilstate(L, GCSenteratomic, 0);
   luaW_start(L);
+  /* Major tracing now runs with workers admitted. Bring these retained
+   * owners to black before testing writes; minor collections still use the
+   * remembered-owner protocol between their marking epochs. */
+  while (luaC_tracing(L) &&
+         (G(L)->gray != NULL || L->barrier_forward != NULL)) {
+    require(batches++ < 10000);
+    luaC_tracebatch(L, 64);
+  }
   lua_unlock(L);
+}
+
+static int recorded(lua_State *L, int index) {
+  return luaC_tracing(L) ? isblack(object(L, index)) : isgray(object(L, index));
 }
 
 static void drain(lua_State *L) {
@@ -59,7 +72,7 @@ static void repeated(lua_State *L) {
   measured = 0;
   require(stops == 0); /* One dirty owner must not fill an edge buffer. */
   drain(L);
-  require(isgray(object(L, 1)));
+  require(recorded(L, 1));
   lua_settop(L, 1);
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_rawgeti(L, 1, 1) == LUA_TTABLE);
@@ -104,7 +117,7 @@ static void mixed(lua_State *L) {
   lua_pushvalue(L, 4);
   lua_rawseti(L, 1, 2);
   drain(L);
-  require(!iswhite(object(L, 3)) && isgray(object(L, 1)));
+  require(!iswhite(object(L, 3)) && recorded(L, 1));
   lua_settop(L, 2);
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_rawgeti(L, 1, 2) == LUA_TTABLE);
@@ -133,7 +146,7 @@ static void collisions(lua_State *L, int reset) {
     require(stops == 0);
     drain(L);
     for (i = 1; i <= OWNERS; i++)
-      require(isgray(object(L, (int)i)));
+      require(recorded(L, (int)i));
     lua_settop(L, OWNERS);
   }
   lua_gc(L, LUA_GCCOLLECT);
@@ -191,7 +204,7 @@ static void parallel(lua_State *L, int collect) {
     lua_xmove(L, thread, 1);
   }
   prepare(L);
-  lua_newtable(L); /* a white referent shared with all actors */
+  lua_newtable(L); /* black during a major trace, white between minor cycles */
   for (i = 0; i < ACTORS; i++) {
     lua_pushvalue(L, -1);
     lua_xmove(L, actors[i].state, 1);

@@ -348,6 +348,7 @@ struct lua_State {
   LuaStackGate stack_gate;
   LuaParticipation participation;
   LuaParticipation *admission;  /* shared by a paired stack transaction */
+  struct lua_State *stack_peer;  /* other gate in a paired transaction */
   LuaPolicy *policy;
   void (*state_poll)(lua_State *L, void *context);
   void *state_poll_context;
@@ -356,15 +357,22 @@ struct lua_State {
   unsigned world_depth;
   unsigned heap_waiting;
   unsigned object_waiting;
+  unsigned root_waiting;  /* stack parked; protected by world.mutex */
   struct LuaObjectScope *object_scopes;
   GCObject *barrier_forward;  /* atomic; uniquely claimed untraced objects */
   GCObject *barrier_back;  /* atomic; uniquely claimed dirty owners */
-  GCObject *retired;  /* detached work; world mutex protects shared claims */
+  uint64_t trace_snapshot;  /* release-published root snapshot epoch */
+  uint64_t trace_trimmed;
+  unsigned trace_assisting;
+  lu_mem trace_bytes;
+  struct Proto *building_protos;  /* mutable compiler/undumper graphs */
+  GCObject *retired;  /* atomic work hint; world mutex protects shared claims */
   GCObject *retired_tail;
   unsigned reclaiming;
   unsigned reclaim_pages;
   struct lua_State *reclaim_next;
   unsigned reclaim_workers;  /* world mutex protects work ownership */
+  unsigned reclaim_registered;  /* world mutex; helpers may finish the queue */
   lu_mem assist_debt;
   uint64_t assist_epoch;
   GCObject *new_objects;
@@ -390,6 +398,24 @@ typedef struct LX {
 /*
 ** 'global state', shared by all threads of this state
 */
+/* Collection cursors belong to the VM, never to a driver's suspended C stack.
+** A helper can therefore finish a phase while its original caller is parked. */
+typedef struct LuaTracePlan {
+  GCObject *again;
+  GCObject *next;
+  GCObject *deferred;
+  GCObject *tail;
+  uint64_t round_changes;
+  uint64_t clear_changes;
+  l_mem base_marked;
+  unsigned phase;
+  unsigned after;
+  unsigned changed;
+  unsigned direction;
+  unsigned weak_list;
+  unsigned finish;
+} LuaTracePlan;
+
 typedef struct global_State {
   LuaWorld world;
   struct LuaScheduler *scheduler;
@@ -417,7 +443,17 @@ typedef struct global_State {
   l_mem GCdebt;  /* bytes counted but not yet allocated */
   l_mem GCreclaimed;  /* atomic physical credits, independent of pacing */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
-  l_mem GCmarked;  /* number of objects marked in a GC cycle */
+  unsigned trace_active;  /* atomic concurrent marking phase */
+  unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
+  uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
+  uint64_t trace_epoch;
+  unsigned trace_busy;  /* one graph scanner; never held across a wait */
+  unsigned trace_ready;  /* atomic work hint; termination still checks producers */
+  uint64_t trace_changes;  /* atomic monotonic shading progress */
+  GCObject *trace_deferred;
+  GCObject **trace_tail;
+  LuaTracePlan trace_plan;
+  l_mem GCmarked;  /* bytes marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
   stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */
   TValue l_registry;

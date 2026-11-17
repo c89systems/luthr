@@ -30,6 +30,7 @@ l_sinline void luaR_setroot (lua_State *L, LuaNativeRoot *root,
                             const TValue *value) {
   root->table_view = NULL;
   setobj(L, &root->value, value);
+  luaC_tracevalue(L, &root->value);
 }
 
 l_sinline void luaR_poproot (lua_State *L, LuaNativeRoot *root) {

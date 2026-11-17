@@ -23,14 +23,22 @@ static struct {
 static __thread unsigned role;
 
 void __real_luaW_heapenter(lua_State *);
-void __wrap_luaW_heapenter(lua_State *L) {
+void __real_luaW_collectenter(lua_State *);
+static void arrive(void) {
   if (role != 0) {
     require(pthread_mutex_lock(&fixture.mutex) == 0);
     fixture.arrived[role - 1]++;
     require(pthread_cond_broadcast(&fixture.changed) == 0);
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
   }
+}
+void __wrap_luaW_heapenter(lua_State *L) {
+  arrive();
   __real_luaW_heapenter(L);
+}
+void __wrap_luaW_collectenter(lua_State *L) {
+  arrive();
+  __real_luaW_collectenter(L);
 }
 
 struct request {

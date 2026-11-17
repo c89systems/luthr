@@ -1,3 +1,4 @@
+#include <lapi.h>
 #include <lauxlib.h>
 #include <lgc.h>
 #include <lstate.h>
@@ -25,6 +26,8 @@ struct fixture {
   int native_case;
   int contended_case;
   int worker_collections;
+  unsigned ordinary_polls;
+  int application_progress;
   int progress_requested;
   int progress_observed;
   int finalized[3];
@@ -65,12 +68,9 @@ static void *allocate(void *context, void *pointer, size_t old_size,
   (void)old_size;
   check(pthread_mutex_lock(&fixture->mutex));
   if (fixture->active_phase &&
-      (!fixture->collector_ready ||
-       !pthread_equal(fixture->collector, pthread_self())) &&
-      !(fixture->contended_case &&
-        pthread_equal(fixture->worker_carrier, pthread_self()) &&
-        fixture->worker->world_depth != 0)) {
-    fputs("GC experiment: allocation outside the collector carrier\n", stderr);
+      (!luaQ_isowner(&G(fixture->main)->world.heap_owner) ||
+       G(fixture->main)->world.heap_depth == 0)) {
+    fputs("GC experiment: allocation without metadata ownership\n", stderr);
     abort();
   }
   check(pthread_mutex_unlock(&fixture->mutex));
@@ -85,6 +85,10 @@ static void worker_poll(lua_State *state, void *context) {
   struct fixture *fixture = context;
   (void)state;
   check(pthread_mutex_lock(&fixture->mutex));
+  if (!luaC_ingc(state) && ++fixture->ordinary_polls > 1) {
+    fixture->application_progress = 1;
+    check(pthread_cond_broadcast(&fixture->changed));
+  }
   if (!fixture->entered) {
     fixture->entered = 1;
     check(pthread_cond_broadcast(&fixture->changed));
@@ -112,6 +116,15 @@ static void finalizer_poll(lua_State *state, void *context) {
     abort();
   }
   fixture->finalizer_polls++;
+  /* Either collecting execution may claim a finalizer. If the worker runs
+   * it, the main execution must still be able to execute the stop setter.
+   * Both polling sites witness actual Lua progress outside GC ownership. */
+  check(pthread_mutex_lock(&fixture->mutex));
+  if (fixture->progress_requested) {
+    fixture->progress_observed = 1;
+    check(pthread_cond_broadcast(&fixture->changed));
+  }
+  check(pthread_mutex_unlock(&fixture->mutex));
 }
 
 static int finalize(lua_State *state) {
@@ -232,6 +245,27 @@ static void *run_collector(void *context) {
   for (i = 0; i < 4; ++i)
     if (lua_gc(fixture->main, LUA_GCCOLLECT) != 0)
       fixture->failed = 1;
+  if (!fixture->native_case) {
+    /* The worker may reach its blocking finalizer after these collections
+     * return. Wait for that request, then execute real Lua on the main state
+     * to release it; an earlier setter call cannot witness a future request. */
+    check(pthread_mutex_lock(&fixture->mutex));
+    while (!fixture->application_progress) {
+      if (fixture->progress_requested && !fixture->progress_observed) {
+        check(pthread_mutex_unlock(&fixture->mutex));
+        lua_lock(fixture->main);
+        fixture->main->poll_remaining = 1;
+        lua_unlock(fixture->main);
+        lua_rawgeti(fixture->main, LUA_REGISTRYINDEX, fixture->stop_ref);
+        lua_pushboolean(fixture->main, 0);
+        if (lua_pcall(fixture->main, 1, 0, 0) != LUA_OK)
+          fixture->failed = 1;
+        check(pthread_mutex_lock(&fixture->mutex));
+      } else
+        check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
+    }
+    check(pthread_mutex_unlock(&fixture->mutex));
+  }
   lua_rawgeti(fixture->main, LUA_REGISTRYINDEX, fixture->stop_ref);
   lua_pushboolean(fixture->main, 1);
   if (lua_pcall(fixture->main, 1, 0, 0) != LUA_OK)
