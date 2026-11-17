@@ -98,12 +98,25 @@ target_link_libraries(capture_cells_test PRIVATE luthr_static)
 target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
   -Wl,--wrap=luaF_readcapture -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
-  -Wl,--wrap=luaF_loadlocals
-  -Wl,--wrap=luaW_stop)
+  -Wl,--wrap=luaF_loadlocals)
 foreach(case IN ITEMS independent readers access uncaptured semantics incremental generational)
   add_test(NAME capture_cells_${case} COMMAND capture_cells_test ${case})
   set_tests_properties(capture_cells_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
+luthr_test_program(gc_barriers_test gc_barriers_test.c)
+set_target_properties(gc_barriers_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_barriers_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_barriers_test PRIVATE luthr_static)
+target_link_options(gc_barriers_test PRIVATE -Wl,--wrap=luaW_stop)
+foreach(collector IN ITEMS incremental generational)
+  foreach(case IN ITEMS repeated forward mixed collisions reset)
+    add_test(NAME gc_barriers_${case}_${collector}
+      COMMAND gc_barriers_test ${case} ${collector})
+    set_tests_properties(gc_barriers_${case}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+  endforeach()
 endforeach()
 
 luthr_test_program(memory_publication_test memory_publication_test.c)
@@ -732,7 +745,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test scheduler_test native_lifecycle_test
+  capture_cells_test memory_publication_test gc_barriers_test scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)
   add_dependencies(unit_build race_detector_test)

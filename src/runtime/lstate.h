@@ -305,6 +305,7 @@ typedef struct LuaNativeRoot {
 } LuaNativeRoot;
 
 #define LUA_BARRIER_CAPACITY 64
+#define LUA_BARRIER_CACHE 16
 typedef struct LuaBarrierRecord {
   GCObject *owner;
   GCObject *value;
@@ -364,6 +365,7 @@ struct lua_State {
   struct LuaObjectScope *object_scopes;
   unsigned barrier_count;
   LuaBarrierRecord barriers[LUA_BARRIER_CAPACITY];
+  lu_byte barrier_back_cache[LUA_BARRIER_CACHE];  /* validated record indices */
   GCObject *new_objects;
   GCObject *new_objects_tail;
   l_mem allocation_debt;

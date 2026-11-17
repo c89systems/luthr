@@ -30,7 +30,6 @@ static __thread unsigned reading;
 static __thread unsigned reader_mutexes;
 static __thread unsigned reader_ownership;
 static __thread unsigned write_calls;
-static __thread unsigned barrier_flushes;
 static const void *measured_function;
 static unsigned local_loads;
 
@@ -44,14 +43,6 @@ void __real_luaF_writecapture(lua_State *state, LClosure *closure, int n,
                               const TValue *value);
 void __real_luaF_storelocals(lua_State *state, StkId first, int count);
 void __real_luaF_loadlocals(lua_State *state, CallInfo *ci);
-void __real_luaW_stop(lua_State *state);
-
-void __wrap_luaW_stop(lua_State *state) {
-  if (state->barrier_count == LUA_BARRIER_CAPACITY)
-    barrier_flushes++;
-  __real_luaW_stop(state);
-}
-
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   if (reading)
     reader_mutexes++;
@@ -300,8 +291,6 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "generational") == 0)
       lua_gc(state, LUA_GCGEN);
     run(state, barriers);
-    if (strcmp(argv[1], "generational") == 0)
-      require(barrier_flushes > 0);
   }
   lua_close(state);
   return 0;

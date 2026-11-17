@@ -285,10 +285,10 @@ void luaC_barrierback_ (lua_State *L, GCObject *o) {
 }
 
 static void applybarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
-  if (isblack(o) && iswhite(v)) {
+  if (isblack(o)) {
     if (back)
-      luaC_barrierback_(L, o);
-    else
+      luaC_barrierback_(L, o);  /* dirty owner, regardless of first child's color */
+    else if (iswhite(v))
       luaC_barrier_(L, o, v);
   }
 }
@@ -309,8 +309,10 @@ void luaC_drainbarriers (lua_State *L) {
     drainthreadbarriers(L, participant->thread);
 }
 
-/* Mutators append complete edges locally. Only a full buffer or a collection
-** transition needs shared coordination. No record survives a collector step. */
+/* Forward barriers retain complete edges; backward barriers remember dirty
+** owners. Repeated writes to one owner need only one rescan. The small cache
+** holds indices, never roots: validate against the current buffer after every
+** drain or collision. No record survives a collector step. */
 void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
   LuaBarrierRecord *record;
   if (luaW_iscollector(L)) {
@@ -318,6 +320,14 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
     return;
   }
   lua_assert(L->barrier_count < LUA_BARRIER_CAPACITY);
+  if (back) {
+    unsigned bucket = (point2uint(o) >> 4) % LUA_BARRIER_CACHE;
+    unsigned index = L->barrier_back_cache[bucket];
+    if (index < L->barrier_count && L->barriers[index].back &&
+        L->barriers[index].owner == o)
+      return;
+    L->barrier_back_cache[bucket] = cast_byte(L->barrier_count);
+  }
   record = &L->barriers[L->barrier_count++];
   record->owner = o;
   record->value = v;
