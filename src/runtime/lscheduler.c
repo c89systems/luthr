@@ -665,6 +665,7 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
   luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
   for (i = 0; i < config->slots; i++) {
     s->slots[i].allocation.global = G(L);
+    s->slots[i].allocation.parallelism = config->slots;
     s->slots[i].allocation.next = G(L)->slot_caches;
     G(L)->slot_caches = &s->slots[i].allocation;
   }

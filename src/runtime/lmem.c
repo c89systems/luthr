@@ -122,6 +122,7 @@ struct LuaAllocPage {
 
 #define ALLOC_PAGE_MIN 4096
 #define ALLOC_PAGE_MAX 65536
+#define ALLOC_PAGE_RESERVE 3
 #define ALLOC_PAGE_HEADER \
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
     * sizeof(LuaAllocBlock))
@@ -322,6 +323,55 @@ static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
   return NULL;
 }
 
+static void preparepage (global_State *g, LuaAllocPage *page,
+                         unsigned bin, unsigned pool, size_t bytes) {
+  size_t stride = sizeof(LuaAllocBlock) + binbytes(bin);
+  size_t offset;
+  page->free = NULL;
+  page->bin = bin;
+  page->pool = pool;
+  page->available_next = NULL;
+  page->live = 0;
+  page->bytes = bytes;
+  for (offset = ALLOC_PAGE_HEADER; offset + stride <= bytes; offset += stride) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+    block->block.page = page;
+    block->block.next = page->free;
+    page->free = block;
+  }
+  page->next = g->allocation_pages;
+  g->allocation_pages = page;
+}
+
+/* Amortize backing admission for a parallel team. Refill reaches this point
+** only after finding its pool empty under metadata ownership. At most three
+** spare pages remain per pool, independent of task count. Reserves are optional:
+** failure stops the batch without collection or failing the requested block. */
+static void reservepages (lua_State *L, unsigned bin, unsigned pool,
+                          size_t bytes) {
+  global_State *g = G(L);
+  LuaExecution *execution = luaQ_current();
+  unsigned count, i;
+  if (g->gcstopem || luaW_iscollector(L) || execution == NULL ||
+      execution->allocation_cache == NULL ||
+      execution->allocation_cache->global != g)
+    return;
+  count = execution->allocation_cache->parallelism;
+  if (count > ALLOC_PAGE_RESERVE + 1) count = ALLOC_PAGE_RESERVE + 1;
+  for (i = 1; i < count; i++) {
+    LuaAllocPage *page = cast(LuaAllocPage *, firsttry(g, NULL, 0, bytes));
+    LuaAllocPage **head = &g->allocation_available[pool];
+    LuaAllocPage *next;
+    if (page == NULL) break;
+    preparepage(g, page, bin, pool, bytes);
+    next = __atomic_load_n(head, __ATOMIC_RELAXED);
+    do {
+      page->available_next = next;
+    } while (!__atomic_compare_exchange_n(head, &next, page, 0,
+                                          __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  }
+}
+
 static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   global_State *g = G(L);
   LuaAllocPage *page = allocationcache(L)[pool];
@@ -359,23 +409,8 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
       page = cast(LuaAllocPage *, callfrealloc(g, NULL, 0, bytes));
     }
     if (page != NULL) {
-      size_t stride = sizeof(LuaAllocBlock) + binbytes(bin);
-      size_t offset;
-      page->free = NULL;
-      page->bin = bin;
-      page->pool = pool;
-      page->available_next = NULL;
-      page->live = 0;
-      page->bytes = bytes;
-      for (offset = ALLOC_PAGE_HEADER;
-           offset + stride <= bytes; offset += stride) {
-        LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-        block->block.page = page;
-        block->block.next = page->free;
-        page->free = block;
-      }
-      page->next = g->allocation_pages;
-      g->allocation_pages = page;
+      preparepage(g, page, bin, pool, bytes);
+      reservepages(L, bin, pool, bytes);
     }
   }
  ready:

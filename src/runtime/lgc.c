@@ -1862,11 +1862,19 @@ void luaC_runtilstate (lua_State *L, int state, int fast) {
 ** finishing a cycle (pause state). Finally, it sets the debt that
 ** controls when next step will be performed.
 */
-static void incstep (lua_State *L, global_State *g) {
+static void incstep (lua_State *L, global_State *g, l_mem debt) {
   l_mem stepsize = applygcparam(g, STEPSIZE, 100);
   l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
   l_mem stres;
   int fast = (work2do == 0);  /* special case: do a full collection */
+  /* Admission and local accounting can accumulate several workers' bytes
+  ** beyond the trigger. Pay for that overshoot before resetting the debt;
+  ** otherwise a faster allocator can outrun a fixed tracing quantum forever.
+  ** Explicit basic steps pass zero and retain the configured work size. */
+  if (!fast && debt < 0) {
+    l_mem allocated = stepsize > MAX_LMEM + debt ? MAX_LMEM : stepsize - debt;
+    work2do = applygcparam(g, STEPMUL, allocated / cast_int(sizeof(void*)));
+  }
   do {  /* repeat until enough work */
     stres = singlestep(L, fast);  /* perform one single step */
     if (stres == step2minor)  /* returned to minor collections? */
@@ -1921,7 +1929,8 @@ void luaC_step (lua_State *L) {
   luai_tracegc(L, 1);  /* for internal debugging */
   switch (g->gckind) {
     case KGC_INC: case KGC_GENMAJOR:
-      incstep(L, g);
+      incstep(L, g, claimed
+        ? __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) : 0);
       reclaim = g->gcstate == GCSpause || g->gckind == KGC_GENMINOR;
       break;
     case KGC_GENMINOR:

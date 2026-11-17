@@ -15,6 +15,7 @@ struct LuaTaskRoot;
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
   struct global_State *global;
+  unsigned parallelism;  /* immutable team width; zero means one consumer */
   struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
 } LuaAllocationCache;
 

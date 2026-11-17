@@ -17,10 +17,16 @@
 enum { BLOCKS = 5000, ACTORS = 4, BORROWED = 16, BYTES = 64 };
 struct actor {
   lua_State *state;
+  LuaAllocationCache cache;
   unsigned id, admissions;
+  int frame;
   unsigned char *blocks[BORROWED];
 };
 static __thread unsigned measured, admissions;
+struct allocator {
+  size_t live, cap;
+  unsigned denied;
+};
 void __real_luaW_heapenter(lua_State *);
 void __wrap_luaW_heapenter(lua_State *L) {
   if (measured)
@@ -29,42 +35,112 @@ void __wrap_luaW_heapenter(lua_State *L) {
 }
 
 static void *allocate(void *context, void *pointer, size_t old, size_t size) {
-  size_t *live = context;
+  struct allocator *allocator = context;
   void *replacement;
   if (pointer == NULL)
     old = 0;
-  require(old <= *live);
+  require(old <= allocator->live);
   if (size == 0) {
-    *live -= old;
+    allocator->live -= old;
     free(pointer);
+    return NULL;
+  }
+  if (allocator->cap != 0 && size > allocator->cap - (allocator->live - old)) {
+    allocator->denied++;
     return NULL;
   }
   replacement = realloc(pointer, size);
   if (replacement != NULL)
-    *live = *live - old + size;
+    allocator->live = allocator->live - old + size;
   return replacement;
 }
 
 static void *borrow(void *argument) {
   struct actor *actor = argument;
+  LuaExecution execution = {0};
+  NativeStackContext context = {0};
+  NativeStackContext *previous = NULL;
   unsigned i;
+  if (actor->cache.global != NULL) {
+    context.execution = &execution;
+    execution.allocation_cache = &actor->cache;
+    previous = luaE_setnativestackcontext(&context);
+  }
   lua_lock(actor->state);
   admissions = 0;
   measured = 1;
-  for (i = 0; i < BORROWED; i++) {
-    actor->blocks[i] = luaM_malloc_(actor->state, BYTES, 0);
+  for (i = 0; i < (actor->frame ? 1U : BORROWED); i++) {
+    actor->blocks[i] = actor->frame
+                           ? (unsigned char *)luaM_newframe(actor->state)
+                           : luaM_malloc_(actor->state, BYTES, 0);
     require(actor->blocks[i] != NULL);
-    memset(actor->blocks[i], (int)(actor->id * BORROWED + i), BYTES);
+    memset(actor->blocks[i], (int)(actor->id * BORROWED + i),
+           actor->frame ? sizeof(CallInfo) : BYTES);
   }
   measured = 0;
   actor->admissions = admissions;
   lua_unlock(actor->state);
+  if (actor->cache.global != NULL)
+    luaE_setnativestackcontext(previous);
   return NULL;
 }
 
+static void batch(int capped) {
+  struct allocator allocator = {0};
+  lua_State *L = lua_newstate(allocate, &allocator, 0);
+  struct actor actors[ACTORS] = {0};
+  unsigned i, j, total = 0;
+  require(L != NULL);
+  for (i = 0; i < ACTORS; i++) {
+    actors[i].state = lua_newthread(L);
+    actors[i].id = i + 1;
+    actors[i].frame = 1;
+    actors[i].cache.global = G(L);
+    actors[i].cache.parallelism = ACTORS;
+    require(actors[i].state->nci == 0);
+  }
+  lua_gc(L, LUA_GCSTOP);
+  lua_lock(L);
+  luaW_stop(L);
+  for (i = 0; i < ACTORS; i++) {
+    actors[i].cache.next = G(L)->slot_caches;
+    G(L)->slot_caches = &actors[i].cache;
+  }
+  luaW_start(L);
+  lua_unlock(L);
+  lua_gc(L,
+         LUA_GCCOLLECT); /* Retire unused frames and start with a cold pool. */
+  if (capped)
+    allocator.cap = allocator.live + 4096;
+  for (i = 0; i < ACTORS; i++) {
+    borrow(&actors[i]);
+    total += actors[i].admissions;
+  }
+  require(!capped ||
+          (allocator.denied != 0 && allocator.live <= allocator.cap));
+  allocator.cap = 0;
+  lua_lock(L);
+  for (i = 0; i < ACTORS; i++) {
+    for (j = 0; j < sizeof(CallInfo); j++)
+      require(actors[i].blocks[0][j] == actors[i].id * BORROWED);
+    luaM_free_(L, actors[i].blocks[0], sizeof(CallInfo));
+  }
+  lua_unlock(L);
+  lua_close(L);
+  require(allocator.live == 0);
+  fprintf(stderr, "cold-pool metadata admissions: %u\n", total);
+  require(capped || total == 1);
+}
+
 int main(int argc, char **argv) {
-  size_t live = 0;
-  lua_State *L = lua_newstate(allocate, &live, 0);
+  struct allocator allocator = {0};
+  lua_State *L;
+  require(argc == 2);
+  if (strcmp(argv[1], "batch") == 0 || strcmp(argv[1], "cap") == 0) {
+    batch(strcmp(argv[1], "cap") == 0);
+    return 0;
+  }
+  L = lua_newstate(allocate, &allocator, 0);
   unsigned char **blocks = calloc(BLOCKS, sizeof(*blocks));
   struct actor actors[ACTORS] = {0};
   pthread_t workers[ACTORS];
@@ -112,7 +188,7 @@ int main(int argc, char **argv) {
   lua_unlock(L);
   lua_close(L);
   free(blocks);
-  require(live == 0);
+  require(allocator.live == 0);
   fprintf(stderr, "reclaimed-page metadata admissions: %u\n", total);
   require(total == 0);
   return 0;

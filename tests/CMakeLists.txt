@@ -105,12 +105,22 @@ foreach(case IN ITEMS independent readers access uncaptured semantics incrementa
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(gc_pacing_test gc_pacing_test.c)
+set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_pacing_test PRIVATE luthr_static)
+foreach(case IN ITEMS overdue explicit overflow fast)
+  add_test(NAME gc_pacing_${case} COMMAND gc_pacing_test ${case})
+  set_tests_properties(gc_pacing_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(allocation_pool_test allocation_pool_test.c)
 set_target_properties(allocation_pool_test PROPERTIES C_STANDARD 99)
 target_compile_options(allocation_pool_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(allocation_pool_test PRIVATE luthr_static)
 target_link_options(allocation_pool_test PRIVATE -Wl,--wrap=luaW_heapenter)
-foreach(case IN ITEMS serial parallel)
+foreach(case IN ITEMS serial parallel batch cap)
   add_test(NAME allocation_pool_${case} COMMAND allocation_pool_test ${case})
   set_tests_properties(allocation_pool_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -768,7 +778,8 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test allocation_pool_test gc_barriers_test gc_requests_test
+  capture_cells_test memory_publication_test allocation_pool_test gc_pacing_test
+  gc_barriers_test gc_requests_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)
