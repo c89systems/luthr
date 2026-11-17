@@ -26,6 +26,8 @@ int luaW_init (LuaWorld *world) {
   world->heap_depth = 0;
   world->heap_owner.token = world->collector.token = NULL;
   world->participants = NULL;
+  world->reclaimers = NULL;
+  world->reclaim_epoch = 0;
   world->waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
@@ -44,7 +46,7 @@ int luaW_init (LuaWorld *world) {
 void luaW_destroy (LuaWorld *world) {
   lua_assert(world->ready && !world->stopped && world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
-             world->heap_head == NULL);
+             world->heap_head == NULL && world->reclaimers == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
@@ -248,6 +250,17 @@ void luaW_heapleave (lua_State *L) {
 static unsigned heapdepth (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   return luaQ_isowner(&world->heap_owner) ? world->heap_depth : 0;
+}
+
+void luaW_waitreclaim (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  lua_assert(L->native_depth != 0);
+  luaW_deactivate(L);
+  luaQ_wake(&world->changed, &world->waiters);
+  do {
+    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  } while (world->stopped);
+  luaW_activate(L);
 }
 
 static void restoreheap (lua_State *L, unsigned depth) {

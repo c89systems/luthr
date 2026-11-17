@@ -239,10 +239,17 @@
 #define luaC_needstep(L) \
     (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
 
+#define LUA_GC_ASSIST_BYTES 65536
+#define luaC_hasreclaimers(L) \
+    (__atomic_load_n(&G(L)->world.reclaimers, __ATOMIC_ACQUIRE) != NULL)
+#define luaC_needassist(L) \
+    ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
+
 #define luaC_condGC(L,pre,pos) \
     { if (gcrunning(G(L)) && luaC_needstep(L) && \
           ((L)->world_depth != 0 || \
-           !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED))) \
+           ((!__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED) && \
+             !luaC_hasreclaimers(L)) || luaC_needassist(L)))) \
           { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 
@@ -279,6 +286,13 @@ LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int bac
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
 /* Private work-list inspection; caller owns quiescent collection. */
 LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
+/* Destroy privately retired garbage. Normal collection calls this after
+** resuming mutators; exclusive VM teardown also uses the same path. */
+LUAI_FUNC void luaC_reclaim (lua_State *L);
+LUAI_FUNC void luaC_assistreclaim (lua_State *L);
+LUAI_FUNC l_mem luaC_objsize (GCObject *object);
+LUAI_FUNC void luaC_retireobject (lua_State *L, GCObject *object);
+LUAI_FUNC void luaC_finishreclaim (lua_State *L);
 /* Collector or exclusive incomplete-VM cleanup only. Publish complete local
 ** construction lists, exact allocation totals and finalizer registrations. */
 LUAI_FUNC void luaC_publish (lua_State *L);

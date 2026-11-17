@@ -116,8 +116,8 @@ endforeach()
 target_sources(scheduled_gc_profile PRIVATE gc_probe.c)
 target_compile_definitions(scheduled_gc_profile PRIVATE LUTHR_BENCH_GC_PROBE)
 foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_heapleave
-    luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers
-    luaM_reclaimpages luaQ_wait)
+    luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
+    luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitreclaim)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
 set(gc_arguments
@@ -233,6 +233,14 @@ foreach(module IN ITEMS lib1 lib11 lib2 lib21 lib2-v2)
   set_target_properties(lua_suite_${module} PROPERTIES PREFIX "" OUTPUT_NAME "${module}"
     C_STANDARD 99 LIBRARY_OUTPUT_DIRECTORY "${suite_modules}")
   target_include_directories(lua_suite_${module} PRIVATE "${reference_dir}")
+endforeach()
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME lua_library_string_lifetime_${collector}
+    COMMAND "${CMAKE_COMMAND}" -E env "LUA_CPATH=${suite_modules}/?.so"
+      "$<TARGET_FILE:luthr_test_host>" -l lib2-v2 -e
+      "collectgarbage('${collector}'); for i=1,100 do lib2.newstr(string.rep('x',100)) end; collectgarbage('collect'); keep=setmetatable({}, {__gc=function() keep_string=lib2.newstr(string.rep('y',100)) end}); assert(lib2.id())")
+  set_tests_properties(lua_library_string_lifetime_${collector} PROPERTIES
+    LABELS "runtime;compatibility;parallel" TIMEOUT 15)
 endforeach()
 foreach(runtime IN ITEMS upstream luthr)
   if(runtime STREQUAL "upstream")

@@ -25,6 +25,8 @@ typedef struct LuaWorld {
   struct LuaHeapWaiter *heap_head;
   struct LuaHeapWaiter **heap_tail;
   LuaParticipation *participants;
+  lua_State *reclaimers;  /* atomic head; list/work ownership uses mutex */
+  uint64_t reclaim_epoch;
   unsigned heap_depth;
   int stopped;
   int ready;
@@ -53,6 +55,8 @@ LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);
 LUAI_FUNC void luaW_heapleave (lua_State *L);
+/* Caller owns world.mutex, retains native depth and borrows no shared work. */
+LUAI_FUNC void luaW_waitreclaim (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_scope (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);

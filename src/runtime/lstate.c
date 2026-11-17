@@ -81,6 +81,7 @@ void luaE_setdebt (global_State *g, l_mem debt) {
     debt = MAX_LMEM - tb;  /* will make GCtotalbytes == MAX_LMEM */
   g->GCtotalbytes = tb + debt;
   __atomic_store_n(&g->GCdebt, debt, __ATOMIC_RELAXED);
+  __atomic_store_n(&g->GCreclaimed, 0, __ATOMIC_RELAXED);
 }
 
 
@@ -106,13 +107,13 @@ CallInfo *luaE_extendCI (lua_State *L, int err) {
 /*
 ** free all CallInfo structures not in use by a thread
 */
-static void freeCI (lua_State *L) {
+static void freeCI (lua_State *owner, lua_State *L) {
   CallInfo *ci = L->ci;
   CallInfo *next = ci->next;
   ci->next = NULL;
   while ((ci = next) != NULL) {
     next = ci->next;
-    luaM_free(L, ci);
+    luaM_free(owner, ci);
     L->nci--;
   }
 }
@@ -304,14 +305,14 @@ static void stack_init (lua_State *L1, lua_State *L) {
 }
 
 
-static void freestack (lua_State *L) {
+static void freestack (lua_State *owner, lua_State *L) {
   if (L->stack.p == NULL)
     return;  /* stack not completely built yet */
   L->ci = &L->base_ci;  /* free the entire 'ci' list */
-  freeCI(L);
+  freeCI(owner, L);
   lua_assert(L->nci == 0);
   /* free stack */
-  luaM_freearray(L, L->stack.p, cast_sizet(stacksize(L) + EXTRA_STACK));
+  luaM_freearray(owner, L->stack.p, cast_sizet(stacksize(L) + EXTRA_STACK));
 }
 
 
@@ -371,8 +372,15 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->native_roots = NULL;
   L->policy = NULL;
   L->barrier_forward = L->barrier_back = NULL;
+  L->retired = L->retired_tail = NULL;
+  L->reclaiming = L->reclaim_pages = 0;
+  L->reclaim_next = NULL;
+  L->reclaim_workers = 0;
+  L->assist_debt = 0;
+  L->assist_epoch = 0;
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
+  L->reclaim_credit = 0;
   L->finalizer_count = 0;
   for (i = 0; i < LUA_ALLOC_POOLS; i++)
     L->allocation_cache[i] = NULL;
@@ -441,7 +449,7 @@ static void close_state (lua_State *L, int owns_gate) {
   }
   for (i = 0; i < LUA_STRING_SHARDS; i++)
     luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
-  freestack(L);
+  freestack(L, L);
   luaCP_bind(L, NULL);
   luaM_reclaimpages(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State));
@@ -489,7 +497,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   luaF_closeupval(L1, L1->stack.p);  /* close all upvalues */
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
-  freestack(L1);
+  freestack(L, L1);
   {
     LuaPolicy *policy = L1->policy;
     L1->policy = NULL;
@@ -622,6 +630,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCtotalbytes = sizeof(global_State);
   g->GCmarked = 0;
   g->GCdebt = 0;
+  g->GCreclaimed = 0;
   g->gcstep_pending = 0;
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g, PAUSE, LUAI_GCPAUSE);

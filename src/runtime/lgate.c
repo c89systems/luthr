@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "lgate.h"
 #include "ldo.h"
+#include "lgc.h"
 #include "lstate.h"
 #include "ltask.h"
 
@@ -102,6 +103,8 @@ void luaX_lockstate (lua_State *L) {
 void luaX_unlockstate (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
+  if (!L->reclaiming && (L->retired != NULL || L->reclaim_pages))
+    luaC_reclaim(L);
   lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */

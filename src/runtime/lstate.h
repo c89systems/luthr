@@ -359,9 +359,18 @@ struct lua_State {
   struct LuaObjectScope *object_scopes;
   GCObject *barrier_forward;  /* atomic; uniquely claimed untraced objects */
   GCObject *barrier_back;  /* atomic; uniquely claimed dirty owners */
+  GCObject *retired;  /* detached work; world mutex protects shared claims */
+  GCObject *retired_tail;
+  unsigned reclaiming;
+  unsigned reclaim_pages;
+  struct lua_State *reclaim_next;
+  unsigned reclaim_workers;  /* world mutex protects work ownership */
+  lu_mem assist_debt;
+  uint64_t assist_epoch;
   GCObject *new_objects;
   GCObject *new_objects_tail;
   l_mem allocation_debt;
+  l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
   unsigned finalizer_count;
   GCObject *finalizers[LUA_FINALIZER_CAPACITY];
   TString *strcache[STRCACHE_N][STRCACHE_M];
@@ -406,6 +415,7 @@ typedef struct global_State {
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */
+  l_mem GCreclaimed;  /* atomic physical credits, independent of pacing */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
   l_mem GCmarked;  /* number of objects marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
@@ -512,7 +522,8 @@ union GCUnion {
 
 
 /* actual number of total memory allocated */
-#define gettotalbytes(g)	((g)->GCtotalbytes - (g)->GCdebt)
+#define gettotalbytes(g) ((g)->GCtotalbytes - (g)->GCdebt - \
+    __atomic_load_n(&(g)->GCreclaimed, __ATOMIC_RELAXED))
 
 
 LUAI_FUNC void luaE_setdebt (global_State *g, l_mem debt);

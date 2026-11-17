@@ -64,6 +64,9 @@ void __real_luaC_fullgc(lua_State *, int);
 void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *, int);
 void __real_luaC_publish(lua_State *);
 void __real_luaC_drainbarriers(lua_State *);
+void __real_luaC_reclaim(lua_State *);
+void __real_luaC_assistreclaim(lua_State *);
+void __real_luaW_waitreclaim(lua_State *);
 void __real_luaM_reclaimpages(lua_State *);
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
@@ -231,6 +234,57 @@ void __wrap_luaM_reclaimpages(lua_State *L) {
   if (record != NULL) {
     record->reclaim_calls++;
     record->reclaim_ns += now() - started;
+  }
+}
+
+static void reclaim(lua_State *L, int assist) {
+  GcProbe *record = probe(L);
+  uint64_t started = 0, excluded = 0;
+  int outside = 0;
+  unsigned reason = REASON_OTHER;
+  if (record != NULL) {
+    started = now();
+    excluded = record->coordination_ns + record->reclaim_ns;
+    outside = record->gc_depth == 0;
+    record->gc_depth++;
+    reason = record->reason;
+    record->reason = REASON_GC;
+  }
+  if (assist)
+    __real_luaC_assistreclaim(L);
+  else
+    __real_luaC_reclaim(L);
+  if (record != NULL) {
+    uint64_t elapsed = now() - started;
+    excluded = record->coordination_ns + record->reclaim_ns - excluded;
+    if (excluded > elapsed)
+      abort();
+    record->object_reclaim_calls++;
+    record->reclaim_assist_calls += assist;
+    record->object_reclaim_ns += elapsed - excluded;
+    /* Automatic steps include destruction in their body. API/exit boundaries
+     * may destroy after the collecting call returns; count that work as well.
+     */
+    if (outside)
+      record->collector_body_ns += elapsed - excluded;
+    record->gc_depth--;
+    record->reason = reason;
+  }
+}
+
+void __wrap_luaC_reclaim(lua_State *L) { reclaim(L, 0); }
+void __wrap_luaC_assistreclaim(lua_State *L) { reclaim(L, 1); }
+
+void __wrap_luaW_waitreclaim(lua_State *L) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  if (record != NULL)
+    coordination_begin(record);
+  __real_luaW_waitreclaim(L);
+  if (record != NULL) {
+    coordination_end(record);
+    record->reclaim_waits++;
+    record->reclaim_wait_ns += now() - started;
   }
 }
 

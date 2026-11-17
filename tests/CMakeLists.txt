@@ -138,6 +138,21 @@ foreach(case IN ITEMS incremental generational explicit stopped)
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(gc_reclamation_test gc_reclamation_test.c)
+set_target_properties(gc_reclamation_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_reclamation_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_reclamation_test PRIVATE luthr_static)
+target_link_options(gc_reclamation_test PRIVATE -Wl,--wrap=luaM_free_
+  -Wl,--wrap=luaQ_wait -Wl,--wrap=luaC_publish)
+foreach(collector IN ITEMS incremental generational)
+  foreach(case IN ITEMS overlap collect_again handshake assist)
+    add_test(NAME gc_reclamation_${case}_${collector}
+      COMMAND gc_reclamation_test ${case} ${collector})
+    set_tests_properties(gc_reclamation_${case}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+  endforeach()
+endforeach()
+
 luthr_test_program(gc_barriers_test gc_barriers_test.c)
 set_target_properties(gc_barriers_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_barriers_test PRIVATE -Wall -Wextra -Werror)
@@ -780,7 +795,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test memory_publication_test allocation_pool_test gc_pacing_test
-  gc_barriers_test gc_requests_test
+  gc_barriers_test gc_requests_test gc_reclamation_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)

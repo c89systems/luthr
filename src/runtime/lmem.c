@@ -92,16 +92,50 @@ static void adddebt (global_State *g, l_mem change, int exclusive) {
     __atomic_fetch_add(&g->GCdebt, change, __ATOMIC_RELAXED);
 }
 
+static void accountassist (lua_State *L, l_mem change) {
+  LuaWorld *world = &G(L)->world;
+  uint64_t epoch;
+  lu_mem bytes;
+  if (change >= 0 || L->reclaiming || !completestate(G(L)) ||
+      !luaC_hasreclaimers(L))
+    return;
+  epoch = __atomic_load_n(&world->reclaim_epoch, __ATOMIC_ACQUIRE);
+  if (L->assist_epoch != epoch) {
+    L->assist_epoch = epoch;
+    L->assist_debt = 0;
+  }
+  bytes = cast(lu_mem, 0) - cast(lu_mem, change);
+  L->assist_debt = bytes > cast(lu_mem, MAX_LMEM) - L->assist_debt
+    ? cast(lu_mem, MAX_LMEM) : L->assist_debt + bytes;
+}
+
 void luaM_flushdebt (lua_State *L) {
   l_mem debt = L->allocation_debt;
+  l_mem reclaimed = L->reclaim_credit;
   L->allocation_debt = 0;
+  L->reclaim_credit = 0;
+  accountassist(L, debt);
   if (debt != 0)
     adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(L));
+  if (reclaimed != 0)
+    __atomic_fetch_add(&G(L)->GCreclaimed, reclaimed, __ATOMIC_RELAXED);
 }
 
 static void accountowned (lua_State *L, l_mem change, int exclusive) {
+  if (L->reclaiming && change > 0) {
+    if (change >= DEBT_BATCH) {
+      luaM_flushdebt(L);
+      __atomic_fetch_add(&G(L)->GCreclaimed, change, __ATOMIC_RELAXED);
+    }
+    else {
+      L->reclaim_credit += change;
+      if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L);
+    }
+    return;
+  }
   if (exclusive || change >= DEBT_BATCH || change <= -DEBT_BATCH) {
     luaM_flushdebt(L);
+    if (!exclusive) accountassist(L, change);
     adddebt(G(L), change, exclusive);
   }
   else {

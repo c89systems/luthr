@@ -27,6 +27,7 @@
 #include "laccess.h"
 #include "lauxowned.h"
 #include "lexec.h"
+#include "lgc.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "lvm.h"
@@ -315,10 +316,9 @@ static void setpath (lua_State *L, const char *fieldname,
 
 /*
 ** External strings created by DLLs may need the DLL code to be
-** deallocated. This implies that a DLL can only be unloaded after all
-** its strings were deallocated. To ensure that, we create a 'library
-** string' to represent each DLL, and when this string is deallocated
-** it closes its corresponding DLL.
+** deallocated. Library strings therefore have VM lifetime; shutdown destroys
+** ordinary objects before these fixed tokens. Parallel destruction need not
+** impose a global order on unrelated external-string callbacks.
 ** (The string itself is irrelevant; its userdata is the DLL pointer.)
 */
 
@@ -354,14 +354,24 @@ static void *freelib (void *ud, void *ptr, size_t osize, size_t nsize) {
 static void createlibstr (lua_State *L, void *plib) {
   /* common content for all library strings */
   static const char dummy[] = "01234567890";
-  lua_pushexternalstring(L, dummy, sizeof(dummy) - 1, freelib, plib);
+  TString *token;
+  lua_lock(L);
+  /* Fix the token before publication, keeping its construction-list link
+  ** stable across allocation and registration. */
+  luaW_heapenter(L);
+  token = luaS_newextlstr(L, dummy, sizeof(dummy) - 1, freelib, plib);
+  luaC_fix(L, obj2gco(token));
+  setsvalue2s(L, L->top.p, token);
+  api_incr_top(L);
+  luaW_heapleave(L);
+  luaC_checkGC(L);
+  lua_unlock(L);
 }
 
 
 /*
 ** registry.CLIBS[path] = plib          -- for queries.
-** Also create a reference to strlib, so that the library string will
-** only be collected when registry.CLIBS is collected.
+** Keep a reference to the fixed library string alongside the handle.
 */
 static void addtoclib (lua_State *L, const char *path, void *plib) {
   lua_getfield(L, LUA_REGISTRYINDEX, CLIBS);

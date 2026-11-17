@@ -17,6 +17,8 @@
   X(mutator_stop_waits) X(mutator_stop_wait_ns) \
   X(publish_calls) X(publish_ns) X(drain_calls) X(drain_ns) \
   X(barrier_records) X(back_records) X(repeated_back_records) \
+  X(object_reclaim_calls) X(object_reclaim_ns) X(reclaim_assist_calls) \
+  X(reclaim_waits) X(reclaim_wait_ns) \
   X(reclaim_calls) X(reclaim_ns) X(inspection_ns)
 // clang-format on
 

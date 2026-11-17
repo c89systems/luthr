@@ -102,6 +102,8 @@
 static void reallymarkobject (global_State *g, GCObject *o);
 static void atomic (lua_State *L);
 static void entersweep (lua_State *L);
+static void setpause (global_State *g);
+static void setminordebt (global_State *g);
 
 
 /*
@@ -117,7 +119,7 @@ static void entersweep (lua_State *L);
 #define gnodelast(h)	gnode(h, cast_sizet(sizenode(h)))
 
 
-static l_mem objsize (GCObject *o) {
+l_mem luaC_objsize (GCObject *o) {
   lu_mem res;
   switch (o->tt) {
     case LUA_VTABLE: {
@@ -462,7 +464,7 @@ GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz) {
 ** (only closures can), and a userdata's metatable must be a table.
 */
 static void reallymarkobject (global_State *g, GCObject *o) {
-  g->GCmarked += objsize(o);
+  g->GCmarked += luaC_objsize(o);
   switch (o->tt) {
     case LUA_VSHRSTR:
     case LUA_VLNGSTR: {
@@ -851,7 +853,8 @@ static l_mem traversethread (global_State *g, lua_State *th) {
   for (uv = th->openupval; uv != NULL; uv = uv->open.next)
     markobject(g, uv);  /* open upvalues cannot be collected */
   if (g->gcstate == GCSatomic) {  /* final traversal? */
-    if (!g->gcemergency && !th->heap_waiting && !th->object_waiting)
+    if (!g->gcemergency && !th->heap_waiting && !th->object_waiting &&
+        !th->reclaiming)
       luaD_shrinkstack(th); /* preserve allocation waiters' borrowed pointers */
     for (o = th->top.p; o < th->stack_last.p + EXTRA_STACK; o++)
       setnilvalue2s(o);  /* clear dead stack slice */
@@ -966,62 +969,6 @@ static void clearbyvalues (global_State *g, GCObject *l, GCObject *f) {
 }
 
 
-static void freeupval (lua_State *L, UpVal *uv) {
-  if (upisopen(uv))
-    luaF_unlinkupval(uv);
-  if (uv->mutex_ready)
-    luaX_checksync(pthread_mutex_destroy(&uv->mutex));
-  luaM_free(L, uv);
-}
-
-
-static void freeobj (lua_State *L, GCObject *o) {
-  switch (o->tt) {
-    case LUA_VPROTO:
-      luaF_freeproto(L, gco2p(o));
-      break;
-    case LUA_VUPVAL:
-      freeupval(L, gco2upv(o));
-      break;
-    case LUA_VLCL: {
-      LClosure *cl = gco2lcl(o);
-      lua_assert(cl->access.depth == 0);
-      luaM_freemem(L, cl, sizeLclosure(cl->nupvalues));
-      break;
-    }
-    case LUA_VCCL: {
-      CClosure *cl = gco2ccl(o);
-      lua_assert(cl->access.depth == 0);
-      luaM_freemem(L, cl, sizeCclosure(cl->nupvalues));
-      break;
-    }
-    case LUA_VTABLE:
-      luaH_free(L, gco2t(o));
-      break;
-    case LUA_VTHREAD:
-      luaE_freethread(L, gco2th(o));
-      break;
-    case LUA_VUSERDATA: {
-      Udata *u = gco2u(o);
-      luaM_freemem(L, o, sizeudata(u->nuvalue, u->len));
-      break;
-    }
-    case LUA_VSHRSTR: {
-      TString *ts = gco2ts(o);
-      luaS_remove(L, ts);  /* remove it from hash table */
-      luaM_freemem(L, ts, sizestrshr(cast_uint(ts->shrlen)));
-      break;
-    }
-    case LUA_VLNGSTR: {
-      TString *ts = gco2ts(o);
-      if (ts->shrlen == LSTRMEM)  /* must free external string? */
-        (*ts->falloc)(ts->ud, ts->contents, ts->u.lnglen + 1, 0);
-      luaM_freemem(L, ts, luaS_sizelngstr(ts->u.lnglen, ts->shrlen));
-      break;
-    }
-    default: lua_assert(0);
-  }
-}
 
 
 /*
@@ -1040,7 +987,7 @@ static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
     int marked = curr->marked;
     if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
       *p = curr->next;  /* remove 'curr' from list */
-      freeobj(L, curr);  /* erase 'curr' */
+      luaC_retireobject(L, curr);
     }
     else {  /* change mark to 'white' and age to 'new' */
       curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
@@ -1342,7 +1289,7 @@ static void sweep2old (lua_State *L, GCObject **p) {
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(isdead(g, curr));
       *p = curr->next;  /* remove 'curr' from list */
-      freeobj(L, curr);  /* erase 'curr' */
+      luaC_retireobject(L, curr);
     }
     else {  /* all surviving objects become old */
       setage(curr, G_OLD);
@@ -1388,7 +1335,7 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(!isold(curr) && isdead(g, curr));
       *p = curr->next;  /* remove 'curr' from list */
-      freeobj(L, curr);  /* erase 'curr' */
+      luaC_retireobject(L, curr);
     }
     else {  /* correct mark and age */
       int age = getage(curr);
@@ -1400,7 +1347,7 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
         lua_assert(age != G_OLD1);  /* advanced in 'markold' */
         setage(curr, nextage[age]);
         if (getage(curr) == G_OLD1) {
-          addedold += objsize(curr);  /* bytes becoming old */
+          addedold += luaC_objsize(curr);  /* bytes becoming old */
           if (*pfirstold1 == NULL)
             *pfirstold1 = curr;  /* first OLD1 object in the list */
         }
@@ -1618,6 +1565,19 @@ static void setminordebt (global_State *g) {
   luaE_setdebt(g, applygcparam(g, MINORMUL, g->GCmajorminor));
 }
 
+void luaC_finishreclaim (lua_State *L) {
+  global_State *g = G(L);
+  luaW_stop(L);
+  luaM_reclaimpages(L);
+  /* A competing collector may have advanced the cycle during destruction.
+  ** Reset only the current idle policy, after reclamation credits are exact. */
+  if (g->gckind == KGC_GENMINOR)
+    setminordebt(g);
+  else if (g->gcstate == GCSpause)
+    setpause(g);
+  luaW_start(L);
+}
+
 
 /*
 ** Enter generational mode. Must go until the end of an atomic cycle
@@ -1631,6 +1591,7 @@ static void entergen (lua_State *L, global_State *g) {
   atomic(L);  /* propagates all and then do the atomic stuff */
   atomic2gen(L, g);
   setminordebt(g);  /* set debt assuming next cycle will be minor */
+  L->reclaim_pages = 1;
 }
 
 
@@ -1716,7 +1677,7 @@ static void entersweep (lua_State *L) {
 static void deletelist (lua_State *L, GCObject *p, GCObject *limit) {
   while (p != limit) {
     GCObject *next = p->next;
-    freeobj(L, p);
+    luaC_retireobject(L, p);
     p = next;
   }
 }
@@ -1735,7 +1696,9 @@ void luaC_freeallobjects (lua_State *L) {
   callallpendingfinalizers(L);
   deletelist(L, g->allgc, obj2gco(mainthread(g)));
   lua_assert(g->finobj == NULL);  /* no new finalizers */
+  luaC_reclaim(L);  /* external callbacks precede fixed DLL handle destruction */
   deletelist(L, g->fixedgc, NULL);  /* collect fixed objects */
+  luaC_reclaim(L);  /* shutdown owns the complete VM until destruction ends */
   { int i; for (i = 0; i < LUA_STRING_SHARDS; i++)
       lua_assert(g->strt[i].nuse == 0); }
 }
@@ -1948,6 +1911,10 @@ void luaC_step (lua_State *L) {
   int reclaim = 0;
   int claimed = 0;
   if (!gcrunning(g) || !luaC_needstep(L)) return;
+  if (L->world_depth == 0 && luaC_hasreclaimers(L)) {
+    luaC_assistreclaim(L);
+    return;
+  }
   if (L->world_depth == 0) {
     unsigned expected = 0;
     /* One automatic request can wait for metadata while other mutators keep
@@ -1987,8 +1954,11 @@ void luaC_step (lua_State *L) {
   /* Retiring all allocation caches and scanning every page belongs to a
   ** completed collection, not each marking/partial-sweep step. Emergency and
   ** explicit full collections still reclaim before retrying an allocation. */
-  if (reclaim) luaM_reclaimpages(L);
+  if (reclaim) L->reclaim_pages = 1;
   luaW_start(L);
+  if (!L->reclaiming && L->world_depth == 0 &&
+      (L->retired != NULL || L->reclaim_pages))
+    luaC_reclaim(L);
  done:
   if (claimed)
     __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
@@ -2032,9 +2002,15 @@ void luaC_fullgc (lua_State *L, int isemergency) {
       g->gckind = KGC_GENMAJOR;
       break;
   }
+  L->reclaim_pages = 1;
+  /* An allocation retry may still borrow its caller's stack/object storage.
+  ** Finish emergency destruction before relinquishing that quiescent scope. */
+  if (isemergency) luaC_reclaim(L);
   g->gcemergency = 0;
-  luaM_reclaimpages(L);
   luaW_start(L);
+  if (!L->reclaiming && L->world_depth == 0 &&
+      (L->retired != NULL || L->reclaim_pages))
+    luaC_reclaim(L);
 }
 
 /* }====================================================== */

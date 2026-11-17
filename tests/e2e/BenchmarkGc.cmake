@@ -53,7 +53,8 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   heap_gc_wait_ns quiesce_waits quiesce_wait_ns metadata_waits metadata_wait_ns
   mutator_stop_waits mutator_stop_wait_ns publish_calls publish_ns drain_calls
   drain_ns barrier_records back_records repeated_back_records reclaim_calls
-  reclaim_ns inspection_ns)
+  reclaim_ns object_reclaim_calls object_reclaim_ns reclaim_assist_calls
+  reclaim_waits reclaim_wait_ns inspection_ns)
 string(JOIN ",gc_" probe_columns ${probes})
 string(JOIN "," metric_columns ${metrics})
 file(WRITE "${output_dir}/summary.csv"
@@ -64,7 +65,7 @@ foreach(key IN ITEMS target config compiler samples warmups tasks work_divisor)
 endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 string(JSON metadata SET "${metadata}" notes
-  "\"Counters are invocation-local. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body excludes coordination and page reclamation. Stopped disables automatic collection; counters measure remaining coordination. Explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
+  "\"Counters are invocation-local. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and excludes coordination and page reclamation. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; counters measure remaining coordination. Explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)
   file(SHA256 "${${input}}" digest)
   string(JSON metadata SET "${metadata}" "${input}_sha256" "\"${digest}\"")
