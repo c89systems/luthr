@@ -167,7 +167,7 @@ void luaM_reclaimpages (lua_State *L) {
   LuaAllocPage **link;
   int i;
   for (i = 0; i < LUA_ALLOC_POOLS; i++)
-    g->allocation_available[i] = NULL;
+    __atomic_store_n(&g->allocation_available[i], NULL, __ATOMIC_RELAXED);
   for (participant = g->world.participants; participant != NULL;
        participant = participant->next)
     for (i = 0; i < LUA_ALLOC_POOLS; i++)
@@ -182,8 +182,10 @@ void luaM_reclaimpages (lua_State *L) {
     }
     else {
       if (__atomic_load_n(&page->free, __ATOMIC_RELAXED) != NULL) {
-        page->available_next = g->allocation_available[page->pool];
-        g->allocation_available[page->pool] = page;
+        page->available_next = __atomic_load_n(
+          &g->allocation_available[page->pool], __ATOMIC_RELAXED);
+        __atomic_store_n(&g->allocation_available[page->pool], page,
+                         __ATOMIC_RELEASE);
       }
       link = &page->next;
     }
@@ -305,12 +307,19 @@ static void *tryagain (lua_State *L, void *block,
 }
 
 static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
-  LuaAllocPage *page = G(L)->allocation_available[pool];
-  if (page != NULL) {
-    G(L)->allocation_available[pool] = page->available_next;
-    page->available_next = NULL;
+  LuaAllocPage **head = &G(L)->allocation_available[pool];
+  LuaAllocPage *page = __atomic_load_n(head, __ATOMIC_ACQUIRE);
+  /* Consumers remain admitted throughout this pop. Only quiescent collection
+  ** reinserts or frees pages, so a removed node cannot reappear during a CAS.
+  ** Keep its successor immutable until that collection: another consumer may
+  ** still read it before noticing that its own CAS lost. */
+  while (page != NULL) {
+    LuaAllocPage *next = page->available_next;
+    if (__atomic_compare_exchange_n(head, &page, next, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+      return page;
   }
-  return page;
+  return NULL;
 }
 
 static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
@@ -320,6 +329,11 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
     : page->bytes < ALLOC_PAGE_MAX ? page->bytes * 2 : ALLOC_PAGE_MAX;
   /* Copy the growth hint before metadata admission can collect the old page.
   ** Cold bins remain small; hot bins amortize serialized backing allocation. */
+  page = availablepage(L, pool);
+  if (page != NULL) {
+    allocationcache(L)[pool] = page;
+    return page;
+  }
   luaW_heapenter(L);
   /* Admission can park and borrow a different slot. Its cache may already
   ** have been refilled, so retain usable pages instead of overwriting them. */
