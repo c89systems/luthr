@@ -8,7 +8,9 @@
 #include <lroots.h>
 #include <lstate.h>
 #include <ltable.h>
+#include <lualib.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +35,13 @@ static struct collection *collecting;
 static lua_State *weak_marker;
 static GCObject *weak_table, *weak_key, *weak_target;
 static unsigned weak_deferred_seen, weak_rescans, weak_target_scanned;
+static struct parallel_scan {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *workers[2], *finisher;
+  int entered, progressed, release, finished;
+} *parallel_scanning;
+static __thread unsigned parallel_worker;
 static struct closure_builder {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -89,6 +98,22 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
 int __real_luaA_tryscan(GCObject *);
 int __wrap_luaA_tryscan(GCObject *object) {
   int acquired = __real_luaA_tryscan(object);
+  if (acquired && parallel_scanning != NULL && parallel_worker != 0 &&
+      object->tt == LUA_VTABLE) {
+    struct parallel_scan *scan = parallel_scanning;
+    require(pthread_mutex_lock(&scan->mutex) == 0);
+    if (parallel_worker == 1 && !scan->entered) {
+      scan->entered = 1;
+      require(pthread_cond_broadcast(&scan->changed) == 0);
+      while (!scan->release)
+        require(pthread_cond_wait(&scan->changed, &scan->mutex) == 0);
+    } else if (parallel_worker == 2) {
+      require(scan->entered && !scan->release);
+      scan->progressed = 1;
+      require(pthread_cond_broadcast(&scan->changed) == 0);
+    }
+    require(pthread_mutex_unlock(&scan->mutex) == 0);
+  }
   if (acquired && weak_marker != NULL && luaC_tracing(weak_marker)) {
     if (object == weak_table) {
       if (iswhite(weak_key))
@@ -811,6 +836,155 @@ static void ephemerons(void) {
   lua_close(L);
 }
 
+static void *parallel_scanner(void *context) {
+  struct parallel_scan *scan = parallel_scanning;
+  unsigned worker = *(unsigned *)context;
+  lua_State *L = scan->workers[worker - 1];
+  unsigned rounds;
+  parallel_worker = worker;
+  lua_lock(L);
+  for (rounds = 0; rounds < 10000; rounds++) {
+    int done;
+    luaC_tracebatch(L, 1);
+    require(pthread_mutex_lock(&scan->mutex) == 0);
+    done = worker == 1 ? scan->release : scan->progressed;
+    require(pthread_mutex_unlock(&scan->mutex) == 0);
+    if (done)
+      break;
+  }
+  require(rounds < 10000);
+  lua_unlock(L);
+  parallel_worker = 0;
+  return NULL;
+}
+
+static void *parallel_finisher(void *context) {
+  struct parallel_scan *scan = context;
+  require(lua_gc(scan->finisher, LUA_GCCOLLECT) == 0);
+  require(pthread_mutex_lock(&scan->mutex) == 0);
+  scan->finished = 1;
+  require(pthread_cond_broadcast(&scan->changed) == 0);
+  require(pthread_mutex_unlock(&scan->mutex) == 0);
+  return NULL;
+}
+
+static void parallel_marking(const char *kind) {
+  struct parallel_scan scan = {0};
+  lua_State *L = newstate();
+  pthread_t workers[2], finisher;
+  unsigned identities[2] = {1, 2};
+  unsigned phase = strcmp(kind, "parallel_ephemerons") == 0   ? TRACE_EPHEMERONS
+                   : strcmp(kind, "parallel_weakvalues") == 0 ? TRACE_VALUES
+                                                              : TRACE_MARK;
+  unsigned rounds;
+  l_mem marked;
+  require(pthread_mutex_init(&scan.mutex, NULL) == 0);
+  require(pthread_cond_init(&scan.changed, NULL) == 0);
+  scan.workers[0] = lua_newthread(L);
+  scan.workers[1] = lua_newthread(L);
+  scan.finisher = lua_newthread(L);
+  if (phase == TRACE_EPHEMERONS)
+    require(luaL_loadstring(L, "local root,keys={},{}; "
+                               "for i=1,257 do keys[i]={i} end; "
+                               "for i=1,256 do root[i]=setmetatable("
+                               "{[keys[i]]={keys[i+1],42}}, {__mode='k'}) "
+                               "end; return root,keys[1]") == LUA_OK);
+  else if (phase == TRACE_VALUES)
+    require(luaL_loadstring(L, "local root={}; for i=1,256 do "
+                               "root[i]=setmetatable({{i,42}}, {__mode='v'}) "
+                               "end; return root") == LUA_OK);
+  else
+    require(luaL_loadstring(L, "local root,shared={},{}; for i=1,256 do "
+                               "root[i]={i,{i+1,42},shared}; shared[i]=root[i] "
+                               "end; return root") == LUA_OK);
+  luaL_openlibs(L);
+  require(lua_pcall(L, 0, LUA_MULTRET, 0) == LUA_OK);
+  begin(L);
+  lua_lock(L);
+  memset(&G(L)->trace_plan, 0, sizeof(G(L)->trace_plan));
+  G(L)->trace_plan.phase = TRACE_INIT;
+  G(L)->trace_plan.finish = TRACE_MAJOR;
+  luaC_advancetrace(L);
+  for (rounds = 0; phase != TRACE_MARK && rounds < 10000; rounds++) {
+    if (G(L)->trace_plan.phase == phase && G(L)->trace_plan.next != NULL)
+      break;
+    luaC_tracebatch(L, 64);
+    if (!__atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE))
+      luaC_advancetrace(L);
+  }
+  require(rounds < 10000 && luaC_tracing(L));
+  lua_unlock(L);
+  parallel_scanning = &scan;
+  require(pthread_create(&workers[0], NULL, parallel_scanner, &identities[0]) ==
+          0);
+  require(pthread_mutex_lock(&scan.mutex) == 0);
+  while (!scan.entered)
+    require(pthread_cond_wait(&scan.changed, &scan.mutex) == 0);
+  require(pthread_mutex_unlock(&scan.mutex) == 0);
+  require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
+  marked = G(L)->GCmarked;
+  require(G(L)->trace_busy == 1 && !G(L)->world.stopped);
+  require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
+  require(pthread_create(&workers[1], NULL, parallel_scanner, &identities[1]) ==
+          0);
+  require(pthread_join(workers[1], NULL) == 0);
+  require(pthread_mutex_lock(&scan.mutex) == 0);
+  require(scan.progressed && !scan.release);
+  require(pthread_mutex_unlock(&scan.mutex) == 0);
+  require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
+  require(G(L)->trace_busy == 1 && G(L)->trace_plan.phase == phase &&
+          !G(L)->world.stopped);
+  if (phase == TRACE_MARK)
+    require(G(L)->GCmarked > marked);
+  require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
+  require(pthread_create(&finisher, NULL, parallel_finisher, &scan) == 0);
+  while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_ACQUIRE))
+    sched_yield();
+  /* An empty shared queue cannot finish a phase while the first scanner's
+   * claimed payloads and newly discovered edges are still private. */
+  require(pthread_mutex_lock(&scan.mutex) == 0);
+  require(!scan.finished && luaC_tracing(L));
+  scan.release = 1;
+  require(pthread_cond_broadcast(&scan.changed) == 0);
+  require(pthread_mutex_unlock(&scan.mutex) == 0);
+  require(pthread_join(workers[0], NULL) == 0);
+  require(pthread_join(finisher, NULL) == 0);
+  require(scan.finished);
+  parallel_scanning = NULL;
+  lua_lock(L);
+  luaC_waittrace(L);
+  require(!luaC_tracing(L) && !G(L)->trace_busy);
+  lua_unlock(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  /* Check the graph after a subsequent complete collection, including the
+   * conditional edges discovered by concurrently scanned ephemerons. */
+  if (phase == TRACE_EPHEMERONS) {
+    for (rounds = 1; rounds <= 256; rounds++) {
+      lua_rawgeti(L, 4, rounds);
+      lua_pushvalue(L, 5);
+      require(lua_rawget(L, -2) == LUA_TTABLE);
+      require(lua_rawgeti(L, -1, 2) == LUA_TNUMBER);
+      require(lua_tointeger(L, -1) == 42);
+      lua_pop(L, 1);
+      require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
+      lua_replace(L, 5);
+      lua_settop(L, 5);
+    }
+  } else {
+    for (rounds = 1; rounds <= 256; rounds++) {
+      require(lua_rawgeti(L, 4, rounds) == LUA_TTABLE);
+      require(lua_rawgeti(L, -1, 1) ==
+              (phase == TRACE_VALUES ? LUA_TNIL : LUA_TNUMBER));
+      if (phase == TRACE_MARK)
+        require(lua_tointeger(L, -1) == (lua_Integer)rounds);
+      lua_settop(L, 4);
+    }
+  }
+  lua_close(L);
+  require(pthread_cond_destroy(&scan.changed) == 0);
+  require(pthread_mutex_destroy(&scan.mutex) == 0);
+}
+
 int main(int argc, char **argv) {
   require(argc == 2);
   if (strcmp(argv[1], "stack") == 0)
@@ -834,6 +1008,8 @@ int main(int argc, char **argv) {
     concurrent_collection(argv[1]);
   else if (strcmp(argv[1], "ephemerons") == 0)
     ephemerons();
+  else if (strncmp(argv[1], "parallel_", 9) == 0)
+    parallel_marking(argv[1]);
   else if (strncmp(argv[1], "weak", 4) == 0)
     weak_cutoff(argv[1]);
   else

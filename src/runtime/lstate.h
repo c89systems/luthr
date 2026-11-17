@@ -447,11 +447,10 @@ typedef struct global_State {
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
-  unsigned trace_busy;  /* one graph scanner; never held across a wait */
+  unsigned trace_busy;  /* atomic number of unpublished scanning batches */
   unsigned trace_ready;  /* atomic work hint; termination still checks producers */
   uint64_t trace_changes;  /* atomic monotonic shading progress */
   GCObject *trace_deferred;
-  GCObject **trace_tail;
   LuaTracePlan trace_plan;
   l_mem GCmarked;  /* bytes marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */

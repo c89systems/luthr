@@ -63,11 +63,6 @@
 #define set2gray(x)	resetbits(x->marked, maskcolors)
 
 
-/* make an object black (coming from any color) */
-#define set2black(x)  \
-  setmarked(x, cast_byte((getmarked(x) & ~WHITEBITS) | bitmask(BLACKBIT)))
-
-
 #define valiswhite(x)   (iscollectable(x) && iswhite(gcvalue(x)))
 
 #define keyiswhite(n)   (keyiscollectable(n) && iswhite(gckey(n)))
@@ -89,8 +84,6 @@
 #define markvalue(g,o) { checkliveness(mainthread(g),o); \
   if (valiswhite(o)) reallymarkobject(g,gcvalue(o)); }
 
-#define markkey(g, n)	{ if keyiswhite(n) reallymarkobject(g,gckey(n)); }
-
 #define markobject(g,t)	{ if (iswhite(t)) reallymarkobject(g, obj2gco(t)); }
 
 /*
@@ -106,7 +99,7 @@ static void entersweep (lua_State *L);
 static void setpause (global_State *g);
 static void setminordebt (global_State *g);
 static void linktrace (global_State *g, GCObject *object);
-static int scantrace (lua_State *L, GCObject *object);
+static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object);
 static void starttrace (lua_State *L);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
 static void atomic2gen (lua_State *L, global_State *g);
@@ -237,10 +230,12 @@ static void clearkey (Node *n) {
 ** other objects: if really collected, cannot keep them; for objects
 ** being finalized, keep them in keys, but not in values
 */
-static int iscleared (global_State *g, const GCObject *o) {
+static void markwork (LuaTraceWork *work, GCObject *object);
+
+static int iscleared (LuaTraceWork *work, const GCObject *o) {
   if (o == NULL) return 0;  /* non-collectable value */
   else if (novariant(o->tt) == LUA_TSTRING) {
-    markobject(g, o);  /* strings are 'values', so are never weak */
+    markwork(work, obj2gco(o));  /* strings are values, never weak */
     return 0;
   }
   else return iswhite(o);
@@ -495,39 +490,71 @@ GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz) {
 
 
 /*
-** Mark an object. Userdata without user values, strings and shared capture
-** cells are visited and turned black here. Other objects are added to the
-** gray list to be visited (and turned black) later.  Both userdata and
-** upvalues can call this function recursively, but this recursion goes
-** for at most two levels: An upvalue cannot refer to another upvalue
-** (only closures can), and a userdata's metatable must be a table.
+** Claim the one publication link for a white object. Mutators and parallel
+** scanners compete through this same monotonic color transition. A winner
+** publishes either to its local batch or to a shared root list.
 */
-static void reallymarkobject (global_State *g, GCObject *o) {
+static int claimmark (GCObject *o) {
   lu_byte marked = getmarked(o);
   lu_byte claimed;
   do {
-    if (!testbits(marked, WHITEBITS)) return;
+    if (!testbits(marked, WHITEBITS)) return 0;
     claimed = cast_byte(marked & ~maskcolors);
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-  if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED))
-    __atomic_fetch_add(&g->trace_changes, 1, __ATOMIC_RELAXED);
-  linktrace(g, o);
+  return 1;
 }
 
-/* The scanner owns graph lists; mutators own only their publication queues.
-** Strings are immutable leaves. Every other payload waits for its actual
-** object, stack or construction owner before it is inspected. */
+static void reallymarkobject (global_State *g, GCObject *o) {
+  if (claimmark(o)) {
+    if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED))
+      __atomic_fetch_add(&g->trace_changes, 1, __ATOMIC_RELAXED);
+    linktrace(g, o);
+  }
+}
+
+/* Shared root/barrier publication owns world.mutex or quiescence. Strings
+** are immutable leaves; all other payloads are queued for a scanner. */
 static void linktrace (global_State *g, GCObject *o) {
   if (novariant(o->tt) == LUA_TSTRING) {
     g->GCmarked += luaC_objsize(o);
-    set2black(o);
+    nw2black(o);
   }
   else {
     *getgclist(o) = g->gray;
     g->gray = o;
   }
 }
+
+static void queuework (LuaTraceList *list, GCObject *object) {
+  GCObject **next = getgclist(object);
+  if (list->head == NULL) list->tail = next;
+  *next = list->head;
+  list->head = object;
+}
+
+static void linkwork (LuaTraceList *list, GCObject *object) {
+  lua_assert(!isgray(object));
+  queuework(list, object);
+  set2gray(object);
+}
+
+static void markwork (LuaTraceWork *work, GCObject *object) {
+  if (!claimmark(object)) return;
+  work->claims++;
+  if (novariant(object->tt) == LUA_TSTRING) {
+    work->marked += luaC_objsize(object);
+    nw2black(object);
+  }
+  else queuework(&work->gray, object);
+}
+
+#define tracevalue(w,v) \
+  { if (iscollectable(v)) markwork(w, gcvalue(v)); }
+#define tracekey(w,n) \
+  { if (keyiscollectable(n)) markwork(w, gckey(n)); }
+#define traceobjectN(w,o) \
+  { if ((o) != NULL) markwork(w, obj2gco(o)); }
 
 
 /*
@@ -570,7 +597,6 @@ static void cleargraylists (global_State *g) {
   g->gray = g->grayagain = NULL;
   g->weak = g->allweak = g->ephemeron = NULL;
   g->trace_deferred = NULL;
-  g->trace_tail = &g->trace_deferred;
 }
 
 void luaC_waittrace (lua_State *L) {
@@ -594,7 +620,6 @@ static void starttrace (lua_State *L) {
   g->trace_changes = 0;
   g->trace_ready = 0;
   g->trace_deferred = NULL;
-  g->trace_tail = &g->trace_deferred;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
   g->trace_plan.base_marked = g->GCmarked;
@@ -672,10 +697,10 @@ static void restartcollection (lua_State *L, global_State *g) {
 ** This function is a no-op in incremental mode, as objects cannot be
 ** marked as touched in that mode.
 */
-static void genlink (global_State *g, GCObject *o) {
+static void genlink (LuaTraceWork *work, GCObject *o) {
   lua_assert(isblack(o));
   if (getage(o) == G_TOUCHED1) {  /* touched in this cycle? */
-    linkobjgclist(o, g->grayagain);  /* link it back in 'grayagain' */
+    linkwork(&work->grayagain, o);
   }  /* everything else do not need to be linked back */
   else if (getage(o) == G_TOUCHED2)
     setage(o, G_OLD);  /* advance age */
@@ -689,7 +714,8 @@ static void genlink (global_State *g, GCObject *o) {
 ** put it in 'weak' list, to be cleared; otherwise, call 'genlink'
 ** to check table age in generational mode.
 */
-static void traverseweakvalue (global_State *g, Table *h) {
+static void traverseweakvalue (LuaTraceWork *work, Table *h) {
+  global_State *g = work->global;
   Node *n, *limit = gnodelast(h);
   /* if there is array part, assume it may have white values (it is not
      worth traversing it now just to check) */
@@ -699,24 +725,24 @@ static void traverseweakvalue (global_State *g, Table *h) {
       clearkey(n);  /* clear its key */
     else {
       lua_assert(!keyisnil(n));
-      markkey(g, n);
-      if (!hasclears && iscleared(g, gcvalueN(gval(n))))  /* a white value? */
+      tracekey(work, n);
+      if (!hasclears && iscleared(work, gcvalueN(gval(n))))
         hasclears = 1;  /* table will have to be cleared */
     }
   }
   if (g->gcstate == GCSpropagate)
-    linkgclist(h, g->grayagain);  /* must retraverse it in atomic phase */
+    linkwork(&work->grayagain, obj2gco(h));
   else if (hasclears)
-      linkgclist(h, g->weak);  /* has to be cleared later */
+      linkwork(&work->weak, obj2gco(h));
   else
-    genlink(g, obj2gco(h));
+    genlink(work, obj2gco(h));
 }
 
 
 /*
 ** Traverse the array part of a table.
 */
-static int traversearray (global_State *g, Table *h) {
+static int traversearray (LuaTraceWork *work, Table *h) {
   unsigned asize = h->asize;
   int marked = 0;  /* true if some object is marked in this traversal */
   unsigned i;
@@ -724,7 +750,7 @@ static int traversearray (global_State *g, Table *h) {
     GCObject *o = gcvalarr(h, i);
     if (o != NULL && iswhite(o)) {
       marked = 1;
-      reallymarkobject(g, o);
+      markwork(work, o);
     }
   }
   return marked;
@@ -743,53 +769,54 @@ static int traversearray (global_State *g, Table *h) {
 ** must be kept in some gray list for post-processing; this is done
 ** by 'genlink'.
 */
-static int traverseephemeron (global_State *g, Table *h, int inv) {
+static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
+  global_State *g = work->global;
   int hasclears = 0;  /* true if table has white keys */
   int hasww = 0;  /* true if table has entry "white-key -> white-value" */
   unsigned int i;
   unsigned int nsize = sizenode(h);
-  int marked = traversearray(g, h);  /* traverse array part */
+  int marked = traversearray(work, h);  /* traverse array part */
   /* Alternate direction between convergence rounds to shorten long chains. */
   for (i = 0; i < nsize; i++) {
     Node *n = inv ? gnode(h, nsize - 1 - i) : gnode(h, i);
     if (isempty(gval(n)))  /* entry is empty? */
       clearkey(n);  /* clear its key */
-    else if (iscleared(g, gckeyN(n))) {  /* key is not marked (yet)? */
+    else if (iscleared(work, gckeyN(n))) {  /* key is not marked (yet)? */
       hasclears = 1;  /* table must be cleared */
       if (valiswhite(gval(n)))  /* value not marked yet? */
         hasww = 1;  /* white-white entry */
     }
     else if (valiswhite(gval(n))) {  /* value not marked yet? */
       marked = 1;
-      reallymarkobject(g, gcvalue(gval(n)));  /* mark it now */
+      markwork(work, gcvalue(gval(n)));
     }
   }
   /* link table into proper list */
   if (g->gcstate == GCSpropagate)
-    linkgclist(h, g->grayagain);  /* must retraverse it in atomic phase */
+    linkwork(&work->grayagain, obj2gco(h));
   else if (hasww)  /* table has white->white entries? */
-    linkgclist(h, g->ephemeron);  /* have to propagate again */
+    linkwork(&work->ephemeron, obj2gco(h));
   else if (hasclears)  /* table has white keys? */
-    linkgclist(h, g->allweak);  /* may have to clean white keys */
+    linkwork(&work->allweak, obj2gco(h));
   else
-    genlink(g, obj2gco(h));  /* check whether collector still needs to see it */
+    genlink(work, obj2gco(h));
   return marked;
 }
 
 
-static void traversestrongtable (global_State *g, Table *h) {
+static void traversestrongtable (LuaTraceWork *work, Table *h) {
   Node *n, *limit = gnodelast(h);
-  traversearray(g, h);
+  traversearray(work, h);
   for (n = gnode(h, 0); n < limit; n++) {  /* traverse hash part */
     if (isempty(gval(n)))  /* entry is empty? */
       clearkey(n);  /* clear its key */
     else {
       lua_assert(!keyisnil(n));
-      markkey(g, n);
-      markvalue(g, gval(n));
+      tracekey(work, n);
+      tracevalue(work, gval(n));
     }
   }
-  genlink(g, obj2gco(h));
+  genlink(work, obj2gco(h));
 }
 
 
@@ -822,35 +849,36 @@ static int getmode (global_State *g, Table *h) {
 }
 
 
-static l_mem traversetable (global_State *g, Table *h) {
-  markobjectN(g, h->metatable);
+static l_mem traversetable (LuaTraceWork *work, Table *h) {
+  global_State *g = work->global;
+  traceobjectN(work, h->metatable);
   switch (getmode(g, h)) {
     case 0:  /* not weak */
-      traversestrongtable(g, h);
+      traversestrongtable(work, h);
       break;
     case 1:  /* weak values */
-      traverseweakvalue(g, h);
+      traverseweakvalue(work, h);
       break;
     case 2:  /* weak keys */
-      traverseephemeron(g, h, 0);
+      traverseephemeron(work, h, 0);
       break;
     case 3:  /* all weak; nothing to traverse */
       if (g->gcstate == GCSpropagate)
-        linkgclist(h, g->grayagain);  /* must visit again its metatable */
+        linkwork(&work->grayagain, obj2gco(h));
       else
-        linkgclist(h, g->allweak);  /* must clear collected entries */
+        linkwork(&work->allweak, obj2gco(h));
       break;
   }
   return cast(l_mem, 1 + 2*sizenode(h) + h->asize);
 }
 
 
-static l_mem traverseudata (global_State *g, Udata *u) {
+static l_mem traverseudata (LuaTraceWork *work, Udata *u) {
   int i;
-  markobjectN(g, u->metatable);  /* mark its metatable */
+  traceobjectN(work, u->metatable);
   for (i = 0; i < u->nuvalue; i++)
-    markvalue(g, &u->uv[i].uv);
-  genlink(g, obj2gco(u));
+    tracevalue(work, &u->uv[i].uv);
+  genlink(work, obj2gco(u));
   return 1 + u->nuvalue;
 }
 
@@ -862,10 +890,10 @@ static l_mem traverseudata (global_State *g, Udata *u) {
 */
 
 
-static l_mem traverseCclosure (global_State *g, CClosure *cl) {
+static l_mem traverseCclosure (LuaTraceWork *work, CClosure *cl) {
   int i;
   for (i = 0; i < cl->nupvalues; i++)  /* mark its upvalues */
-    markvalue(g, &cl->upvalue[i]);
+    tracevalue(work, &cl->upvalue[i]);
   return 1 + cl->nupvalues;
 }
 
@@ -873,12 +901,12 @@ static l_mem traverseCclosure (global_State *g, CClosure *cl) {
 ** Traverse a Lua closure, marking its prototype and its upvalues.
 ** (Both can be NULL while closure is being created.)
 */
-static l_mem traverseLclosure (global_State *g, LClosure *cl) {
+static l_mem traverseLclosure (LuaTraceWork *work, LClosure *cl) {
   int i;
-  markobjectN(g, cl->p);  /* mark its prototype */
+  traceobjectN(work, cl->p);
   for (i = 0; i < cl->nupvalues; i++) {  /* visit its upvalues */
     UpVal *uv = cl->upvals[i];
-    markobjectN(g, uv);  /* mark upvalue */
+    traceobjectN(work, uv);
   }
   return 1 + cl->nupvalues;
 }
@@ -904,7 +932,7 @@ static l_mem traverseLclosure (global_State *g, LClosure *cl) {
 ** of the number of slots traversed.
 */
 
-static int scantrace (lua_State *L, GCObject *o) {
+static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   global_State *g = G(L);
   if (o->tt == LUA_VTHREAD) {
     lua_State *thread = gco2th(o);
@@ -919,9 +947,9 @@ static int scantrace (lua_State *L, GCObject *o) {
         luaX_endreserve(thread, reservation);
       }
     }
-    g->GCmarked += cast(l_mem, thread->trace_bytes);
-    set2black(o);
-    if (isold(o)) linkgclist(thread, g->grayagain);
+    work->marked += cast(l_mem, thread->trace_bytes);
+    nw2black(o);
+    if (isold(o)) linkwork(&work->grayagain, o);
     return 1;
   }
   if (o->tt == LUA_VPROTO) {
@@ -941,8 +969,8 @@ static int scantrace (lua_State *L, GCObject *o) {
         if (builder != NULL) luaX_endreserve(builder, reservation);
       }
     }
-    g->GCmarked += cast(l_mem, proto->trace_bytes);
-    set2black(o);
+    work->marked += cast(l_mem, proto->trace_bytes);
+    nw2black(o);
     return 1;
   }
   if (o->tt == LUA_VUPVAL) {
@@ -951,12 +979,12 @@ static int scantrace (lua_State *L, GCObject *o) {
       int status = pthread_mutex_trylock(&upvalue->mutex);
       if (status == EBUSY) return 0;
       luaX_checksync(status);
-      markvalue(g, &upvalue->value);
+      tracevalue(work, &upvalue->value);
       luaX_checksync(pthread_mutex_unlock(&upvalue->mutex));
     }
-    else markvalue(g, &upvalue->value);
-    g->GCmarked += sizeof(UpVal);
-    set2black(o);
+    else tracevalue(work, &upvalue->value);
+    work->marked += sizeof(UpVal);
+    nw2black(o);
     return 1;
   }
   if (!luaW_iscollector(L) && !luaA_tryscan(o)) return 0;
@@ -968,43 +996,23 @@ static int scantrace (lua_State *L, GCObject *o) {
       luaA_endscan(L, o);
       return 0;
     }
-    g->GCmarked += luaC_objsize(o);
-    set2black(o);
-    traversetable(g, table);
+    work->marked += luaC_objsize(o);
+    nw2black(o);
+    traversetable(work, table);
     if (pair && !luaW_iscollector(L)) luaA_endscan(L, obj2gco(metatable));
   }
   else {
-    g->GCmarked += luaC_objsize(o);
-    set2black(o);
+    work->marked += luaC_objsize(o);
+    nw2black(o);
     switch (o->tt) {
-      case LUA_VUSERDATA: traverseudata(g, gco2u(o)); break;
-      case LUA_VLCL: traverseLclosure(g, gco2lcl(o)); break;
-      case LUA_VCCL: traverseCclosure(g, gco2ccl(o)); break;
+      case LUA_VUSERDATA: traverseudata(work, gco2u(o)); break;
+      case LUA_VLCL: traverseLclosure(work, gco2lcl(o)); break;
+      case LUA_VCCL: traverseCclosure(work, gco2ccl(o)); break;
       default: lua_assert(0); break;
     }
   }
   if (!luaW_iscollector(L)) luaA_endscan(L, o);
   return 1;
-}
-
-void luaC_traceobjects (lua_State *L, unsigned limit) {
-  global_State *g = G(L);
-  unsigned attempted = 0;
-  lua_assert(__atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED));
-  while (g->gray != NULL && attempted++ < limit) {
-    GCObject *object = g->gray;
-    g->gray = *getgclist(object);
-    if (!scantrace(L, object)) {
-      *getgclist(object) = NULL;
-      *g->trace_tail = object;
-      g->trace_tail = getgclist(object);
-    }
-  }
-  if (g->gray == NULL && g->trace_deferred != NULL) {
-    g->gray = g->trace_deferred;
-    g->trace_deferred = NULL;
-    g->trace_tail = &g->trace_deferred;
-  }
 }
 
 void luaC_assisttrace (lua_State *L) {
@@ -1066,33 +1074,119 @@ static GCObject *takeweak (GCObject **head, GCObject **tail) {
 
 
 
-lu_mem luaC_ephemeronwork (lua_State *L, unsigned limit) {
+/* Claims/publication serialize list ownership, never payload scanning. A batch
+** stays participating until its discoveries are published; stopping the world
+** therefore also joins all scanners before a phase can change. */
+static void readytrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
-  lu_mem work = 0;
-  unsigned attempted = 0;
-  int quiescent = luaW_iscollector(L);
-  lua_assert(__atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) &&
-             plan->phase == TRACE_EPHEMERONS);
-  while ((plan->next != NULL || plan->deferred != NULL) &&
-         attempted++ < limit) {
-    GCObject *object;
-    if (plan->next != NULL) {
-      object = plan->next;
-      plan->next = *getgclist(object);
+  __atomic_store_n(&g->trace_ready,
+    g->gray != NULL || g->trace_deferred != NULL ||
+    plan->next != NULL || plan->deferred != NULL ||
+    __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
+    __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
+    __ATOMIC_RELEASE);
+}
+
+void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
+  global_State *g = G(L);
+  LuaTracePlan *plan = &g->trace_plan;
+  l_mem marked = g->GCmarked;
+  work->global = g;
+  if (!luaC_tracing(L)) return;
+  luaC_drainbarriers(L);
+  work->scanned = cast(lu_mem, g->GCmarked - marked);
+  if (g->gray == NULL && g->trace_deferred != NULL) {
+    g->gray = g->trace_deferred;
+    g->trace_deferred = NULL;
+  }
+  work->phase = TRACE_MARK;
+  while (g->gray != NULL && work->count < limit) {
+    GCObject *object = g->gray;
+    g->gray = *getgclist(object);
+    work->objects[work->count++] = object;
+  }
+  if (work->count == 0 &&
+      (plan->phase == TRACE_EPHEMERONS || plan->phase == TRACE_VALUES ||
+       plan->phase == TRACE_CLEAR)) {
+    work->phase = plan->phase;
+    work->direction = plan->direction;
+    while ((plan->next != NULL || plan->deferred != NULL) &&
+           work->count < limit) {
+      GCObject *object;
+      if (plan->next != NULL) {
+        object = plan->next;
+        plan->next = *getgclist(object);
+      }
+      else object = takeweak(&plan->deferred, &plan->tail);
+      work->objects[work->count++] = object;
     }
-    else object = takeweak(&plan->deferred, &plan->tail);
-    if (!quiescent && !luaA_tryscan(object))
-      deferweak(&plan->deferred, &plan->tail, object);
+  }
+  if (work->count != 0)
+    __atomic_fetch_add(&g->trace_busy, 1, __ATOMIC_RELAXED);
+  readytrace(L);
+}
+
+void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
+  unsigned attempted = 0;
+  unsigned index;
+  int quiescent = luaW_iscollector(L);
+  lua_assert(__atomic_load_n(&G(L)->trace_busy, __ATOMIC_RELAXED));
+  for (index = 0; index < work->count; index++, attempted++) {
+    GCObject *object = work->objects[index];
+    if (work->phase == TRACE_MARK) {
+      if (!scantrace(L, work, object)) queuework(&work->deferred, object);
+    }
+    else if (!quiescent && !luaA_tryscan(object))
+      deferweak(&work->retry, &work->retry_tail, object);
     else {
-      nw2black(object);
-      if (traverseephemeron(g, gco2t(object), plan->direction))
-        plan->changed = 1;
-      work += luaC_objsize(object);
+      if (work->phase == TRACE_EPHEMERONS) {
+        nw2black(object);
+        if (traverseephemeron(work, gco2t(object), work->direction))
+          work->changed = 1;
+      }
+      else luaC_prepareweak(L, gco2t(object));
+      work->scanned += luaC_objsize(object);
       if (!quiescent) luaA_endscan(L, object);
     }
   }
-  return work;
+  /* Consume locally produced edges before returning to the shared queue. */
+  while (work->gray.head != NULL && attempted++ < limit) {
+    GCObject *object = work->gray.head;
+    work->gray.head = *getgclist(object);
+    if (!scantrace(L, work, object)) queuework(&work->deferred, object);
+  }
+}
+
+static void publishwork (LuaTraceList *list, GCObject **head) {
+  if (list->head != NULL) {
+    *list->tail = *head;
+    *head = list->head;
+  }
+}
+
+void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
+  global_State *g = G(L);
+  LuaTracePlan *plan = &g->trace_plan;
+  publishwork(&work->gray, &g->gray);
+  publishwork(&work->grayagain, &g->grayagain);
+  publishwork(&work->weak, &g->weak);
+  publishwork(&work->allweak, &g->allweak);
+  publishwork(&work->ephemeron, &g->ephemeron);
+  publishwork(&work->deferred, &g->trace_deferred);
+  if (work->retry != NULL) {
+    barrierblock(work->retry_tail)->block.next =
+      cast(LuaAllocBlock *, plan->deferred);
+    if (plan->deferred == NULL) plan->tail = work->retry_tail;
+    plan->deferred = work->retry;
+  }
+  plan->changed |= work->changed;
+  g->GCmarked += work->marked;
+  /* Phase decisions join every batch, so claim counts can be published once
+  ** with the work rather than contending on one cache line per object. */
+  __atomic_fetch_add(&g->trace_changes, work->claims, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&g->trace_busy, 1, __ATOMIC_RELEASE);
+  readytrace(L);
 }
 
 /* }====================================================== */
@@ -1105,33 +1199,6 @@ lu_mem luaC_ephemeronwork (lua_State *L, unsigned limit) {
 */
 
 
-/* Process weak entries in bounded jobs, retaining busy tables in the plan. */
-lu_mem luaC_weakwork (lua_State *L, unsigned limit) {
-  global_State *g = G(L);
-  LuaTracePlan *plan = &g->trace_plan;
-  lu_mem work = 0;
-  unsigned attempted = 0;
-  int quiescent = luaW_iscollector(L);
-  lua_assert(__atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) &&
-    (plan->phase == TRACE_VALUES || plan->phase == TRACE_CLEAR));
-  while ((plan->next != NULL || plan->deferred != NULL) &&
-         attempted++ < limit) {
-    GCObject *object;
-    if (plan->next != NULL) {
-      object = plan->next;
-      plan->next = *getgclist(object);
-    }
-    else object = takeweak(&plan->deferred, &plan->tail);
-    if (!quiescent && !luaA_tryscan(object))
-      deferweak(&plan->deferred, &plan->tail, object);
-    else {
-      luaC_prepareweak(L, gco2t(object));
-      work += luaC_objsize(object);
-      if (!quiescent) luaA_endscan(L, object);
-    }
-  }
-  return work;
-}
 
 /* Idle stacks are borrowed under their own gate, then resized under metadata
 ** ownership. Pin the target before a possible allocation wait: an emergency

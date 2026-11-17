@@ -162,7 +162,7 @@ target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaA_tryscan -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_stop
   -Wl,--wrap=luaM_malloc_)
 foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak intern cache
-    concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons)
+    concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues)
   add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})
   set_tests_properties(gc_tracing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

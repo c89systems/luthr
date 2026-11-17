@@ -25,6 +25,25 @@ enum {
 };
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
 
+/* A batch owns its payloads until it publishes every list and counter. It
+** must not yield or park while these private references are outstanding. */
+#define LUA_TRACE_BATCH 64
+typedef struct LuaTraceList {
+  GCObject *head;
+  GCObject **tail;
+} LuaTraceList;
+
+typedef struct LuaTraceWork {
+  global_State *global;
+  LuaTraceList gray, grayagain, weak, allweak, ephemeron, deferred;
+  GCObject *retry, *retry_tail;
+  GCObject *objects[LUA_TRACE_BATCH];
+  uint64_t claims;
+  l_mem marked;
+  lu_mem scanned;
+  unsigned count, phase, direction, changed;
+} LuaTraceWork;
+
 LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
 LUAI_FUNC void luaC_restoregcframe (LuaGCFrame *frame);
 LUAI_FUNC int luaC_ingc (lua_State *L);
@@ -335,14 +354,14 @@ LUAI_FUNC void luaC_traceview (lua_State *L, const Table *view);
 LUAI_FUNC void luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
-/* Specialized graph walk; the batch coordinator owns trace_busy. */
-LUAI_FUNC void luaC_traceobjects (lua_State *L, unsigned limit);
+/* Claims/publication hold world.mutex; scanning owns only the local batch. */
+LUAI_FUNC void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit);
+LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit);
+LUAI_FUNC void luaC_publishtrace (lua_State *L, LuaTraceWork *work);
 LUAI_FUNC void luaC_advancetrace (lua_State *L);
 LUAI_FUNC void luaC_initialtrace (lua_State *L);
 LUAI_FUNC void luaC_finalizetrace (lua_State *L);
 LUAI_FUNC void luaC_finishtrace (lua_State *L);
-LUAI_FUNC lu_mem luaC_ephemeronwork (lua_State *L, unsigned limit);
-LUAI_FUNC lu_mem luaC_weakwork (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_assisttrace (lua_State *L);
 /* Caller owns the table. Resolve the current weak cutoff before publishing
 ** a result or deciding whether an entry exists. New stores shade both edges. */

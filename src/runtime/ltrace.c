@@ -155,36 +155,19 @@ void luaC_trimstack (lua_State *L) {
 
 lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   global_State *g = G(L);
-  unsigned expected = 0;
-  l_mem marked;
-  lu_mem weakwork = 0;
-  if (!luaC_tracing(L) ||
-      !__atomic_compare_exchange_n(&g->trace_busy, &expected, 1, 0,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-    return 0;
-  marked = g->GCmarked;
+  LuaTraceWork work = {0};
+  if (!luaC_tracing(L) || limit == 0) return 0;
+  if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
-  luaC_drainbarriers(L);
+  luaC_claimtrace(L, &work, limit);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-  luaC_traceobjects(L, limit);
-  if (g->gray == NULL && g->trace_deferred == NULL) {
-    if (g->trace_plan.phase == TRACE_EPHEMERONS)
-      weakwork = luaC_ephemeronwork(L, limit);
-    else if (g->trace_plan.phase == TRACE_VALUES ||
-             g->trace_plan.phase == TRACE_CLEAR)
-      weakwork = luaC_weakwork(L, limit);
-  }
-  __atomic_store_n(&g->trace_ready,
-    g->gray != NULL || g->trace_deferred != NULL ||
-    g->trace_plan.next != NULL || g->trace_plan.deferred != NULL ||
-    __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
-    __ATOMIC_RELEASE);
-  marked = g->GCmarked - marked;
-  __atomic_store_n(&g->trace_busy, 0, __ATOMIC_RELEASE);
+  if (work.count == 0) return work.scanned;
+  luaC_scantrace(L, &work, limit);
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  luaC_publishtrace(L, &work);
   luaQ_wake(&g->world.changed, &g->world.waiters);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-  return cast(lu_mem, marked) + weakwork;
+  return cast(lu_mem, work.marked) + work.scanned;
 }
 
 static int weakdead (lua_State *L, GCObject *object) {

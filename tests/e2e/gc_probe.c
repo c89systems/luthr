@@ -12,6 +12,7 @@
 enum { REASON_OTHER, REASON_GC, REASON_BARRIER };
 static lua_State *host;
 static GcProbe *host_probe;
+static unsigned scanners;
 
 static uint64_t now(void) {
   struct timespec stamp;
@@ -97,6 +98,7 @@ void __real_luaC_drainbarriers(lua_State *);
 void __real_luaC_reclaim(lua_State *);
 void __real_luaC_assistreclaim(lua_State *);
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
+void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __real_luaC_assisttrace(lua_State *);
 void __real_luaC_snapshot(lua_State *, lua_State *);
 void __real_luaC_checksnapshot(lua_State *);
@@ -341,6 +343,18 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
       record->collector_body_ns += elapsed;
   }
   return marked;
+}
+
+void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  unsigned active = __atomic_add_fetch(&scanners, 1, __ATOMIC_ACQ_REL);
+  if (record != NULL && record->trace_peak_workers < active)
+    record->trace_peak_workers = active;
+  __real_luaC_scantrace(L, work, limit);
+  __atomic_fetch_sub(&scanners, 1, __ATOMIC_ACQ_REL);
+  if (record != NULL)
+    record->trace_scan_ns += now() - started;
 }
 
 void __wrap_luaC_assisttrace(lua_State *L) {
