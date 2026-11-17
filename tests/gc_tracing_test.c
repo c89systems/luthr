@@ -165,6 +165,9 @@ void __wrap_luaQ_poll(lua_State *L) {
       __atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE)) {
     LuaWorldScope scope = {0, 0};
     require(L->world_depth == 0 && !G(L)->world.stopped && !G(L)->trace_busy);
+    /* These cases isolate graph publication and explicit helper handoffs.
+     * Keep automatic allocation backpressure in gc_pacing's pressure cases. */
+    __atomic_store_n(&G(L)->GCmarkdebt, MAX_LMEM, __ATOMIC_RELAXED);
     if (collection->emergency || collection->help)
       scope = luaW_detach(L); /* a real safepoint with no claimed graph work */
     require(pthread_mutex_lock(&collection->mutex) == 0);
@@ -199,6 +202,7 @@ static void begin(lua_State *L) {
   g->trace_epoch++;
   g->GCmarked = 0;
   g->trace_changes = 0;
+  g->GCmarkdebt = MAX_LMEM; /* This fixture supplies its own phase driver. */
   g->gcstate = GCSpropagate;
   setmarked(L, (getmarked(L) & ~(WHITEBITS | (1 << BLACKBIT))));
   L->gclist = NULL;
@@ -662,9 +666,14 @@ static void string_lookup(int cache) {
 
 static void *collect_graph(void *context) {
   struct collection *collection = context;
-  if (collection->minor)
+  if (collection->minor) {
     require(lua_gc(collection->collector, LUA_GCSTEP, (size_t)0) >= 0);
-  else
+    /* A normal minor request is a slice too. This fixture needs a complete
+     * job to check the overlapping helper/emergency termination handshake. */
+    lua_lock(collection->collector);
+    luaC_waittrace(collection->collector);
+    lua_unlock(collection->collector);
+  } else
     require(lua_gc(collection->collector, LUA_GCCOLLECT) == 0);
   require(!luaC_tracing(collection->collector) &&
           !G(collection->collector)->trace_busy);
@@ -718,6 +727,7 @@ static void concurrent_collection(const char *kind) {
   collection.collector = lua_newthread(collection.main);
   lua_pushvalue(collection.main, 1);
   lua_xmove(collection.main, collection.collector, 1);
+  lua_gc(collection.main, LUA_GCRESTART); /* Workers may assist this job. */
   interrupted = G(collection.main)->trace_interrupt;
   collecting = &collection;
   require(pthread_create(&collector, NULL, collect_graph, &collection) == 0);

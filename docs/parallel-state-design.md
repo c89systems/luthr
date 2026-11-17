@@ -52,13 +52,19 @@ claims need no additional storage. Publication cannot allocate, wait or request
 a global rendezvous. Collection drains every queue before tracing or reclaiming
 objects, including queues on otherwise unreachable threads. Parallel scanners
 publish private work before parking; weak processing joins them at phase
-boundaries. Logical sweep classification still requires quiescence, while
-physical destruction overlaps application workers.
+boundaries. Automatic requests and allocation assists return after a marking
+slice; VM safepoints advance the same job even without further allocation.
+Unpaid marking work survives an unavailable batch. Allocation assists share
+capacity with physical reclamation and drain marking when its allocation
+runway is spent. Explicit full collections and emergency retries drain it.
+Logical sweep classification still requires quiescence, while physical
+destruction overlaps application workers.
 
 Allocation consumes owner-local page lists and batches atomic remote returns.
 Pacing counts live storage, including runtime records and black allocations,
 separately from pending destruction. Physical completion preserves the cycle's
-fixed allocation goal.
+fixed allocation goal. Allocations after marking consume the following
+allowance without enlarging its baseline until the next cycle.
 
 Backing allocation and page handoff, logical sweep/finalizer classification,
 general metadata scopes and managed admission still need further scaling work.

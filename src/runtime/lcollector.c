@@ -40,7 +40,17 @@ static void clearing (global_State *g, unsigned phase) {
 void luaC_advancetrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
+  /* Several helpers may observe the same empty queue. Metadata admission
+  ** orders phase requests; recheck after it, before stopping every worker. */
+  luaW_collectenter(L);
+  if (!luaC_tracing(L) || plan->finish == 0 ||
+      (plan->phase != TRACE_INIT &&
+       __atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))) {
+    luaW_heapleave(L);
+    return;
+  }
   luaW_stop(L);
+  luaW_heapleave(L);  /* retain exactly the stop's metadata ownership */
   luaC_publish(L);
   luaC_drainbarriers(L);
   while (luaC_tracing(L) && plan->finish != 0) {

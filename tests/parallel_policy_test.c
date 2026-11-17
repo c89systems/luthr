@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <lauxlib.h>
+#include <lgc.h>
 #include <lstate.h>
 #include <lua.h>
 #include <lualib.h>
@@ -45,6 +46,7 @@ struct fixture {
   struct observer observers[2];
   enum mode mode;
   unsigned accepted;
+  unsigned managed_waiting;
   unsigned ticks[2];
   unsigned warning_calls[2];
   int measured;
@@ -398,13 +400,35 @@ static int read_child(lua_State *state) {
 
 static void managed_poll(lua_State *state, void *user) {
   struct actor *actor = user;
-  (void)state;
   if (!actor->polled) {
     int status;
+    LuaWorldScope scope;
     actor->polled = 1;
+    /* A native barrier must withdraw managed participation. Otherwise a peer
+     * requesting GC before its first poll waits for this blocked participant.
+     */
+    scope = luaW_detach(state);
+    if (actor->fixture->mode == CAP) {
+      struct fixture *fixture = actor->fixture;
+      check(pthread_mutex_lock(&fixture->mutex));
+      if (actor == &fixture->actors[0]) {
+        fixture->managed_waiting = 1;
+        check(pthread_cond_broadcast(&fixture->changed));
+      } else {
+        while (!fixture->managed_waiting)
+          check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
+      }
+      check(pthread_mutex_unlock(&fixture->mutex));
+      if (actor == &fixture->actors[1]) {
+        luaW_attach(state, scope);
+        luaC_fullgc(state, 0);
+        scope = luaW_detach(state);
+      }
+    }
     status = pthread_barrier_wait(&actor->fixture->managed);
     if (status != 0 && status != PTHREAD_BARRIER_SERIAL_THREAD)
       abort();
+    luaW_attach(state, scope);
   }
 }
 

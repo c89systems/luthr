@@ -21,6 +21,17 @@ static struct {
   unsigned arrived[2], done;
 } fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0, 0}, 0};
 static __thread unsigned role;
+static __thread unsigned stops;
+static void arrive(void);
+
+void __real_luaW_stop(lua_State *);
+void __wrap_luaW_stop(lua_State *L) {
+  if (role != 0) {
+    stops++;
+    arrive();
+  }
+  __real_luaW_stop(L);
+}
 
 void __real_luaW_heapenter(lua_State *);
 void __real_luaW_collectenter(lua_State *);
@@ -43,14 +54,19 @@ void __wrap_luaW_collectenter(lua_State *L) {
 
 struct request {
   lua_State *state;
-  unsigned role;
+  unsigned role, stops;
+  int phase;
 };
 static void *request(void *argument) {
   struct request *r = argument;
   role = r->role;
   lua_lock(r->state);
-  luaC_step(r->state);
+  if (r->phase)
+    luaC_advancetrace(r->state);
+  else
+    luaC_step(r->state);
   lua_unlock(r->state);
+  r->stops = stops;
   if (role == 2) {
     require(pthread_mutex_lock(&fixture.mutex) == 0);
     fixture.done = 1;
@@ -60,13 +76,62 @@ static void *request(void *argument) {
   return NULL;
 }
 
+static void phase_request(lua_State *L, int generational) {
+  struct request helper = {0};
+  pthread_t worker;
+  unsigned length = 0;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_loadstring(L, "local head; for i=1,20000 do "
+                             "head={head} end; return head") == LUA_OK);
+  require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  helper.state = lua_newthread(L);
+  helper.role = helper.phase = 1;
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(L, LUA_GCRESTART);
+  lua_lock(L);
+  G(L)->GCgoal = MAX_LMEM;
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  require(luaC_tracing(L));
+  luaW_heapenter(L);
+  /* A helper observed an empty shared queue, then waited for metadata. A
+   * scanner can publish work before that pending request is admitted. */
+  __atomic_store_n(&G(L)->trace_ready, 0, __ATOMIC_RELEASE);
+  require(pthread_create(&worker, NULL, request, &helper) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (fixture.arrived[0] == 0)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  luaC_tracebatch(L, LUA_TRACE_BATCH);
+  require(__atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE));
+  luaW_heapleave(L);
+  lua_unlock(L);
+  require(pthread_join(worker, NULL) == 0);
+  require(helper.stops == 0); /* A stale request must not pause every worker. */
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_pushvalue(L, 1);
+  while (lua_istable(L, -1)) {
+    lua_rawgeti(L, -1, 1);
+    lua_remove(L, -2);
+    length++;
+  }
+  require(length == 20000);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
-  struct request requests[2];
+  struct request requests[2] = {{0}};
   pthread_t workers[2];
   unsigned round;
   int explicit_step, stop;
   require(L != NULL && argc == 2);
+  if (strncmp(argv[1], "phase_", 6) == 0) {
+    require(strcmp(argv[1], "phase_incremental") == 0 ||
+            strcmp(argv[1], "phase_generational") == 0);
+    phase_request(L, strcmp(argv[1], "phase_generational") == 0);
+    goto done;
+  }
   explicit_step = strcmp(argv[1], "explicit") == 0;
   stop = strcmp(argv[1], "stopped") == 0;
   require(explicit_step || stop || strcmp(argv[1], "incremental") == 0 ||
@@ -119,6 +184,7 @@ int main(int argc, char **argv) {
     if (stop)
       lua_gc(L, LUA_GCRESTART);
   }
+done:
   lua_close(L);
   require(pthread_cond_destroy(&fixture.changed) == 0);
   require(pthread_mutex_destroy(&fixture.mutex) == 0);

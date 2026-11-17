@@ -75,6 +75,7 @@ typedef struct lua_longjmp {
   lu_byte luthr_stack_overflow;
   LuaNativeRoot *native_roots;
   unsigned native_depth;
+  unsigned reclaiming;
   LuaWorldScope world_scope;
   LuaObjectScope *object_scopes;
   LuaCoroutineScope *coroutine_scopes;
@@ -260,6 +261,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.luthr_stack_overflow = L->luthr_stack_context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
+  lj.reclaiming = L->reclaiming;
   lj.gc_frame = luaC_gcframe();
   lj.world_scope = luaW_scope(L);
   lj.object_scopes = L->object_scopes;
@@ -268,6 +270,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
   luaC_restoregcframe(lj.gc_frame);
+  L->reclaiming = lj.reclaiming;
   /* Retire the jump buffer before any cleanup callback can park this stack. */
   if (lj.execution != NULL) {
     lj.execution->protected = lj.execution_previous;

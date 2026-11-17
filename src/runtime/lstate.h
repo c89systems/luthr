@@ -363,7 +363,6 @@ struct lua_State {
   GCObject *barrier_back;  /* atomic; uniquely claimed dirty owners */
   uint64_t trace_snapshot;  /* release-published root snapshot epoch */
   uint64_t trace_trimmed;
-  unsigned trace_assisting;
   lu_mem trace_bytes;
   struct Proto *building_protos;  /* mutable compiler/undumper graphs */
   GCObject *retired;  /* atomic work hint; world mutex protects shared claims */
@@ -374,6 +373,7 @@ struct lua_State {
   unsigned reclaim_workers;  /* world mutex protects work ownership */
   unsigned reclaim_registered;  /* world mutex; helpers may finish the queue */
   lu_mem assist_debt;
+  lu_mem trace_debt;  /* unpaid marking work, independent of physical returns */
   uint64_t assist_epoch;
   GCObject *new_objects;
   GCObject *new_objects_tail;
@@ -446,6 +446,8 @@ typedef struct global_State {
   l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
   l_mem GCgoal;  /* fixed logical allocation target for the current idle cycle */
+  l_mem GCcyclelive;  /* mark-end storage, less this cycle's logical garbage */
+  l_mem GCmarkdebt;  /* remaining allocation runway while marking */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
   unsigned trace_active;  /* atomic concurrent marking phase */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */

@@ -82,6 +82,8 @@ static void *firsttry (global_State *g, void *block, size_t os, size_t ns) {
 #define DEBT_BATCH 65536
 
 static void adddebt (global_State *g, l_mem change, int exclusive) {
+  if (__atomic_load_n(&g->trace_active, __ATOMIC_ACQUIRE))
+    __atomic_fetch_add(&g->GCmarkdebt, change, __ATOMIC_RELAXED);
   if (exclusive) {
     /* Match the word-sized arithmetic of mutator accumulation. */
     lu_mem debt = cast(lu_mem, __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED));
@@ -103,10 +105,16 @@ static void accountassist (lua_State *L, l_mem change) {
   if (L->assist_epoch != epoch) {
     L->assist_epoch = epoch;
     L->assist_debt = 0;
+    L->trace_debt = 0;
   }
   bytes = cast(lu_mem, 0) - cast(lu_mem, change);
   L->assist_debt = bytes > cast(lu_mem, MAX_LMEM) - L->assist_debt
     ? cast(lu_mem, MAX_LMEM) : L->assist_debt + bytes;
+  if (luaC_tracing(L)) {
+    lu_mem work = cast(lu_mem, applygcparam(G(L), STEPMUL, cast(l_mem, bytes)));
+    L->trace_debt = work > cast(lu_mem, MAX_LMEM) - L->trace_debt
+      ? cast(lu_mem, MAX_LMEM) : L->trace_debt + work;
+  }
 }
 
 void luaM_flushdebt (lua_State *L) {
@@ -332,12 +340,17 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
 }
 
 void luaM_retire_ (lua_State *L, void *memory, size_t size) {
+  global_State *g = G(L);
   LuaAllocBlock *block;
   if (memory == NULL) { lua_assert(size == 0); return; }
   block = cast(LuaAllocBlock *, memory) - 1;
   lua_assert(!luaMP_retired(block));
   block->block.page |= 1u;
-  __atomic_fetch_add(&G(L)->GCretired, cast(l_mem, size), __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g->GCretired, cast(l_mem, size), __ATOMIC_RELAXED);
+  if (issweepphase(g) && !(g->gcstp & GCSTPCLS)) {
+    lua_assert(g->GCcyclelive >= cast(l_mem, size));
+    g->GCcyclelive -= cast(l_mem, size);
+  }
 }
 
 

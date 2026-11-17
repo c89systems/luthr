@@ -10,6 +10,7 @@
 #include <time.h>
 
 enum { REASON_OTHER, REASON_GC, REASON_BARRIER };
+enum { COLLECT_STEP, COLLECT_FULL, COLLECT_ASSIST, COLLECT_POLL };
 static lua_State *host;
 static GcProbe *host_probe;
 static unsigned scanners;
@@ -100,6 +101,7 @@ void __real_luaC_assistreclaim(lua_State *);
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __real_luaC_assisttrace(lua_State *);
+void __real_luaC_polltrace(lua_State *);
 void __real_luaC_snapshot(lua_State *, lua_State *);
 void __real_luaC_checksnapshot(lua_State *);
 void __real_luaW_waitcollector(lua_State *);
@@ -177,7 +179,7 @@ void __wrap_luaW_heapleave(lua_State *L) {
     coordination_end(record);
 }
 
-static void collect(lua_State *L, int full, int emergency) {
+static void collect(lua_State *L, int operation, int emergency) {
   GcProbe *record = probe(L);
   uint64_t started = 0, excluded = 0, elapsed;
   unsigned reason = REASON_OTHER;
@@ -189,15 +191,19 @@ static void collect(lua_State *L, int full, int emergency) {
     if (outer) {
       started = now();
       excluded = record->coordination_ns + record->reclaim_ns;
-      running = full || gcrunning(G(L)) != 0;
+      running = operation == COLLECT_FULL || gcrunning(G(L)) != 0;
       record->collector_calls++;
       record->collector_running_calls += running;
     }
   }
-  if (full)
+  if (operation == COLLECT_FULL)
     __real_luaC_fullgc(L, emergency);
-  else
+  else if (operation == COLLECT_STEP)
     __real_luaC_step(L);
+  else if (operation == COLLECT_ASSIST)
+    __real_luaC_assisttrace(L);
+  else
+    __real_luaC_polltrace(L);
   if (record != NULL) {
     if (outer) {
       elapsed = now() - started;
@@ -213,9 +219,9 @@ static void collect(lua_State *L, int full, int emergency) {
     record->gc_depth--;
   }
 }
-void __wrap_luaC_step(lua_State *L) { collect(L, 0, 0); }
+void __wrap_luaC_step(lua_State *L) { collect(L, COLLECT_STEP, 0); }
 void __wrap_luaC_fullgc(lua_State *L, int emergency) {
-  collect(L, 1, emergency);
+  collect(L, COLLECT_FULL, emergency);
 }
 
 void __wrap_luaC_finishtrace(lua_State *L) {
@@ -361,7 +367,14 @@ void __wrap_luaC_assisttrace(lua_State *L) {
   GcProbe *record = probe(L);
   if (record != NULL)
     record->trace_assist_calls++;
-  __real_luaC_assisttrace(L);
+  collect(L, COLLECT_ASSIST, 0);
+}
+
+void __wrap_luaC_polltrace(lua_State *L) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->trace_poll_calls++;
+  collect(L, COLLECT_POLL, 0);
 }
 
 static unsigned snapshot_needed(lua_State *L, lua_State *thread) {

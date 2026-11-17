@@ -116,6 +116,20 @@ string(JSON body GET "${output}" gc_collector_body_ns)
 if(body EQUAL 0)
   message(FATAL_ERROR "Explicit full collection was mislabeled as disabled dispatch")
 endif()
+file(WRITE "${output_dir}/poll.lua"
+  "return function() collectgarbage('stop'); local head; for i=1,20000 do head={head} end; collectgarbage('restart'); collectgarbage('step',0); local sum=0; for i=1,200000 do sum=sum+i end; assert(head and sum==20000100000); return 1 end,function() end,function() end,1\n")
+execute_process(COMMAND "${profile}" "${output_dir}/poll.lua" marking_poll
+  incremental 1 1 1 1 1 0 0 RESULT_VARIABLE result
+  OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
+  message(FATAL_ERROR "VM marking probe failed: ${result}: ${output}${error}")
+endif()
+string(STRIP "${output}" output)
+string(JSON polls GET "${output}" gc_trace_poll_calls)
+string(JSON running GET "${output}" gc_collector_running_calls)
+if(polls EQUAL 0 OR polls GREATER running)
+  message(FATAL_ERROR "VM marking work is missing from collector accounting")
+endif()
 foreach(runtime IN ITEMS upstream shared control profile)
   execute_process(COMMAND "${${runtime}}" "${script}" integers incremental
     1 0 8 256 1 0 0 invalid RESULT_VARIABLE result

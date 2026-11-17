@@ -109,9 +109,17 @@ luthr_test_program(gc_pacing_test gc_pacing_test.c)
 set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_pacing_test PRIVATE luthr_static)
+target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
+  -Wl,--wrap=luaQ_poll)
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
-    borrowed_incremental borrowed_generational)
+    borrowed_incremental borrowed_generational bounded_incremental
+    bounded_generational idle_incremental idle_generational
+    pressure_incremental pressure_generational unavailable_incremental
+    unavailable_generational sweep_growth stopped_incremental
+    stopped_generational unwind_incremental unwind_generational
+    closing_incremental closing_generational closing_pending_incremental
+    closing_pending_generational)
   add_test(NAME gc_pacing_${case} COMMAND gc_pacing_test ${case})
   set_tests_properties(gc_pacing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -134,8 +142,8 @@ set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_requests_test PRIVATE luthr_static)
 target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
-  -Wl,--wrap=luaW_collectenter)
-foreach(case IN ITEMS incremental generational explicit stopped)
+  -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS incremental generational explicit stopped phase_incremental phase_generational)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -146,9 +154,9 @@ set_target_properties(gc_reclamation_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_reclamation_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_reclamation_test PRIVATE luthr_static)
 target_link_options(gc_reclamation_test PRIVATE -Wl,--wrap=luaM_free_
-  -Wl,--wrap=luaQ_wait -Wl,--wrap=luaC_publish)
+  -Wl,--wrap=luaQ_wait -Wl,--wrap=luaC_publish -Wl,--wrap=luaQ_poll)
 foreach(collector IN ITEMS incremental generational)
-  foreach(case IN ITEMS overlap collect_again handshake assist)
+  foreach(case IN ITEMS overlap collect_again handshake assist assist_trace assist_unwind)
     add_test(NAME gc_reclamation_${case}_${collector}
       COMMAND gc_reclamation_test ${case} ${collector})
     set_tests_properties(gc_reclamation_${case}_${collector} PROPERTIES

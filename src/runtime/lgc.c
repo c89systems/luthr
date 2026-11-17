@@ -95,6 +95,7 @@
 
 static void reallymarkobject (global_State *g, GCObject *o);
 static int atomic (lua_State *L);
+static lu_mem tracework (lua_State *L, lu_mem budget, int complete);
 static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
 static l_mem livebytes (global_State *g);
@@ -610,9 +611,29 @@ void luaC_waittrace (lua_State *L) {
   }
 }
 
+/* Convert the previous live storage estimate to allocation runway at the
+** configured marking work/byte ratio. Decode Lua's fixed-point parameter so
+** this inverse cannot overflow or lose precision on large heaps. */
+static l_mem markrunway (global_State *g) {
+  unsigned p = g->gcparams[LUA_GCPSTEPMUL];
+  unsigned m = p & 15u, e = p >> 4;
+  l_mem live = g->GCcyclelive;
+  if (e != 0) { m += 16; e--; }
+  if (m == 0) return 0;  /* zero requests complete collections */
+  if (e >= 7) return (live >> (e - 7)) / m;
+  e = 7 - e;
+  if (live / m > MAX_LMEM >> e) return MAX_LMEM;
+  {
+    l_mem high = (live / m) << e;
+    l_mem low = ((live % m) << e) / m;
+    return high > MAX_LMEM - low ? MAX_LMEM : high + low;
+  }
+}
+
 static void starttrace (lua_State *L) {
   global_State *g = G(L);
-  if (g->gcstp & GCSTPCLS) return;
+  l_mem runway, deadline;
+  if ((g->gcstp & GCSTPCLS) && !g->gcemergency) return;
   lua_assert(L->world_depth != 0 && !luaC_tracing(L));
   g->trace_epoch++;
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
@@ -626,6 +647,9 @@ static void starttrace (lua_State *L) {
   g->trace_plan.phase = TRACE_INIT;
   g->trace_plan.finish = g->gckind == KGC_GENMINOR
                          ? TRACE_YOUNG : TRACE_MAJOR;
+  runway = markrunway(g);
+  deadline = runway > MAX_LMEM - g->GCgoal ? MAX_LMEM : g->GCgoal + runway;
+  __atomic_store_n(&g->GCmarkdebt, deadline - livebytes(g), __ATOMIC_RELAXED);
   __atomic_store_n(&g->trace_active, 1, __ATOMIC_RELEASE);
 }
 
@@ -1018,38 +1042,39 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
 void luaC_assisttrace (lua_State *L) {
   global_State *g = G(L);
   LuaGCFrame frame;
-  lu_mem budget = L->assist_debt;
-  if (budget < LUA_GC_ASSIST_BYTES || L->trace_assisting || L->reclaiming ||
+  lu_mem budget = L->trace_debt;
+  int pressure = luaC_markpressure(L);
+  if (!gcrunning(g) || (budget < LUA_GC_ASSIST_BYTES && !pressure) ||
+      luaC_ingc(L) || L->reclaiming ||
       L->world_depth != 0 || L->object_scopes != NULL ||
       luaW_scope(L).heap != 0 || !luaC_tracing(L))
     return;
-  L->assist_debt = 0;
-  L->trace_assisting = 1;
   luaC_entergc(L, &frame);
-  while (luaC_tracing(L) && L->assist_epoch ==
-      __atomic_load_n(&g->world.work_epoch, __ATOMIC_ACQUIRE)) {
-    lu_mem done;
-    if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE) &&
-        g->trace_plan.finish != 0)
-      luaC_advancetrace(L);
-    done = luaC_tracebatch(L, 64);
-    if (done >= budget) break;
-    budget -= done;
-    luaX_pollrequests(L);
-    luaQ_poll(L);
-    if (done == 0) {
-      /* The last scanner or a weak/finalization phase may own the remaining
-      ** work. Return managed capacity instead of allocating beyond its pace. */
-      luaX_checksync(pthread_mutex_lock(&g->world.mutex));
-      if (luaC_tracing(L) &&
-          __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE))
-        luaW_waitcollector(L);
-      luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-    }
-  }
+  /* Earlier cycles can still have physical garbage. A stream of new marking
+  ** jobs must not monopolize every allocation assist and starve that storage. */
+  if (luaC_needassist(L)) luaC_assistreclaim(L);
+  if (pressure || L->assist_epoch ==
+      __atomic_load_n(&g->world.work_epoch, __ATOMIC_ACQUIRE))
+    tracework(L, budget, pressure);
+  else L->trace_debt = 0;
   if (luaC_retired(L) != NULL || L->reclaim_pages) luaC_reclaim(L);
   luaC_leavegc(L, &frame);
-  L->trace_assisting = 0;
+}
+
+/* Supply marking capacity even when applications stop allocating. This uses
+** the VM's existing safepoints, never another carrier or a retained driver.
+** One whole-object batch is the minimum slice; it owns no unpublished work
+** when the application resumes. */
+void luaC_polltrace (lua_State *L) {
+  LuaGCFrame frame;
+  if (!luaC_tracing(L) || !gcrunning(G(L)) || luaC_ingc(L) || L->reclaiming ||
+      L->world_depth != 0 || L->object_scopes != NULL ||
+      luaW_scope(L).heap != 0)
+    return;
+  luaC_entergc(L, &frame);
+  tracework(L, 1, 0);
+  if (luaC_retired(L) != NULL || L->reclaim_pages) luaC_reclaim(L);
+  luaC_leavegc(L, &frame);
 }
 
 
@@ -1729,7 +1754,7 @@ static void markold (global_State *g, GCObject *from, GCObject *to) {
 ** Finish a young-generation collection.
 */
 static void finishgencycle (lua_State *L, global_State *g) {
-  l_mem live = livebytes(g);
+  l_mem live = g->GCcyclelive;
   l_mem growth = applygcparam(g, MINORMUL, g->GCmajorlive);
   g->GCgoal = growth > MAX_LMEM - live ? MAX_LMEM : live + growth;
   correctgraylists(g);
@@ -1770,11 +1795,10 @@ static int checkminormajor (global_State *g) {
 }
 
 /*
-** Does a young collection. First, mark 'OLD1' objects. Then does the
-** atomic step. Then, check whether to continue in minor mode. If so,
-** sweep all lists and advance pointers. Finally, finish the collection.
+** Start a young collection by publishing 'OLD1' work. Its payloads and
+** subsequent phases use the same shared slices as a major collection.
 */
-static void youngcollection (lua_State *L, global_State *g) {
+static void startyoungcollection (lua_State *L, global_State *g) {
   lua_assert(g->gcstate == GCSpropagate);
   starttrace(L);
   if (g->firstold1) {  /* are there regular OLD1 objects? */
@@ -1783,8 +1807,6 @@ static void youngcollection (lua_State *L, global_State *g) {
   }
   markold(g, g->finobj, g->finobjrold);
   markold(g, g->tobefnz, NULL);
-
-  atomic(L);
 }
 
 static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
@@ -1954,6 +1976,7 @@ static int checkmajorminor (lua_State *L, global_State *g) {
 */
 static void entersweep (lua_State *L) {
   global_State *g = G(L);
+  g->GCcyclelive = livebytes(g);
   g->gcstate = GCSswpallgc;
   lua_assert(g->sweepgc == NULL);
   g->sweepgc = sweeptolive(L, &g->allgc);
@@ -1980,6 +2003,15 @@ static void deletelist (lua_State *L, GCObject *p, GCObject *limit) {
 void luaC_freeallobjects (lua_State *L) {
   global_State *g = G(L);
   g->gcstp = GCSTPCLS;  /* no extra finalizers after here */
+  if (luaC_tracing(L)) {
+    lu_byte emergency = g->gcemergency;
+    /* An automatic slice has no suspended driver to finish at shutdown.
+    ** Join its graph work without running finalizers or releasing the world;
+    ** the complete finalization list is separated below. */
+    g->gcemergency = 1;
+    atomic(L);
+    g->gcemergency = emergency;
+  }
   luaC_changemode(L, KGC_INC);
   separatetobefnz(g, 1);  /* separate all objects with finalizers */
   lua_assert(g->finobj == NULL);
@@ -2023,6 +2055,7 @@ void luaC_finishtrace (lua_State *L) {
   l_mem marked = g->trace_plan.base_marked;
   lua_assert(L->world_depth != 0 && luaC_tracing(L));
   luaS_clearcache(g);
+  g->GCcyclelive = livebytes(g);
   endtrace(L);
   g->trace_plan.finish = 0;
   g->currentwhite = cast_byte(otherwhite(g));  /* flip current white */
@@ -2042,31 +2075,67 @@ void luaC_finishtrace (lua_State *L) {
 
 /* Only scalar tickets and ownership scopes survive a scheduler poll. Every
 ** graph cursor is shared, so another execution can finish this very job. */
-static int atomic (lua_State *L) {
+static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
   global_State *g = G(L);
   uint64_t epoch = g->trace_epoch;
+  lu_mem worked = 0;
   if (g->gcemergency || L->object_scopes != NULL || luaW_scope(L).heap != 0) {
+    /* These callers may borrow mutable storage which cannot cross admission.
+    ** Emergency retries must finish before their allocator resumes. */
     while (luaC_tracing(L) && g->trace_epoch == epoch) {
       luaC_advancetrace(L);
       if (!luaC_tracing(L) || g->trace_epoch != epoch) break;
-      luaC_tracebatch(L, 64);
+      luaC_tracebatch(L, LUA_TRACE_BATCH);
     }
   }
   else {
     LuaWorldScope scope;
-    luaC_advancetrace(L);  /* publish the initial roots before admission */
-    g->gcstopem = 0;
+    if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE) &&
+        g->trace_plan.finish != 0)
+      luaC_advancetrace(L);
+    if (L->world_depth != 0) g->gcstopem = 0;
     scope = luaW_suspend(L);
     while (luaC_tracing(L) && g->trace_epoch == epoch) {
-      if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))
+      lu_mem done;
+      if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE) &&
+          g->trace_plan.finish != 0)
         luaC_advancetrace(L);
       if (!luaC_tracing(L) || g->trace_epoch != epoch) break;
-      luaC_tracebatch(L, 64);
+      done = luaC_tracebatch(L, LUA_TRACE_BATCH);
+      worked = done > cast(lu_mem, MAX_LMEM) - worked
+        ? cast(lu_mem, MAX_LMEM) : worked + done;
+      if (!complete && (worked >= budget || done == 0)) {
+        /* The last publisher also services termination. Deferring an empty
+        ** job until another allocation slice would retain every black object
+        ** allocated in that gap and inflate the following cycle's live base. */
+        if (luaC_tracing(L) && g->trace_epoch == epoch &&
+            g->trace_plan.finish != 0 &&
+            !__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))
+          luaC_advancetrace(L);
+        break;
+      }
       luaX_pollrequests(L);
       luaQ_poll(L);
+      if (done == 0) {
+        luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+        if (luaC_tracing(L) &&
+            __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE))
+          luaW_waitcollector(L);
+        luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+      }
     }
     luaW_restore(L, scope, L->native_depth);
   }
+  if (g->trace_epoch == epoch && L->assist_epoch ==
+      __atomic_load_n(&g->world.work_epoch, __ATOMIC_ACQUIRE))
+    L->trace_debt = worked >= L->trace_debt ? 0 : L->trace_debt - worked;
+  return worked;
+}
+
+static int atomic (lua_State *L) {
+  global_State *g = G(L);
+  uint64_t epoch = g->trace_epoch;
+  tracework(L, cast(lu_mem, MAX_LMEM), 1);
   return g->trace_epoch == epoch;
 }
 
@@ -2157,7 +2226,9 @@ static l_mem singlestep (lua_State *L, int fast) {
       else {  /* no more finalizers or emergency mode or not enough stack
                  to run finalizers */
         g->gcstate = GCSpause;  /* finish collection */
-        g->GCgoal = applygcparam(g, PAUSE, livebytes(g));
+        /* Allocations made after marking already consume the next cycle's
+        ** allowance. They must not enlarge its live base before being traced. */
+        g->GCgoal = applygcparam(g, PAUSE, g->GCcyclelive);
         stepresult = step2pause;
       }
       break;
@@ -2206,6 +2277,15 @@ static void incstep (lua_State *L, global_State *g, l_mem debt) {
     work2do = applygcparam(g, STEPMUL, allocated / cast_int(sizeof(void*)));
   }
   do {  /* repeat until enough work */
+    if (!fast && luaC_tracing(L)) {
+      uint64_t epoch = g->trace_epoch;
+      lu_mem budget = work2do > MAX_LMEM / cast_int(sizeof(void*))
+        ? cast(lu_mem, MAX_LMEM)
+        : cast(lu_mem, work2do * cast_int(sizeof(void*)));
+      tracework(L, budget, 0);
+      if (g->trace_epoch != epoch || g->gckind == KGC_GENMINOR) return;
+      break;
+    }
     stres = singlestep(L, fast);  /* perform one single step */
     if (stres == stepinterrupted) return;
     if (stres == step2minor)  /* returned to minor collections? */
@@ -2214,7 +2294,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt) {
       break;  /* end of cycle or atomic */
     else
       work2do -= stres;
-  } while (fast || work2do > 0 || luaC_tracing(L));
+  } while (fast || work2do > 0);
   if (g->gcstate == GCSpause)
     setidledebt(g);
   else
@@ -2236,7 +2316,7 @@ void luaC_step (lua_State *L) {
   int reclaim = 0;
   int claimed = 0;
   l_mem debt;
-  if (luaC_tracing(L)) { luaC_waittrace(L); return; }
+  if (luaC_tracing(L)) { luaC_assisttrace(L); return; }
   if (L->world_depth == 0 &&
       (L->object_scopes != NULL || luaW_scope(L).heap != 0)) return;
   if ((!gcrunning(g) && !luaC_ingc(L)) || !luaC_needstep(L)) return;
@@ -2280,11 +2360,18 @@ void luaC_step (lua_State *L) {
       reclaim = !luaC_tracing(L) &&
                 (g->gcstate == GCSpause || g->gckind == KGC_GENMINOR);
       break;
-    case KGC_GENMINOR:
-      youngcollection(L, g);
-      setidledebt(g);
+    case KGC_GENMINOR: {
+      l_mem budget = applygcparam(g, STEPMUL,
+                        applygcparam(g, STEPSIZE, 100));
+      uint64_t epoch;
+      startyoungcollection(L, g);
+      epoch = g->trace_epoch;
+      tracework(L, cast(lu_mem, budget), budget == 0);
+      if (g->trace_epoch != epoch) break;
+      if (!luaC_tracing(L)) setidledebt(g);
       reclaim = !luaC_tracing(L);
       break;
+    }
   }
   luai_tracegc(L, 0);  /* for internal debugging */
   /* Retiring all allocation caches and scanning every page belongs to a

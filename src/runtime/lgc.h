@@ -281,9 +281,13 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
     (__atomic_load_n(&G(L)->world.reclaimers, __ATOMIC_ACQUIRE) != NULL)
 #define luaC_needassist(L) \
     ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
+#define luaC_markpressure(L) \
+    (__atomic_load_n(&G(L)->GCmarkdebt, __ATOMIC_RELAXED) <= \
+     -(L)->allocation_debt)
 #define luaC_needtraceassist(L) \
-    ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && !(L)->trace_assisting && \
-     !(L)->reclaiming && luaC_tracing(L))
+    (luaC_tracing(L) && gcrunning(G(L)) && \
+     !(L)->reclaiming && \
+     ((L)->trace_debt >= LUA_GC_ASSIST_BYTES || luaC_markpressure(L)))
 
 #define luaC_condGC(L,pre,pos) \
     { if (!luaC_ingc(L)) { \
@@ -291,7 +295,7 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
       else { \
         if (gcrunning(G(L)) && luaC_needassist(L)) \
           { pre; luaC_assistreclaim(L); pos; } \
-        if (gcrunning(G(L)) && luaC_needstep(L) && \
+        if (!luaC_tracing(L) && gcrunning(G(L)) && luaC_needstep(L) && \
           ((L)->world_depth != 0 || \
            !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED))) \
           { pre; luaC_step(L); pos; } } \
@@ -363,6 +367,7 @@ LUAI_FUNC void luaC_initialtrace (lua_State *L);
 LUAI_FUNC void luaC_finalizetrace (lua_State *L);
 LUAI_FUNC void luaC_finishtrace (lua_State *L);
 LUAI_FUNC void luaC_assisttrace (lua_State *L);
+LUAI_FUNC void luaC_polltrace (lua_State *L);
 /* Caller owns the table. Resolve the current weak cutoff before publishing
 ** a result or deciding whether an entry exists. New stores shade both edges. */
 LUAI_FUNC void luaC_prepareweak (lua_State *L, Table *table);

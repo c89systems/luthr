@@ -374,7 +374,6 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->barrier_forward = L->barrier_back = NULL;
   L->trace_snapshot = 0;
   L->trace_trimmed = 0;
-  L->trace_assisting = 0;
   L->trace_bytes = 0;
   L->building_protos = NULL;
   L->retired = L->retired_tail = NULL;
@@ -383,6 +382,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->reclaim_workers = 0;
   L->reclaim_registered = 0;
   L->assist_debt = 0;
+  L->trace_debt = 0;
   L->assist_epoch = 0;
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
@@ -667,6 +667,8 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCretired = 0;
   g->GCmajorlive = sizeof(global_State);
   g->GCgoal = sizeof(global_State);
+  g->GCcyclelive = sizeof(global_State);
+  g->GCmarkdebt = 0;
   g->gcstep_pending = 0;
   g->trace_active = g->trace_epoch = g->trace_busy = 0;
   g->trace_weakcutoff = 0;

@@ -13,7 +13,7 @@
   X(collector_body_ns) X(collector_disabled_ns) \
   X(coordination_ns) X(stop_request_ns) X(resume_ns) \
   X(stopped_ns) X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
-  X(trace_assist_calls) X(trace_waits) X(trace_wait_ns) \
+  X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
   X(root_snapshot_calls) X(root_snapshot_ns) \
   X(heap_entries) X(heap_gc_entries) X(heap_contended_entries) X(heap_gc_wait_ns) \
   X(quiesce_waits) X(quiesce_wait_ns) X(metadata_waits) X(metadata_wait_ns) \

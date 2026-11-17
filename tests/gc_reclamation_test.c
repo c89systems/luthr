@@ -1,5 +1,6 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
 #include <lualib.h>
@@ -25,9 +26,25 @@ struct fixture {
   unsigned allocator_active;
   int entered, release, detached, freed, done;
   int handshake, waiting, observed;
-  int assist, assisted;
+  int assist, assisted, trace, trace_assisted, unwind, interrupt;
 };
 static struct fixture *active;
+
+void __real_luaQ_poll(lua_State *);
+void __wrap_luaQ_poll(lua_State *L) {
+  if (active != NULL && active->interrupt && L == active->worker &&
+      L->reclaiming) {
+    active->interrupt = 0;
+    luaD_throw(L, LUA_ERRRUN);
+  }
+  __real_luaQ_poll(L);
+}
+
+static void interrupted_reclaim(lua_State *L, void *unused) {
+  (void)unused;
+  luaC_assistreclaim(L);
+  require(0);
+}
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
@@ -88,8 +105,11 @@ void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
   int watched = fixture != NULL && block != NULL &&
                 block == __atomic_load_n(&fixture->target, __ATOMIC_ACQUIRE);
   if (fixture != NULL && fixture->assist && block != NULL &&
-      L == fixture->worker && L->reclaiming)
+      L == fixture->worker && L->reclaiming) {
     fixture->assisted++;
+    if (luaC_tracing(L))
+      fixture->trace_assisted++;
+  }
   if (watched) {
     require(L == fixture->collector && L->reclaiming);
     require(L->world_depth == 0 && luaW_scope(L).heap == 0);
@@ -159,7 +179,10 @@ int main(int argc, char **argv) {
   require(generational || strcmp(argv[2], "incremental") == 0);
   fixture.detached = strcmp(argv[1], "collect_again") == 0;
   fixture.handshake = strcmp(argv[1], "handshake") == 0;
-  fixture.assist = strcmp(argv[1], "assist") == 0;
+  fixture.trace = strcmp(argv[1], "assist_trace") == 0;
+  fixture.unwind = strcmp(argv[1], "assist_unwind") == 0;
+  fixture.assist =
+      fixture.trace || fixture.unwind || strcmp(argv[1], "assist") == 0;
   /* Automatic tracing can now overlap older destruction too. Model the held
    * allocator wait as withdrawn participation, just like collect_again. */
   if (fixture.assist)
@@ -183,6 +206,10 @@ int main(int argc, char **argv) {
     for (i = 0; i < 9; i++)
       require(luaL_dostring(fixture.main, garbage) == LUA_OK);
   }
+  if (fixture.trace)
+    require(luaL_dostring(fixture.main,
+                          "local head; for i=1,50000 do head={head} end; "
+                          "retained_chain=head") == LUA_OK);
   /* Preserve traversal order: this newest object enters the first private
    * batch, with coroutine, capture, prototype and string garbage still queued.
    */
@@ -200,15 +227,42 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
   require(__atomic_load_n(&G(fixture.main)->GCretired, __ATOMIC_RELAXED) > 0);
   if (fixture.assist) {
+    if (fixture.trace)
+      lua_gc(fixture.worker, LUA_GCINC);
     lua_lock(fixture.worker);
-    fixture.worker->assist_debt = MAX_LMEM;
+    if (fixture.trace) {
+      luaW_stop(fixture.worker);
+      luaC_runtilstate(fixture.worker, GCSpropagate, 1);
+      G(fixture.worker)->GCmarkdebt = MAX_LMEM;
+      luaW_start(fixture.worker);
+      require(luaC_tracing(fixture.worker));
+    }
+    fixture.worker->assist_debt =
+        fixture.trace ? LUA_GC_ASSIST_BYTES : MAX_LMEM;
     fixture.worker->assist_epoch = G(fixture.worker)->world.work_epoch;
-    luaC_assistreclaim(fixture.worker);
+    if (fixture.unwind) {
+      unsigned before;
+      fixture.interrupt = 1;
+      require(luaD_rawrunprotected(fixture.worker, interrupted_reclaim, NULL) ==
+              LUA_ERRRUN);
+      require(!fixture.worker->reclaiming && fixture.worker->native_depth == 0);
+      before = (unsigned)fixture.assisted;
+      fixture.worker->assist_debt = MAX_LMEM;
+      luaC_assistreclaim(fixture.worker);
+      require((unsigned)fixture.assisted > before);
+    }
+    if (fixture.trace) {
+      fixture.worker->trace_debt = LUA_GC_ASSIST_BYTES;
+      luaC_assisttrace(fixture.worker);
+      require(fixture.trace_assisted != 0 && luaC_tracing(fixture.worker));
+    } else
+      luaC_assistreclaim(fixture.worker);
     lua_unlock(fixture.worker);
     /* All shared work is gone; only the deliberately held claim remains.
      * Assistance must return and allow ordinary allocation to continue. */
-    require(fixture.collector->retired == NULL &&
-            fixture.collector->reclaim_workers == 1);
+    if (!fixture.trace)
+      require(fixture.collector->retired == NULL &&
+              fixture.collector->reclaim_workers == 1);
   }
   /* This must finish while destruction is held, including backing allocation,
    * shared string interning and ordinary Lua execution on another carrier. */
