@@ -22,6 +22,8 @@ typedef struct LuaWorld {
   LuaOwner collector;
   LuaOwner heap_owner;
   LuaWaiter *waiters;
+  struct LuaHeapWaiter *heap_head;
+  struct LuaHeapWaiter **heap_tail;
   LuaParticipation *participants;
   unsigned heap_depth;
   int stopped;

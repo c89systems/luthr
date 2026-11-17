@@ -1878,45 +1878,38 @@ static void incstep (lua_State *L, global_State *g) {
 #endif
 
 /*
-** Performs a basic GC step if collector is running. (If collector was
-** stopped by the user, set a reasonable debt to avoid it being called
-** at every single check.)
+** Performs a basic GC step while collection is enabled. Explicit API steps
+** temporarily enable collection while already owning the collector.
 */
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
   int reclaim = 0;
-  if (!luaC_needstep(L)) return;
+  if (!gcrunning(g) || !luaC_needstep(L)) return;
   /* Another collector can service this request while metadata access waits.
   ** Revalidate under metadata ownership before requesting global quiescence.
   ** Include unpublished local debt, just like the allocation-side check.
   ** Explicit API steps set their debt while already owning the collector. */
   luaW_heapenter(L);
-  if (!luaC_needstep(L)) {
+  if (!gcrunning(g) || !luaC_needstep(L)) {
     luaW_heapleave(L);
     return;
   }
   luaW_stop(L);
   luaW_heapleave(L);  /* retain exactly the ownership acquired by luaW_stop */
   lua_assert(!g->gcemergency);
-  if (!gcrunning(g)) {  /* not running? */
-    if (g->gcstp & GCSTPUSR)  /* stopped by the user? */
-      luaE_setdebt(g, 20000);
+  luai_tracegc(L, 1);  /* for internal debugging */
+  switch (g->gckind) {
+    case KGC_INC: case KGC_GENMAJOR:
+      incstep(L, g);
+      reclaim = g->gcstate == GCSpause || g->gckind == KGC_GENMINOR;
+      break;
+    case KGC_GENMINOR:
+      youngcollection(L, g);
+      setminordebt(g);
+      reclaim = 1;
+      break;
   }
-  else {
-    luai_tracegc(L, 1);  /* for internal debugging */
-    switch (g->gckind) {
-      case KGC_INC: case KGC_GENMAJOR:
-        incstep(L, g);
-        reclaim = g->gcstate == GCSpause || g->gckind == KGC_GENMINOR;
-        break;
-      case KGC_GENMINOR:
-        youngcollection(L, g);
-        setminordebt(g);
-        reclaim = 1;
-        break;
-    }
-    luai_tracegc(L, 0);  /* for internal debugging */
-  }
+  luai_tracegc(L, 0);  /* for internal debugging */
   /* Retiring all allocation caches and scanning every page belongs to a
   ** completed collection, not each marking/partial-sweep step. Emergency and
   ** explicit full collections still reclaim before retrying an allocation. */

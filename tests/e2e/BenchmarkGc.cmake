@@ -64,7 +64,7 @@ foreach(key IN ITEMS target config compiler samples warmups tasks work_divisor)
 endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 string(JSON metadata SET "${metadata}" notes
-  "\"Counters are invocation-local. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body excludes coordination and page reclamation. Stopped disables automatic collection, not GC dispatch or explicit steps. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
+  "\"Counters are invocation-local. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body excludes coordination and page reclamation. Stopped disables automatic collection; counters measure remaining coordination. Explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)
   file(SHA256 "${${input}}" digest)
   string(JSON metadata SET "${metadata}" "${input}_sha256" "\"${digest}\"")

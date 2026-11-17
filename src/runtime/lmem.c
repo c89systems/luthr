@@ -320,8 +320,16 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
     : page->bytes < ALLOC_PAGE_MAX ? page->bytes * 2 : ALLOC_PAGE_MAX;
   /* Copy the growth hint before metadata admission can collect the old page.
   ** Cold bins remain small; hot bins amortize serialized backing allocation. */
-  allocationcache(L)[pool] = NULL;
   luaW_heapenter(L);
+  /* Admission can park and borrow a different slot. Its cache may already
+  ** have been refilled, so retain usable pages instead of overwriting them. */
+  page = allocationcache(L)[pool];
+  if (page != NULL) {
+    size_t grown;
+    if (__atomic_load_n(&page->free, __ATOMIC_ACQUIRE) != NULL) goto ready;
+    grown = page->bytes < ALLOC_PAGE_MAX ? page->bytes * 2 : ALLOC_PAGE_MAX;
+    if (grown > bytes) bytes = grown;
+  }
   page = availablepage(L, pool);
   if (page == NULL) {
     page = cast(LuaAllocPage *, firsttry(g, NULL, 0, bytes));

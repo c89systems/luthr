@@ -36,6 +36,8 @@ typedef struct LuaExecution {
   void (*native_leave)(struct LuaExecution *, lua_State *);
   void (*native_restore)(struct LuaExecution *, lua_State *, unsigned);
   void (*poll)(struct LuaExecution *, lua_State *);
+  /* Owner-local request only: no allocation, Lua entry or stack switch. */
+  void (*request_handoff)(struct LuaExecution *, lua_State *);
   /* wait releases the supplied mutex and returns unlocked after notification
   ** removes its registration. wake only arranges resumption; it cannot enter
   ** Lua or switch the calling stack. */
@@ -109,6 +111,7 @@ LUAI_FUNC void luaQ_endcall (lua_State *, LuaCallScope *);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,
                                   unsigned depth);
 LUAI_FUNC void luaQ_poll (lua_State *L);
+LUAI_FUNC void luaQ_requesthandoff (lua_State *L);
 /* Bounded CPU work in trusted C helpers. Call outside state/object ownership;
 ** all borrowed Lua values must remain rooted across this migration point.
 ** Initialize the caller-local counter to zero. Does not charge bytecode fuel. */

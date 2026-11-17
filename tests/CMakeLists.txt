@@ -67,12 +67,13 @@ set_target_properties(scheduler_test PROPERTIES C_STANDARD 99)
 target_compile_options(scheduler_test PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
 target_link_libraries(scheduler_test PRIVATE luthr_static)
 target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
+  -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=pthread_mutex_init
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
   -Wl,--wrap=mprotect -Wl,--wrap=munmap)
 foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational
     native shutdown yield saturation cancel_admission startup_failures callback_progress
-    parked cancel_parked idle_notifications idle_affinity)
+    parked cancel_parked idle_notifications idle_affinity metadata_progress)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
   set_tests_properties(scheduler_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -112,8 +113,10 @@ target_link_libraries(memory_publication_test PRIVATE luthr_static)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_free_)
+target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
 foreach(case IN ITEMS no_requests stack_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
-    totals construction weak_resize incremental generational page_growth page_cap page_isolation)
+    totals construction weak_resize incremental generational page_growth page_cap page_isolation
+    metadata_handoff metadata_spurious metadata_collect metadata_contention stopped_gc refill_recheck)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
   set_tests_properties(memory_publication_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

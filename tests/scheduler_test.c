@@ -34,6 +34,8 @@ struct fixture {
   unsigned finalized;
   unsigned native_callback_done;
   unsigned idle_entries, host_channel_entries;
+  lua_State *metadata_peer;
+  unsigned metadata_held, metadata_queued;
   size_t live;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
@@ -45,6 +47,20 @@ static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
 static pthread_t idle_host;
+
+void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
+                      LuaWaiter **);
+void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
+                      pthread_cond_t *changed, LuaWaiter **waiters) {
+  if (fixture != NULL && L == fixture->metadata_peer &&
+      mutex == &G(L)->world.mutex) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->metadata_queued = 1;
+    luaQ_wake(&fixture->changed, &fixture->waiters);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
+  __real_luaQ_wait(L, mutex, changed, waiters);
+}
 
 int __real_pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
 int __wrap_pthread_cond_wait(pthread_cond_t *condition,
@@ -218,6 +234,63 @@ static lua_Integer collect(struct fixture *f, unsigned i, int expected) {
   lua_pop(f->main, 1);
   require(luaSC_collect(f->main, task, &status, &results) == LUA_TK_COLLECTED);
   return value;
+}
+
+static int metadata_owner(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_lock(L);
+  luaW_heapenter(L);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->metadata_held = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  /* Keep ownership while the peer queues; this controlled internal wait
+   * releases the sole execution slot without running a GC-dependent action. */
+  while (!f->metadata_queued)
+    luaQ_wait(L, &f->mutex, &f->changed, &f->waiters);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  luaW_heapleave(L);
+  lua_unlock(L);
+  return 0;
+}
+
+static int metadata_need(lua_State *L) {
+  lua_lock(L);
+  luaW_heapenter(L);
+  luaW_heapleave(L);
+  lua_unlock(L);
+  return 0;
+}
+
+static void metadata_progress(struct fixture *f) {
+  lua_State *owner, *peer;
+  init(f, 1);
+  f->scheduler.config.quantum_polls = 1000000;
+  managed(f->main, "metadata_owner", metadata_owner);
+  managed(f->main, "metadata_need", metadata_need);
+  lua_pushboolean(f->main, 0);
+  lua_setglobal(f->main, "metadata_ready");
+  owner = lua_newthread(f->main);
+  peer = lua_newthread(f->main);
+  require(luaL_loadstring(
+              owner, "metadata_owner(); "
+                     "for i=1,2000000 do "
+                     "if metadata_ready then return 1 end end; "
+                     "error('metadata recipient did not progress')") == LUA_OK);
+  require(
+      luaL_loadstring(peer, "metadata_need(); metadata_ready=true; return 2") ==
+      LUA_OK);
+  f->metadata_peer = peer;
+  lua_gc(f->main, LUA_GCSTOP);
+  require(luaSC_submit(&f->scheduler, &f->tasks[0], owner, 0) == 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->metadata_held)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(luaSC_submit(&f->scheduler, &f->tasks[1], peer, 0) == 0);
+  require(collect(f, 0, LUA_OK) == 1);
+  require(collect(f, 1, LUA_OK) == 2);
+  f->metadata_peer = NULL;
+  finish(f);
 }
 
 static int started(lua_State *L) {
@@ -688,6 +761,8 @@ int main(int argc, char **argv) {
     fairness(f, 2, 1);
   else if (strcmp(argv[1], "no_requests") == 0)
     no_requests(f);
+  else if (strcmp(argv[1], "metadata_progress") == 0)
+    metadata_progress(f);
   else if (strcmp(argv[1], "early_incremental") == 0)
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)

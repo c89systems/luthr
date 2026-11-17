@@ -115,9 +115,9 @@ objects and does not change the collector. Raw samples, medians and input hashes
 are saved under `build/<target>/<config>/benchmarks/gc/`. The workloads separate
 integer work, live tables and short-lived allocations at 1/2/4/8 managed slots.
 Both collectors run with automatic collection enabled and stopped. The stopped
-control retains GC dispatch, barriers and metadata coordination; it is not a
-zero-coordination configuration. Peak memory is recorded because collection is
-stopped only during the bounded timed workload.
+control measures remaining barriers and metadata coordination; it is not a
+zero-coordination configuration. Explicit GC requests still run. Peak memory is
+recorded because collection is stopped only during the bounded timed workload.
 
 Probe counters are invocation-local, including across carrier movement.
 Collector-body time excludes coordination and page reclamation. Coordination

@@ -13,6 +13,13 @@
 #include "lstate.h"
 #include "lworld.h"
 
+typedef struct LuaHeapWaiter {
+  struct LuaHeapWaiter *next;
+  void *owner;
+  LuaWaiter *waiters;
+  pthread_cond_t changed;
+} LuaHeapWaiter;
+
 int luaW_init (LuaWorld *world) {
   int status;
   world->ready = world->stopped = 0;
@@ -20,6 +27,8 @@ int luaW_init (LuaWorld *world) {
   world->heap_owner.token = world->collector.token = NULL;
   world->participants = NULL;
   world->waiters = NULL;
+  world->heap_head = NULL;
+  world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
   if (status != 0)
     return status;
@@ -34,7 +43,8 @@ int luaW_init (LuaWorld *world) {
 
 void luaW_destroy (LuaWorld *world) {
   lua_assert(world->ready && !world->stopped && world->participants == NULL &&
-             world->heap_depth == 0 && world->waiters == NULL);
+             world->heap_depth == 0 && world->waiters == NULL &&
+             world->heap_head == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
@@ -180,21 +190,30 @@ void luaW_heapenter (lua_State *L) {
   }
   else {
     if (world->heap_depth != 0 || world->stopped) {
+      LuaHeapWaiter wait = {NULL, NULL, NULL, PTHREAD_COND_INITIALIZER};
       lua_assert(L->world_depth == 0 &&
         __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
       L->native_depth++;
       L->heap_waiting++;
+      wait.owner = luaQ_ownertoken();
+      *world->heap_tail = &wait;
+      world->heap_tail = &wait.next;
       luaW_deactivate(L);
       luaQ_wake(&world->changed, &world->waiters);
-      do {
-        luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-      } while (world->heap_depth != 0 || world->stopped);
+      while (!luaQ_isowner(&world->heap_owner))
+        luaQ_wait(L, &world->mutex, &wait.changed, &wait.waiters);
+      /* Ownership is reserved directly for this recipient. Fresh arrivals
+      ** cannot steal it while its saved stack waits for execution capacity. */
+      lua_assert(world->heap_depth == 1 && !world->stopped);
+      luaX_checksync(pthread_cond_destroy(&wait.changed));
       luaW_activate(L);
       L->heap_waiting--;
       L->native_depth--;
     }
-    world->heap_depth = 1;
-    luaQ_setowner(&world->heap_owner);
+    else {
+      world->heap_depth = 1;
+      luaQ_setowner(&world->heap_owner);
+    }
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -205,8 +224,18 @@ void luaW_heapleave (lua_State *L) {
   lua_assert(world->heap_depth != 0 &&
              luaQ_isowner(&world->heap_owner));
   if (--world->heap_depth == 0) {
-    __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
-    luaQ_wake(&world->changed, &world->waiters);
+    LuaHeapWaiter *next = world->heap_head;
+    if (next == NULL)
+      __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
+    else {
+      world->heap_head = next->next;
+      if (world->heap_head == NULL) world->heap_tail = &world->heap_head;
+      world->heap_depth = 1;
+      __atomic_store_n(&world->heap_owner.token, next->owner, __ATOMIC_RELEASE);
+      if (next->waiters != NULL && next->waiters->execution != NULL)
+        luaQ_requesthandoff(L);
+      luaQ_wake(&next->changed, &next->waiters);
+    }
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }

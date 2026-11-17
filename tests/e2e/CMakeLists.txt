@@ -153,6 +153,11 @@ foreach(collector IN ITEMS incremental generational)
       LABELS "runtime;benchmark;parallel;memcheck;gc_profile" TIMEOUT 30)
   endforeach()
 endforeach()
+add_test(NAME gc_probe_fanout COMMAND scheduled_gc_profile
+  "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" independent_tables
+  incremental 8 1 32 5000 1 0 0)
+set_tests_properties(gc_probe_fanout PROPERTIES
+  LABELS "runtime;benchmark;parallel;memcheck;gc_profile" TIMEOUT 30)
 add_custom_target(benchmark_scheduler
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
     "${CMAKE_COMMAND}" ${scheduled_arguments}

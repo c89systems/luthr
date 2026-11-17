@@ -363,6 +363,21 @@ static void wakework (LuaScheduler *s, int all) {
   }
 }
 
+static void requesthandoff (LuaExecution *execution, lua_State *L) {
+  LuaScheduledTask *task = execution->context;
+  LuaScheduler *s = task->scheduler;
+  unsigned i;
+  if (task->slot != NULL) {
+    /* A free slot can run the recipient without preempting useful work.
+    ** Only shorten this owner's quantum when every managed slot is busy. */
+    for (i = 0; i < s->config.slots; i++)
+      if (__atomic_load_n(&s->slots[i].owner, __ATOMIC_RELAXED) == NULL)
+        return;
+    task->polls = 1;
+    L->poll_remaining = 1;  /* defer until initialized values are published */
+  }
+}
+
 static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
@@ -688,6 +703,7 @@ static void configureexecution (LuaScheduler *s, LuaScheduledTask *task) {
   execution->native_leave = nativeleave;
   execution->native_restore = nativerestore;
   execution->poll = poll;
+  execution->request_handoff = requesthandoff;
   execution->wait = resourcewait;
   execution->wake = resourcewake;
   execution->pin_carrier = pincarrier;

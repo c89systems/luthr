@@ -39,6 +39,17 @@ struct allocator {
   int deny;
 };
 
+struct metadata_handoff {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  pthread_cond_t *first_condition;
+  lua_State *states[2];
+  unsigned waits[2], order[2], count;
+  int grant, first_returned, release_first, second_arrived, collect;
+};
+static struct metadata_handoff *metadata;
+static lua_State *frame_refill_probe;
+
 static struct handoff *handoff;
 static LuaWorld *watched;
 static pthread_mutex_t *watched_gate;
@@ -57,6 +68,20 @@ void __real_luaW_enter(lua_State *state);
 void __real_luaW_leave(LuaWorld *world, LuaParticipation *participant);
 void __real_luaX_poll(lua_State *state);
 void __real_luaM_free_(lua_State *state, void *block, size_t size);
+void __real_luaW_heapenter(lua_State *state);
+
+void __wrap_luaW_heapenter(lua_State *state) {
+  if (state == frame_refill_probe) {
+    CallInfo *frame;
+    /* Populate the cache after the outer refill chose to seek admission.
+     * This models another task using its slot while that admission parks. */
+    frame_refill_probe = NULL;
+    frame = luaM_newframe(state);
+    require(frame != NULL);
+    luaM_free_(state, frame, sizeof(*frame));
+  }
+  __real_luaW_heapenter(state);
+}
 
 void __wrap_luaM_free_(lua_State *state, void *block, size_t size) {
   if (resize_probe.armed && state == resize_probe.owner &&
@@ -76,6 +101,19 @@ void __real_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
 
 void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
+  struct metadata_handoff *fixture = metadata;
+  int index = role - 4;
+  if (fixture != NULL && index >= 0 && index < 2 &&
+      mutex == &G(state)->world.mutex) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->waits[index]++;
+    if (index == 0)
+      fixture->first_condition = changed;
+    else
+      fixture->second_arrived = 1;
+    require(pthread_cond_broadcast(&fixture->changed) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
   if (role == 3 && mutex == &G(handoff->target)->world.mutex) {
     require(pthread_mutex_lock(&handoff->mutex) == 0);
     handoff->entered = 1;
@@ -83,6 +121,21 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
     require(pthread_mutex_unlock(&handoff->mutex) == 0);
   }
   __real_luaQ_wait(state, mutex, changed, waiters);
+  if (fixture != NULL && index == 0 && mutex == &G(state)->world.mutex) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    if (fixture->grant && !fixture->first_returned) {
+      /* Delay the selected recipient before it tests ownership. A fresh
+       * entrant must not take the grant while this recipient is delayed. */
+      fixture->first_returned = 1;
+      require(pthread_cond_broadcast(&fixture->changed) == 0);
+      require(pthread_mutex_unlock(mutex) == 0);
+      while (!fixture->release_first)
+        require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
+      require(pthread_mutex_unlock(&fixture->mutex) == 0);
+      require(pthread_mutex_lock(mutex) == 0);
+    } else
+      require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
 }
 
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
@@ -542,6 +595,26 @@ static void page_isolation(void) {
   free(objects);
 }
 
+static void refill_recheck(void) {
+  struct allocator allocator = {0};
+  lua_State *state = lua_newstate(allocate, &allocator, 0);
+  CallInfo *frame;
+  require(state != NULL && state->nci == 0);
+  lua_gc(state, LUA_GCCOLLECT); /* no retained frames: the frame pool is cold */
+  allocator.cap = allocator.live + 4096;
+  allocator.failures = 0;
+  luaX_lockstate(state);
+  frame_refill_probe = state;
+  frame = luaM_newframe(state);
+  require(frame != NULL && frame_refill_probe == NULL);
+  require(allocator.failures == 0);
+  luaM_free_(state, frame, sizeof(*frame));
+  luaX_unlockstate(state);
+  allocator.cap = 0;
+  lua_close(state);
+  require(allocator.live == 0);
+}
+
 static size_t counted(lua_State *state) {
   size_t kib = (size_t)lua_gc(state, LUA_GCCOUNT);
   return kib * 1024 + (size_t)lua_gc(state, LUA_GCCOUNTB);
@@ -853,6 +926,141 @@ static void weak_resize(lua_State *state) {
   require(resize_probe.finalized == 2);
 }
 
+static void metadata_order(struct metadata_handoff *fixture, unsigned index) {
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  require(fixture->count < 2);
+  fixture->order[fixture->count++] = index;
+  if (index == 1)
+    fixture->second_arrived = 1;
+  require(pthread_cond_broadcast(&fixture->changed) == 0);
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
+}
+
+static void *metadata_worker(void *context) {
+  unsigned index = (unsigned)(uintptr_t)context;
+  struct metadata_handoff *fixture = metadata;
+  lua_State *state = fixture->states[index];
+  role = (int)index + 4;
+  if (index == 1 && fixture->collect) {
+    require(lua_gc(state, LUA_GCCOLLECT) == 0);
+    metadata_order(fixture, index);
+  } else {
+    luaX_lockstate(state);
+    luaW_heapenter(state);
+    metadata_order(fixture, index);
+    luaW_heapleave(state);
+    luaX_unlockstate(state);
+  }
+  return NULL;
+}
+
+static void metadata_handoff(lua_State *state, int spurious, int collect) {
+  struct metadata_handoff fixture = {0};
+  pthread_t first, second;
+  int bypassed;
+  require(pthread_mutex_init(&fixture.mutex, NULL) == 0);
+  require(pthread_cond_init(&fixture.changed, NULL) == 0);
+  fixture.states[0] = lua_newthread(state);
+  fixture.states[1] = lua_newthread(state);
+  fixture.collect = collect;
+  metadata = &fixture;
+  luaX_lockstate(state);
+  luaW_heapenter(state);
+  require(pthread_create(&first, NULL, metadata_worker, (void *)(uintptr_t)0) ==
+          0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (fixture.waits[0] == 0)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  if (spurious) {
+    require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
+    require(pthread_cond_broadcast(fixture.first_condition) == 0);
+    require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    while (fixture.waits[0] < 2)
+      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  }
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  fixture.grant = 1;
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  luaW_heapleave(state);
+  luaX_unlockstate(state);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.first_returned)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_create(&second, NULL, metadata_worker,
+                         (void *)(uintptr_t)1) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.second_arrived)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  bypassed = fixture.count != 0;
+  fixture.release_first = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(first, NULL) == 0 && pthread_join(second, NULL) == 0);
+  metadata = NULL;
+  require(pthread_cond_destroy(&fixture.changed) == 0);
+  require(pthread_mutex_destroy(&fixture.mutex) == 0);
+  require(!bypassed && fixture.count == 2 && fixture.order[0] == 0 &&
+          fixture.order[1] == 1);
+}
+
+struct metadata_counter {
+  lua_State *state;
+  unsigned *value;
+};
+static void *metadata_increment(void *context) {
+  struct metadata_counter *counter = context;
+  for (unsigned i = 0; i < 1000; i++) {
+    luaX_lockstate(counter->state);
+    luaW_heapenter(counter->state);
+    ++*counter->value;
+    luaW_heapleave(counter->state);
+    luaX_unlockstate(counter->state);
+  }
+  return NULL;
+}
+static void metadata_contention(lua_State *state) {
+  struct metadata_counter counters[4];
+  pthread_t peers[4];
+  unsigned value = 0, i;
+  for (i = 0; i < 4; i++) {
+    counters[i].state = lua_newthread(state);
+    counters[i].value = &value;
+  }
+  for (i = 0; i < 4; i++)
+    require(pthread_create(&peers[i], NULL, metadata_increment, &counters[i]) ==
+            0);
+  for (i = 0; i < 4; i++)
+    require(pthread_join(peers[i], NULL) == 0);
+  require(value == 4000);
+}
+
+static void stopped_gc(lua_State *state) {
+  execute(state, "keep={}; for i=1,4000 do keep[i]={i} end");
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_gc(state, LUA_GCSTOP);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPSTEPMUL, 100);
+  luaX_lockstate(state);
+  luaE_setdebt(G(state), 0);
+  watched = &G(state)->world;
+  world_locks = 0;
+  measured++;
+  luaC_checkGC(state);
+  measured--;
+  require(world_locks == 0 && G(state)->gcstate == GCSpause);
+  watched = NULL;
+  luaX_unlockstate(state);
+  lua_gc(state, LUA_GCSTEP, (size_t)0);
+  require(lua_gc(state, LUA_GCISRUNNING) == 0);
+  luaX_lockstate(state);
+  require(G(state)->gcstate != GCSpause);
+  luaX_unlockstate(state);
+}
+
 int main(int argc, char **argv) {
   lua_State *state;
   require(argc == 2);
@@ -862,6 +1070,10 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "page_isolation") == 0) {
     page_isolation();
+    return 0;
+  }
+  if (strcmp(argv[1], "refill_recheck") == 0) {
+    refill_recheck();
     return 0;
   }
   if (strcmp(argv[1], "totals") == 0 ||
@@ -883,6 +1095,15 @@ int main(int argc, char **argv) {
     stack_admission(state);
   else if (strcmp(argv[1], "stack_contention") == 0)
     stack_contention(state);
+  else if (strcmp(argv[1], "metadata_contention") == 0)
+    metadata_contention(state);
+  else if (strcmp(argv[1], "metadata_handoff") == 0 ||
+           strcmp(argv[1], "metadata_spurious") == 0 ||
+           strcmp(argv[1], "metadata_collect") == 0)
+    metadata_handoff(state, strcmp(argv[1], "metadata_spurious") == 0,
+                     strcmp(argv[1], "metadata_collect") == 0);
+  else if (strcmp(argv[1], "stopped_gc") == 0)
+    stopped_gc(state);
   else if (strcmp(argv[1], "intern_hits") == 0)
     intern_hits(state);
   else if (strcmp(argv[1], "ordinary_operations") == 0)

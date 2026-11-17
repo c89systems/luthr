@@ -758,12 +758,13 @@ static int exercise_resource_wait(const char *name) {
     while (pool->stage != 1)
       wait_change(pool);
     unlock(pool);
+    /* Roots are published before outgoing context publication. Collect while
+     * still owning metadata: after handoff it belongs to the held recipient. */
+    luaC_fullgc(pool->main, 0);
+    require(pool->finalized == 0);
     luaW_heapleave(pool->main);
     luaX_unlockstate(pool->main);
-    /* Wake and collect while registration exists but context is not published.
-     */
-    (void)lua_gc(pool->main, LUA_GCCOLLECT);
-    require(pool->finalized == 0);
+    /* Notify while registration exists but context is not published. */
     lock(pool);
     require(pool->tasks[0].early_wakes != 0);
     pool->stage = 2;

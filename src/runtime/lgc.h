@@ -239,7 +239,7 @@
     (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
 
 #define luaC_condGC(L,pre,pos) \
-    { if (luaC_needstep(L)) \
+    { if (gcrunning(G(L)) && luaC_needstep(L)) \
           { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 

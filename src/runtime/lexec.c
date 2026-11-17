@@ -140,6 +140,12 @@ void luaQ_poll (lua_State *L) {
   }
 }
 
+void luaQ_requesthandoff (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  if (execution != NULL && execution->request_handoff != NULL)
+    execution->request_handoff(execution, L);
+}
+
 void luaQ_work (lua_State *L, unsigned *work) {
   luaQ_workn(L, work, 1);
 }
