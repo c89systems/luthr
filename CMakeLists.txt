@@ -68,7 +68,7 @@ add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
 add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 
 set(lua_sources
-  laccess lapi lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lobject lopcodes
+  laccess lapi lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc llex lmem lmempage lobject lopcodes
   lparser lpipe lpolicy lscheduler lstate lstring ltable ltask ltm lundump lvm lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
 list(TRANSFORM lua_sources PREPEND "src/runtime/")

@@ -1,7 +1,9 @@
 #include <lapi.h>
 #include <lauxlib.h>
 #include <lmem.h>
+#include <lmempage.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,11 +20,17 @@ enum { BLOCKS = 5000, ACTORS = 4, BORROWED = 16, BYTES = 64 };
 struct actor {
   lua_State *state;
   LuaAllocationCache cache;
-  unsigned id, admissions;
+  unsigned id, admissions, initializations;
   int frame;
   unsigned char *blocks[BORROWED];
 };
 static __thread unsigned measured, admissions;
+static __thread unsigned initializations;
+static struct {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  int armed, entered, release;
+} pause_init = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0};
 struct allocator {
   size_t live, cap;
   unsigned denied;
@@ -32,6 +40,25 @@ void __wrap_luaW_heapenter(lua_State *L) {
   if (measured)
     admissions++;
   __real_luaW_heapenter(L);
+}
+
+void __real_luaMP_initpage(lua_State *, LuaAllocPage *);
+void __wrap_luaMP_initpage(lua_State *L, LuaAllocPage *page) {
+  if (measured && !luaW_iscollector(L)) {
+    initializations++;
+    require(luaW_scope(L).heap == 0);
+    require(pthread_mutex_lock(&pause_init.mutex) == 0);
+    if (pause_init.armed) {
+      pause_init.armed = 0;
+      pause_init.entered = 1;
+      require(pthread_cond_broadcast(&pause_init.changed) == 0);
+      /* Keep participation while initialization is deliberately held. */
+      while (!pause_init.release)
+        require(pthread_cond_wait(&pause_init.changed, &pause_init.mutex) == 0);
+    }
+    require(pthread_mutex_unlock(&pause_init.mutex) == 0);
+  }
+  __real_luaMP_initpage(L, page);
 }
 
 static void *allocate(void *context, void *pointer, size_t old, size_t size) {
@@ -68,6 +95,7 @@ static void *borrow(void *argument) {
   }
   lua_lock(actor->state);
   admissions = 0;
+  initializations = 0;
   measured = 1;
   for (i = 0; i < (actor->frame ? 1U : BORROWED); i++) {
     actor->blocks[i] = actor->frame
@@ -79,17 +107,23 @@ static void *borrow(void *argument) {
   }
   measured = 0;
   actor->admissions = admissions;
+  actor->initializations = initializations;
   lua_unlock(actor->state);
   if (actor->cache.global != NULL)
     luaE_setnativestackcontext(previous);
   return NULL;
 }
 
-static void batch(int capped) {
+static void *collect(void *argument) {
+  require(lua_gc(argument, LUA_GCCOLLECT) == 0);
+  return NULL;
+}
+
+static void batch(int capped, int collect_during_init) {
   struct allocator allocator = {0};
   lua_State *L = lua_newstate(allocate, &allocator, 0);
   struct actor actors[ACTORS] = {0};
-  unsigned i, j, total = 0;
+  unsigned i, j, total = 0, initialized = 0;
   require(L != NULL);
   for (i = 0; i < ACTORS; i++) {
     actors[i].state = lua_newthread(L);
@@ -112,9 +146,35 @@ static void batch(int capped) {
          LUA_GCCOLLECT); /* Retire unused frames and start with a cold pool. */
   if (capped)
     allocator.cap = allocator.live + 4096;
+  if (collect_during_init) {
+    pthread_t first, second, collector;
+    size_t base = allocator.live;
+    pause_init.armed = 1;
+    require(pthread_create(&first, NULL, borrow, &actors[0]) == 0);
+    require(pthread_mutex_lock(&pause_init.mutex) == 0);
+    while (!pause_init.entered)
+      require(pthread_cond_wait(&pause_init.changed, &pause_init.mutex) == 0);
+    require(pthread_mutex_unlock(&pause_init.mutex) == 0);
+    /* A second backing request can finish while the first batch is private.
+     * It must not reserve a second batch for this same allocation pool. */
+    require(pthread_create(&second, NULL, borrow, &actors[1]) == 0);
+    require(pthread_join(second, NULL) == 0);
+    require(allocator.live <= base + 5 * 4096);
+    require(pthread_create(&collector, NULL, collect, L) == 0);
+    while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST))
+      sched_yield();
+    require(pthread_mutex_lock(&pause_init.mutex) == 0);
+    pause_init.release = 1;
+    require(pthread_cond_broadcast(&pause_init.changed) == 0);
+    require(pthread_mutex_unlock(&pause_init.mutex) == 0);
+    require(pthread_join(first, NULL) == 0);
+    require(pthread_join(collector, NULL) == 0);
+  }
   for (i = 0; i < ACTORS; i++) {
-    borrow(&actors[i]);
+    if (!collect_during_init || i >= 2)
+      borrow(&actors[i]);
     total += actors[i].admissions;
+    initialized += actors[i].initializations;
   }
   require(!capped ||
           (allocator.denied != 0 && allocator.live <= allocator.cap));
@@ -128,16 +188,18 @@ static void batch(int capped) {
   lua_unlock(L);
   lua_close(L);
   require(allocator.live == 0);
+  require(initialized != 0);
   fprintf(stderr, "cold-pool metadata admissions: %u\n", total);
-  require(capped || total == 1);
+  require(capped || collect_during_init || total == 1);
 }
 
 int main(int argc, char **argv) {
   struct allocator allocator = {0};
   lua_State *L;
   require(argc == 2);
-  if (strcmp(argv[1], "batch") == 0 || strcmp(argv[1], "cap") == 0) {
-    batch(strcmp(argv[1], "cap") == 0);
+  if (strcmp(argv[1], "batch") == 0 || strcmp(argv[1], "cap") == 0 ||
+      strcmp(argv[1], "init_gc") == 0) {
+    batch(strcmp(argv[1], "cap") == 0, strcmp(argv[1], "init_gc") == 0);
     return 0;
   }
   L = lua_newstate(allocate, &allocator, 0);

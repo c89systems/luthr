@@ -393,6 +393,7 @@ typedef struct global_State {
   struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages;
   struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
+  unsigned allocation_reserving[LUA_ALLOC_POOLS];  /* atomic batch publishers */
   LuaAllocationCache *slot_caches;
   lua_Alloc frealloc;  /* function to reallocate memory */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */

@@ -580,8 +580,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->policy_factory = NULL;
   g->policy_context = NULL;
   g->slot_caches = NULL;
-  for (i = 0; i < LUA_ALLOC_POOLS; i++)
+  for (i = 0; i < LUA_ALLOC_POOLS; i++) {
     g->allocation_available[i] = NULL;
+    g->allocation_reserving[i] = 0;
+  }
   g->ud = ud;
   g->warnf = NULL;
   g->ud_warn = NULL;
