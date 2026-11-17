@@ -382,12 +382,22 @@ static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   LuaWorldScope depth;
+  unsigned publishing;
   flushrouting(s);
   if (--task->polls != 0) return;
   task->polls = s->config.quantum_polls;
+  /* Read publication before the runnable predicate: observing its completion
+  ** also publishes the recipient's queue entry to the following load. */
+  publishing = __atomic_load_n(&s->pending_ready, __ATOMIC_ACQUIRE);
   if (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 &&
       __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0 &&
-      __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) return;
+      __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) {
+    /* A notified waiter cannot enter the runnable queue until its outgoing
+    ** context is saved. Keep the handoff prompt across that publication gap. */
+    if (publishing != 0)
+      task->polls = 1;
+    return;
+  }
   depth = luaW_detach(L);
   releaseslot(task);  /* a requested handoff retires trusted helper capacity too */
   task->handoffs++;
@@ -447,7 +457,10 @@ static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
       task->published = 0;
       enqueue(s, task);
     }
-    else task->early_wakes++;
+    else {
+      task->early_wakes++;
+      __atomic_fetch_add(&s->pending_ready, 1, __ATOMIC_RELEASE);
+    }
   }
   notify(s);
   unlock(s);
@@ -543,7 +556,10 @@ static void *carrierentry (void *argument) {
       if (s->completed != NULL) s->completed(s->completion_context);
     }
     else if (task->reason == SC_RESOURCE) {
-      if (task->notified) enqueue(s, task);
+      if (task->notified) {
+        enqueue(s, task);
+        __atomic_fetch_sub(&s->pending_ready, 1, __ATOMIC_RELEASE);
+      }
       else task->published = 1;
     }
     else enqueue(s, task);

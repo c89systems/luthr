@@ -35,7 +35,7 @@ struct fixture {
   unsigned native_callback_done;
   unsigned idle_entries, host_channel_entries;
   lua_State *metadata_peer;
-  unsigned metadata_held, metadata_queued;
+  unsigned metadata_held, metadata_queued, metadata_released;
   size_t live;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
@@ -155,12 +155,30 @@ void __wrap_luaX_poll(lua_State *L) {
     inspecting = 0;
   } else
     __real_luaX_poll(L);
+  if (fixture->metadata_peer != NULL && L == fixture->tasks[0].root.thread) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    if (fixture->metadata_released && !fixture->pause_release) {
+      /* The first handoff poll ran while the recipient's context was still
+       * unpublished. Queue that recipient before allowing Lua to continue. */
+      LuaScheduler *s = &fixture->scheduler;
+      require(fixture->pause_seen);
+      fixture->pause_release = 1;
+      require(pthread_cond_broadcast(&fixture->changed) == 0);
+      require(pthread_mutex_unlock(&fixture->mutex) == 0);
+      require(pthread_mutex_lock(&s->mutex) == 0);
+      while (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0)
+        require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
+      require(pthread_mutex_unlock(&s->mutex) == 0);
+    } else
+      require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
 }
 void __real_luaCT_pause(LuaFiber *);
 void __wrap_luaCT_pause(LuaFiber *fiber) {
   struct fixture *f = fixture;
   LuaScheduledTask *task = fiber->execution.context;
-  if (f->pause_hold && task->waiter != NULL) {
+  if ((f->pause_hold || task->root.thread == f->metadata_peer) &&
+      task->waiter != NULL) {
     require(pthread_mutex_lock(&f->mutex) == 0);
     if (!f->pause_seen) {
       f->pause_seen = 1;
@@ -247,8 +265,13 @@ static int metadata_owner(lua_State *L) {
    * releases the sole execution slot without running a GC-dependent action. */
   while (!f->metadata_queued)
     luaQ_wait(L, &f->mutex, &f->changed, &f->waiters);
+  while (!f->pause_seen)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   luaW_heapleave(L);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->metadata_released = 1;
+  require(pthread_mutex_unlock(&f->mutex) == 0);
   lua_unlock(L);
   return 0;
 }

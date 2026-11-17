@@ -69,6 +69,7 @@ struct LuaScheduler {
   LuaCarrier *idle;
   LuaScheduledTask *tasks;
   unsigned runnable;  /* atomic; no-request polls only read this word */
+  unsigned pending_ready;  /* atomic notifications awaiting context publication */
   unsigned reentry_waiting;  /* atomic native-return/callback progress request */
   unsigned routing_request;  /* deferred notification from nonblocking unpin */
   unsigned external_yields;  /* atomic fairness request from provider threads */
