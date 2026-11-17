@@ -81,24 +81,38 @@ static void *firsttry (global_State *g, void *block, size_t os, size_t ns) {
 
 #define DEBT_BATCH 65536
 
+static void adddebt (global_State *g, l_mem change, int exclusive) {
+  if (exclusive) {
+    /* Match the word-sized arithmetic of mutator accumulation. */
+    lu_mem debt = cast(lu_mem, __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED));
+    __atomic_store_n(&g->GCdebt, cast(l_mem, debt + cast(lu_mem, change)),
+                     __ATOMIC_RELAXED);
+  }
+  else
+    __atomic_fetch_add(&g->GCdebt, change, __ATOMIC_RELAXED);
+}
+
 void luaM_flushdebt (lua_State *L) {
   l_mem debt = L->allocation_debt;
   L->allocation_debt = 0;
   if (debt != 0)
-    __atomic_fetch_add(&G(L)->GCdebt, debt, __ATOMIC_RELAXED);
+    adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(L));
 }
 
-static void account (lua_State *L, l_mem change) {
-  if (!completestate(G(L)) || luaW_iscollector(L) ||
-      change >= DEBT_BATCH || change <= -DEBT_BATCH) {
+static void accountowned (lua_State *L, l_mem change, int exclusive) {
+  if (exclusive || change >= DEBT_BATCH || change <= -DEBT_BATCH) {
     luaM_flushdebt(L);
-    __atomic_fetch_add(&G(L)->GCdebt, change, __ATOMIC_RELAXED);
+    adddebt(G(L), change, exclusive);
   }
   else {
     L->allocation_debt += change;
     if (L->allocation_debt >= DEBT_BATCH || L->allocation_debt <= -DEBT_BATCH)
       luaM_flushdebt(L);
   }
+}
+
+static void account (lua_State *L, l_mem change) {
+  accountowned(L, change, !completestate(G(L)) || luaW_iscollector(L));
 }
 
 #define ALLOC_PAGE_MIN 4096
@@ -108,9 +122,17 @@ static void account (lua_State *L, l_mem change) {
 /* One admitted coroutine consumes a cached page. Other owners only return
 ** blocks; MPSC push never reads a node's successor, and only the consumer
 ** removes nodes. Collection retires caches before changing page ownership. */
-static void returnblock (LuaAllocBlock *block) {
+static void returnblock (LuaAllocBlock *block, int exclusive) {
   LuaAllocPage *page = block->block.page;
   LuaAllocBlock *head = __atomic_load_n(&page->free, __ATOMIC_RELAXED);
+  if (exclusive) {
+    unsigned live = __atomic_load_n(&page->live, __ATOMIC_RELAXED);
+    lua_assert(live != 0);
+    block->block.next = head;
+    __atomic_store_n(&page->free, block, __ATOMIC_RELEASE);
+    __atomic_store_n(&page->live, live - 1, __ATOMIC_RELAXED);
+    return;
+  }
   do {
     block->block.next = head;
   } while (!__atomic_compare_exchange_n(&page->free, &head, block, 0,
@@ -259,17 +281,19 @@ l_noret luaM_toobig (lua_State *L) {
 */
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
   LuaAllocBlock *allocation;
+  int exclusive;
   lua_assert((osize == 0) == (block == NULL));
   if (block == NULL) return;
+  exclusive = !completestate(G(L)) || luaW_iscollector(L);
   allocation = cast(LuaAllocBlock *, block) - 1;
   if (allocation->block.page != NULL)
-    returnblock(allocation);
+    returnblock(allocation, exclusive);
   else {
     luaW_heapenter(L);
     callfrealloc(G(L), allocation, osize + sizeof(LuaAllocBlock), 0);
     luaW_heapleave(L);
   }
-  account(L, cast(l_mem, osize));
+  accountowned(L, cast(l_mem, osize), exclusive);
 }
 
 

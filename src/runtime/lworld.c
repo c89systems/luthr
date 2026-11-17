@@ -174,6 +174,11 @@ void luaW_start (lua_State *L) {
 
 int luaW_iscollector (lua_State *L) {
   LuaWorld *world = &G(L)->world;
+  if (L->world_depth != 0) {
+    lua_assert(__atomic_load_n(&world->stopped, __ATOMIC_ACQUIRE) &&
+               luaQ_isowner(&world->collector));
+    return 1;
+  }
   return __atomic_load_n(&world->stopped, __ATOMIC_ACQUIRE) &&
          luaQ_isowner(&world->collector);
 }
