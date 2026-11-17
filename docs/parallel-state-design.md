@@ -61,6 +61,15 @@ Logical sweep classification still requires quiescence, while physical
 destruction overlaps application workers.
 
 Allocation consumes owner-local page lists and batches atomic remote returns.
+Nonempty caches retain their pages across ordinary collection. Slotless task
+drivers share one task cache across nested coroutines. Changed pages form finite
+shared cleanup jobs: bounded batches borrow idle caches and retire empty pages
+without stopping workers. A first remote return pins a page until its notice is
+claimed; publication is the producer's last page access. Destruction completion
+drains these jobs; refills assist abandoned pages while retaining warm caches.
+Emergency retries recall clean caches;
+shutdown drains the complete directory. Cold chunks start small and grow with
+demand instead of reserving an OS-page-sized chunk per cold size class.
 Pacing counts live storage, including runtime records and black allocations,
 separately from pending destruction. Physical completion preserves the cycle's
 fixed allocation goal. Allocations after marking consume the following

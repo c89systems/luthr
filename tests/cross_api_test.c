@@ -86,7 +86,9 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
   if (pointer == NULL)
     old_size = 0;
   if (size == 0) {
-    if (fixture->close_active && fixture->global->world.stopped)
+    /* Backing-page returns overlap mutators. The forwarded close must retain
+     * its child and resource across reclamation in either phase state. */
+    if (fixture->close_active)
       fixture->close_gc_frees++;
     fixture->live_bytes -= old_size;
     free(pointer);

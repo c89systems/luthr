@@ -13,6 +13,8 @@
 #include "llimits.h"
 #include "lua.h"
 
+struct LuaAllocPage;
+struct LuaAllocationCache;
 
 #define luaM_error(L)	luaD_throw(L, LUA_ERRMEM)
 
@@ -21,7 +23,13 @@ LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
                                    size_t nsize);
 /* Local allocation accounting is exact at a collector publication boundary. */
 LUAI_FUNC void luaM_flushdebt (lua_State *L);
-/* Collector/exclusive shutdown only; retire local caches before freeing pages. */
+LUAI_FUNC int luaM_initpools (lua_State *L);
+LUAI_FUNC void luaM_destroypools (lua_State *L);
+/* Admitted cache owner, quiescent retirement or a finished task's retirement
+** under world.mutex; never a safepoint. */
+LUAI_FUNC void luaM_releasecache (lua_State *L, struct LuaAllocationCache *cache);
+/* Drain a finite changed-page snapshot without stopping mutators. Idle caches
+** lend ownership; active caches retain their pending notices. */
 LUAI_FUNC void luaM_reclaimpages (lua_State *L);
 /* Quiescent GC: record unreachable storage independently of physical freeing. */
 LUAI_FUNC void luaM_retire_ (lua_State *L, void *memory, size_t size);

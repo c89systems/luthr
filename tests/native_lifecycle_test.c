@@ -311,6 +311,7 @@ static int await_callback(lua_State *L) {
   return 0;
 }
 static int allocation_failure(lua_State *L) {
+  active->fail_allocations = 2; /* fail the body request and emergency retry */
   (void)lua_newuserdatauv(L, 8192, 0);
   return 0;
 }
@@ -363,7 +364,6 @@ static void callbacks(struct fixture *f, const char *mode) {
     register_callback(f, "await_callback(); return 42");
   else if (strcmp(mode, "oom") == 0) {
     register_callback(f, "allocate_body(); return 42");
-    f->fail_allocations = 2;
   } else {
     register_callback(f, "check_slot(); return 42");
     f->marshalling_error = strcmp(mode, "marshal_error") == 0;

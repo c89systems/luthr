@@ -23,10 +23,15 @@ void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
 }
 
 void luaMP_collectpage (LuaAllocPage *page) {
-  LuaAllocBlock *head = __atomic_exchange_n(&page->remote, NULL,
-                                            __ATOMIC_ACQUIRE);
-  LuaAllocBlock *tail = head;
+  uintptr_t old = __atomic_load_n(&page->remote, __ATOMIC_ACQUIRE);
+  LuaAllocBlock *head, *tail;
   unsigned returned = 0;
+  do {
+    head = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
+    if (head == NULL) return;
+  } while (!__atomic_compare_exchange_n(&page->remote, &old,
+              old & LUA_PAGE_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+  tail = head;
   if (head == NULL) return;
   for (;;) {
     returned++;
@@ -37,4 +42,55 @@ void luaMP_collectpage (LuaAllocPage *page) {
   page->used -= returned;
   tail->block.next = page->local;
   page->local = head;
+}
+
+/* A notification owns one return outside the page's remote list. That block
+** remains counted as allocated, pinning the page until its notice is claimed.
+** Publication is the producer's LAST page access, so a consumer can retire an
+** empty page without joining every mutator or observing a half-done publisher.
+*/
+void luaMP_publish (global_State *g, LuaAllocPage *page) {
+  LuaAllocPage *head = __atomic_load_n(&g->allocation_dirty, __ATOMIC_RELAXED);
+  do { page->dirty_next = head; }
+  while (!__atomic_compare_exchange_n(&g->allocation_dirty, &head, page, 0,
+                                       __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+void luaMP_notify (global_State *g, LuaAllocPage *page) {
+  uintptr_t old = __atomic_load_n(&page->remote, __ATOMIC_RELAXED);
+  do {
+    if (old & LUA_PAGE_NOTIFIED) return;
+  } while (!__atomic_compare_exchange_n(&page->remote, &old,
+              old | LUA_PAGE_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED));
+  page->notified = NULL; /* an allocation/cache handoff, not a returned block */
+  luaMP_publish(g, page);
+}
+
+void luaMP_return (global_State *g, LuaAllocBlock *block) {
+  LuaAllocPage *page = luaMP_page(block);
+  uintptr_t old = __atomic_load_n(&page->remote, __ATOMIC_RELAXED);
+  for (;;) {
+    if (!(old & LUA_PAGE_NOTIFIED)) {
+      if (__atomic_compare_exchange_n(&page->remote, &old,
+            old | LUA_PAGE_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        page->notified = block;
+        luaMP_publish(g, page);
+        return; /* never touch page after publishing the lifetime pin */
+      }
+    }
+    else {
+      block->block.next = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
+      if (__atomic_compare_exchange_n(&page->remote, &old,
+            cast(uintptr_t, block) | LUA_PAGE_NOTIFIED, 0,
+            __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        return; /* ordinary remote publication is also the last page access */
+    }
+  }
+}
+
+void luaMP_resetnotice (LuaAllocPage *page) {
+  /* Claim the held return before this reset. Later producers must publish a
+  ** new notice BEFORE we collect returns, or their final return could be lost.
+  ** The old held block, plus the pool/cache lease, pins this consumer's work. */
+  __atomic_fetch_and(&page->remote, ~LUA_PAGE_NOTIFIED, __ATOMIC_ACQ_REL);
 }

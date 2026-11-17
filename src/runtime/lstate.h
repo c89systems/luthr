@@ -379,11 +379,10 @@ struct lua_State {
   GCObject *new_objects_tail;
   l_mem allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
-  l_mem retired_credit;  /* logically retired allocations freed by this owner */
   unsigned finalizer_count;
   GCObject *finalizers[LUA_FINALIZER_CAPACITY];
   TString *strcache[STRCACHE_N][STRCACHE_M];
-  struct LuaAllocPage *allocation_cache[LUA_ALLOC_POOLS];
+  LuaAllocationCache allocation;
 };
 
 
@@ -421,6 +420,16 @@ typedef struct global_State {
   LuaWorld world;
   struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages;
+  struct LuaAllocPage *allocation_dirty;  /* atomic changed-page queue */
+  struct LuaAllocPage *allocation_pending;  /* mutex-claimed finite page job */
+  struct LuaAllocPage *allocation_retired;  /* atomic privately empty pages */
+  uint64_t allocation_epoch;  /* a finite queue snapshot; helpers may finish it */
+  unsigned allocation_busy;
+  struct LuaAllocPage *allocation_returning;  /* backing returns; metadata-owned */
+  uint64_t allocation_return_epoch;
+  pthread_cond_t allocation_changed;  /* slow cache leases; pool zero mutex */
+  unsigned allocation_waiters;
+  pthread_mutex_t allocation_mutex[LUA_ALLOC_POOLS];
   struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
   unsigned allocation_reserving[LUA_ALLOC_POOLS];  /* atomic batch publishers */
   LuaAllocationCache *slot_caches;
@@ -440,9 +449,8 @@ typedef struct global_State {
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   TString *operation_error;
   void *ud;         /* auxiliary data to 'frealloc' */
-  l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
-  l_mem GCdebt;  /* bytes counted but not yet allocated */
-  l_mem GCreclaimed;  /* atomic physical credits, independent of pacing */
+  l_mem GCbytes;  /* atomic charged storage, including pending destruction */
+  l_mem GCdebt;  /* atomic remaining logical allocation/work allowance */
   l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
   l_mem GCgoal;  /* fixed logical allocation target for the current idle cycle */
@@ -563,8 +571,7 @@ union GCUnion {
 
 
 /* actual number of total memory allocated */
-#define gettotalbytes(g) ((g)->GCtotalbytes - (g)->GCdebt - \
-    __atomic_load_n(&(g)->GCreclaimed, __ATOMIC_RELAXED))
+#define gettotalbytes(g) __atomic_load_n(&(g)->GCbytes, __ATOMIC_RELAXED)
 
 
 LUAI_FUNC void luaE_setdebt (global_State *g, l_mem debt);

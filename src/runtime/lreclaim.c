@@ -91,6 +91,7 @@ void luaC_retireobject (lua_State *L, GCObject *o) {
   else if (o->tt == LUA_VTHREAD) {
     lua_State *thread = gco2th(o);
     lua_assert(thread != L && thread->native_depth == 0);
+    luaM_releasecache(L, &thread->allocation);
     luaF_closeupval(thread, thread->stack.p);
     luaW_unregister(thread);
     if (thread->reclaim_pages) L->reclaim_pages = 1;

@@ -6,6 +6,7 @@
 #include "lexec.h"
 #include "lstate.h"
 #include "ltask.h"
+#include "lmempage.h"
 #include <stdlib.h>
 
 LuaExecution *luaQ_current (void) {
@@ -65,6 +66,7 @@ void luaQ_entermanaged (lua_State *L) {
     /* The callback may park before any state gate/world participation exists. */
     if (execution->managed_depth == 0 && execution->managed_enter != NULL)
       execution->managed_enter(execution, L);
+    if (execution->managed_depth == 0) luaMC_enter(execution);
     checkcarrier(execution);
     execution->managed_depth++;
   }
@@ -74,8 +76,10 @@ void luaQ_leavemanaged (void) {
   LuaExecution *execution = luaQ_current();
   if (execution != NULL) {
     lua_assert(execution->managed_depth != 0);
-    if (--execution->managed_depth == 0 && execution->managed_leave != NULL)
-      execution->managed_leave(execution);
+    if (--execution->managed_depth == 0) {
+      luaMC_leave(execution);
+      if (execution->managed_leave != NULL) execution->managed_leave(execution);
+    }
   }
 }
 
@@ -135,7 +139,13 @@ void luaQ_poll (lua_State *L) {
   LuaExecution *execution = luaQ_current();
   if (execution != NULL) {
     checkcarrier(execution);
-    if (execution->poll != NULL) execution->poll(execution, L);
+    if (execution->poll != NULL) {
+      int leased = execution->memory_cache != NULL;
+      if (leased) luaMC_leave(execution);
+      execution->poll(execution, L);
+      if (leased && execution->memory_cache == NULL && execution->managed_depth != 0)
+        luaMC_enter(execution);
+    }
     checkcarrier(execution);
   }
 }
@@ -212,6 +222,7 @@ static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
   if (waiter->execution != NULL) {
     unsigned depth = execution->managed_depth;
     execution->managed_depth = 0;
+    luaMC_leave(execution);
     if (depth != 0 && execution->managed_leave != NULL)
       execution->managed_leave(execution);
     execution->wait(execution, mutex, waiter);
@@ -223,8 +234,11 @@ static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
     luaX_checksync(pthread_mutex_lock(mutex));
   }
   else {
+    int leased = execution != NULL && execution->memory_cache != NULL;
+    if (leased) luaMC_leave(execution);
     while (waiter->link != NULL)
       luaX_checksync(pthread_cond_wait(changed, mutex));
+    if (leased) luaMC_enter(execution);
   }
   lua_assert(waiter->link == NULL);
 }
@@ -239,7 +253,10 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
   if (waiter.execution != NULL)
     waitregistered(L, mutex, changed, &waiter);
   else {
+    int leased = execution != NULL && execution->memory_cache != NULL;
+    if (leased) luaMC_leave(execution);
     luaX_checksync(pthread_cond_wait(changed, mutex));
+    if (leased) luaMC_enter(execution);
     unlinkwaiter(&waiter);  /* also retire after a spurious/direct POSIX signal */
   }
 }

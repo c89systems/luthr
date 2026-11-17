@@ -20,7 +20,7 @@ typedef struct LuaSchedulerConfig {
 } LuaSchedulerConfig;
 
 struct LuaExecutionSlot {
-  LuaScheduledTask *owner;  /* atomic managed permission */
+  void *owner;  /* atomic managed permission; page helpers may borrow an idle slot */
   pthread_mutex_t mutex;
   LuaScheduledTask *head, *tail;
   unsigned count;

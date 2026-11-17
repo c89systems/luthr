@@ -25,6 +25,7 @@
 #include "lfunc.h"
 #include "lgc.h"
 #include "lmem.h"
+#include "lmempage.h"
 #include "lobject.h"
 #include "lopcodes.h"
 #include "lparser.h"
@@ -67,6 +68,7 @@ typedef struct lua_longjmp {
   struct lua_longjmp *execution_previous;
   LuaExecution *execution;
   unsigned execution_native_depth;
+  int execution_memory_cache;
   LuaCallScope *execution_trusted;
   LuaGCFrame *gc_frame;
   volatile pthread_t carrier;
@@ -251,6 +253,8 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.status = LUA_OK;
   lj.carrier = pthread_self();
   lj.execution = luaQ_current();
+  lj.execution_memory_cache = lj.execution != NULL &&
+                               lj.execution->memory_cache != NULL;
   lj.execution_native_depth = lj.execution != NULL
                               ? lj.execution->native_depth : 0;
   lj.execution_trusted = lj.execution != NULL ? lj.execution->trusted : NULL;
@@ -284,6 +288,9 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   if (lj.status != LUA_OK) {
     L->native_roots = lj.native_roots;  /* native scopes have unwound */
     luaW_restore(L, lj.world_scope, lj.native_depth);
+    if (lj.execution_memory_cache && lj.execution->managed_depth != 0 &&
+        lj.execution->memory_cache == NULL)
+      luaMC_enter(lj.execution);
   }
   L->errorJmp = lj.previous;  /* restore old error handler */
   L->nCcalls = oldnCcalls;

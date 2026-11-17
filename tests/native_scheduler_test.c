@@ -1478,6 +1478,10 @@ static int exercise_stream(const char *name) {
       lock(pool);
       while (!pool->tasks[id].published && !pool->tasks[id].finished)
         wait_change(pool);
+      if (!pool->tasks[id].published)
+        fprintf(stderr,
+                "stream consumer %d finished before waiting: status=%d\n", id,
+                pool->tasks[id].status);
       require(pool->tasks[id].published);
       unlock(pool);
     }
@@ -1495,8 +1499,22 @@ static int exercise_stream(const char *name) {
       int parked;
       do {
         parked = 0;
-        for (id = 3; id < 3 + consumers; ++id)
+        if (!foreign && pool->tasks[2].finished) {
+          fprintf(stderr,
+                  "stream producer finished before checkpoint: status=%d\n",
+                  pool->tasks[2].status);
+          require(!pool->tasks[2].finished);
+        }
+        for (id = 3; id < 3 + consumers; ++id) {
+          if (pool->tasks[id].finished) {
+            fprintf(
+                stderr,
+                "stream consumer %d finished before checkpoint: status=%d\n",
+                id, pool->tasks[id].status);
+            require(!pool->tasks[id].finished);
+          }
           parked += pool->tasks[id].published != 0;
+        }
         if (pool->consumed == 1 && parked == consumers &&
             (foreign ? actor.task.pinned_resource_waits != 0
                      : pool->tasks[2].published))

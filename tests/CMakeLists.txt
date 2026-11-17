@@ -137,6 +137,18 @@ foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime remote_
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(page_ownership_test page_ownership_test.c)
+set_target_properties(page_ownership_test PROPERTIES C_STANDARD 99)
+target_compile_options(page_ownership_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(page_ownership_test PRIVATE luthr_static)
+target_link_options(page_ownership_test PRIVATE -Wl,--wrap=luaW_heapenter
+  -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS retained pressure task lease_unwind busy_cache remote_returns growth_handoff growth_epoch assist_rebind boundary credit overlap helpers unwind finite)
+  add_test(NAME page_ownership_${case} COMMAND page_ownership_test ${case})
+  set_tests_properties(page_ownership_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
+
 luthr_test_program(gc_requests_test gc_requests_test.c)
 set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
@@ -819,7 +831,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test allocation_pool_test gc_pacing_test
+  capture_cells_test memory_publication_test allocation_pool_test page_ownership_test gc_pacing_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)

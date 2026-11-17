@@ -35,7 +35,8 @@ struct allocator {
   size_t cap, max_request;
   unsigned failures;
   unsigned calls, fail_at;
-  unsigned denied_large, small_fallback;
+  size_t denied_request;
+  unsigned denied_requests, small_fallback;
   int deny;
 };
 
@@ -512,8 +513,9 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
     allocator->max_request = size;
   if (allocator->cap != 0 && size > allocator->cap - (allocator->live - old)) {
     allocator->failures++;
-    if (size > 4096)
-      allocator->denied_large++;
+    if (size > allocator->denied_request)
+      allocator->denied_request = size;
+    allocator->denied_requests++;
     return NULL;
   }
   if (allocator->fail_at != 0 && allocator->calls == allocator->fail_at) {
@@ -527,7 +529,7 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
   replacement = realloc(pointer, size);
   if (replacement != NULL) {
     allocator->live = allocator->live - old + size;
-    if (size == 4096 && allocator->denied_large != 0)
+    if (allocator->denied_request != 0 && size < allocator->denied_request)
       allocator->small_fallback++;
   }
   return replacement;
@@ -555,7 +557,7 @@ static void page_growth(int limited) {
   }
   if (limited) {
     require(count < 1500 && allocator.live <= allocator.cap);
-    require(allocator.denied_large != 0 && allocator.small_fallback != 0);
+    require(allocator.denied_requests != 0 && allocator.small_fallback != 0);
   } else {
     fprintf(stderr, "pooled backing allocations: %u calls, largest %zu\n",
             allocator.calls, allocator.max_request);

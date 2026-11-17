@@ -291,10 +291,17 @@ void __wrap_luaC_drainbarriers(lua_State *L) {
 void __wrap_luaM_reclaimpages(lua_State *L) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
+  uint64_t excluded = record != NULL ? record->coordination_ns : 0;
   __real_luaM_reclaimpages(L);
   if (record != NULL) {
+    uint64_t elapsed = now() - started;
+    excluded = record->coordination_ns - excluded;
+    if (excluded > elapsed)
+      abort();
     record->reclaim_calls++;
-    record->reclaim_ns += now() - started;
+    /* Page jobs now rendezvous and yield internally. Their coordination is
+     * already accounted separately; an outer collector must exclude it once. */
+    record->reclaim_ns += elapsed - excluded;
   }
 }
 

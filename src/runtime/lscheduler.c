@@ -159,6 +159,14 @@ static void bindslot (LuaScheduledTask *task, LuaExecutionSlot *slot) {
   task->fiber.execution.allocation_cache = &slot->allocation;
 }
 
+static void cachereturned (void *context) {
+  LuaScheduler *s = context;
+  lock(s);
+  notify(s);
+  wakework(s, 1);
+  unlock(s);
+}
+
 static void releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
   if (slot == NULL) return;
@@ -237,7 +245,7 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     while (task->slot == NULL) {
       unsigned i;
       for (i = 0; i < s->config.slots; i++) {
-        LuaScheduledTask *expected = NULL;
+        void *expected = NULL;
         LuaExecutionSlot *slot = &s->slots[(task->home + i) % s->config.slots];
         if (__atomic_compare_exchange_n(&slot->owner, &expected, task, 0,
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
@@ -498,7 +506,8 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
   for (i = 0; i < s->config.slots; i++) {
     unsigned index = (carrier->cursor + i) % s->config.slots;
     LuaExecutionSlot *slot = &s->slots[index];
-    LuaScheduledTask *expected = NULL, *task;
+    void *expected = NULL;
+    LuaScheduledTask *task;
     /* The carrier address is a temporary reservation, never dereferenced as
     ** a task. No managed operation starts until bindslot replaces it. */
     if (!__atomic_compare_exchange_n(&slot->owner, &expected,
@@ -574,6 +583,7 @@ static void freeengine (lua_State *L, LuaScheduler *s) {
   luaW_stop(L);
   for (i = 0; i < s->config.slots; i++) {
     LuaAllocationCache **link = &G(L)->slot_caches;
+    luaM_releasecache(L, &s->slots[i].allocation);
     while (*link != &s->slots[i].allocation) link = &(*link)->next;
     *link = (*link)->next;
     luaX_checksync(pthread_mutex_destroy(&s->slots[i].mutex));
@@ -681,6 +691,9 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
   luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
   for (i = 0; i < config->slots; i++) {
     s->slots[i].allocation.global = G(L);
+    s->slots[i].allocation.permission = &s->slots[i].owner;
+    s->slots[i].allocation.returned = cachereturned;
+    s->slots[i].allocation.context = s;
     s->slots[i].allocation.parallelism = config->slots;
     s->slots[i].allocation.next = G(L)->slot_caches;
     G(L)->slot_caches = &s->slots[i].allocation;

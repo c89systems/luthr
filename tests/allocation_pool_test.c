@@ -145,8 +145,18 @@ static void batch(int capped, int collect_during_init) {
   lua_unlock(L);
   lua_gc(L,
          LUA_GCCOLLECT); /* Retire unused frames and start with a cold pool. */
-  if (capped)
-    allocator.cap = allocator.live + 4096;
+  if (capped) {
+    CallInfo *probe;
+    size_t capacity;
+    lua_lock(L);
+    probe = luaM_newframe(L);
+    require(probe != NULL);
+    capacity = luaMP_page((LuaAllocBlock *)probe - 1)->bytes;
+    luaM_free_(L, probe, sizeof(*probe));
+    lua_unlock(L);
+    lua_gc(L, LUA_GCCOLLECT);
+    allocator.cap = allocator.live + capacity; /* exactly one observed page */
+  }
   if (collect_during_init) {
     pthread_t first, second, collector;
     size_t base = allocator.live;

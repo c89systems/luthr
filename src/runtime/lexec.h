@@ -6,6 +6,7 @@
 #include "llimits.h"
 #include "lpolicy.h"
 #include <pthread.h>
+#include <stdint.h>
 
 struct lua_longjmp;
 struct LuaWaiter;
@@ -15,8 +16,16 @@ struct LuaTaskRoot;
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
   struct global_State *global;
+  lua_State *thread;  /* unmanaged cache: borrow its coroutine gate */
+  void **permission;  /* managed slot's existing permission, or NULL */
+  void *owner;  /* inline permission for drivers without managed slots */
+  unsigned borrowers;  /* short page-work leases; record retirement joins them */
+  void (*returned)(void *);  /* notify an idle slot after a collector borrows it */
+  void *context;
   unsigned parallelism;  /* immutable team width; zero means one consumer */
   struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
+  unsigned char growth[LUA_ALLOC_POOLS];  /* backing-size history survives handoffs */
+  uint64_t growth_epoch;  /* a collection invalidates stale capacity demand */
 } LuaAllocationCache;
 
 typedef struct LuaCallScope {
@@ -57,6 +66,7 @@ typedef struct LuaExecution {
   unsigned pin_depth;
   pthread_t pinned_carrier;
   LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
+  LuaAllocationCache *memory_cache;  /* exact inline lease, if this entry took one */
   LuaCallScope *trusted;  /* runtime-owned C frames, including nested callbacks */
   struct LuaGCFrame *gc_frame;  /* execution-local collector reentrancy */
 } LuaExecution;

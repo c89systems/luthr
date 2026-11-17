@@ -1876,18 +1876,13 @@ static void atomic2gen (lua_State *L, global_State *g) {
 
 
 /*
-** Finish physical reclamation and refresh the current cycle's fixed budget.
+** Finish physical page reclamation independently of the cycle's fixed budget.
 */
 void luaC_finishreclaim (lua_State *L) {
-  global_State *g = G(L);
-  if (g->gcstp & GCSTPCLS) return;  /* teardown frees pages without admission */
-  luaW_stop(L);
+  if (G(L)->gcstp & GCSTPCLS) return;
+  /* Reclamation pays physical credits without rebasing logical pacing. Page
+  ** lifetime work owns its own protocol; accounting needs no rendezvous. */
   luaM_reclaimpages(L);
-  /* A competing collector may have advanced the cycle during destruction.
-  ** Reset only the current idle policy, after reclamation credits are exact. */
-  if (g->gckind == KGC_GENMINOR || g->gcstate == GCSpause)
-    setidledebt(g);
-  luaW_start(L);
 }
 
 

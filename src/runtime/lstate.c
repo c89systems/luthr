@@ -69,19 +69,10 @@
 #endif
 
 
-/*
-** set GCdebt to a new value keeping the real number of allocated
-** objects (GCtotalobjs - GCdebt) invariant and avoiding overflows in
-** 'GCtotalobjs'.
-*/
+/* Pacing and charged storage are independent. Rebasing a work allowance never
+** rewrites physical accounting or consumes another worker's return credits. */
 void luaE_setdebt (global_State *g, l_mem debt) {
-  l_mem tb = gettotalbytes(g);
-  lua_assert(tb > 0);
-  if (debt > MAX_LMEM - tb)
-    debt = MAX_LMEM - tb;  /* will make GCtotalbytes == MAX_LMEM */
-  g->GCtotalbytes = tb + debt;
   __atomic_store_n(&g->GCdebt, debt, __ATOMIC_RELAXED);
-  __atomic_store_n(&g->GCreclaimed, 0, __ATOMIC_RELAXED);
 }
 
 
@@ -387,10 +378,10 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
-  L->retired_credit = 0;
   L->finalizer_count = 0;
-  for (i = 0; i < LUA_ALLOC_POOLS; i++)
-    L->allocation_cache[i] = NULL;
+  memset(&L->allocation, 0, sizeof(L->allocation));
+  L->allocation.global = g;
+  L->allocation.thread = L;
   for (i = 0; i < STRCACHE_N; i++)
     for (j = 0; j < STRCACHE_M; j++)
       L->strcache[i][j] = NULL;
@@ -462,6 +453,7 @@ static void close_state (lua_State *L, int owns_gate) {
   luaCP_bind(L, NULL);
   luaM_reclaimpages(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State) && g->GCretired == 0);
+  luaM_destroypools(L);
   if (owns_gate) {
     luaW_start(L);
     lua_unlock(L);
@@ -609,20 +601,21 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
+  if (luaM_initpools(L) != 0) {
+    luaW_destroy(&g->world);
+    luaX_destroygate(&L->stack_gate);
+    (*f)(ud, g, sizeof(global_State), 0);
+    return NULL;
+  }
   luaW_register(L);
   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
   L->next = NULL;
   incnny(L);  /* main thread is always non yieldable */
   g->frealloc = f;
-  g->allocation_pages = NULL;
   g->scheduler = NULL;
   g->policy_factory = NULL;
   g->policy_context = NULL;
   g->slot_caches = NULL;
-  for (i = 0; i < LUA_ALLOC_POOLS; i++) {
-    g->allocation_available[i] = NULL;
-    g->allocation_reserving[i] = 0;
-  }
   g->ud = ud;
   g->warnf = NULL;
   g->ud_warn = NULL;
@@ -660,10 +653,9 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->sweepgc = NULL;
   g->gray = g->grayagain = NULL;
   g->weak = g->ephemeron = g->allweak = NULL;
-  g->GCtotalbytes = sizeof(global_State);
+  g->GCbytes = sizeof(global_State);
   g->GCmarked = 0;
   g->GCdebt = 0;
-  g->GCreclaimed = 0;
   g->GCretired = 0;
   g->GCmajorlive = sizeof(global_State);
   g->GCgoal = sizeof(global_State);

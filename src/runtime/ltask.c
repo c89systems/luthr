@@ -6,6 +6,8 @@
 #include "lapi.h"
 #include "ldo.h"
 #include "lgc.h"
+#include "lmem.h"
+#include "lmempage.h"
 #include "ltask.h"
 
 static void notifywait (LuaWorld *world, LuaStopWait *wait) {
@@ -24,6 +26,7 @@ static void registertask (lua_State *L, LuaTaskRoot *task,
   task->global = G(L);
   task->thread = L;
   task->execution = execution;
+  task->allocation.global = G(L);
   task->phase = phase;
   task->next = G(L)->tasks;
   task->link = &G(L)->tasks;
@@ -32,6 +35,13 @@ static void registertask (lua_State *L, LuaTaskRoot *task,
 }
 
 static void unregistertask (LuaTaskRoot *task) {
+  /* The execution has returned and this retirement holds world.mutex, which
+  ** also serializes page-job bookkeeping. No page retains this record after
+  ** the task/callback root can leave its caller's storage. */
+  luaMC_acquire(&task->allocation);
+  luaM_releasecache(mainthread(task->global), &task->allocation);
+  luaMC_join(&task->allocation);
+  luaMC_release(&task->allocation);
   *task->link = task->next;
   if (task->next != NULL) task->next->link = task->link;
   task->next = NULL;
