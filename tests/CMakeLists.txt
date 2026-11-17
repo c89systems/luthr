@@ -109,7 +109,9 @@ luthr_test_program(gc_pacing_test gc_pacing_test.c)
 set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_pacing_test PRIVATE luthr_static)
-foreach(case IN ITEMS overdue explicit overflow fast)
+foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
+    persistent_generational refresh_incremental refresh_generational
+    borrowed_incremental borrowed_generational)
   add_test(NAME gc_pacing_${case} COMMAND gc_pacing_test ${case})
   set_tests_properties(gc_pacing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -121,7 +123,7 @@ target_compile_options(allocation_pool_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(allocation_pool_test PRIVATE luthr_static)
 target_link_options(allocation_pool_test PRIVATE -Wl,--wrap=luaW_heapenter
   -Wl,--wrap=luaMP_initpage)
-foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime)
+foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime remote_returns)
   add_test(NAME allocation_pool_${case} COMMAND allocation_pool_test ${case})
   set_tests_properties(allocation_pool_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

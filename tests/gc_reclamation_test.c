@@ -198,6 +198,7 @@ int main(int argc, char **argv) {
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(!fixture.done && !fixture.freed);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(__atomic_load_n(&G(fixture.main)->GCretired, __ATOMIC_RELAXED) > 0);
   if (fixture.assist) {
     lua_lock(fixture.worker);
     fixture.worker->assist_debt = MAX_LMEM;
@@ -239,6 +240,7 @@ int main(int argc, char **argv) {
   require(fixture.done && fixture.freed == 1);
   active = NULL;
   lua_gc(fixture.main, LUA_GCCOLLECT);
+  require(G(fixture.main)->GCretired == 0);
   lua_close(fixture.main);
   require(fixture.live == 0 && fixture.allocator_active == 0);
   require(pthread_cond_destroy(&fixture.changed) == 0);

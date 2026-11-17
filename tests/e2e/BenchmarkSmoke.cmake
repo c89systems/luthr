@@ -1,4 +1,14 @@
 include("${CMAKE_CURRENT_LIST_DIR}/BenchmarkLua.cmake")
+file(WRITE "${output_dir}/drain.lua"
+  "package.cpath=arg[1]..'/?.so'; local native=require('compat_fixture'); local clock=native.monotonic; local gc=collectgarbage; local active=false; local collections=0; collectgarbage=function(...) collections=collections+1; return gc(...) end; native.monotonic=function() if active then assert(collections>0,'sample ended before final collection'); active=false else collections=0; active=true end; return clock() end; dofile([=[${script}]=])\n")
+foreach(runtime IN ITEMS upstream luthr)
+  execute_process(COMMAND "${${runtime}}" "${output_dir}/drain.lua"
+    "${module_dir}" integers incremental 1 0 100000 1
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Final collection escaped the sample timer: ${runtime}: ${result}: ${output}${error}")
+  endif()
+endforeach()
 file(STRINGS "${output_dir}/samples.csv" rows)
 list(LENGTH rows raw_count)
 math(EXPR expected_raw "7 * 2 * 2 * ${samples} + 1")

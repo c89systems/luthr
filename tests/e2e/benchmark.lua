@@ -85,6 +85,7 @@ for sample=1,warmups+samples do
   local cpu_start,wall_start=clock(),wall()
   local checksum=0
   for iteration=1,repetitions do checksum=checksum+work() end
+  collectgarbage('collect')  -- charge final collector work to this sample
   local elapsed_wall=wall()-wall_start
   local elapsed_cpu=math.floor((clock()-cpu_start)*1000000000+0.5)
   if sample>warmups then

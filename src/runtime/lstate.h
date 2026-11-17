@@ -379,6 +379,7 @@ struct lua_State {
   GCObject *new_objects_tail;
   l_mem allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
+  l_mem retired_credit;  /* logically retired allocations freed by this owner */
   unsigned finalizer_count;
   GCObject *finalizers[LUA_FINALIZER_CAPACITY];
   TString *strcache[STRCACHE_N][STRCACHE_M];
@@ -442,6 +443,9 @@ typedef struct global_State {
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */
   l_mem GCreclaimed;  /* atomic physical credits, independent of pacing */
+  l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
+  l_mem GCmajorlive;  /* logical live storage at the last major collection */
+  l_mem GCgoal;  /* fixed logical allocation target for the current idle cycle */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
   unsigned trace_active;  /* atomic concurrent marking phase */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
@@ -563,6 +567,7 @@ union GCUnion {
 
 LUAI_FUNC void luaE_setdebt (global_State *g, l_mem debt);
 LUAI_FUNC void luaE_freethread (lua_State *L, lua_State *L1);
+LUAI_FUNC void luaE_retirethread (lua_State *L, lua_State *thread);
 LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);

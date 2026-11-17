@@ -245,7 +245,8 @@ int main(int argc, char **argv) {
   selected_native = stats.native_limit;
 #endif
   for (unsigned sample = 0; sample < samples + warmups; ++sample) {
-    uint64_t cpu_start, released, wall, cpu, live, peak, retained, checksum = 0;
+    uint64_t cpu_start, released, wall, cpu, execution_wall, execution_cpu,
+        live, peak, retained, checksum = 0;
     unsigned done = 0, native_peak = 0;
     struct resident usage;
 #ifdef LUTHR_BENCH_GC_PROBE
@@ -347,19 +348,16 @@ int main(int argc, char **argv) {
       done++;
     }
 #endif
-    wall = now(CLOCK_MONOTONIC) - released;
-    cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
+    execution_wall = now(CLOCK_MONOTONIC) - released;
+    execution_cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
 #ifdef LUTHR_BENCH_GC_PROBE
     host_probe.enabled = 0;
-    gc_probe_add(&total, &host_probe);
     for (unsigned i = 0; i < tasks; ++i) {
       jobs[i].probe.enabled = 0;
-      gc_probe_add(&total, &jobs[i].probe);
     }
 #endif
     if (stopped)
       lua_gc(L, LUA_GCRESTART);
-    peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
     for (unsigned i = 0; i < tasks; ++i) {
       latencies[i] = jobs[i].latency;
       int status = lua_closethread(jobs[i].state, NULL);
@@ -372,7 +370,15 @@ int main(int argc, char **argv) {
     }
     require(checksum == (uint64_t)expected * tasks);
     lua_gc(L, LUA_GCCOLLECT);
+    wall = now(CLOCK_MONOTONIC) - released;
+    cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
+    peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
     retained = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
+#ifdef LUTHR_BENCH_GC_PROBE
+    gc_probe_add(&total, &host_probe);
+    for (unsigned i = 0; i < tasks; ++i)
+      gc_probe_add(&total, &jobs[i].probe);
+#endif
     usage = resident();
     qsort(latencies, tasks, sizeof(*latencies), compare);
     if (sample < warmups)
@@ -381,6 +387,10 @@ int main(int argc, char **argv) {
     field("checksum", checksum);
     field("cpu_ns", cpu);
     field("wall_ns", wall);
+    field("execution_cpu_ns", execution_cpu);
+    field("execution_wall_ns", execution_wall);
+    field("cleanup_cpu_ns", cpu - execution_cpu);
+    field("cleanup_wall_ns", wall - execution_wall);
     field("completion_p50_ns", latencies[(tasks + 1) / 2 - 1]);
     field("completion_p95_ns", latencies[(tasks * 95 + 99) / 100 - 1]);
     field("completion_max_ns", latencies[tasks - 1]);

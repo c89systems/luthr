@@ -67,7 +67,8 @@ if(automatic)
   list(APPEND levels 0)
 endif()
 
-set(metrics checksum cpu_ns wall_ns completion_p50_ns completion_p95_ns
+set(metrics checksum cpu_ns wall_ns execution_cpu_ns execution_wall_ns
+  cleanup_cpu_ns cleanup_wall_ns completion_p50_ns completion_p95_ns
   completion_max_ns lua_live_bytes lua_peak_bytes lua_retained_bytes rss_kib
   rss_hwm_kib threads parallelism carrier_limit native_limit observed_native_peak
   completed affinity_count quota_us period_us effective_cpu_milli)
@@ -85,6 +86,8 @@ endforeach()
 string(JSON metadata SET "${metadata}" model "\"public_task_scheduler\"")
 string(JSON metadata SET "${metadata}" upstream_model "\"serial_coroutines\"")
 string(JSON metadata SET "${metadata}" latency "\"host_observed_completion\"")
+string(JSON metadata SET "${metadata}" timing
+  "\"Total CPU/wall includes task cleanup, validation and final collection; completion latency covers execution.\"")
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 foreach(key IN ITEMS samples warmups tasks work_divisor delay_us)
   string(JSON metadata SET "${metadata}" "${key}" "${${key}}")
@@ -153,7 +156,10 @@ function(scheduled_measure runtime slots native delay)
     if(reference_checksum STREQUAL "")
       set(reference_checksum "${checksum}")
     endif()
-    if(NOT checksum STREQUAL reference_checksum OR NOT completed EQUAL tasks OR
+    math(EXPR measured_wall "${execution_wall_ns} + ${cleanup_wall_ns}")
+    math(EXPR measured_cpu "${execution_cpu_ns} + ${cleanup_cpu_ns}")
+    if(NOT wall_ns EQUAL measured_wall OR NOT cpu_ns EQUAL measured_cpu OR
+        NOT checksum STREQUAL reference_checksum OR NOT completed EQUAL tasks OR
         lua_peak_bytes LESS lua_live_bytes OR completion_p95_ns LESS completion_p50_ns OR
         completion_max_ns LESS completion_p95_ns OR completion_max_ns GREATER wall_ns OR
         observed_native_peak GREATER native_limit OR parallelism LESS 1)

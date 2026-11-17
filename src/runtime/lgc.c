@@ -96,8 +96,8 @@
 static void reallymarkobject (global_State *g, GCObject *o);
 static int atomic (lua_State *L);
 static void entersweep (lua_State *L);
-static void setpause (global_State *g);
-static void setminordebt (global_State *g);
+static void setidledebt (global_State *g);
+static l_mem livebytes (global_State *g);
 static void linktrace (global_State *g, GCObject *object);
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object);
 static void starttrace (lua_State *L);
@@ -1528,9 +1528,9 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
 */
 
 /*
-** Fields 'GCmarked' and 'GCmajorminor' are used to control the pace and
-** the mode of the collector. They play several roles, depending on the
-** mode of the collector:
+** Trace and generational-mode heuristics use 'GCmarked' and 'GCmajorminor'.
+** Allocation pacing instead uses logical live storage and a fixed GCgoal.
+** The tracing counters play several roles, depending on the collector mode:
 ** * KGC_INC:
 **     GCmarked: number of marked bytes during a cycle.
 **     GCmajorminor: not used.
@@ -1544,13 +1544,20 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
 
 
 /*
-** Set the "time" to wait before starting a new incremental cycle;
-** cycle will start when number of bytes in use hits the threshold of
-** approximately (marked * pause / 100).
+** Pacing counts every live allocation, including non-GC runtime records and
+** allocations made black during tracing. Pending destruction is not live.
+** The cycle's fixed goal survives later physical reclamation: refreshing debt
+** must not grant a fresh growth allowance for intervening allocations.
 */
-static void setpause (global_State *g) {
-  l_mem threshold = applygcparam(g, PAUSE, g->GCmarked);
-  l_mem debt = threshold - gettotalbytes(g);
+static l_mem livebytes (global_State *g) {
+  l_mem live = gettotalbytes(g) -
+    __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
+  lua_assert(live >= cast(l_mem, sizeof(global_State)));
+  return live;
+}
+
+static void setidledebt (global_State *g) {
+  l_mem debt = g->GCgoal - livebytes(g);
   if (debt < 0) debt = 0;
   luaE_setdebt(g, debt);
 }
@@ -1722,6 +1729,9 @@ static void markold (global_State *g, GCObject *from, GCObject *to) {
 ** Finish a young-generation collection.
 */
 static void finishgencycle (lua_State *L, global_State *g) {
+  l_mem live = livebytes(g);
+  l_mem growth = applygcparam(g, MINORMUL, g->GCmajorlive);
+  g->GCgoal = growth > MAX_LMEM - live ? MAX_LMEM : live + growth;
   correctgraylists(g);
   checkSizes(L, g);
   g->gcstate = GCSpropagate;  /* skip restart */
@@ -1807,7 +1817,7 @@ static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
   /* decide whether to shift to major mode */
   if (checkminormajor(g)) {
     minor2inc(L, g, KGC_GENMAJOR);  /* go to major mode */
-    g->GCmarked = 0;  /* avoid pause in first major cycle (see 'setpause') */
+    g->GCmarked = 0;  /* fresh accounting for the forthcoming major */
   }
   else
     finishgencycle(L, g);  /* still in minor mode; finish it */
@@ -1836,6 +1846,7 @@ static void atomic2gen (lua_State *L, global_State *g) {
   sweep2old(L, &g->tobefnz);
 
   g->gckind = KGC_GENMINOR;
+  g->GCmajorlive = livebytes(g);
   g->GCmajorminor = g->GCmarked;  /* "base" for number of bytes */
   g->GCmarked = 0;  /* to count the number of added old1 bytes */
   finishgencycle(L, g);
@@ -1843,15 +1854,8 @@ static void atomic2gen (lua_State *L, global_State *g) {
 
 
 /*
-** Set debt for the next minor collection, which will happen when
-** total number of bytes grows 'genminormul'% in relation to
-** the base, GCmajorminor, which is the number of bytes being used
-** after the last major collection.
+** Finish physical reclamation and refresh the current cycle's fixed budget.
 */
-static void setminordebt (global_State *g) {
-  luaE_setdebt(g, applygcparam(g, MINORMUL, g->GCmajorminor));
-}
-
 void luaC_finishreclaim (lua_State *L) {
   global_State *g = G(L);
   if (g->gcstp & GCSTPCLS) return;  /* teardown frees pages without admission */
@@ -1859,10 +1863,8 @@ void luaC_finishreclaim (lua_State *L) {
   luaM_reclaimpages(L);
   /* A competing collector may have advanced the cycle during destruction.
   ** Reset only the current idle policy, after reclamation credits are exact. */
-  if (g->gckind == KGC_GENMINOR)
-    setminordebt(g);
-  else if (g->gcstate == GCSpause)
-    setpause(g);
+  if (g->gckind == KGC_GENMINOR || g->gcstate == GCSpause)
+    setidledebt(g);
   luaW_start(L);
 }
 
@@ -1925,7 +1927,7 @@ static int checkmajorminor (lua_State *L, global_State *g) {
     l_mem tobecollected = numbytes - g->GCmarked;
     if (tobecollected > limit) {
       atomic2gen(L, g);  /* return to generational mode */
-      setminordebt(g);
+      setidledebt(g);
       return 1;  /* exit incremental collection */
     }
   }
@@ -2027,11 +2029,11 @@ void luaC_finishtrace (lua_State *L) {
   lua_assert(g->gray == NULL);
   if (finish == TRACE_YOUNG) {
     finishyoung(L, g, marked);
-    setminordebt(g);
+    setidledebt(g);
   }
   else if (finish == TRACE_GENERATIONAL) {
     atomic2gen(L, g);
-    setminordebt(g);
+    setidledebt(g);
     L->reclaim_pages = 1;
   }
   else if (!checkmajorminor(L, g))
@@ -2155,6 +2157,7 @@ static l_mem singlestep (lua_State *L, int fast) {
       else {  /* no more finalizers or emergency mode or not enough stack
                  to run finalizers */
         g->gcstate = GCSpause;  /* finish collection */
+        g->GCgoal = applygcparam(g, PAUSE, livebytes(g));
         stepresult = step2pause;
       }
       break;
@@ -2213,7 +2216,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt) {
       work2do -= stres;
   } while (fast || work2do > 0 || luaC_tracing(L));
   if (g->gcstate == GCSpause)
-    setpause(g);  /* pause until next cycle */
+    setidledebt(g);
   else
     luaE_setdebt(g, stepsize);
 }
@@ -2279,7 +2282,7 @@ void luaC_step (lua_State *L) {
       break;
     case KGC_GENMINOR:
       youngcollection(L, g);
-      setminordebt(g);
+      setidledebt(g);
       reclaim = !luaC_tracing(L);
       break;
   }
@@ -2316,7 +2319,7 @@ static void fullinc (lua_State *L, global_State *g) {
   luaC_runtilstate(L, GCScallfin, 1);  /* run up to finalizers */
   if (g->trace_interrupt != interrupted || g->gckind == KGC_GENMINOR) return;
   luaC_runtilstate(L, GCSpause, 1);  /* finish collection */
-  setpause(g);
+  setidledebt(g);
 }
 
 /*

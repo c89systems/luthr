@@ -1,6 +1,6 @@
 # Luthr runtime architecture
 
-Status: replacement architecture boundaries, 2026-11-16.
+Status: replacement architecture boundaries, 2026-11-17.
 The [runtime specification](coroutine-multiplexing-concept.md) governs behavior.
 This design replaces the earlier preference for preserving Lua's collector,
 stack-backed captures and central ownership bookkeeping. Internal compatibility
@@ -35,7 +35,8 @@ Uncontended acquisition/release touches the object; only real contention enters
 the shared wait queue. Tokens identify logical executions across carrier movement
 and permanent thread-local storage for unmanaged callers. Waiter publication and
 the release-side observer check order notification against the predicate recheck.
-The collector still bypasses suspended ownership under quiescence.
+Concurrent scanners use nonblocking object ownership. Global boundaries publish
+roots and change collection phases.
 
 Lua captures now store their complete value in a stable shared cell throughout
 their lifetime. A live binding records a stack offset, never a pointer into its
@@ -49,14 +50,20 @@ Pointer barriers atomically claim gray objects and publish them on the current
 coroutine's work queues. Each object uses its existing allocation link; repeated
 claims need no additional storage. Publication cannot allocate, wait or request
 a global rendezvous. Collection drains every queue before tracing or reclaiming
-objects, including queues on otherwise unreachable threads. Tracing itself
-still requires quiescence at this intermediate stage.
+objects, including queues on otherwise unreachable threads. Parallel scanners
+publish private work before parking; weak processing joins them at phase
+boundaries. Logical sweep classification still requires quiescence, while
+physical destruction overlaps application workers.
 
-This is an intermediate cutover within surface 1. Allocation/publication,
-interning, general metadata scopes and managed admission/polling still use the
-old global protocol and must be replaced before the memory surface satisfies
-the product specification. Dispatch's frame-wide capture refresh is provisional;
-the final performance gate must measure and constrain its cost.
+Allocation consumes owner-local page lists and batches atomic remote returns.
+Pacing counts live storage, including runtime records and black allocations,
+separately from pending destruction. Physical completion preserves the cycle's
+fixed allocation goal.
+
+Backing allocation and page handoff, logical sweep/finalizer classification,
+general metadata scopes and managed admission still need further scaling work.
+Dispatch's frame-wide capture refresh is provisional; the final performance gate
+must measure and constrain its cost.
 
 ## State ownership boundaries
 

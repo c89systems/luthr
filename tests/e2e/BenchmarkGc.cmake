@@ -46,7 +46,8 @@ if(NOT 1 IN_LIST levels)
   message(FATAL_ERROR "GC benchmark needs a single-slot baseline")
 endif()
 file(MAKE_DIRECTORY "${output_dir}")
-set(metrics wall_ns cpu_ns lua_peak_bytes lua_retained_bytes threads)
+set(metrics wall_ns cpu_ns execution_cpu_ns execution_wall_ns
+  cleanup_cpu_ns cleanup_wall_ns lua_peak_bytes lua_retained_bytes threads)
 set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   collector_running_calls collector_body_ns collector_disabled_ns coordination_ns
   stop_request_ns resume_ns heap_entries heap_gc_entries heap_contended_entries
@@ -67,6 +68,8 @@ foreach(key IN ITEMS target config compiler samples warmups tasks work_divisor)
   string(JSON metadata SET "${metadata}" "${key}" "\"${${key}}\"")
 endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
+string(JSON metadata SET "${metadata}" timing
+  "\"Total CPU/wall includes cleanup and final collection. Execution and cleanup times are separate fields; GC probe counters cover execution only.\"")
 string(JSON metadata SET "${metadata}" notes
   "\"Counters are invocation-local wall durations. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and trace assists, excludes coordination and page reclamation, and can include scheduler suspension. Trace batches exclude cooperative suspension; roots are measured separately. Stopped time starts after quiescence and ends before resumed root work. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)

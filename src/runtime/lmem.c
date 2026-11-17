@@ -112,11 +112,15 @@ static void accountassist (lua_State *L, l_mem change) {
 void luaM_flushdebt (lua_State *L) {
   l_mem debt = L->allocation_debt;
   l_mem reclaimed = L->reclaim_credit;
+  l_mem retired = L->retired_credit;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
+  L->retired_credit = 0;
   accountassist(L, debt);
   if (debt != 0)
     adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(L));
+  if (retired != 0)
+    __atomic_fetch_sub(&G(L)->GCretired, retired, __ATOMIC_RELAXED);
   if (reclaimed != 0)
     __atomic_fetch_add(&G(L)->GCreclaimed, reclaimed, __ATOMIC_RELAXED);
 }
@@ -157,34 +161,28 @@ static void account (lua_State *L, l_mem change) {
 ** blocks; MPSC push never reads a node's successor, and only the consumer
 ** removes nodes. Collection retires caches before changing page ownership. */
 static void returnblock (LuaAllocBlock *block, int exclusive) {
-  LuaAllocPage *page = block->block.page;
-  LuaAllocBlock *head = __atomic_load_n(&page->free, __ATOMIC_RELAXED);
+  LuaAllocPage *page = luaMP_page(block);
+  LuaAllocBlock *head = __atomic_load_n(&page->remote, __ATOMIC_RELAXED);
   if (exclusive) {
-    unsigned live = __atomic_load_n(&page->live, __ATOMIC_RELAXED);
-    lua_assert(live != 0);
     block->block.next = head;
-    __atomic_store_n(&page->free, block, __ATOMIC_RELEASE);
-    __atomic_store_n(&page->live, live - 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&page->remote, block, __ATOMIC_RELEASE);
     return;
   }
   do {
     block->block.next = head;
-  } while (!__atomic_compare_exchange_n(&page->free, &head, block, 0,
+  } while (!__atomic_compare_exchange_n(&page->remote, &head, block, 0,
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-  __atomic_fetch_sub(&page->live, 1, __ATOMIC_RELAXED);
 }
 
 static LuaAllocBlock *takeblock (LuaAllocPage *page) {
-  LuaAllocBlock *head = __atomic_load_n(&page->free, __ATOMIC_ACQUIRE);
-  while (head != NULL) {
-    LuaAllocBlock *next = head->block.next;
-    if (__atomic_compare_exchange_n(&page->free, &head, next, 0,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE)) {
-      __atomic_fetch_add(&page->live, 1, __ATOMIC_RELAXED);
-      return head;
-    }
-  }
-  return NULL;
+  LuaAllocBlock *head;
+  if (page->local == NULL) luaMP_collectpage(page);
+  head = page->local;
+  if (head == NULL) return NULL;
+  page->local = head->block.next;
+  page->used++;
+  head->block.page = cast(uintptr_t, page);  /* clear the prior retire credit */
+  return head;
 }
 
 static LuaAllocPage **allocationcache (lua_State *L) {
@@ -213,12 +211,13 @@ void luaM_reclaimpages (lua_State *L) {
     for (i = 0; i < LUA_ALLOC_POOLS; i++) cache->pages[i] = NULL;
   for (link = &g->allocation_pages; *link != NULL;) {
     LuaAllocPage *page = *link;
-    if (__atomic_load_n(&page->live, __ATOMIC_RELAXED) == 0) {
+    luaMP_collectpage(page);
+    if (page->used == 0) {
       *link = page->next;
       callfrealloc(g, page, page->bytes, 0);
     }
     else {
-      if (__atomic_load_n(&page->free, __ATOMIC_RELAXED) != NULL) {
+      if (page->local != NULL) {
         page->available_next = __atomic_load_n(
           &g->allocation_available[page->pool], __ATOMIC_RELAXED);
         __atomic_store_n(&g->allocation_available[page->pool], page,
@@ -315,19 +314,30 @@ l_noret luaM_toobig (lua_State *L) {
 */
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
   LuaAllocBlock *allocation;
-  int exclusive;
+  int exclusive, retired;
   lua_assert((osize == 0) == (block == NULL));
   if (block == NULL) return;
   exclusive = !completestate(G(L)) || luaW_iscollector(L);
   allocation = cast(LuaAllocBlock *, block) - 1;
-  if (allocation->block.page != NULL)
+  retired = luaMP_retired(allocation);
+  if (luaMP_page(allocation) != NULL)
     returnblock(allocation, exclusive);
   else {
     luaW_heapenter(L);
     callfrealloc(G(L), allocation, osize + sizeof(LuaAllocBlock), 0);
     luaW_heapleave(L);
   }
+  if (retired) L->retired_credit += cast(l_mem, osize);
   accountowned(L, cast(l_mem, osize), exclusive);
+}
+
+void luaM_retire_ (lua_State *L, void *memory, size_t size) {
+  LuaAllocBlock *block;
+  if (memory == NULL) { lua_assert(size == 0); return; }
+  block = cast(LuaAllocBlock *, memory) - 1;
+  lua_assert(!luaMP_retired(block));
+  block->block.page |= 1u;
+  __atomic_fetch_add(&G(L)->GCretired, cast(l_mem, size), __ATOMIC_RELAXED);
 }
 
 
@@ -363,11 +373,11 @@ static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
 
 static void preparepage (global_State *g, LuaAllocPage *page,
                          unsigned bin, unsigned pool, size_t bytes) {
-  page->free = NULL;
+  page->local = page->remote = NULL;
   page->bin = bin;
   page->pool = pool;
   page->available_next = NULL;
-  page->live = 0;
+  page->used = 0;
   page->bytes = bytes;
   page->next = g->allocation_pages;
   g->allocation_pages = page;
@@ -438,7 +448,8 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   page = allocationcache(L)[pool];
   if (page != NULL) {
     size_t grown;
-    if (__atomic_load_n(&page->free, __ATOMIC_ACQUIRE) != NULL) goto ready;
+    if (page->local != NULL ||
+        __atomic_load_n(&page->remote, __ATOMIC_ACQUIRE) != NULL) goto ready;
     grown = page->bytes < ALLOC_PAGE_MAX ? page->bytes * 2 : ALLOC_PAGE_MAX;
     if (grown > bytes) bytes = grown;
   }
@@ -491,7 +502,7 @@ static void *allocatebacking (lua_State *L, size_t size, int tag) {
   if (block == NULL)
     block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
   if (block != NULL) {
-    block->block.page = NULL;
+    block->block.page = 0;
     account(L, -cast(l_mem, size));
   }
   luaW_heapleave(L);
@@ -538,12 +549,13 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     return NULL;
   }
   allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
-  if (allocation != NULL && allocation->block.page != NULL &&
-      nsize <= luaMP_binbytes(allocation->block.page->bin)) {
+  lua_assert(allocation == NULL || !luaMP_retired(allocation));
+  if (allocation != NULL && luaMP_page(allocation) != NULL &&
+      nsize <= luaMP_binbytes(luaMP_page(allocation)->bin)) {
     account(L, cast(l_mem, osize) - cast(l_mem, nsize));
     return block;
   }
-  if (allocation != NULL && allocation->block.page == NULL &&
+  if (allocation != NULL && luaMP_page(allocation) == NULL &&
       nsize > luaMP_binbytes(LUA_ALLOC_BINS - 1)) {
     global_State *g = G(L);
     LuaAllocBlock *replacement;
@@ -556,7 +568,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     if (replacement == NULL)
       replacement = cast(LuaAllocBlock *, tryagain(L, allocation, oldbytes, bytes));
     if (replacement != NULL) {
-      replacement->block.page = NULL;
+      replacement->block.page = 0;
       account(L, cast(l_mem, osize) - cast(l_mem, nsize));
     }
     luaW_heapleave(L);
@@ -565,7 +577,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   newblock = allocateblock(L, nsize, 0, 0);
   if (newblock == NULL) return NULL;
   if (block != NULL) {
-    int backing = allocation->block.page == NULL;
+    int backing = luaMP_page(allocation) == NULL;
     if (backing) luaW_heapenter(L);
     memcpy(newblock, block, osize < nsize ? osize : nsize);
     luaM_free_(L, block, osize);

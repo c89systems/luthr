@@ -238,10 +238,110 @@ static void control_lifetime(void) {
   require(allocator.live == 0);
 }
 
+struct return_wave {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *state;
+  unsigned char *blocks[BORROWED];
+  unsigned ready, returned;
+};
+
+static void *return_remote(void *context) {
+  struct return_wave *wave = context;
+  unsigned round, i, j;
+  for (round = 1; round <= 512; round++) {
+    require(pthread_mutex_lock(&wave->mutex) == 0);
+    while (wave->ready != round)
+      require(pthread_cond_wait(&wave->changed, &wave->mutex) == 0);
+    require(pthread_mutex_unlock(&wave->mutex) == 0);
+    lua_lock(wave->state);
+    for (i = 0; i < BORROWED; i++) {
+      for (j = 0; j < BYTES; j++)
+        require(wave->blocks[i][j] == (unsigned char)round);
+      luaM_free_(wave->state, wave->blocks[i], BYTES);
+    }
+    lua_unlock(wave->state);
+    require(pthread_mutex_lock(&wave->mutex) == 0);
+    wave->returned = round;
+    require(pthread_cond_broadcast(&wave->changed) == 0);
+    require(pthread_mutex_unlock(&wave->mutex) == 0);
+  }
+  return NULL;
+}
+
+static void remote_returns(void) {
+  struct allocator allocator = {0};
+  struct return_wave wave = {0};
+  lua_State *L = lua_newstate(allocate, &allocator, 0);
+  unsigned char *warm[64], *owned[BORROWED];
+  pthread_t freer;
+  unsigned round, i;
+  require(L != NULL);
+  wave.state = lua_newthread(L);
+  lua_gc(L, LUA_GCSTOP);
+  require(pthread_mutex_init(&wave.mutex, NULL) == 0);
+  require(pthread_cond_init(&wave.changed, NULL) == 0);
+  lua_lock(L);
+  /* Grow this owner's size class once, then deny any further backing memory.
+   * Remote returns must sustain both simultaneous waves without collecting. */
+  for (i = 0; i < 64; i++) {
+    warm[i] = luaM_malloc_(L, BYTES, 0);
+    require(warm[i] != NULL);
+  }
+  for (i = 0; i < 64; i++)
+    luaM_free_(L, warm[i], BYTES);
+  for (i = 0; i < BORROWED; i++) {
+    owned[i] = luaM_malloc_(L, BYTES, 0);
+    require(owned[i] != NULL);
+    memset(owned[i], 1, BYTES);
+  }
+  allocator.cap = allocator.live;
+  G(L)->gcstopem = 1;
+  lua_unlock(L);
+  require(pthread_create(&freer, NULL, return_remote, &wave) == 0);
+  measured = 1;
+  admissions = 0;
+  for (round = 1; round <= 512; round++) {
+    require(pthread_mutex_lock(&wave.mutex) == 0);
+    memcpy(wave.blocks, owned, sizeof(owned));
+    wave.ready = round;
+    require(pthread_cond_broadcast(&wave.changed) == 0);
+    require(pthread_mutex_unlock(&wave.mutex) == 0);
+    lua_lock(L);
+    for (i = 0; i < BORROWED; i++) {
+      owned[i] = luaM_malloc_(L, BYTES, 0);
+      require(owned[i] != NULL);
+      memset(owned[i], (unsigned char)(round + 1), BYTES);
+    }
+    lua_unlock(L);
+    require(pthread_mutex_lock(&wave.mutex) == 0);
+    while (wave.returned != round)
+      require(pthread_cond_wait(&wave.changed, &wave.mutex) == 0);
+    require(pthread_mutex_unlock(&wave.mutex) == 0);
+  }
+  measured = 0;
+  require(pthread_join(freer, NULL) == 0);
+  require(admissions == 0 && allocator.denied == 0);
+  lua_lock(L);
+  allocator.cap = 0;
+  G(L)->gcstopem = 0;
+  for (i = 0; i < BORROWED; i++)
+    luaM_free_(L, owned[i], BYTES);
+  lua_unlock(L);
+  lua_close(L);
+  require(allocator.live == 0);
+  require(pthread_cond_destroy(&wave.changed) == 0);
+  require(pthread_mutex_destroy(&wave.mutex) == 0);
+}
+
 int main(int argc, char **argv) {
   struct allocator allocator = {0};
   lua_State *L;
   require(argc == 2);
+  if (strcmp(argv[1], "remote_returns") == 0) {
+    remote_returns();
+    return 0;
+  }
   if (strcmp(argv[1], "control_lifetime") == 0) {
     control_lifetime();
     return 0;

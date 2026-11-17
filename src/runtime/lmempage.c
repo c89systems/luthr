@@ -12,11 +12,29 @@ void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
   lua_assert(!completestate(G(L)) || luaW_iscollector(L) ||
     __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
   UNUSED(L);
+  lua_assert((cast(uintptr_t, page) & 1u) == 0);
   for (offset = LUA_ALLOC_PAGE_HEADER;
        offset + stride <= page->bytes; offset += stride) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-    block->block.page = page;
-    block->block.next = page->free;
-    page->free = block;
+    block->block.page = cast(uintptr_t, page);
+    block->block.next = page->local;
+    page->local = block;
   }
+}
+
+void luaMP_collectpage (LuaAllocPage *page) {
+  LuaAllocBlock *head = __atomic_exchange_n(&page->remote, NULL,
+                                            __ATOMIC_ACQUIRE);
+  LuaAllocBlock *tail = head;
+  unsigned returned = 0;
+  if (head == NULL) return;
+  for (;;) {
+    returned++;
+    if (tail->block.next == NULL) break;
+    tail = tail->block.next;
+  }
+  lua_assert(page->used >= returned);
+  page->used -= returned;
+  tail->block.next = page->local;
+  page->local = head;
 }

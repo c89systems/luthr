@@ -19,7 +19,7 @@ file(WRITE "${raw}" "runtime,workload,collector,repetitions,sample,checksum,cpu_
 file(WRITE "${summary}" "workload,collector,repetitions,samples,upstream_cpu_ns,luthr_cpu_ns,cpu_ratio,upstream_wall_ns,luthr_wall_ns,wall_ratio\n")
 string(TIMESTAMP started "%Y-%m-%dT%H:%M:%SZ" UTC)
 file(WRITE "${output_dir}/metadata.json"
-  "{\"lua\":\"5.5.1\",\"target\":\"${target}\",\"config\":\"${config}\",\"compiler\":\"${compiler}\",\"started_utc\":\"${started}\",\"samples\":${samples},\"warmups\":${warmups},\"work_divisor\":${work_divisor},\"ratio\":\"luthr/upstream\",\"timing_unit\":\"ns\"}\n")
+  "{\"lua\":\"5.5.1\",\"target\":\"${target}\",\"config\":\"${config}\",\"compiler\":\"${compiler}\",\"started_utc\":\"${started}\",\"samples\":${samples},\"warmups\":${warmups},\"work_divisor\":${work_divisor},\"ratio\":\"luthr/upstream\",\"timing_unit\":\"ns\",\"timing\":\"includes final collection\"}\n")
 set(integers_repetitions 25)
 set(tables_repetitions 20)
 set(closures_repetitions 50)

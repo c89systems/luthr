@@ -109,6 +109,12 @@ void luaC_retireobject (lua_State *L, GCObject *o) {
       luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
     }
   }
+  switch (o->tt) {
+    case LUA_VPROTO: luaF_retireproto(L, gco2p(o)); break;
+    case LUA_VTABLE: luaH_retire(L, gco2t(o)); break;
+    case LUA_VTHREAD: luaE_retirethread(L, gco2th(o)); break;
+    default: luaM_retire_(L, o, cast_sizet(luaC_objsize(o))); break;
+  }
   o->next = NULL;
   if (L->retired_tail != NULL) L->retired_tail->next = o;
   else __atomic_store_n(&L->retired, o, __ATOMIC_RELEASE);

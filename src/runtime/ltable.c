@@ -839,6 +839,14 @@ lu_mem luaH_size (Table *t) {
 /*
 ** Frees a table.
 */
+void luaH_retire (lua_State *L, Table *t) {
+  if (!isdummy(t))
+    luaM_retire_(L, cast_charp(t->node) - extraLastfree(t), sizehash(t));
+  if (t->asize != 0)
+    luaM_retire_(L, t->array - t->asize, concretesize(t->asize));
+  luaM_retire_(L, t, sizeof(*t));
+}
+
 void luaH_free (lua_State *L, Table *t) {
   lua_assert(t->access.depth == 0);
   freehash(L, t);

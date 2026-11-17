@@ -326,11 +326,8 @@ int main(int argc, char **argv) {
     notice(&pool);
     while (pool.done != pool.count || pool.idle != pool.width)
       wait_change(&pool);
-    elapsed_wall = now(CLOCK_MONOTONIC) - pool.released;
-    elapsed_cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
     failed = pool.failed;
     unlock(&pool);
-    peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
     for (unsigned i = 0; i < pool.count; ++i) {
       checksum += (uint64_t)pool.jobs[i].checksum;
       services[i] = pool.jobs[i].service;
@@ -345,6 +342,9 @@ int main(int argc, char **argv) {
     }
     require(checksum == (uint64_t)pool.expected * pool.count);
     (void)lua_gc(state, LUA_GCCOLLECT);
+    elapsed_wall = now(CLOCK_MONOTONIC) - pool.released;
+    elapsed_cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
+    peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
     retained = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
     qsort(services, pool.count, sizeof(*services), compare_u64);
     qsort(latencies, pool.count, sizeof(*latencies), compare_u64);

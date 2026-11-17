@@ -23,6 +23,9 @@ LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
 LUAI_FUNC void luaM_flushdebt (lua_State *L);
 /* Collector/exclusive shutdown only; retire local caches before freeing pages. */
 LUAI_FUNC void luaM_reclaimpages (lua_State *L);
+/* Quiescent GC: record unreachable storage independently of physical freeing. */
+LUAI_FUNC void luaM_retire_ (lua_State *L, void *memory, size_t size);
+#define luaM_retirearray(L,b,n) luaM_retire_(L, (b), (n)*sizeof(*(b)))
 
 
 /*

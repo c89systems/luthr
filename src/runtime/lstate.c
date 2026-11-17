@@ -387,6 +387,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
+  L->retired_credit = 0;
   L->finalizer_count = 0;
   for (i = 0; i < LUA_ALLOC_POOLS; i++)
     L->allocation_cache[i] = NULL;
@@ -460,7 +461,7 @@ static void close_state (lua_State *L, int owns_gate) {
   freestack(L, L);
   luaCP_bind(L, NULL);
   luaM_reclaimpages(L);
-  lua_assert(gettotalbytes(g) == sizeof(global_State));
+  lua_assert(gettotalbytes(g) == sizeof(global_State) && g->GCretired == 0);
   if (owns_gate) {
     luaW_start(L);
     lua_unlock(L);
@@ -512,6 +513,16 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   return L1;
 }
 
+
+void luaE_retirethread (lua_State *L, lua_State *thread) {
+  CallInfo *ci;
+  for (ci = thread->base_ci.next; ci != NULL; ci = ci->next)
+    luaM_retire_(L, ci, sizeof(*ci));
+  if (thread->stack.p != NULL)
+    luaM_retirearray(L, thread->stack.p,
+                     cast_sizet(stacksize(thread) + EXTRA_STACK));
+  luaM_retire_(L, fromstate(thread), sizeof(LX));
+}
 
 void luaE_freethread (lua_State *L, lua_State *L1) {
   LX *l = fromstate(L1);
@@ -653,6 +664,9 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCmarked = 0;
   g->GCdebt = 0;
   g->GCreclaimed = 0;
+  g->GCretired = 0;
+  g->GCmajorlive = sizeof(global_State);
+  g->GCgoal = sizeof(global_State);
   g->gcstep_pending = 0;
   g->trace_active = g->trace_epoch = g->trace_busy = 0;
   g->trace_weakcutoff = 0;

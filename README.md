@@ -26,7 +26,8 @@ Multi-step operations on shared application data still need application
 coordination. Native libraries retain their own thread-safety and affinity rules.
 
 **Status:** pre-1.0 development. The runtime and public task API are implemented;
-final performance tuning, automatic sizing and package verification remain open.
+concurrency and performance architecture, sizing and final delivery verification
+remain in progress.
 Supported build targets are x86_64 Linux with GNU libc or musl.
 
 ## Build and test
@@ -76,7 +77,9 @@ make benchmark-gc                    # collector work, coordination and stopped-
 Benchmark targets default to Release builds. `make benchmark` prints a comparison
 table and saves it alongside raw samples and CPU/wall medians under
 `build/<target>/Release/benchmarks/lua/`. Ratios are Luthr/upstream elapsed time:
-`2.000x` means Luthr takes twice as long. `CONFIG` overrides the build mode.
+`2.000x` means Luthr takes twice as long. Timing includes final collection.
+Scheduler output separates execution and cleanup durations while including both
+in total time. `CONFIG` overrides the build mode.
 
 ## Embed Luthr
 

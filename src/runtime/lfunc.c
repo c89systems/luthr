@@ -472,6 +472,19 @@ lu_mem luaF_protosize (Proto *p) {
 }
 
 
+void luaF_retireproto (lua_State *L, Proto *f) {
+  if (!(f->flag & PF_FIXED)) {
+    luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
+    luaM_retirearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
+    luaM_retirearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
+  }
+  luaM_retirearray(L, f->p, cast_sizet(f->sizep));
+  luaM_retirearray(L, f->k, cast_sizet(f->sizek));
+  luaM_retirearray(L, f->locvars, cast_sizet(f->sizelocvars));
+  luaM_retirearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
+  luaM_retire_(L, f, sizeof(*f));
+}
+
 void luaF_freeproto (lua_State *L, Proto *f) {
   if (!(f->flag & PF_FIXED)) {
     luaM_freearray(L, f->code, cast_sizet(f->sizecode));

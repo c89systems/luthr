@@ -77,6 +77,8 @@ endforeach()
 string(JSON metadata SET "${metadata}" lua "\"5.5.1\"")
 string(JSON metadata SET "${metadata}" model "\"shared_vm_host_pool\"")
 string(JSON metadata SET "${metadata}" timing_unit "\"ns\"")
+string(JSON metadata SET "${metadata}" timing
+  "\"CPU/wall includes coroutine cleanup, validation and final collection; service and completion latency cover execution.\"")
 string(JSON metadata SET "${metadata}" ratio "\"luthr/upstream\"")
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 foreach(key IN ITEMS samples warmups tasks work_divisor)
