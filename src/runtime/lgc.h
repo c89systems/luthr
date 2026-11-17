@@ -239,7 +239,9 @@
     (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
 
 #define luaC_condGC(L,pre,pos) \
-    { if (gcrunning(G(L)) && luaC_needstep(L)) \
+    { if (gcrunning(G(L)) && luaC_needstep(L) && \
+          ((L)->world_depth != 0 || \
+           !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED))) \
           { pre; luaC_step(L); pos;}; \
 	  condchangemem(L,pre,pos,0); }
 

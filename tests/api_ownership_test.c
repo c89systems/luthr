@@ -5,6 +5,7 @@
 #include <lua.h>
 #include <lualib.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,7 @@ static struct fixture *active_fixture;
 
 void __real_luaX_lockstate(lua_State *state);
 void __real_luaX_unlockstate(lua_State *state);
+void __real_luaX_pollrequests(lua_State *state);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
 
 static void check(int status) {
@@ -62,13 +64,13 @@ void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
 static void collect_at_boundary(struct fixture *fixture) {
   uintptr_t original = (uintptr_t)fixture->old_stack;
   fixture->armed = 0;
+  fixture->collections++;
   /* A real collection shrinks the parked VM or native frame's unused stack. The
    * retired mapping stays allocated but is cleared, making stale slot reads
    * deterministic without depending on the host realloc implementation. */
   if (!fixture->vm_case && fixture->worker->native_depth == 0)
     abort();
   (void)lua_gc(fixture->main, LUA_GCCOLLECT);
-  fixture->collections++;
   if ((uintptr_t)fixture->worker->stack.p == original ||
       fixture->retired_stack == NULL)
     abort();
@@ -76,8 +78,8 @@ static void collect_at_boundary(struct fixture *fixture) {
 
 void __wrap_luaX_lockstate(lua_State *state) {
   struct fixture *fixture = active_fixture;
-  if (fixture != NULL && fixture->armed && fixture->entry_case &&
-      state == fixture->worker)
+  if (fixture != NULL && !fixture->vm_case && fixture->armed &&
+      fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);
   __real_luaX_lockstate(state);
 }
@@ -85,9 +87,30 @@ void __wrap_luaX_lockstate(lua_State *state) {
 void __wrap_luaX_unlockstate(lua_State *state) {
   struct fixture *fixture = active_fixture;
   __real_luaX_unlockstate(state);
-  if (fixture != NULL && fixture->armed && !fixture->entry_case &&
-      state == fixture->worker && (!fixture->vm_case || isLua(state->ci)))
+  if (fixture != NULL && !fixture->vm_case && fixture->armed &&
+      !fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);
+}
+
+void __wrap_luaX_pollrequests(lua_State *state) {
+  struct fixture *fixture = active_fixture;
+  if (fixture != NULL && fixture->vm_case && fixture->armed &&
+      state == fixture->worker) {
+    check(pthread_mutex_lock(&fixture->mutex));
+    fixture->snapshot_ready = 1;
+    check(pthread_cond_broadcast(&fixture->changed));
+    check(pthread_mutex_unlock(&fixture->mutex));
+    /* The host requests a real collection after the VM allocation publishes
+     * its result, before this request check decides whether to hand off. */
+    while (!__atomic_load_n(&G(state)->world.stopped, __ATOMIC_SEQ_CST))
+      sched_yield();
+    __real_luaX_pollrequests(state);
+    check(pthread_mutex_lock(&fixture->mutex));
+    while (!fixture->replacement_ready)
+      check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
+    check(pthread_mutex_unlock(&fixture->mutex));
+  } else
+    __real_luaX_pollrequests(state);
 }
 
 static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
@@ -273,7 +296,17 @@ int main(int argc, char **argv) {
   check(pthread_cond_init(&fixture.changed, NULL));
   if (pthread_create(&carrier, NULL, run, &fixture) != 0)
     abort();
-  if (fixture.selfcopy_case) {
+  if (fixture.vm_case) {
+    check(pthread_mutex_lock(&fixture.mutex));
+    while (!fixture.snapshot_ready)
+      check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
+    check(pthread_mutex_unlock(&fixture.mutex));
+    collect_at_boundary(&fixture);
+    check(pthread_mutex_lock(&fixture.mutex));
+    fixture.replacement_ready = 1;
+    check(pthread_cond_broadcast(&fixture.changed));
+    check(pthread_mutex_unlock(&fixture.mutex));
+  } else if (fixture.selfcopy_case) {
     check(pthread_mutex_lock(&fixture.mutex));
     while (!fixture.snapshot_ready)
       check(pthread_cond_wait(&fixture.changed, &fixture.mutex));

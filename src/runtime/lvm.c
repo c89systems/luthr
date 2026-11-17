@@ -1222,21 +1222,14 @@ void luaV_finishOp (lua_State *L) {
 */
 #define halfProtect(exp)  (savestate(L,ci), (exp))
 
-/*
-** macro executed during Lua functions at points where the
-** function can yield.
-*/
-#if !defined(luai_threadyield)
-#define luai_threadyield(L)	{lua_unlock(L); lua_lock(L);}
-#endif
-
 /* 'c' is the limit of live values in the stack. Publish before every handoff,
 ** even if this carrier does not collect. Another collector can move the stack
-** while ownership is released, so reload dispatch state after reacquiring it. */
+** while ownership is released, so reload dispatch state after reacquiring it.
+** Allocations do not otherwise retire the current execution slot or quantum. */
 #define checkGC(L,c)  \
 	{ savepc(ci); L->top.p = (c); \
 	  luaC_condGC(L, (void)0, (void)0); \
-	  luai_threadyield(L); updatebase(ci); updatetrap(ci); }
+	  luaX_pollrequests(L); updatebase(ci); updatetrap(ci); }
 
 
 /* Open cells are ordered by descending stack level. Captures in callers do

@@ -412,6 +412,7 @@ typedef struct global_State {
   void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCtotalbytes;  /* number of bytes currently allocated + debt */
   l_mem GCdebt;  /* bytes counted but not yet allocated */
+  unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
   l_mem GCmarked;  /* number of objects marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
   stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */

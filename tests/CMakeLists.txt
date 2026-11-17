@@ -105,6 +105,17 @@ foreach(case IN ITEMS independent readers access uncaptured semantics incrementa
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(gc_requests_test gc_requests_test.c)
+set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_requests_test PRIVATE luthr_static)
+target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter)
+foreach(case IN ITEMS incremental generational explicit stopped)
+  add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
+  set_tests_properties(gc_requests_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(gc_barriers_test gc_barriers_test.c)
 set_target_properties(gc_barriers_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_barriers_test PRIVATE -Wall -Wextra -Werror)
@@ -127,7 +138,7 @@ target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_loc
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_free_)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
-foreach(case IN ITEMS no_requests stack_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
+foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational page_growth page_cap page_isolation
     metadata_handoff metadata_spurious metadata_collect metadata_contention stopped_gc refill_recheck)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
@@ -639,7 +650,8 @@ set_target_properties(api_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(api_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(api_ownership_test PRIVATE luthr_static)
 target_link_options(api_ownership_test PRIVATE
-  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate -Wl,--wrap=luaA_end)
+  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate -Wl,--wrap=luaA_end
+  -Wl,--wrap=luaX_pollrequests)
 foreach(case IN ITEMS string_pointer string_length dump_entry rawset_entry capture_selfcopy
     vm_newtable_incremental vm_newtable_generational vm_concat_incremental
     vm_concat_generational vm_closure_incremental vm_closure_generational)
@@ -745,7 +757,8 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test gc_barriers_test scheduler_test native_lifecycle_test
+  capture_cells_test memory_publication_test gc_barriers_test gc_requests_test
+  scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)
   add_dependencies(unit_build race_detector_test)

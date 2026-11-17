@@ -29,5 +29,8 @@ LUAI_FUNC void luaX_unlockpair (lua_State *first, lua_State *second);
 LUAI_FUNC l_uint32 luaX_parentcalls (lua_State *from);
 LUAI_FUNC void luaX_checksync (int status);
 LUAI_FUNC void luaX_poll (lua_State *L);
+/* Caller publishes live stack values before a possible collector handoff.
+** This checks ownership requests without consuming a scheduling quantum. */
+LUAI_FUNC void luaX_pollrequests (lua_State *L);
 
 #endif

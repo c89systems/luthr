@@ -1894,7 +1894,18 @@ static void incstep (lua_State *L, global_State *g) {
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
   int reclaim = 0;
+  int claimed = 0;
   if (!gcrunning(g) || !luaC_needstep(L)) return;
+  if (L->world_depth == 0) {
+    unsigned expected = 0;
+    /* One automatic request can wait for metadata while other mutators keep
+    ** working. Explicit steps already own the collector and must still run. */
+    if (__atomic_load_n(&g->gcstep_pending, __ATOMIC_RELAXED) ||
+        !__atomic_compare_exchange_n(&g->gcstep_pending, &expected, 1, 0,
+                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+      return;
+    claimed = 1;
+  }
   /* Another collector can service this request while metadata access waits.
   ** Revalidate under metadata ownership before requesting global quiescence.
   ** Include unpublished local debt, just like the allocation-side check.
@@ -1902,7 +1913,7 @@ void luaC_step (lua_State *L) {
   luaW_heapenter(L);
   if (!gcrunning(g) || !luaC_needstep(L)) {
     luaW_heapleave(L);
-    return;
+    goto done;
   }
   luaW_stop(L);
   luaW_heapleave(L);  /* retain exactly the ownership acquired by luaW_stop */
@@ -1925,6 +1936,9 @@ void luaC_step (lua_State *L) {
   ** explicit full collections still reclaim before retrying an allocation. */
   if (reclaim) luaM_reclaimpages(L);
   luaW_start(L);
+ done:
+  if (claimed)
+    __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
 }
 
 

@@ -174,12 +174,7 @@ l_uint32 luaX_parentcalls (lua_State *from) {
   return calls;
 }
 
-void luaX_poll (lua_State *L) {
-  luaQ_poll(L);
-  /* Internal poll handlers execute as managed VM code, with stack ownership.
-  ** They are not ordinary C bindings and do not detach automatically. */
-  if (L->state_poll != NULL)
-    L->state_poll(L, L->state_poll_context);
+void luaX_pollrequests (lua_State *L) {
   if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
       __atomic_load_n(&L->stack_gate.waiting, __ATOMIC_ACQUIRE) != 0) {
     /* A real request publishes roots and hands off ownership. The successful
@@ -189,6 +184,15 @@ void luaX_poll (lua_State *L) {
     luaX_lockstate(L);
     L->native_depth--;
   }
+}
+
+void luaX_poll (lua_State *L) {
+  luaQ_poll(L);
+  /* Internal poll handlers execute as managed VM code, with stack ownership.
+  ** They are not ordinary C bindings and do not detach automatically. */
+  if (L->state_poll != NULL)
+    L->state_poll(L, L->state_poll_context);
+  luaX_pollrequests(L);
   luaTK_checkstop(L);
   luaCP_checklimit(L);
 }

@@ -242,6 +242,22 @@ static void stack_admission(lua_State *state) {
   watched_gate = NULL;
 }
 
+static void allocation_admission(lua_State *state) {
+  unsigned admissions;
+  lua_gc(state, LUA_GCSTOP);
+  require(luaL_loadstring(state,
+                          "local last; for i=1,2000 do local t={i}; "
+                          "local function f() return t[1] end; "
+                          "local s='value'..i; last=f()+#s end; return last") ==
+          LUA_OK);
+  entries = 0;
+  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+  admissions = entries;
+  require(lua_tointeger(state, -1) == 2009);
+  fprintf(stderr, "allocation-only stack admissions: %u\n", admissions);
+  require(admissions == 1); /* Allocation is not a new coroutine entry. */
+}
+
 static void *stack_increment(void *context) {
   lua_State *state = context;
   unsigned i;
@@ -1093,6 +1109,8 @@ int main(int argc, char **argv) {
     no_requests(state);
   else if (strcmp(argv[1], "stack_admission") == 0)
     stack_admission(state);
+  else if (strcmp(argv[1], "allocation_admission") == 0)
+    allocation_admission(state);
   else if (strcmp(argv[1], "stack_contention") == 0)
     stack_contention(state);
   else if (strcmp(argv[1], "metadata_contention") == 0)
