@@ -106,6 +106,17 @@ foreach(case IN ITEMS independent readers access uncaptured operands semantics i
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(execution_context_test execution_context_test.c)
+set_target_properties(execution_context_test PROPERTIES C_STANDARD 99)
+target_compile_options(execution_context_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(execution_context_test PRIVATE luthr_static)
+target_link_options(execution_context_test PRIVATE -Wl,--wrap=luaE_getnativestackcontext)
+foreach(case IN ITEMS host managed borrow pair foreign publication)
+  add_test(NAME execution_context_${case} COMMAND execution_context_test ${case})
+  set_tests_properties(execution_context_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(gc_pacing_test gc_pacing_test.c)
 set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
@@ -832,7 +843,8 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test memory_publication_test allocation_pool_test page_ownership_test gc_pacing_test
+  capture_cells_test execution_context_test memory_publication_test
+  allocation_pool_test page_ownership_test gc_pacing_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)

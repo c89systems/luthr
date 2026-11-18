@@ -114,10 +114,12 @@ LUAI_FUNC int luaQ_unpincarrier (LuaCarrierPin *pin);
 ** GC-rooted identities for the VM lifetime; captured closures remain distinct.
 ** Ordinary native functions remain foreign by default. */
 LUAI_FUNC void luaQ_pushmanaged (lua_State *L, lua_CFunction function, int n);
-LUAI_FUNC void luaQ_entermanaged (lua_State *L);
-LUAI_FUNC void luaQ_leavemanaged (void);
-LUAI_FUNC void luaQ_beginnative (lua_State *L);
-LUAI_FUNC void luaQ_endnative (lua_State *L);
+LUAI_FUNC void luaQ_entermanaged (lua_State *L, LuaExecution *execution);
+LUAI_FUNC void luaQ_leavemanaged (LuaExecution *execution);
+/* Native admission can precede stack ownership. The caller supplies either
+** its bound execution or the ambient driver; L may be NULL at that boundary. */
+LUAI_FUNC void luaQ_beginnative (lua_State *L, LuaExecution *execution);
+LUAI_FUNC void luaQ_endnative (lua_State *L, LuaExecution *execution);
 LUAI_FUNC void luaQ_begincall (lua_State *, int managed, LuaCallScope *);
 LUAI_FUNC void luaQ_endcall (lua_State *, LuaCallScope *);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,

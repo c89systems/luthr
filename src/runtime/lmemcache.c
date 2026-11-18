@@ -79,7 +79,7 @@ void luaMC_leave (LuaExecution *execution) {
 
 int luaMC_borrow (lua_State *L, LuaAllocationCache *cache,
                   LuaCacheBorrow *borrow, int exclusive) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   void *expected = NULL;
   borrow->cache = cache;
   borrow->global = cache->global;

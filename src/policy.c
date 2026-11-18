@@ -49,7 +49,8 @@ static void hook(lua_State *L, lua_Debug *debug) {
     luthr_lua_runtime_trace_fn trace;
     void *context;
     Invocation *previous;
-    luaQ_beginnative(L);
+    LuaExecution *execution = luaQ_current();
+    luaQ_beginnative(L, execution);
     check(pthread_mutex_lock(&invocation->observer));
     trace = invocation->options.trace;
     context = invocation->options.trace_context;
@@ -63,7 +64,7 @@ static void hook(lua_State *L, lua_Debug *debug) {
       observing = previous;
     }
     check(pthread_mutex_unlock(&invocation->observer));
-    luaQ_endnative(L);
+    luaQ_endnative(L, execution);
   }
 }
 

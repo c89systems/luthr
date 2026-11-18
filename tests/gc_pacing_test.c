@@ -344,11 +344,11 @@ static void persistent_storage(int generational, int refresh) {
   if (refresh) {
     l_mem before, spent;
     lua_lock(L);
-    luaM_flushdebt(L);
+    luaM_flushdebt(L, L);
     before = G(L)->GCdebt;
     extra = luaM_alloccontrol(L, 65536);
     require(extra != NULL);
-    luaM_flushdebt(L);
+    luaM_flushdebt(L, L);
     spent = G(L)->GCdebt;
     require(spent == before - 65536 && spent > 0);
     /* A late physical completion must preserve the outstanding allocation

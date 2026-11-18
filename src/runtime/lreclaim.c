@@ -166,7 +166,7 @@ static lu_mem destroywork (lua_State *L, GCObject *head) {
       ? cast(lu_mem, MAX_LMEM) : bytes + size;
     freeobj(L, o);
   }
-  luaM_flushdebt(L);
+  luaM_flushdebt(L, L);
   return bytes;
 }
 
@@ -258,7 +258,7 @@ void luaC_reclaim (lua_State *L) {
       completework(L, L);
     }
   }
-  luaM_flushdebt(L);
+  luaM_flushdebt(L, L);
   if (L->reclaim_pages) {
     L->reclaim_pages = 0;
     if (!(G(L)->gcstp & GCSTPCLS))

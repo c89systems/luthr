@@ -1011,12 +1011,12 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     nw2black(o);
     return 1;
   }
-  if (!luaW_iscollector(L) && !luaA_tryscan(o)) return 0;
+  if (!luaW_iscollector(L) && !luaA_tryscan(L, o)) return 0;
   if (o->tt == LUA_VTABLE) {
     Table *table = gco2t(o);
     Table *metatable = table->metatable;
     int pair = metatable != NULL && metatable != table;
-    if (pair && !luaW_iscollector(L) && !luaA_tryscan(obj2gco(metatable))) {
+    if (pair && !luaW_iscollector(L) && !luaA_tryscan(L, obj2gco(metatable))) {
       luaA_endscan(L, o);
       return 0;
     }
@@ -1162,7 +1162,7 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     if (work->phase == TRACE_MARK) {
       if (!scantrace(L, work, object)) queuework(&work->deferred, object);
     }
-    else if (!quiescent && !luaA_tryscan(object))
+    else if (!quiescent && !luaA_tryscan(L, object))
       deferweak(&work->retry, &work->retry_tail, object);
     else {
       if (work->phase == TRACE_EPHEMERONS) {
@@ -1259,7 +1259,7 @@ static int trimstacks (lua_State *L) {
       thread->trace_trimmed = thread->trace_snapshot;
       thread->reclaiming = 1;
       luaD_shrinkstack(thread);  /* metadata entry is recursive for this owner */
-      luaM_flushdebt(thread);
+      luaM_flushdebt(L, thread);
       thread->reclaiming = 0;
     }
     thread->native_depth--;
@@ -1497,7 +1497,7 @@ void luaC_publish (lua_State *L) {
   for (participant = g->world.participants; participant != NULL;
        participant = participant->next) {
     lua_State *thread = participant->thread;
-    luaM_flushdebt(thread);
+    luaM_flushdebt(L, thread);
     if (thread->new_objects != NULL) {
       thread->new_objects_tail->next = g->allgc;
       g->allgc = thread->new_objects;

@@ -59,8 +59,7 @@ int luaQ_unpincarrier (LuaCarrierPin *pin) {
   return LUA_OK;
 }
 
-void luaQ_entermanaged (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+void luaQ_entermanaged (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     checkcarrier(execution);
     /* The callback may park before any state gate/world participation exists. */
@@ -72,8 +71,7 @@ void luaQ_entermanaged (lua_State *L) {
   }
 }
 
-void luaQ_leavemanaged (void) {
-  LuaExecution *execution = luaQ_current();
+void luaQ_leavemanaged (LuaExecution *execution) {
   if (execution != NULL) {
     lua_assert(execution->managed_depth != 0);
     if (--execution->managed_depth == 0) {
@@ -83,8 +81,7 @@ void luaQ_leavemanaged (void) {
   }
 }
 
-void luaQ_beginnative (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+void luaQ_beginnative (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     checkcarrier(execution);
     /* Admission runs before the foreign activation exists. */
@@ -95,8 +92,7 @@ void luaQ_beginnative (lua_State *L) {
   }
 }
 
-void luaQ_endnative (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+void luaQ_endnative (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     lua_assert(execution->native_depth != 0);
     execution->native_depth--;
@@ -106,10 +102,10 @@ void luaQ_endnative (lua_State *L) {
 }
 
 void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   scope->execution = execution;
   scope->managed = managed;
-  if (!managed) luaQ_beginnative(L);
+  if (!managed) luaQ_beginnative(L, execution);
   else if (execution != NULL) {
     scope->previous = execution->trusted;
     scope->native_depth = execution->native_depth;
@@ -118,9 +114,9 @@ void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
 }
 
 void luaQ_endcall (lua_State *L, LuaCallScope *scope) {
-  if (!scope->managed) luaQ_endnative(L);
+  if (!scope->managed) luaQ_endnative(L, scope->execution);
   else if (scope->execution != NULL) {
-    lua_assert(scope->execution == luaQ_current() &&
+    lua_assert(scope->execution == luaX_execution(L) &&
                scope->execution->trusted == scope);
     scope->execution->trusted = scope->previous;
   }
@@ -136,7 +132,7 @@ void luaQ_restorenative (LuaExecution *execution, lua_State *L, unsigned depth) 
 }
 
 void luaQ_poll (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   if (execution != NULL) {
     checkcarrier(execution);
     if (execution->poll != NULL) {
@@ -151,7 +147,7 @@ void luaQ_poll (lua_State *L) {
 }
 
 void luaQ_requesthandoff (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   if (execution != NULL && execution->request_handoff != NULL)
     execution->request_handoff(execution, L);
 }
@@ -192,7 +188,7 @@ int luaQ_isowner (const LuaOwner *owner) {
 void *luaQ_ownertoken (void) {
   LuaExecution *execution = luaQ_current();
   return execution != NULL ? cast(void *, execution)
-                           : cast(void *, &luaE_native_stack_context);
+                           : cast(void *, &luaE_thread_context.native);
 }
 
 /* The caller has published roots and withdrawn collection participation where
@@ -226,9 +222,9 @@ static void waitregistered (lua_State *L, pthread_mutex_t *mutex,
     if (depth != 0 && execution->managed_leave != NULL)
       execution->managed_leave(execution);
     execution->wait(execution, mutex, waiter);
-    luaQ_entermanaged(L);
+    luaQ_entermanaged(L, execution);
     if (depth == 0)
-      luaQ_leavemanaged();  /* An opaque native resource needs no VM permit. */
+      luaQ_leavemanaged(execution);  /* An opaque native resource needs no VM permit. */
     else
       execution->managed_depth = depth;
     luaX_checksync(pthread_mutex_lock(mutex));

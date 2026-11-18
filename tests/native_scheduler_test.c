@@ -2877,12 +2877,12 @@ static int affine_scope(lua_State *state) {
   /* Install cleanup before reserving affinity or creating the native handle. */
   lua_toclose(state, 2);
   require(luaQ_pincarrier(&resource->pin) == LUA_OK);
-  luaQ_beginnative(state);
+  luaQ_beginnative(state, luaQ_current());
   lock(fixture);
   resource->magic = 12345;
   fixture->affinity_opened++;
   unlock(fixture);
-  luaQ_endnative(state);
+  luaQ_endnative(state, luaQ_current());
   lua_pushvalue(state, 1);
   lua_pushvalue(state, 2);
   lua_callk(state, 1, 1, 0, affine_scope_done);
@@ -2906,7 +2906,7 @@ static int affine_use(lua_State *state) {
   check(pthread_mutex_unlock(&resource->mutex));
   if (owned) {
     long carrier;
-    luaQ_beginnative(state);
+    luaQ_beginnative(state, luaQ_current());
     carrier = syscall(SYS_gettid);
     native_marker = 800;
     if (lua_isfunction(state, 2)) {
@@ -2917,7 +2917,7 @@ static int affine_use(lua_State *state) {
     }
     require(syscall(SYS_gettid) == carrier && native_marker == 800 &&
             luaQ_pinowner(&resource->pin));
-    luaQ_endnative(state);
+    luaQ_endnative(state, luaQ_current());
   }
   lua_pushboolean(state, owned);
   return 1;

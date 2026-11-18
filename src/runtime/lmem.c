@@ -119,14 +119,14 @@ static void accountassist (lua_State *L, l_mem change) {
   }
 }
 
-void luaM_flushdebt (lua_State *L) {
+void luaM_flushdebt (lua_State *actor, lua_State *L) {
   l_mem debt = L->allocation_debt;
   l_mem reclaimed = L->reclaim_credit;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
   accountassist(L, debt);
   if (debt != 0)
-    adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(L));
+    adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(actor));
   if (reclaimed != 0) {
     __atomic_fetch_sub(&G(L)->GCretired, reclaimed, __ATOMIC_RELAXED);
     __atomic_fetch_sub(&G(L)->GCbytes, reclaimed, __ATOMIC_RELAXED);
@@ -135,14 +135,14 @@ void luaM_flushdebt (lua_State *L) {
 
 static void accountowned (lua_State *L, l_mem change, int exclusive) {
   if (exclusive || change >= DEBT_BATCH || change <= -DEBT_BATCH) {
-    luaM_flushdebt(L);
+    luaM_flushdebt(L, L);
     if (!exclusive) accountassist(L, change);
     adddebt(G(L), change, exclusive);
   }
   else {
     L->allocation_debt += change;
     if (L->allocation_debt >= DEBT_BATCH || L->allocation_debt <= -DEBT_BATCH)
-      luaM_flushdebt(L);
+      luaM_flushdebt(L, L);
   }
 }
 
@@ -224,7 +224,7 @@ static LuaAllocBlock *takeblock (LuaAllocPage *page) {
 }
 
 static LuaAllocationCache *allocationcache (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   if (execution != NULL) {
     LuaTaskRoot *task;
     if (execution->allocation_cache != NULL &&
@@ -523,13 +523,13 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
     /* Logical retirement already paid this storage's pacing credit. Physical
     ** return changes charged/pending bytes only, without a collector phase. */
     if (osize >= DEBT_BATCH) {
-      luaM_flushdebt(L);
+      luaM_flushdebt(L, L);
       __atomic_fetch_sub(&G(L)->GCretired, cast(l_mem, osize), __ATOMIC_RELAXED);
       __atomic_fetch_sub(&G(L)->GCbytes, cast(l_mem, osize), __ATOMIC_RELAXED);
     }
     else {
       L->reclaim_credit += cast(l_mem, osize);
-      if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L);
+      if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L, L);
     }
   }
   else accountowned(L, cast(l_mem, osize), exclusive);
@@ -620,7 +620,7 @@ static void preparepage (global_State *g, LuaAllocPage *page,
 static unsigned reservepages (lua_State *L, unsigned bin, unsigned pool,
                               size_t bytes, LuaAllocPage **reserved) {
   global_State *g = G(L);
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   unsigned count, i, expected = 0, used = 0;
   if (g->gcstopem || luaW_iscollector(L) || execution == NULL ||
       execution->allocation_cache == NULL ||
@@ -683,9 +683,9 @@ static void abandonpage (lua_State *L, unsigned pool) {
 /* Metadata admission can lend this slot to another task. Keep the requested
 ** capacity in the cache record, rather than only on a parked caller's stack:
 ** otherwise each new borrower restarts a hot size class with a cold chunk. */
-static size_t growcache (LuaAllocationCache *cache, unsigned pool,
+static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
                          size_t minimum, size_t requested) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   size_t bytes;
   /* Only a provided cache can be lent to another task during admission.
   ** State/task-owned caches keep this request's demand on its retained stack;
@@ -737,7 +737,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
     2 * (sizeof(LuaAllocBlock) + luaMP_binbytes(bin));
   size_t bytes;
   if (minimum < ALLOC_PAGE_MIN) minimum = ALLOC_PAGE_MIN;
-  bytes = growcache(allocationcache(L), pool, minimum, page == NULL ? 0
+  bytes = growcache(L, allocationcache(L), pool, minimum, page == NULL ? 0
     : page->bytes <= ALLOC_PAGE_MAX / 2 ? page->bytes * 2 : ALLOC_PAGE_MAX);
   if (page != NULL) abandonpage(L, pool);
   assistpages(L);  /* reuse abandoned capacity before growing backing storage */
@@ -754,7 +754,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   ** have been refilled, so retain usable pages instead of overwriting them. */
   page = reusecache(L, pool, minimum, &bytes, epoch);
   if (page != NULL) goto ready;
-  bytes = growcache(allocationcache(L), pool, minimum, bytes);
+  bytes = growcache(L, allocationcache(L), pool, minimum, bytes);
   page = availablepage(L, pool);
   if (page == NULL) {
     page = cast(LuaAllocPage *, firsttry(g, NULL, 0, bytes));

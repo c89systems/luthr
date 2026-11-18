@@ -298,6 +298,16 @@ typedef struct NativeStackContext {
   struct LuaCoroutineScope *coroutine_scopes;
 } NativeStackContext;
 
+/* Carrier-local defaults and ambient host scopes share one TLS record. Managed
+** fibers supply their own stack/execution context and never retain this record
+** across a carrier handoff. */
+typedef struct LuaThreadContext {
+  NativeStackContext native;
+  NativeStackContext *override;
+  LuaPolicy *policy;
+  struct LuaGCFrame *gc_frame;
+} LuaThreadContext;
+
 /* Temporary values owned by a native scope, independently of Lua stack slots.
 ** Nodes do not move and must be removed before their native storage expires. */
 typedef struct LuaNativeRoot {
@@ -583,10 +593,36 @@ LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
-LUAI_DDEC(__thread NativeStackContext luaE_native_stack_context;)
+LUAI_DDEC(__thread LuaThreadContext luaE_thread_context;)
 LUAI_FUNC uintptr_t luaE_initnativestack (void);
 LUAI_FUNC NativeStackContext *luaE_getnativestackcontext (void);
 LUAI_FUNC NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context);
+
+/* Only an owner (including a collector reservation) may use bound context.
+** Bootstrap construction has no reservation yet and resolves its ambient
+** context. A binding ends before its gate or final participation is released. */
+l_sinline NativeStackContext *luaX_context (lua_State *L) {
+  return L->stack_gate.context != NULL ? L->stack_gate.context
+                                      : luaE_getnativestackcontext();
+}
+
+l_sinline LuaExecution *luaX_execution (lua_State *L) {
+  return luaX_context(L)->execution;
+}
+
+l_sinline LuaThreadContext *luaX_hostcontext (lua_State *L) {
+  return L->stack_gate.host != NULL ? L->stack_gate.host : &luaE_thread_context;
+}
+
+l_sinline void *luaX_token (lua_State *L) {
+  return L->stack_gate.context != NULL
+    ? __atomic_load_n(&L->stack_gate.owner.token, __ATOMIC_RELAXED)
+    : luaQ_ownertoken();
+}
+
+l_sinline int luaX_isowner (lua_State *L, const LuaOwner *owner) {
+  return __atomic_load_n(&owner->token, __ATOMIC_ACQUIRE) == luaX_token(L);
+}
 LUAI_FUNC void luaE_nativestackerror (lua_State *L, uintptr_t position);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);

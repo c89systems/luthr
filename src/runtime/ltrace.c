@@ -14,22 +14,23 @@
 #include "ltable.h"
 #include "lvm.h"
 
-static __thread LuaGCFrame *host_gcframe;
-
 LuaGCFrame *luaC_gcframe (void) {
   LuaExecution *execution = luaQ_current();
-  return execution != NULL ? execution->gc_frame : host_gcframe;
+  return execution != NULL ? execution->gc_frame : luaE_thread_context.gc_frame;
 }
 
 void luaC_restoregcframe (LuaGCFrame *frame) {
   LuaExecution *execution = luaQ_current();
   if (execution != NULL) execution->gc_frame = frame;
-  else host_gcframe = frame;
+  else luaE_thread_context.gc_frame = frame;
 }
 
 int luaC_ingc (lua_State *L) {
   LuaGCFrame *frame;
-  for (frame = luaC_gcframe(); frame != NULL; frame = frame->previous)
+  LuaExecution *execution = luaX_execution(L);
+  for (frame = execution != NULL ? execution->gc_frame
+                                : luaX_hostcontext(L)->gc_frame;
+       frame != NULL; frame = frame->previous)
     if (frame->global == G(L)) return 1;
   return 0;
 }
@@ -160,7 +161,7 @@ void luaC_trimstack (lua_State *L) {
     L->trace_trimmed = L->trace_snapshot;
     L->reclaiming = 1;
     luaD_shrinkstack(L);
-    luaM_flushdebt(L);
+    luaM_flushdebt(L, L);
     L->reclaiming = 0;
   }
 }

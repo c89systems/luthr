@@ -95,9 +95,9 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   return marked;
 }
 
-int __real_luaA_tryscan(GCObject *);
-int __wrap_luaA_tryscan(GCObject *object) {
-  int acquired = __real_luaA_tryscan(object);
+int __real_luaA_tryscan(lua_State *, GCObject *);
+int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
+  int acquired = __real_luaA_tryscan(state, object);
   if (acquired && parallel_scanning != NULL && parallel_worker != 0 &&
       object->tt == LUA_VTABLE) {
     struct parallel_scan *scan = parallel_scanning;

@@ -6,11 +6,9 @@
 #include "lpolicy.h"
 #include "lstate.h"
 
-static __thread LuaPolicy *host_policy;
-
 LuaPolicy *luaCP_current (void) {
   LuaExecution *execution = luaQ_current();
-  return execution != NULL ? execution->policy : host_policy;
+  return execution != NULL ? execution->policy : luaE_thread_context.policy;
 }
 
 void luaCP_retain (LuaPolicy *policy) {
@@ -33,7 +31,9 @@ void luaCP_bind (lua_State *L, LuaPolicy *policy) {
 }
 
 void luaCP_apply (lua_State *L) {
-  LuaPolicy *policy = luaCP_current();
+  LuaExecution *execution = luaX_execution(L);
+  LuaPolicy *policy = execution != NULL ? execution->policy
+                                       : luaX_hostcontext(L)->policy;
   if (policy != NULL && policy->global == G(L)) luaCP_bind(L, policy);
   if (L->policy != NULL) L->policy->configure(L->policy, L);
 }
@@ -45,14 +45,14 @@ void luaCP_begin (LuaPolicy *policy, LuaPolicyScope *scope) {
     scope->execution->policy = policy;
   }
   else {
-    scope->previous = host_policy;
-    host_policy = policy;
+    scope->previous = luaE_thread_context.policy;
+    luaE_thread_context.policy = policy;
   }
 }
 
 void luaCP_end (LuaPolicyScope *scope) {
   if (scope->execution != NULL) scope->execution->policy = scope->previous;
-  else host_policy = scope->previous;
+  else luaE_thread_context.policy = scope->previous;
 }
 
 int luaCP_exhausted (lua_State *L) {

@@ -160,7 +160,7 @@ void luaW_stop (lua_State *L) {
   luaW_collectenter(L);  /* finish the current metadata scope before stopping */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
-  luaQ_setowner(&world->collector);
+  __atomic_store_n(&world->collector.token, luaX_token(L), __ATOMIC_RELEASE);
   __atomic_store_n(&world->stopped, 1, __ATOMIC_SEQ_CST);
   luaQ_wake(&world->changed, &world->waiters);
   luaW_deactivate(L);
@@ -178,7 +178,7 @@ void luaW_start (lua_State *L) {
   if (--L->world_depth != 0)
     return;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(world->stopped && luaQ_isowner(&world->collector));
+  lua_assert(world->stopped && luaX_isowner(L, &world->collector));
   /* Late entrants may have published a tentative reference after the stop
   ** scan. They cannot access managed data until stopped becomes false. */
   luaW_resume(L);  /* the collector resumes as an ordinary mutator */
@@ -193,11 +193,11 @@ int luaW_iscollector (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   if (L->world_depth != 0) {
     lua_assert(__atomic_load_n(&world->stopped, __ATOMIC_ACQUIRE) &&
-               luaQ_isowner(&world->collector));
+               luaX_isowner(L, &world->collector));
     return 1;
   }
   return __atomic_load_n(&world->stopped, __ATOMIC_ACQUIRE) &&
-         luaQ_isowner(&world->collector);
+         luaX_isowner(L, &world->collector);
 }
 
 /* Reentrant within one execution (or unmanaged carrier), including operations
@@ -207,7 +207,7 @@ static void heapenter (lua_State *L, int collector) {
   LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (world->heap_depth != 0 &&
-      luaQ_isowner(&world->heap_owner)) {
+      luaX_isowner(L, &world->heap_owner)) {
     world->heap_depth++;
   }
   else {
@@ -217,7 +217,7 @@ static void heapenter (lua_State *L, int collector) {
         __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
       L->native_depth++;
       L->heap_waiting++;
-      wait.owner = luaQ_ownertoken();
+      wait.owner = luaX_token(L);
       wait.collector = collector;
       if (collector) {
         LuaHeapWaiter **link = &world->heap_head;
@@ -235,7 +235,7 @@ static void heapenter (lua_State *L, int collector) {
       }
       luaW_deactivate(L);
       luaQ_wake(&world->changed, &world->waiters);
-      while (!luaQ_isowner(&world->heap_owner))
+      while (!luaX_isowner(L, &world->heap_owner))
         luaQ_wait(L, &world->mutex, &wait.changed, &wait.waiters);
       /* Ownership is reserved directly for this recipient. Fresh arrivals
       ** cannot steal it while its saved stack waits for execution capacity. */
@@ -248,7 +248,7 @@ static void heapenter (lua_State *L, int collector) {
     }
     else {
       world->heap_depth = 1;
-      luaQ_setowner(&world->heap_owner);
+      __atomic_store_n(&world->heap_owner.token, luaX_token(L), __ATOMIC_RELEASE);
     }
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -266,7 +266,7 @@ void luaW_heapleave (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(world->heap_depth != 0 &&
-             luaQ_isowner(&world->heap_owner));
+             luaX_isowner(L, &world->heap_owner));
   if (--world->heap_depth == 0) {
     LuaHeapWaiter *next = world->heap_head;
     if (next == NULL)
@@ -286,7 +286,7 @@ void luaW_heapleave (lua_State *L) {
 
 static unsigned heapdepth (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  return luaQ_isowner(&world->heap_owner) ? world->heap_depth : 0;
+  return luaX_isowner(L, &world->heap_owner) ? world->heap_depth : 0;
 }
 
 void luaW_waitcollector (lua_State *L) {

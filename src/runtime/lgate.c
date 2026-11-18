@@ -25,6 +25,8 @@ int luaX_initgate (LuaStackGate *gate) {
   int status;
   gate->ready = 0;
   gate->owner.token = NULL;
+  gate->context = NULL;
+  gate->host = NULL;
   gate->next_ticket = gate->serving = 0;
   gate->waiting = 0;
   gate->waiters = NULL;
@@ -44,15 +46,22 @@ void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
   lua_assert(gate->owner.token == NULL && gate->next_ticket == gate->serving &&
-             gate->waiters == NULL);
+             gate->waiters == NULL && gate->context == NULL && gate->host == NULL);
   luaX_checksync(pthread_cond_destroy(&gate->changed));
   luaX_checksync(pthread_mutex_destroy(&gate->mutex));
   gate->ready = 0;
 }
 
-static void reserve (lua_State *L) {
+static void bindcontext (LuaStackGate *gate, NativeStackContext *context,
+                         LuaThreadContext *thread, void *token) {
+  gate->context = context;
+  gate->host = context->execution == NULL ? thread : NULL;
+  __atomic_store_n(&gate->owner.token, token, __ATOMIC_RELEASE);
+}
+
+static void reserve (lua_State *L, NativeStackContext *context,
+                      LuaThreadContext *thread, void *token) {
   LuaStackGate *gate = &L->stack_gate;
-  void *token = luaQ_ownertoken();
   unsigned long ticket;
   /* Recursive entry is an internal boundary error, not a wait for ourselves. */
   if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) == token) {
@@ -70,16 +79,18 @@ static void reserve (lua_State *L) {
     luaX_checksync(pthread_mutex_unlock(&gate->mutex));
   }
   lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
-  __atomic_store_n(&gate->owner.token, token, __ATOMIC_RELEASE);
+  bindcontext(gate, context, thread, token);
 }
 
-static void release (lua_State *L) {
+static void release (lua_State *L, void *token) {
   LuaStackGate *gate = &L->stack_gate;
   lua_assert(L->world_depth == 0);
-  if (!luaQ_isowner(&gate->owner)) {
+  if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) != token) {
     fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
+  gate->context = NULL;
+  gate->host = NULL;
   __atomic_store_n(&gate->owner.token, NULL, __ATOMIC_RELEASE);
   /* Either a waiter sees its turn before parking, or this observer check
   ** sees its registration and wakes it. Uncontended entry/exit stays local. */
@@ -93,61 +104,82 @@ static void release (lua_State *L) {
 
 int luaX_tryreserve (lua_State *target) {
   LuaStackGate *gate = &target->stack_gate;
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  void *token = context->execution != NULL ? cast(void *, context->execution)
+                                          : cast(void *, &thread->native);
   unsigned long turn;
-  if (luaQ_isowner(&gate->owner)) return 2;
+  if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) == token) return 2;
   turn = __atomic_load_n(&gate->serving, __ATOMIC_ACQUIRE);
   if (!__atomic_compare_exchange_n(&gate->next_ticket, &turn, turn + 1, 0,
                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
     return 0;
   lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
-  luaQ_setowner(&gate->owner);
+  bindcontext(gate, context, thread, token);
   return 1;
 }
 
 void luaX_endreserve (lua_State *target, int reservation) {
-  if (reservation == 1) release(target);
+  if (reservation == 1) release(target, luaQ_ownertoken());
 }
 
 void luaX_lockstate (lua_State *L) {
-  luaQ_entermanaged(L);
-  reserve(L);
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  LuaExecution *execution = context->execution;
+  LuaThreadContext *host = execution == NULL ? thread : NULL;
+  void *token = execution != NULL ? cast(void *, execution)
+                                  : cast(void *, &thread->native);
+  luaQ_entermanaged(L, execution);
+  reserve(L, context, host, token);
   luaW_enter(L);
   luaCP_apply(L);
-  if (L->errorJmp == NULL && luaQ_current() != NULL)
+  if (L->errorJmp == NULL && execution != NULL)
     luaE_refreshnativestack(L);
 }
 
 void luaX_unlockstate (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
+  LuaExecution *execution = luaX_execution(L);
+  void *token = luaQ_ownertoken();
   if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
   lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
-  if (L->errorJmp == NULL && luaQ_current() != NULL) {
+  if (L->errorJmp == NULL && execution != NULL) {
     L->luthr_stack_context = NULL;
     L->luthr_stack_limit = 0;
   }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
-  release(L);
+  release(L, token);
   luaW_leave(world, participant);
-  luaQ_leavemanaged();  /* no state accesses after the final world leave */
+  luaQ_leavemanaged(execution);  /* no state accesses after the final world leave */
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation
 ** must not count as a mutator or prevent the other owner from collecting.
 ** No managed stack/CI pointer is borrowed until both reservations are ready. */
 void luaX_lockpair (lua_State *first, lua_State *second) {
-  luaQ_entermanaged(first);
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  LuaExecution *execution = context->execution;
+  LuaThreadContext *host = execution == NULL ? thread : NULL;
+  void *token = execution != NULL ? cast(void *, execution)
+                                  : cast(void *, &thread->native);
+  luaQ_entermanaged(first, execution);
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
     lua_State *swap = first;
     first = second;
     second = swap;
   }
-  reserve(first);
-  if (second != first) reserve(second);
+  reserve(first, context, host, token);
+  if (second != first) reserve(second, context, host, token);
   lua_assert(first->admission == &first->participation &&
              second->admission == &second->participation);
   lua_assert(first->stack_peer == NULL && second->stack_peer == NULL);
@@ -160,15 +192,17 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
   if (second != first) luaC_checksnapshot(second);
   luaCP_apply(first);
   if (second != first) luaCP_apply(second);
-  if (first->errorJmp == NULL && luaQ_current() != NULL)
+  if (first->errorJmp == NULL && execution != NULL)
     luaE_refreshnativestack(first);
-  if (second != first && second->errorJmp == NULL && luaQ_current() != NULL)
+  if (second != first && second->errorJmp == NULL && execution != NULL)
     luaE_refreshnativestack(second);
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {
   LuaWorld *world = &G(first)->world;
   LuaParticipation *participant;
+  LuaExecution *execution = luaX_execution(first);
+  void *token = luaQ_ownertoken();
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
     lua_State *swap = first;
     first = second;
@@ -177,18 +211,18 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
   participant = first->admission;
   first->stack_peer = second->stack_peer = NULL;
   second->admission = &second->participation;
-  if (first->errorJmp == NULL && luaQ_current() != NULL) {
+  if (first->errorJmp == NULL && execution != NULL) {
     first->luthr_stack_context = NULL;
     first->luthr_stack_limit = 0;
   }
-  if (second != first && second->errorJmp == NULL && luaQ_current() != NULL) {
+  if (second != first && second->errorJmp == NULL && execution != NULL) {
     second->luthr_stack_context = NULL;
     second->luthr_stack_limit = 0;
   }
-  if (second != first) release(second);
-  release(first);
+  if (second != first) release(second, token);
+  release(first, token);
   luaW_leave(world, participant);
-  luaQ_leavemanaged();
+  luaQ_leavemanaged(execution);
 }
 
 l_uint32 luaX_parentcalls (lua_State *from) {

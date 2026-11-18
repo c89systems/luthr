@@ -500,7 +500,7 @@ static void physical_credit(lua_State *L) {
   luaW_start(L);
   measured = 1;
   luaM_free_(L, block, 128);
-  luaM_flushdebt(L);
+  luaM_flushdebt(L, L);
   measured = 0;
   require(stops == 0 && gettotalbytes(G(L)) == charged - 128);
   require(G(L)->GCretired == pending && G(L)->GCdebt == debt + 128);

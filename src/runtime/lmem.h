@@ -21,8 +21,9 @@ struct LuaAllocationCache;
 /* Auxiliary-library buffer storage is not charged to Lua's GC debt. */
 LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
                                    size_t nsize);
-/* Local allocation accounting is exact at a collector publication boundary. */
-LUAI_FUNC void luaM_flushdebt (lua_State *L);
+/* The actor owns its context; a quiescent target may have an API entrant
+** rebinding its stack gate without permission to change allocation debt. */
+LUAI_FUNC void luaM_flushdebt (lua_State *actor, lua_State *target);
 LUAI_FUNC int luaM_initpools (lua_State *L);
 LUAI_FUNC void luaM_destroypools (lua_State *L);
 /* Admitted cache owner, quiescent retirement or a finished task's retirement

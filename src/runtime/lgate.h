@@ -13,6 +13,8 @@ typedef struct LuaStackGate {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   LuaOwner owner;
+  struct NativeStackContext *context;  /* current reservation's logical stack */
+  struct LuaThreadContext *host;  /* unmanaged reservation only; never migrates */
   LuaWaiter *waiters;
   unsigned long next_ticket;
   unsigned long serving;

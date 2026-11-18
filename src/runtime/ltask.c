@@ -127,7 +127,7 @@ int luaTK_shutdown (global_State *global) {
 }
 
 void luaTK_throwstop (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   LuaTaskRoot *task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
   lua_assert(L->errorJmp != NULL && L->errorJmp == execution->protected);
   lua_assert(task != NULL && task->global == G(L));
@@ -139,7 +139,7 @@ void luaTK_throwstop (lua_State *L) {
 }
 
 void luaTK_checkstop (lua_State *L) {
-  LuaExecution *execution = luaQ_current();
+  LuaExecution *execution = luaX_execution(L);
   LuaTaskRoot *task;
   int deliver;
   if (execution == NULL || L->errorJmp == NULL ||

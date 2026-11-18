@@ -129,6 +129,10 @@ static int migratable(lua_State *state) {
 
 static void poll(lua_State *state, void *user) {
   struct task *task = user;
+  if (luaX_context(state) != &task->fiber.native ||
+      luaX_execution(state) != &task->fiber.execution ||
+      state->stack_gate.host != NULL)
+    abort();
   verify_rounding(task->rounding);
   if (!migratable(state)) {
     task->native_skips++;
@@ -153,7 +157,9 @@ static void poll(lua_State *state, void *user) {
   check(test_register_pause(&task->fiber));
   luaD_rebindexecution(&task->fiber.execution);
   luaW_attach(state, task->world);
-  if (state->luthr_stack_context != &task->fiber.native)
+  if (state->luthr_stack_context != &task->fiber.native ||
+      luaX_context(state) != &task->fiber.native ||
+      state->stack_gate.host != NULL)
     abort();
   verify_rounding(task->rounding);
 }
@@ -254,7 +260,7 @@ static void *worker_entry(void *user) {
     worker->dispatches++;
     test_fiber_resume(&task->fiber, &worker->context);
     verify_rounding(original_rounding);
-    if (luaE_getnativestackcontext() != &luaE_native_stack_context)
+    if (luaE_getnativestackcontext() != &luaE_thread_context.native)
       abort();
     /* Publish only after the complete context has returned to this carrier. */
     check(pthread_mutex_lock(&pool->mutex));

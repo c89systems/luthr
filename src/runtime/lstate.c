@@ -135,17 +135,17 @@ void luaE_shrinkCI (lua_State *L) {
 
 
 /* Cache native bounds per physical thread; refresh on outer VM entry. */
-LUAI_DDEF __thread NativeStackContext luaE_native_stack_context;
-static __thread NativeStackContext *native_stack_override;
+LUAI_DDEF __thread LuaThreadContext luaE_thread_context;
 
 NativeStackContext *luaE_getnativestackcontext (void) {
-  return native_stack_override != NULL ? native_stack_override
-                                      : &luaE_native_stack_context;
+  LuaThreadContext *thread = &luaE_thread_context;
+  return thread->override != NULL ? thread->override : &thread->native;
 }
 
 NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context) {
-  NativeStackContext *previous = native_stack_override;
-  native_stack_override = context;
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *previous = thread->override;
+  thread->override = context;
   return previous;
 }
 
@@ -707,11 +707,12 @@ void luaE_warning (lua_State *L, const char *msg, int tocont) {
   luaA_end(L, &access);
   if (wf != NULL) {
     LuaWorldScope depth;
-    luaQ_beginnative(L);
+    LuaExecution *execution = luaX_execution(L);
+    luaQ_beginnative(L, execution);
     depth = luaW_detach(L);
     wf(context, msg, tocont);
     luaW_attach(L, depth);
-    luaQ_endnative(L);
+    luaQ_endnative(L, execution);
   }
 }
 

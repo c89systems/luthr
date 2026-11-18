@@ -207,7 +207,8 @@ typedef void (*voidf)(void);
 /*
 ** Inline functions
 */
-#if !defined(LUA_USE_C89)
+#if !defined(LUA_USE_C89) && (defined(__cplusplus) || \
+    (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L))
 #define l_inline	inline
 #elif defined(__GNUC__)
 #define l_inline	__inline__

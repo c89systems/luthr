@@ -78,7 +78,7 @@ l_sinline uintptr_t luaD_nativeposition (void) {
 }
 
 #define luaE_refreshnativestack(L) \
-  { NativeStackContext *context = luaE_getnativestackcontext(); \
+  { NativeStackContext *context = luaX_context(L); \
     __asm__ ("" : "+r" (context)); \
     uintptr_t limit = context->limit; \
     if (l_unlikely(limit == 0 || limit == UINTPTR_MAX)) \

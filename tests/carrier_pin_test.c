@@ -119,7 +119,7 @@ static void *wrong_carrier(void *context) {
   NativeStackContext native = *luaE_getnativestackcontext();
   native.execution = context;
   luaE_setnativestackcontext(&native);
-  luaQ_beginnative(NULL);
+  luaQ_beginnative(NULL, luaQ_current());
   _exit(2);
 }
 static void rejected_driver(void) {

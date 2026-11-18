@@ -22,7 +22,7 @@ LUAI_FUNC void luaA_beginpayload (lua_State *L, Udata *object,
                                  LuaObjectScope *scope);
 /* A scanner must defer busy objects; it cannot wait on a mutator which may
 ** itself be awaiting collection. Success is released with luaA_endscan. */
-LUAI_FUNC int luaA_tryscan (GCObject *object);
+LUAI_FUNC int luaA_tryscan (lua_State *L, GCObject *object);
 LUAI_FUNC void luaA_endscan (lua_State *L, GCObject *object);
 /* A VM-owned partition has permanent storage and needs no collectable root. */
 LUAI_FUNC void luaA_beginlock (lua_State *L, LuaObjectLock *lock,
