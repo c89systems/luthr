@@ -59,7 +59,6 @@ static __thread unsigned stack_locks;
 static __thread int role;
 static struct {
   lua_State *owner, *collector;
-  void *array;
   unsigned collections, finalized;
   int armed;
 } resize_probe;
@@ -68,7 +67,8 @@ int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
 void __real_luaW_leave(LuaWorld *world, LuaParticipation *participant);
 void __real_luaX_poll(lua_State *state);
-void __real_luaM_free_(lua_State *state, void *block, size_t size);
+void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
+                           size_t size);
 void __real_luaW_heapenter(lua_State *state);
 
 void __wrap_luaW_heapenter(lua_State *state) {
@@ -84,9 +84,11 @@ void __wrap_luaW_heapenter(lua_State *state) {
   __real_luaW_heapenter(state);
 }
 
-void __wrap_luaM_free_(lua_State *state, void *block, size_t size) {
-  if (resize_probe.armed && state == resize_probe.owner &&
-      block == resize_probe.array) {
+void *__wrap_luaM_realloc_(lua_State *state, void *oldblock, size_t old,
+                           size_t size) {
+  void *block = __real_luaM_realloc_(state, oldblock, old, size);
+  if (resize_probe.armed && state == resize_probe.owner && oldblock == NULL &&
+      size == sizeof(Value) + 1 + sizeof(unsigned)) {
     resize_probe.armed = 0;
     state->native_depth++;
     luaW_leave(&G(state)->world, state->admission);
@@ -95,7 +97,7 @@ void __wrap_luaM_free_(lua_State *state, void *block, size_t size) {
     luaW_enter(state);
     state->native_depth--;
   }
-  __real_luaM_free_(state, block, size);
+  return block;
 }
 void __real_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters);
@@ -929,7 +931,6 @@ static void weak_resize(lua_State *state) {
   table = hvalue(s2v(owner->top.p - 1));
   resize_probe.owner = owner;
   resize_probe.collector = state;
-  resize_probe.array = table->array - table->asize;
   resize_probe.armed = 1;
   luaH_resize(owner, table, 1, 4);
   luaX_unlockstate(owner);

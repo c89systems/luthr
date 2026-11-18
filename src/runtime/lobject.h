@@ -139,11 +139,15 @@ typedef struct TValue {
 /* to stack (not from same stack) */
 #define setobj2s(L,o1,o2)	setobj(L,s2v(o1),o2)
 /* from table to same table */
-#define setobjt2t	setobj
+#define setobjt2t	setobj2t
 /* to new object */
 #define setobj2n	setobj
 /* to table */
-#define setobj2t	setobj
+#define setobj2t(L,obj1,obj2) \
+  { TValue *io1=(obj1); const TValue *io2=(obj2); \
+    __atomic_store(&io1->value_, &io2->value_, __ATOMIC_RELEASE); \
+    __atomic_store_n(&io1->tt_, io2->tt_, __ATOMIC_RELEASE); \
+    checkliveness(L,io1); lua_assert(!isnonstrictnil(io1)); }
 
 
 /*
@@ -243,7 +247,7 @@ typedef union {
 
 
 /* mark an entry as empty */
-#define setempty(v)		settt_(v, LUA_VEMPTY)
+#define setempty(v) __atomic_store_n(&(v)->tt_, LUA_VEMPTY, __ATOMIC_RELEASE)
 
 
 
@@ -783,7 +787,8 @@ typedef union Node {
 /* copy a value into a key */
 #define setnodekey(node,obj) \
 	{ Node *n_=(node); const TValue *io_=(obj); \
-	  n_->u.key_val = io_->value_; n_->u.key_tt = io_->tt_; }
+	  __atomic_store(&n_->u.key_val, &io_->value_, __ATOMIC_RELEASE); \
+          __atomic_store_n(&n_->u.key_tt, io_->tt_, __ATOMIC_RELEASE); }
 
 
 /* copy a value from a key */
@@ -804,6 +809,7 @@ typedef struct Table {
   struct Table *metatable;
   GCObject *gclist;
   LuaObjectLock access;
+  uint64_t sequence;  /* even published contents; odd during exclusive access */
   uint64_t weak_epoch;
   lu_byte gcweak;  /* weakness selected for this collection cycle */
   lu_byte weak_cleared;
@@ -823,7 +829,7 @@ typedef struct Table {
 #define keyisshrstr(node)	(keytt(node) == ctb(LUA_VSHRSTR))
 #define keystrval(node)		(gco2ts(keyval(node).gc))
 
-#define setnilkey(node)		(keytt(node) = LUA_TNIL)
+#define setnilkey(node) __atomic_store_n(&(node)->u.key_tt, LUA_TNIL, __ATOMIC_RELEASE)
 
 #define keyiscollectable(n)	(keytt(n) & BIT_ISCOLLECTABLE)
 
@@ -837,7 +843,7 @@ typedef struct Table {
 ** be found when searched in a special way. ('next' needs that to find
 ** keys removed from a table during a traversal.)
 */
-#define setdeadkey(node)	(keytt(node) = LUA_TDEADKEY)
+#define setdeadkey(node) __atomic_store_n(&(node)->u.key_tt, LUA_TDEADKEY, __ATOMIC_RELEASE)
 #define keyisdead(node)		(keytt(node) == LUA_TDEADKEY)
 
 /* }================================================================== */

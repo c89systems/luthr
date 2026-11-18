@@ -39,6 +39,7 @@
 #include "llex.h"
 #include "lmem.h"
 #include "lstate.h"
+#include "ltablestorage.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"
@@ -369,6 +370,8 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->building_protos = NULL;
   L->retired = L->retired_tail = NULL;
   L->reclaiming = L->reclaim_pages = 0;
+  L->storage_retired = L->storage_tail = NULL;
+  L->storage_bytes = 0;
   L->reclaim_next = NULL;
   L->reclaim_workers = 0;
   L->reclaim_registered = 0;
@@ -389,6 +392,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->participation.previous = NULL;
   L->participation.thread = L;
   L->participation.active = 0;
+  L->participation.storage_epoch = 0;
   L->admission = &L->participation;
   L->callback_owner = NULL;
   L->callback_active = 0;
@@ -451,6 +455,7 @@ static void close_state (lua_State *L, int owns_gate) {
     luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
   freestack(L, L);
   luaCP_bind(L, NULL);
+  luaHS_reclaim(L, LUAHS_DRAIN);
   luaM_reclaimpages(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State) && g->GCretired == 0);
   luaM_destroypools(L);
@@ -508,6 +513,7 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
 
 void luaE_retirethread (lua_State *L, lua_State *thread) {
   CallInfo *ci;
+  lua_assert(thread->storage_retired == NULL && thread->storage_bytes == 0);
   for (ci = thread->base_ci.next; ci != NULL; ci = ci->next)
     luaM_retire_(L, ci, sizeof(*ci));
   if (thread->stack.p != NULL)
@@ -519,6 +525,7 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
 void luaE_freethread (lua_State *L, lua_State *L1) {
   LX *l = fromstate(L1);
   lua_assert(L1->native_depth == 0 && L1->world_depth == 0);
+  lua_assert(L1->storage_retired == NULL && L1->storage_bytes == 0);
   luaF_closeupval(L1, L1->stack.p);  /* close all upvalues */
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);

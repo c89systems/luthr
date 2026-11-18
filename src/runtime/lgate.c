@@ -13,6 +13,7 @@
 #include "lgc.h"
 #include "lstate.h"
 #include "ltask.h"
+#include "ltablestorage.h"
 
 void luaX_checksync (int status) {
   if (status != 0) {
@@ -145,6 +146,7 @@ void luaX_unlockstate (lua_State *L) {
   LuaParticipation *participant = L->admission;
   LuaExecution *execution = luaX_execution(L);
   void *token = luaQ_ownertoken();
+  if (!L->reclaiming && L->storage_retired != NULL) luaHS_reclaim(L, LUAHS_WITHDRAW);
   if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
   lua_assert(participant == &L->participation);  /* paired operations retire together */
@@ -248,6 +250,8 @@ void luaX_pollrequests (lua_State *L) {
 }
 
 void luaX_poll (lua_State *L) {
+  luaHS_quiescent(L);
+  luaHS_reclaim(L, LUAHS_ASSIST);
   luaQ_poll(L);
   luaC_trimstack(L);
   /* Internal poll handlers execute as managed VM code, with stack ownership.

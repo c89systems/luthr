@@ -6,6 +6,7 @@
 #include <lgc.h>
 #include <lopcodes.h>
 #include <lstate.h>
+#include <ltable.h>
 #include <lua.h>
 #include <lualib.h>
 #include <pthread.h>
@@ -51,6 +52,8 @@ void __real_luaF_storelocals(lua_State *state, StkId first, int count);
 StkId __real_luaF_loadlocal(lua_State *state, StkId slot);
 void __real_luaF_loadrange(lua_State *state, StkId first, int count);
 void __real_luaX_pollrequests(lua_State *state);
+lu_byte __real_luaH_getstr(lua_State *, Table *, TString *, TValue *);
+lu_byte __real_luaH_getshortstr(lua_State *, Table *, TString *, TValue *);
 
 void __wrap_luaX_pollrequests(lua_State *state) {
   CallInfo *ci = state->ci;
@@ -78,8 +81,7 @@ int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   return __real_pthread_mutex_lock(mutex);
 }
 
-void __wrap_luaA_begin(lua_State *state, GCObject *object,
-                       LuaObjectScope *scope) {
+static void collect_at_lookup(lua_State *state) {
   CallInfo *ci = state->ci;
   if (collect_lookup && !collected_lookup && isLua(ci) &&
       ci->u.l.rootpc != NULL && GET_OPCODE(*ci->u.l.rootpc) == OP_GETFIELD) {
@@ -90,7 +92,7 @@ void __wrap_luaA_begin(lua_State *state, GCObject *object,
         ptrdiff_t top = savestack(state, state->top.p);
         collected_lookup = 1;
         state->top.p = ci->top.p;
-        /* Model a collector observing the pending lookup at object admission.
+        /* Model a collector observing the pending lookup at VM admission.
          * An emergency collection preserves the borrowed stack addresses. */
         luaC_fullgc(state, 1);
         state->top.p = restorestack(state, top);
@@ -98,6 +100,22 @@ void __wrap_luaA_begin(lua_State *state, GCObject *object,
       }
     }
   }
+}
+
+lu_byte __wrap_luaH_getstr(lua_State *state, Table *table, TString *key,
+                           TValue *result) {
+  collect_at_lookup(state);
+  return __real_luaH_getstr(state, table, key, result);
+}
+
+lu_byte __wrap_luaH_getshortstr(lua_State *state, Table *table, TString *key,
+                                TValue *result) {
+  collect_at_lookup(state);
+  return __real_luaH_getshortstr(state, table, key, result);
+}
+
+void __wrap_luaA_begin(lua_State *state, GCObject *object,
+                       LuaObjectScope *scope) {
   if (reading)
     reader_ownership++;
   measured++;

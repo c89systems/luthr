@@ -212,7 +212,7 @@ void luaC_prepareweak (lua_State *L, Table *table) {
       lu_byte *tag = getArrTag(table, i);
       if ((*tag & BIT_ISCOLLECTABLE) &&
           weakdead(L, getArrVal(table, i)->gc))
-        *tag = LUA_VEMPTY;
+        __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
     }
   }
   for (i = 0; i < sizenode(table); i++) {

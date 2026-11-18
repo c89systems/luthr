@@ -47,7 +47,7 @@ foreach(runtime IN ITEMS upstream luthr)
     target_link_libraries(parallel_${runtime} PRIVATE luthr_shared)
     set(workers 2)
   endif()
-  foreach(workload IN ITEMS integers independent_tables shared_table closures allocation_gc)
+  foreach(workload IN ITEMS integers independent_tables shared_table shared_reads closures allocation_gc)
     foreach(collector IN ITEMS incremental generational)
       add_test(NAME lua_parallel_${runtime}_${workload}_${collector}
         COMMAND parallel_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
@@ -78,7 +78,7 @@ foreach(runtime IN ITEMS upstream luthr)
     set(scheduled_slots 2)
     set(scheduled_native 1)
   endif()
-  foreach(workload IN ITEMS integers independent_tables shared_table closures allocation_gc)
+  foreach(workload IN ITEMS integers independent_tables shared_table shared_reads closures allocation_gc)
     foreach(collector IN ITEMS incremental generational)
       add_test(NAME lua_scheduled_${runtime}_${workload}_${collector}
         COMMAND scheduled_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"

@@ -309,6 +309,9 @@ static void reclaim(lua_State *L, int assist) {
   GcProbe *record = probe(L);
   uint64_t started = 0, excluded = 0;
   int outside = 0;
+  int objects = luaC_retired(L) != NULL ||
+                (assist && __atomic_load_n(&G(L)->world.reclaimers,
+                                           __ATOMIC_ACQUIRE) != NULL);
   unsigned reason = REASON_OTHER;
   if (record != NULL) {
     started = now();
@@ -327,14 +330,18 @@ static void reclaim(lua_State *L, int assist) {
     excluded = record->coordination_ns + record->reclaim_ns - excluded;
     if (excluded > elapsed)
       abort();
-    record->object_reclaim_calls++;
-    record->reclaim_assist_calls += assist;
-    record->object_reclaim_ns += elapsed - excluded;
-    /* Automatic steps include destruction in their body. API/exit boundaries
-     * may destroy after the collecting call returns; count that work as well.
-     */
-    if (outside)
-      record->collector_body_ns += elapsed - excluded;
+    if (objects) {
+      record->object_reclaim_calls++;
+      record->reclaim_assist_calls += assist;
+      record->object_reclaim_ns += elapsed - excluded;
+      /* API exits may destroy objects after the collecting call returns. */
+      if (outside)
+        record->collector_body_ns += elapsed - excluded;
+    } else {
+      /* Explicit table-buffer returns can leave only pool-page cleanup here.
+       * Include its dispatch overhead with page work, not collector body. */
+      record->reclaim_ns += elapsed - excluded;
+    }
     record->gc_depth--;
     record->reason = reason;
   }

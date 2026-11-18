@@ -31,6 +31,7 @@
 #include "luthr_hook_policy.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltablestorage.h"
 #include "ltm.h"
 
 
@@ -863,7 +864,7 @@ static int getmode (global_State *g, Table *h) {
     result = ((weakkey != NULL) << 1) | (weakvalue != NULL);
   }
   if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED)) {
-    h->gcweak = cast_byte(result);
+    __atomic_store_n(&h->gcweak, cast_byte(result), __ATOMIC_RELEASE);
     h->weak_cleared = 0;
     h->weak_initial_cutoff = cast_byte(__atomic_load_n(&g->trace_weakcutoff,
                                                        __ATOMIC_RELAXED));
@@ -2437,7 +2438,10 @@ void luaC_fullgc (lua_State *L, int isemergency) {
   L->reclaim_pages = 1;
   /* An allocation retry may still borrow its caller's stack/object storage.
   ** Finish emergency destruction before relinquishing that quiescent scope. */
-  if (isemergency) luaC_reclaim(L);
+  if (isemergency) {
+    luaHS_reclaim(L, LUAHS_DRAIN);
+    luaC_reclaim(L);
+  }
   g->gcemergency = 0;
   if (!isemergency && g->trace_interrupt != interrupted && g->tobefnz != NULL)
     callallpendingfinalizers(L);
@@ -2447,6 +2451,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
       (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
   luaC_leavegc(L, &frame);
+  luaHS_reclaim(L, LUAHS_DRAIN);
 }
 
 /* }====================================================== */

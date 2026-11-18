@@ -14,6 +14,7 @@ typedef struct LuaParticipation {
   struct LuaParticipation **previous;
   lua_State *thread;
   unsigned active;  /* atomic; overlapping gate retirement/admission is allowed */
+  uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
 } LuaParticipation;
 
 typedef struct LuaWorld {
@@ -27,6 +28,11 @@ typedef struct LuaWorld {
   LuaParticipation *participants;
   lua_State *reclaimers;  /* atomic head; list/work ownership uses mutex */
   uint64_t work_epoch;
+  struct LuaTableRetirement *storage_retired;  /* atomic producer list */
+  struct LuaTableRetirement *storage_pending;  /* sole storage_busy consumer */
+  uint64_t storage_epoch, storage_grace;
+  size_t storage_bytes;
+  unsigned storage_busy, storage_waiting, storage_workers;
   unsigned heap_depth;
   int stopped;
   int ready;

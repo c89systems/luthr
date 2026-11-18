@@ -39,6 +39,7 @@
 #include "lstate.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltablestorage.h"
 #include "lvm.h"
 
 
@@ -325,7 +326,7 @@ static unsigned checkrange (lua_Integer k, unsigned limit) {
 ** Check whether an integer key is in the array part of a table and
 ** return its index there, or zero.
 */
-#define ikeyinarray(t,k)	checkrange(k, t->asize)
+#define ikeyinarray(t,k)	checkrange(k, (t)->asize)
 
 
 /*
@@ -396,7 +397,7 @@ static void freehash (lua_State *L, Table *t) {
   if (!isdummy(t)) {
     /* get pointer to the beginning of Node array */
     char *arr = cast_charp(t->node) - extraLastfree(t);
-    luaM_freearray(L, arr, sizehash(t));
+    luaM_freemem(L, arr, sizehash(t));
   }
 }
 
@@ -564,18 +565,18 @@ static size_t concretesize (unsigned int size) {
 */
 static Value *resizearray (lua_State *L , Table *t,
                                unsigned oldasize,
-                               unsigned newasize) {
+                               unsigned newasize, int keepold) {
   if (oldasize == newasize)
     return t->array;  /* nothing to be done */
   else if (newasize == 0) {  /* erasing array? */
     Value *op = t->array - oldasize;  /* original array's real address */
-    luaM_freemem(L, op, concretesize(oldasize));  /* free it */
+    if (!keepold) luaM_freemem(L, op, concretesize(oldasize));
     return NULL;
   }
   else {
     size_t newasizeb = concretesize(newasize);
     Value *np = cast(Value *,
-                  luaM_reallocvector(L, NULL, 0, newasizeb, lu_byte));
+                  luaM_realloc_(L, NULL, 0, newasizeb));
     if (np == NULL)  /* allocation error? */
       return NULL;
     np += newasize;  /* shift pointer to the end of value segment */
@@ -587,7 +588,7 @@ static Value *resizearray (lua_State *L , Table *t,
       size_t tomoveb = (oldasize < newasize) ? oldasizeb : newasizeb;
       lua_assert(tomoveb > 0);
       memcpy(np - tomove, op - tomove, tomoveb);
-      luaM_freemem(L, op - oldasize, oldasizeb);  /* free old block */
+      if (!keepold) luaM_freemem(L, op - oldasize, oldasizeb);
     }
     return np;
   }
@@ -601,35 +602,38 @@ static Value *resizearray (lua_State *L , Table *t,
 ** comparison ensures that the shift in the second one does not
 ** overflow.
 */
-static void setnodevector (lua_State *L, Table *t, unsigned size) {
-  if (size == 0) {  /* no elements to hash part? */
-    t->node = cast(Node *, dummynode);  /* use common 'dummynode' */
-    t->lsizenode = 0;
+static int setnodevector (lua_State *L, Table *t, int lsize) {
+  if (lsize < 0) {  /* no elements to hash part? */
+    __atomic_store_n(&t->node, cast(Node *, dummynode), __ATOMIC_RELEASE);
+    __atomic_store_n(&t->lsizenode, 0, __ATOMIC_RELEASE);
     setdummy(t);  /* signal that it is using dummy node */
   }
   else {
     int i;
-    int lsize = luaO_ceillog2(size);
-    if (lsize > MAXHBITS || (1 << lsize) > MAXHSIZE)
-      luaG_runerror(L, "table overflow");
-    size = twoto(lsize);
-    if (lsize < LIMFORLAST)  /* no 'lastfree' field? */
-      t->node = luaM_newvector(L, size, Node);
+    unsigned size = twoto(lsize);
+    if (lsize < LIMFORLAST) {  /* no 'lastfree' field? */
+      Node *nodes = luaM_realloc_(L, NULL, 0, size * sizeof(Node));
+      if (nodes == NULL) return 0;
+      __atomic_store_n(&t->node,
+        nodes, __ATOMIC_RELEASE);
+    }
     else {
       size_t bsize = size * sizeof(Node) + sizeof(Limbox);
-      char *node = luaM_newblock(L, bsize);
-      t->node = cast(Node *, node + sizeof(Limbox));
+      char *node = luaM_realloc_(L, NULL, 0, bsize);
+      if (node == NULL) return 0;
+      __atomic_store_n(&t->node, cast(Node *, node + sizeof(Limbox)), __ATOMIC_RELEASE);
       getlastfree(t) = gnode(t, size);  /* all positions are free */
     }
-    t->lsizenode = cast_byte(lsize);
+    __atomic_store_n(&t->lsizenode, cast_byte(lsize), __ATOMIC_RELEASE);
     setnodummy(t);
     for (i = 0; i < cast_int(size); i++) {
       Node *n = gnode(t, i);
-      gnext(n) = 0;
+      setnext(n, 0);
       setnilkey(n);
       setempty(gval(n));
     }
   }
+  return 1;
 }
 
 
@@ -661,12 +665,12 @@ static void exchangehashpart (Table *t1, Table *t2) {
   lu_byte lsizenode = t1->lsizenode;
   Node *node = t1->node;
   int bitdummy1 = gettableflags(t1) & BITDUMMY;
-  t1->lsizenode = t2->lsizenode;
-  t1->node = t2->node;
+  __atomic_store_n(&t1->lsizenode, t2->lsizenode, __ATOMIC_RELEASE);
+  __atomic_store_n(&t1->node, t2->node, __ATOMIC_RELEASE);
   settableflags(t1, cast_byte((gettableflags(t1) & NOTBITDUMMY) |
                              (gettableflags(t2) & BITDUMMY)));
-  t2->lsizenode = lsizenode;
-  t2->node = node;
+  __atomic_store_n(&t2->lsizenode, lsizenode, __ATOMIC_RELEASE);
+  __atomic_store_n(&t2->node, node, __ATOMIC_RELEASE);
   settableflags(t2, cast_byte((gettableflags(t2) & NOTBITDUMMY) | bitdummy1));
 }
 
@@ -695,7 +699,7 @@ static void reinsertOldSlice (Table *t, unsigned oldasize,
 */
 static void clearNewSlice (Table *t, unsigned oldasize, unsigned newasize) {
   for (; oldasize < newasize; oldasize++)
-    *getArrTag(t, oldasize) = LUA_VEMPTY;
+    __atomic_store_n(getArrTag(t, oldasize), LUA_VEMPTY, __ATOMIC_RELEASE);
 }
 
 
@@ -721,9 +725,15 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   LuaNativeRoot image;
   unsigned oldasize;
   Value *newarray;
+  Value *oldarray = t->array;
+  LuaTableRetirement *retirement = NULL;
+  int lsize = nhsize == 0 ? -1 : luaO_ceillog2(nhsize);
+  luaHS_reclaim(L, LUAHS_ASSIST);
   luaC_traceview(L, t);
   oldasize = t->asize;
   if (newasize > MAXASIZE)
+    luaG_runerror(L, "table overflow");
+  if (lsize > MAXHBITS || (lsize >= 0 && (1u << lsize) > MAXHSIZE))
     luaG_runerror(L, "table overflow");
   /* create new hash part with appropriate size into 'newt' */
   newt.flags = 0;
@@ -733,7 +743,15 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   luaR_pushroot(L, &image);
   image.table_view = &newt;
   luaC_traceview(L, &newt);
-  setnodevector(L, &newt, nhsize);
+  if ((oldasize != newasize && oldasize != 0) || !isdummy(t))
+    retirement = luaM_new(L, LuaTableRetirement);
+  /* Once the descriptor exists, allocations report failure without throwing:
+  ** every error releases it and leaves the original image installed. */
+  if (!setnodevector(L, &newt, lsize)) {
+    if (retirement != NULL) luaM_free(L, retirement);
+    luaR_poproot(L, &image);
+    luaM_error(L);
+  }
   if (newasize < oldasize) {  /* will array shrink? */
     /* re-insert into the new hash the elements from vanishing slice */
     exchangehashpart(t, &newt);  /* pretend table has new hash */
@@ -741,24 +759,33 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     exchangehashpart(t, &newt);  /* restore old hash (in case of errors) */
   }
   /* allocate new array */
-  newarray = resizearray(L, t, oldasize, newasize);
+  newarray = resizearray(L, t, oldasize, newasize, 1);
   newt.array = NULL;
   newt.asize = 0;
   if (l_unlikely(newarray == NULL && newasize > 0)) {  /* allocation failed? */
-    freehash(L, &newt);  /* release new hash part */
+    if (retirement != NULL) luaM_free(L, retirement);
+    freehash(L, &newt);  /* unpublished failed construction */
     luaR_poproot(L, &image);
     luaM_error(L);  /* raise error (with array unchanged) */
   }
   /* allocation ok; initialize new part of the array */
   exchangehashpart(t, &newt);  /* 't' has the new hash ('newt' has the old) */
-  t->array = newarray;  /* set new array part */
-  t->asize = newasize;
+  __atomic_store_n(&t->array, newarray, __ATOMIC_RELEASE);
+  __atomic_store_n(&t->asize, newasize, __ATOMIC_RELEASE);
   if (newarray != NULL)
     *lenhint(t) = newasize / 2u;  /* set an initial hint */
   clearNewSlice(t, oldasize, newasize);
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
-  freehash(L, &newt);  /* free old hash part */
+  if (retirement != NULL) {
+    retirement->array = oldasize != newasize && oldasize != 0
+      ? oldarray - oldasize : NULL;
+    retirement->array_bytes = retirement->array != NULL ? concretesize(oldasize) : 0;
+    retirement->nodes = !isdummy(&newt)
+      ? cast_charp(newt.node) - extraLastfree(&newt) : NULL;
+    retirement->node_bytes = retirement->nodes != NULL ? sizehash(&newt) : 0;
+    luaHS_publish(L, retirement);
+  }
   luaR_poproot(L, &image);
 }
 
@@ -815,6 +842,7 @@ Table *luaH_new (lua_State *L) {
   GCObject *o = luaC_newobj(L, LUA_VTABLE, sizeof(Table));
   Table *t = gco2t(o);
   luaA_initlock(&t->access);
+  t->sequence = 0;
   t->metatable = NULL;
   t->weak_epoch = 0;
   t->gcweak = 0;
@@ -823,7 +851,7 @@ Table *luaH_new (lua_State *L) {
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
   t->asize = 0;
-  setnodevector(L, t, 0);
+  setnodevector(L, t, -1);
   return t;
 }
 
@@ -850,7 +878,7 @@ void luaH_retire (lua_State *L, Table *t) {
 void luaH_free (lua_State *L, Table *t) {
   lua_assert(t->access.depth == 0);
   freehash(L, t);
-  resizearray(L, t, t->asize, 0);
+  resizearray(L, t, t->asize, 0, 0);
   luaM_free(L, t);
 }
 
@@ -900,20 +928,24 @@ static int insertkey (Table *t, const TValue *key, TValue *value) {
       /* yes; move colliding node into free position */
       while (othern + gnext(othern) != mp)  /* find previous */
         othern += gnext(othern);
-      gnext(othern) = cast_int(f - othern);  /* rechain to point to 'f' */
-      *f = *mp;  /* copy colliding node into free pos. (mp->next also goes) */
+      setnext(othern, cast_int(f - othern));
+      __atomic_store(&f->u.value_, &mp->u.value_, __ATOMIC_RELEASE);
+      __atomic_store_n(&f->u.tt_, mp->u.tt_, __ATOMIC_RELEASE);
+      __atomic_store(&f->u.key_val, &mp->u.key_val, __ATOMIC_RELEASE);
+      __atomic_store_n(&f->u.key_tt, mp->u.key_tt, __ATOMIC_RELEASE);
+      setnext(f, gnext(mp));
       if (gnext(mp) != 0) {
-        gnext(f) += cast_int(mp - f);  /* correct 'next' */
-        gnext(mp) = 0;  /* now 'mp' is free */
+        setnext(f, gnext(f) + cast_int(mp - f));
+        setnext(mp, 0);
       }
       setempty(gval(mp));
     }
     else {  /* colliding node is in its own main position */
       /* new node will go into free position */
       if (gnext(mp) != 0)
-        gnext(f) = cast_int((mp + gnext(mp)) - f);  /* chain new position */
+        setnext(f, cast_int((mp + gnext(mp)) - f));
       else lua_assert(gnext(f) == 0);
-      gnext(mp) = cast_int(f - mp);
+      setnext(mp, cast_int(f - mp));
       mp = f;
     }
   }
@@ -1095,7 +1127,7 @@ static void tracenodewrite (lua_State *L, const TValue *slot, TValue *val) {
 static int finishnodeset (lua_State *L, Table *t, const TValue *slot, TValue *val) {
   if (!ttisnil(slot)) {
     tracenodewrite(L, slot, val);
-    setobj(((lua_State*)NULL), cast(TValue*, slot), val);
+    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);
     return HOK;  /* success */
   }
   else
@@ -1108,7 +1140,7 @@ static int rawfinishnodeset (lua_State *L, const TValue *slot, TValue *val) {
     return 0;  /* no slot with that key */
   else {
     tracenodewrite(L, slot, val);
-    setobj(((lua_State*)NULL), cast(TValue*, slot), val);
+    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);
     return 1;  /* success */
   }
 }
@@ -1155,7 +1187,7 @@ static int rawpsetshortstr (lua_State *L, Table *t, TString *key, TValue *val) {
   const TValue *slot = luaH_Hgetshortstr(t, key);
   if (!ttisnil(slot)) {  /* key already has a value? (all too common) */
     tracenodewrite(L, slot, val);
-    setobj(((lua_State*)NULL), cast(TValue*, slot), val);  /* update it */
+    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);  /* update it */
     return HOK;  /* done */
   }
   /* Else, either table has new-index metamethod, or it needs barrier,
@@ -1396,11 +1428,159 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
 
 
 
+static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
+  *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  return !(*sequence & 1) &&
+    !(luaC_tracing(L) && __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE));
+}
+
+static int sameversion (Table *table, uint64_t sequence) {
+  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence;
+}
+
+/* Typed views copy only the storage needed by this operation. Keys in this
+** path are compared as pointer representations, never dereferenced before
+** validation; even a mismatched concurrent tag/payload is harmless. */
+static int readshortstr (lua_State *L, Table *table, TString *key,
+                         TValue *result, lu_byte *tag) {
+  uint64_t sequence;
+  Node *base, *node;
+  unsigned lsize, size, steps;
+  if (!readsequence(L, table, &sequence)) return 0;
+  base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  lsize = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
+  if (!sameversion(table, sequence)) return 0;
+  size = twoto(lsize);
+  node = base + lmod(key->hash, size);
+  for (steps = 0; steps < size; steps++) {
+    Value candidate;
+    lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+    if (keytag == ctb(LUA_VSHRSTR)) {
+      TValue value;
+      __atomic_load(&node->u.key_val, &candidate, __ATOMIC_ACQUIRE);
+      __atomic_load(&node->u.value_, &value.value_, __ATOMIC_ACQUIRE);
+      value.tt_ = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
+      if (!sameversion(table, sequence)) return 0;
+      if (memcmp(&candidate, &key, sizeof(key)) == 0) {
+        *tag = finishnodeget(&value, result);
+        return 1;
+      }
+    }
+    {
+      int next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+      ptrdiff_t index;
+      if (!sameversion(table, sequence)) return 0;
+      if (next == 0) { *tag = LUA_VABSTKEY; return 1; }
+      index = node - base + next;
+      if (index < 0 || cast(size_t, index) >= size) return 0;
+      node = base + index;
+    }
+  }
+  return 0;
+}
+
+static int readinteger (lua_State *L, Table *table, lua_Integer key,
+                        TValue *result, lu_byte *tag) {
+  uint64_t sequence;
+  Value *array;
+  TValue value;
+  unsigned asize, k;
+  if (!readsequence(L, table, &sequence)) return 0;
+  asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
+  k = checkrange(key, asize);
+  if (k == 0) return 0;  /* the general view handles hash integer keys */
+  array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
+  if (!sameversion(table, sequence)) return 0;
+  __atomic_load(array - k, &value.value_, __ATOMIC_ACQUIRE);
+  value.tt_ = __atomic_load_n(cast(lu_byte *, array) + sizeof(unsigned) + k - 1,
+                             __ATOMIC_ACQUIRE);
+  if (!sameversion(table, sequence)) return 0;
+  *tag = rawtt(&value);
+  if (!tagisempty(*tag)) setobj(L, result, &value);
+  return 1;
+}
+
+/* An optimistic operation has no safepoint, allocator, or ownership update.
+** Its admission epoch retains replaced buffers. Every loaded component is
+** atomic; an acquire of a writer's component observes its preceding odd
+** sequence. Validate key snapshots before they can dereference pointers. */
+static int optimistic (lua_State *L, Table *table, const TValue *key,
+                        TValue *result, lu_byte *tag) {
+  Table view;
+  TValue normalized;
+  uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  unsigned k, steps;
+  Node *node;
+  if (sequence & 1) return 0;
+  if (luaC_tracing(L) && __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE))
+    return 0;  /* weak cutoffs are resolved under mutation ownership */
+  view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
+  view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
+  view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  view.lsizenode = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
+  view.flags = gettableflags(table);
+  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+    return 0;
+  if (ttisnil(key)) { *tag = LUA_VABSTKEY; return 1; }
+  if (ttisfloat(key)) {
+    lua_Integer integer;
+    if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
+      setivalue(&normalized, integer);
+      key = &normalized;
+    }
+  }
+  k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
+  if (k != 0) {
+    TValue value;
+    __atomic_load(getArrVal(&view, k - 1), &value.value_, __ATOMIC_ACQUIRE);
+    value.tt_ = __atomic_load_n(getArrTag(&view, k - 1), __ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+      return 0;
+    *tag = rawtt(&value);
+    if (!tagisempty(*tag)) setobj(L, result, &value);
+    return 1;
+  }
+  node = mainpositionTV(&view, key);
+  for (steps = 0; steps < sizenode(&view); steps++) {
+    Node snapshot;
+    __atomic_load(&node->u.key_val, &snapshot.u.key_val, __ATOMIC_ACQUIRE);
+    snapshot.u.key_tt = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+    __atomic_load(&node->u.value_, &snapshot.u.value_, __ATOMIC_ACQUIRE);
+    snapshot.u.tt_ = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
+    snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+      return 0;
+    if (equalkey(key, &snapshot, 0)) {
+      *tag = finishnodeget(gval(&snapshot), result);
+      return 1;
+    }
+    if (snapshot.u.next == 0) {
+      *tag = LUA_VABSTKEY;
+      return 1;
+    }
+    /* A validated link belongs to this image. Keep arithmetic inside its
+    ** allocation even if a writer begins immediately after validation. */
+    {
+      ptrdiff_t index = node - view.node;
+      ptrdiff_t next = index + snapshot.u.next;
+      if (next < 0 || cast(size_t, next) >= sizenode(&view)) return 0;
+      node = view.node + next;
+    }
+  }
+  return 0;
+}
+
 /* Complete mutator operations. Encoded slots never cross an unlock. */
 lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   LuaNativeRoot rooted_key;
   LuaObjectScope scope;
   lu_byte tag;
+  if ((ttisshrstring(key) && readshortstr(L, t, tsvalue(key), res, &tag)) ||
+      (ttisinteger(key) && readinteger(L, t, ivalue(key), res, &tag)) ||
+      optimistic(L, t, key, res, &tag)) {
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   luaR_pushroot(L, &rooted_key);
   luaR_setroot(L, &rooted_key, key);
   luaA_begin(L, obj2gco(t), &scope);
@@ -1414,6 +1594,12 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
 lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   LuaObjectScope scope;
   lu_byte tag;
+  TValue index;
+  setivalue(&index, key);
+  if (readinteger(L, t, key, res, &tag) || optimistic(L, t, &index, res, &tag)) {
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   luaA_begin(L, obj2gco(t), &scope);
   tag = rawgetint(t, key, res);
   if (!tagisempty(tag)) luaC_tracevalue(L, res);
@@ -1425,6 +1611,13 @@ lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   LuaNativeRoot rooted_key;
   LuaObjectScope scope;
   lu_byte tag;
+  TValue index;
+  setsvalue(L, &index, key);
+  if ((strisshr(key) && readshortstr(L, t, key, res, &tag)) ||
+      optimistic(L, t, &index, res, &tag)) {
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   luaR_pushroot(L, &rooted_key);
   setsvalue(L, &rooted_key.value, key);
   luaA_begin(L, obj2gco(t), &scope);

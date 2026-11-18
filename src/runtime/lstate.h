@@ -381,6 +381,8 @@ struct lua_State {
   GCObject *retired_tail;
   unsigned reclaiming;
   unsigned reclaim_pages;
+  struct LuaTableRetirement *storage_retired, *storage_tail;
+  size_t storage_bytes;  /* owner-local unpublished retirement batch */
   struct lua_State *reclaim_next;
   unsigned reclaim_workers;  /* world mutex protects work ownership */
   unsigned reclaim_registered;  /* world mutex; helpers may finish the queue */

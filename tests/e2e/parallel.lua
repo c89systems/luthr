@@ -23,6 +23,11 @@ local workloads={
     for i=1,n do sum=sum+shared[base+i] end
     return sum
   end,
+  shared_reads=function()
+    local sum=0
+    for i=1,n do sum=sum+shared.value end
+    return sum
+  end,
   closures=function()
     local sum=0
     local function add(value) sum=sum+value end
@@ -49,9 +54,12 @@ local workloads={
 }
 local work=assert(workloads[kind],'unknown workload')
 if kind=='independent_tables' then total=total*3 end
+if kind=='shared_reads' then total=n end
 if kind=='allocation_gc' or kind=='allocation_only' then total=total+n end
 local function prepare()
-  if kind=='shared_table' then
+  if kind=='shared_reads' then
+    shared.value=1
+  elseif kind=='shared_table' then
     for i=1,n*tasks do shared[i]=0 end
   end
 end

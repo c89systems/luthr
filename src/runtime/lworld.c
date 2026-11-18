@@ -11,6 +11,7 @@
 #include "lgate.h"
 #include "lgc.h"
 #include "lstate.h"
+#include "ltablestorage.h"
 #include "lworld.h"
 
 typedef struct LuaHeapWaiter {
@@ -29,6 +30,10 @@ int luaW_init (LuaWorld *world) {
   world->participants = NULL;
   world->reclaimers = NULL;
   world->work_epoch = 0;
+  world->storage_retired = world->storage_pending = NULL;
+  world->storage_epoch = world->storage_grace = 0;
+  world->storage_bytes = 0;
+  world->storage_busy = world->storage_waiting = world->storage_workers = 0;
   world->waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
@@ -47,7 +52,10 @@ int luaW_init (LuaWorld *world) {
 void luaW_destroy (LuaWorld *world) {
   lua_assert(world->ready && !world->stopped && world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
-             world->heap_head == NULL && world->reclaimers == NULL);
+             world->heap_head == NULL && world->reclaimers == NULL &&
+             world->storage_bytes == 0 && world->storage_busy == 0 &&
+             world->storage_workers == 0 &&
+             world->storage_retired == NULL && world->storage_pending == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   world->ready = 0;
@@ -120,6 +128,7 @@ void luaW_enter (lua_State *L) {
   ** Either the scan observes this entry, or it observes the request before
   ** accessing managed data. No shared ownership word is changed here. */
   luaW_activate(L);
+  luaHS_quiescent(L);
   if (!__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST))
     { luaC_checksnapshot(L); return; }
   luaX_checksync(pthread_mutex_lock(&world->mutex));
@@ -141,7 +150,8 @@ void luaW_leave (LuaWorld *world, LuaParticipation *participant) {
   lua_assert(previous != 0);
   UNUSED(previous);
   /* No participant accesses after withdrawing: it may already be reclaimed. */
-  if (__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST)) {
+  if (__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST) ||
+      __atomic_load_n(&world->storage_waiting, __ATOMIC_SEQ_CST)) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -166,6 +176,9 @@ void luaW_stop (lua_State *L) {
   luaW_deactivate(L);
   while (luaW_activecount(world) != 0)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  luaHS_publishstopped(L);
+  __atomic_store_n(&world->storage_grace,
+    __atomic_load_n(&world->storage_epoch, __ATOMIC_SEQ_CST), __ATOMIC_RELEASE);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaC_publish(L);

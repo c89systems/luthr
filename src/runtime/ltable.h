@@ -13,6 +13,7 @@
 #define gnode(t,i)	(&(t)->node[i])
 #define gval(n)		(&(n)->i_val)
 #define gnext(n)	((n)->u.next)
+#define setnext(n,v) __atomic_store_n(&(n)->u.next, (v), __ATOMIC_RELEASE)
 
 
 /*
@@ -20,8 +21,8 @@
 ** may have any of these metamethods. (First access that fails after the
 ** clearing will set the bit again.)
 */
-#define gettableflags(t) __atomic_load_n(&(t)->flags, __ATOMIC_RELAXED)
-#define settableflags(t,f) __atomic_store_n(&(t)->flags, (f), __ATOMIC_RELAXED)
+#define gettableflags(t) __atomic_load_n(&(t)->flags, __ATOMIC_ACQUIRE)
+#define settableflags(t,f) __atomic_store_n(&(t)->flags, (f), __ATOMIC_RELEASE)
 #define invalidateTMcache(t) \
   __atomic_fetch_and(&(t)->flags, cast_byte(~maskflags), __ATOMIC_RELAXED)
 
@@ -35,8 +36,8 @@
 #define NOTBITDUMMY		cast_byte(~BITDUMMY)
 #define isdummy(t)		(gettableflags(t) & BITDUMMY)
 
-#define setnodummy(t) __atomic_fetch_and(&(t)->flags, NOTBITDUMMY, __ATOMIC_RELAXED)
-#define setdummy(t) __atomic_fetch_or(&(t)->flags, BITDUMMY, __ATOMIC_RELAXED)
+#define setnodummy(t) __atomic_fetch_and(&(t)->flags, NOTBITDUMMY, __ATOMIC_RELEASE)
+#define setdummy(t) __atomic_fetch_or(&(t)->flags, BITDUMMY, __ATOMIC_RELEASE)
 
 
 
@@ -114,7 +115,8 @@
   ((val)->tt_ = *getArrTag(h,(k)), (val)->value_ = *getArrVal(h,(k)))
 
 #define obj2arr(h,k,val)  \
-  (*getArrTag(h,(k)) = (val)->tt_, *getArrVal(h,(k)) = (val)->value_)
+  (__atomic_store(getArrVal(h,(k)), &(val)->value_, __ATOMIC_RELEASE), \
+   __atomic_store_n(getArrTag(h,(k)), (val)->tt_, __ATOMIC_RELEASE))
 
 
 /*
@@ -126,7 +128,8 @@
   ((res)->tt_ = tag, (res)->value_ = *getArrVal(h,(k)))
 
 #define fval2arr(h,k,tag,val)  \
-  (*tag = (val)->tt_, *getArrVal(h,(k)) = (val)->value_)
+  (__atomic_store(getArrVal(h,(k)), &(val)->value_, __ATOMIC_RELEASE), \
+   __atomic_store_n((tag), (val)->tt_, __ATOMIC_RELEASE))
 
 
 LUAI_FUNC lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res);

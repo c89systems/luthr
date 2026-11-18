@@ -96,6 +96,7 @@ set_target_properties(capture_cells_test PROPERTIES C_STANDARD 99)
 target_compile_options(capture_cells_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(capture_cells_test PRIVATE luthr_static)
 target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
+  -Wl,--wrap=luaH_getstr -Wl,--wrap=luaH_getshortstr
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
   -Wl,--wrap=luaF_readcapture -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
@@ -115,6 +116,19 @@ foreach(case IN ITEMS host managed borrow pair foreign publication)
   add_test(NAME execution_context_${case} COMMAND execution_context_test ${case})
   set_tests_properties(execution_context_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
+luthr_test_program(table_read_test table_read_test.c)
+set_target_properties(table_read_test PROPERTIES C_STANDARD 99)
+target_compile_options(table_read_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(table_read_test PRIVATE luthr_static)
+target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
+  -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_)
+foreach(case IN ITEMS fast batching overlap retirement pressure failure hash_failure resume
+    mixed_incremental mixed_generational)
+  add_test(NAME table_read_${case} COMMAND table_read_test ${case})
+  set_tests_properties(table_read_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
 luthr_test_program(gc_pacing_test gc_pacing_test.c)
@@ -222,7 +236,7 @@ target_compile_options(memory_publication_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(memory_publication_test PRIVATE luthr_static)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
-  -Wl,--wrap=luaM_free_)
+  -Wl,--wrap=luaM_realloc_)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
 foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational page_growth page_cap page_isolation
@@ -843,7 +857,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test execution_context_test memory_publication_test
+  capture_cells_test execution_context_test table_read_test memory_publication_test
   allocation_pool_test page_ownership_test gc_pacing_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test
   scheduler_test native_lifecycle_test
