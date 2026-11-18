@@ -20,7 +20,7 @@ typedef struct LuaGCFrame {
 } LuaGCFrame;
 
 enum {
-  TRACE_INIT, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
+  TRACE_INIT, TRACE_PENDING, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
   TRACE_CLEAR, TRACE_VERIFY
 };
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
@@ -364,7 +364,6 @@ LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit)
 LUAI_FUNC void luaC_publishtrace (lua_State *L, LuaTraceWork *work);
 LUAI_FUNC void luaC_advancetrace (lua_State *L);
 LUAI_FUNC void luaC_initialtrace (lua_State *L);
-LUAI_FUNC void luaC_finalizetrace (lua_State *L);
 LUAI_FUNC void luaC_finishtrace (lua_State *L);
 LUAI_FUNC void luaC_assisttrace (lua_State *L);
 LUAI_FUNC void luaC_polltrace (lua_State *L);

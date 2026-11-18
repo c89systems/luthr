@@ -419,6 +419,12 @@ typedef struct LuaTracePlan {
   GCObject *next;
   GCObject *deferred;
   GCObject *tail;
+  GCObject *pending;
+  GCObject **finalizers;
+  GCObject *finalizer_gray;
+  GCObject **finalizer_tail;
+  GCObject *finalizer_new;
+  GCObject **finalizer_newtail;
   uint64_t round_changes;
   uint64_t clear_changes;
   l_mem base_marked;
@@ -502,6 +508,7 @@ typedef struct global_State {
   GCObject *ephemeron;  /* list of ephemeron tables (weak keys) */
   GCObject *allweak;  /* list of all-weak tables */
   GCObject *tobefnz;  /* list of userdata to be GC */
+  GCObject **tobefnz_tail;  /* append without walking queued finalizers */
   GCObject *fixedgc;  /* list of objects not to be collected */
   /* fields for generational collector */
   GCObject *survival;  /* start of objects that survived one GC cycle */

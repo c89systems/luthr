@@ -216,6 +216,20 @@ foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy 
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
+luthr_test_program(finalizer_work_test finalizer_work_test.c)
+set_target_properties(finalizer_work_test PROPERTIES C_STANDARD 99)
+target_compile_options(finalizer_work_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(finalizer_work_test PRIVATE luthr_static)
+target_link_options(finalizer_work_test PRIVATE -Wl,--wrap=luaC_claimtrace
+  -Wl,--wrap=luaC_tracebatch)
+foreach(case IN ITEMS discovery_incremental discovery_generational
+    pending_incremental pending_generational promote_incremental promote_generational
+    overlap_incremental overlap_pending_incremental)
+  add_test(NAME finalizer_work_${case} COMMAND finalizer_work_test ${case})
+  set_tests_properties(finalizer_work_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
+endforeach()
+
 luthr_test_program(gc_barriers_test gc_barriers_test.c)
 set_target_properties(gc_barriers_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_barriers_test PRIVATE -Wall -Wextra -Werror)
@@ -859,7 +873,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test execution_context_test table_read_test memory_publication_test
   allocation_pool_test page_ownership_test gc_pacing_test
-  gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test
+  gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)

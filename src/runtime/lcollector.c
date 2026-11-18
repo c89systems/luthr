@@ -62,8 +62,12 @@ void luaC_advancetrace (lua_State *L) {
       plan->again = NULL;
       break;
     }
-    if (plan->next != NULL || plan->deferred != NULL) break;
+    if (plan->next != NULL || plan->deferred != NULL ||
+        plan->pending != NULL || plan->finalizers != NULL) break;
     switch (plan->phase) {
+      case TRACE_PENDING:
+        plan->phase = TRACE_MARK;
+        break;
       case TRACE_MARK:
         ephemerons(g, TRACE_VALUES);
         break;
@@ -76,8 +80,11 @@ void luaC_advancetrace (lua_State *L) {
         }
         else if (plan->after == TRACE_VALUES || plan->after == TRACE_CLEAR)
           clearing(g, plan->after);
-        else
+        else {
           plan->phase = plan->after;
+          if (plan->phase == TRACE_FINALIZERS && g->finobj != g->finobjold1)
+            plan->finalizers = &g->finobj;
+        }
         break;
       case TRACE_VALUES:
         if (plan->weak_list++ == 0)
@@ -86,7 +93,6 @@ void luaC_advancetrace (lua_State *L) {
           ephemerons(g, TRACE_FINALIZERS);
         break;
       case TRACE_FINALIZERS:
-        luaC_finalizetrace(L);
         ephemerons(g, TRACE_CLEAR);
         break;
       case TRACE_CLEAR:
@@ -117,6 +123,7 @@ void luaC_advancetrace (lua_State *L) {
   if (luaC_tracing(L))
     __atomic_store_n(&g->trace_ready,
       g->gray != NULL || g->trace_deferred != NULL ||
-      plan->next != NULL || plan->deferred != NULL, __ATOMIC_RELEASE);
+      plan->next != NULL || plan->deferred != NULL ||
+      plan->pending != NULL || plan->finalizers != NULL, __ATOMIC_RELEASE);
   luaW_start(L);
 }

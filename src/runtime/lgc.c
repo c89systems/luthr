@@ -585,16 +585,6 @@ static void markmt (global_State *g) {
 }
 
 
-/*
-** mark all objects in list of being-finalized
-*/
-static void markbeingfnz (global_State *g) {
-  GCObject *o;
-  for (o = g->tobefnz; o != NULL; o = o->next)
-    markobject(g, o);
-}
-
-
 static void cleargraylists (global_State *g) {
   g->gray = g->grayagain = NULL;
   g->weak = g->allweak = g->ephemeron = NULL;
@@ -644,6 +634,12 @@ static void starttrace (lua_State *L) {
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
+  g->trace_plan.pending = g->tobefnz;
+  g->trace_plan.finalizers = NULL;
+  g->trace_plan.finalizer_gray = NULL;
+  g->trace_plan.finalizer_tail = NULL;
+  g->trace_plan.finalizer_new = NULL;
+  g->trace_plan.finalizer_newtail = &g->trace_plan.finalizer_new;
   g->trace_plan.base_marked = g->GCmarked;
   g->trace_plan.phase = TRACE_INIT;
   g->trace_plan.finish = g->gckind == KGC_GENMINOR
@@ -698,7 +694,6 @@ static void restartcollection (lua_State *L, global_State *g) {
   marknativeframes(g);
   markvalue(g, &g->l_registry);
   markmt(g);
-  markbeingfnz(g);  /* mark any finalizing object left from previous cycle */
 }
 
 /* }====================================================== */
@@ -1109,9 +1104,72 @@ static void readytrace (lua_State *L) {
   __atomic_store_n(&g->trace_ready,
     g->gray != NULL || g->trace_deferred != NULL ||
     plan->next != NULL || plan->deferred != NULL ||
+    plan->pending != NULL || plan->finalizers != NULL ||
     __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
     __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
     __ATOMIC_RELEASE);
+}
+
+/* Both walks own only collection links and atomic colours, never payloads.
+** Publication of new registrations requires a rendezvous, so it cannot change
+** these links while this admitted batch holds world.mutex. */
+static unsigned pendingfinalizers (global_State *g, unsigned limit) {
+  LuaTracePlan *plan = &g->trace_plan;
+  unsigned count = 0;
+  while (plan->pending != NULL && count < limit) {
+    GCObject *object = plan->pending;
+    count++;
+    plan->pending = object->next;
+    if (g->gckind == KGC_GENMINOR && getage(object) == G_OLD1) {
+      setage(object, G_OLD);
+      if (isblack(object)) {
+        set2gray(object);
+        linktrace(g, object);
+      }
+    }
+    markobject(g, object);
+  }
+  return count;
+}
+
+static unsigned discoverfinalizers (global_State *g, unsigned limit) {
+  LuaTracePlan *plan = &g->trace_plan;
+  unsigned count = 0;
+  while (plan->finalizers != NULL && count < limit) {
+    GCObject *object = *plan->finalizers;
+    if (object == g->finobjold1) {
+      plan->finalizers = NULL;
+      break;
+    }
+    count++;
+    lua_assert(tofinalize(object));
+    /* A weak reader may promote the object concurrently. The colour claim
+    ** decides whether discovery or promotion wins, without a racy test/set. */
+    if (!claimmark(object)) plan->finalizers = &object->next;
+    else {
+      if (object == g->finobjsur) g->finobjsur = object->next;
+      *plan->finalizers = object->next;
+      object->next = NULL;
+      *plan->finalizer_newtail = object;
+      plan->finalizer_newtail = &object->next;
+      /* Discover every candidate before tracing their outgoing edges. Doing
+      ** so in an earlier batch could hide another unreachable finalizable
+      ** object and defer its callback to a later collection. */
+      if (plan->finalizer_gray == NULL)
+        plan->finalizer_tail = getgclist(object);
+      *getgclist(object) = plan->finalizer_gray;
+      plan->finalizer_gray = object;
+    }
+  }
+  if (plan->finalizers != NULL && *plan->finalizers == g->finobjold1)
+    plan->finalizers = NULL;
+  if (plan->finalizers == NULL && plan->finalizer_gray != NULL) {
+    *plan->finalizer_tail = g->gray;
+    g->gray = plan->finalizer_gray;
+    plan->finalizer_gray = NULL;
+    plan->finalizer_tail = NULL;
+  }
+  return count;
 }
 
 void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
@@ -1121,7 +1179,11 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   work->global = g;
   if (!luaC_tracing(L)) return;
   luaC_drainbarriers(L);
-  work->scanned = cast(lu_mem, g->GCmarked - marked);
+  if (plan->phase == TRACE_PENDING)
+    work->scanned += pendingfinalizers(g, limit) * sizeof(GCObject);
+  else if (plan->phase == TRACE_FINALIZERS)
+    work->scanned += discoverfinalizers(g, limit) * sizeof(GCObject);
+  work->scanned += cast(lu_mem, g->GCmarked - marked);
   if (g->gray == NULL && g->trace_deferred != NULL) {
     g->gray = g->trace_deferred;
     g->trace_deferred = NULL;
@@ -1352,7 +1414,11 @@ static void checkSizes (lua_State *L, global_State *g) {
 static GCObject *udata2finalize (global_State *g) {
   GCObject *o = g->tobefnz;  /* get first element */
   lua_assert(tofinalize(o));
+  /* An older callback can finish while another cycle scans queued roots.
+  ** Remove this root from that walk before reusing its allocation link. */
+  if (g->trace_plan.pending == o) g->trace_plan.pending = o->next;
   g->tobefnz = o->next;  /* remove it from 'tobefnz' list */
+  if (g->tobefnz == NULL) g->tobefnz_tail = &g->tobefnz;
   o->next = g->allgc;  /* return it to 'allgc' list */
   g->allgc = o;
   resetbit(o->marked, FINALIZEDBIT);  /* object is "normal" again */
@@ -1411,39 +1477,16 @@ static void callallpendingfinalizers (lua_State *L) {
 }
 
 
-/*
-** find last 'next' field in list 'p' list (to add elements in its end)
-*/
-static GCObject **findlast (GCObject **p) {
-  while (*p != NULL)
-    p = &(*p)->next;
-  return p;
-}
-
-
-/*
-** Move all unreachable objects (or 'all' objects) that need
-** finalization from list 'finobj' to list 'tobefnz' (to be finalized).
-** (Note that objects after 'finobjold1' cannot be white, so they
-** don't need to be traversed. In incremental mode, 'finobjold1' is NULL,
-** so the whole list is traversed.)
-*/
-static void separatetobefnz (global_State *g, int all) {
+/* Shutdown alone selects every remaining finalizer, regardless of reachability.
+** Ordinary collection discovers candidates in admitted, bounded batches. */
+static void separateallfinalizers (global_State *g) {
   GCObject *curr;
-  GCObject **p = &g->finobj;
-  GCObject **lastnext = findlast(&g->tobefnz);
-  while ((curr = *p) != g->finobjold1) {  /* traverse all finalizable objects */
+  while ((curr = g->finobj) != NULL) {
     lua_assert(tofinalize(curr));
-    if (!(iswhite(curr) || all))  /* not being collected? */
-      p = &curr->next;  /* don't bother with it */
-    else {
-      if (curr == g->finobjsur)  /* removing 'finobjsur'? */
-        g->finobjsur = curr->next;  /* correct it */
-      *p = curr->next;  /* remove 'curr' from 'finobj' list */
-      curr->next = *lastnext;  /* link at the end of 'tobefnz' list */
-      *lastnext = curr;
-      lastnext = &curr->next;
-    }
+    g->finobj = curr->next;
+    curr->next = NULL;
+    *g->tobefnz_tail = curr;
+    g->tobefnz_tail = &curr->next;
   }
 }
 
@@ -1807,7 +1850,6 @@ static void startyoungcollection (lua_State *L, global_State *g) {
     g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
   }
   markold(g, g->finobj, g->finobjrold);
-  markold(g, g->tobefnz, NULL);
 }
 
 static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
@@ -2009,7 +2051,7 @@ void luaC_freeallobjects (lua_State *L) {
     g->gcemergency = emergency;
   }
   luaC_changemode(L, KGC_INC);
-  separatetobefnz(g, 1);  /* separate all objects with finalizers */
+  separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
   callallpendingfinalizers(L);
   deletelist(L, g->allgc, obj2gco(mainthread(g)));
@@ -2030,19 +2072,12 @@ void luaC_initialtrace (lua_State *L) {
   lua_assert(g->ephemeron == NULL && g->weak == NULL);
   lua_assert(!iswhite(mainthread(g)));
   g->gcstate = GCSatomic;
-  g->trace_plan.phase = TRACE_MARK;
+  g->trace_plan.phase = g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
   markobject(g, L);  /* mark running thread */
   marknativeframes(g);
   /* registry and global metatables may be changed by API */
   markvalue(g, &g->l_registry);
   markmt(g);  /* mark global metatables */
-}
-
-void luaC_finalizetrace (lua_State *L) {
-  global_State *g = G(L);
-  lua_assert(L->world_depth != 0);
-  separatetobefnz(g, 0);  /* separate objects to be finalized */
-  markbeingfnz(g);  /* mark objects that will be finalized */
 }
 
 void luaC_finishtrace (lua_State *L) {
@@ -2052,6 +2087,14 @@ void luaC_finishtrace (lua_State *L) {
   lua_assert(L->world_depth != 0 && luaC_tracing(L));
   luaS_clearcache(g);
   g->GCcyclelive = livebytes(g);
+  /* A previous cycle's callbacks may still be running. Publish this cohort
+  ** only after its reachability and weak decisions are complete. */
+  if (g->trace_plan.finalizer_new != NULL) {
+    *g->tobefnz_tail = g->trace_plan.finalizer_new;
+    g->tobefnz_tail = g->trace_plan.finalizer_newtail;
+    g->trace_plan.finalizer_new = NULL;
+    g->trace_plan.finalizer_newtail = &g->trace_plan.finalizer_new;
+  }
   endtrace(L);
   g->trace_plan.finish = 0;
   g->currentwhite = cast_byte(otherwhite(g));  /* flip current white */

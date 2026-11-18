@@ -655,6 +655,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->gcstopem = 0;
   g->gcemergency = 0;
   g->finobj = g->tobefnz = g->fixedgc = NULL;
+  g->tobefnz_tail = &g->tobefnz;
   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
   g->finobjsur = g->finobjold1 = g->finobjrold = NULL;
   g->sweepgc = NULL;
