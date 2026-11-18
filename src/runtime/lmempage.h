@@ -26,7 +26,7 @@ union LuaAllocBlock {
 
 struct LuaAllocPage {
   LuaAllocPage *next;
-  LuaAllocPage **previous;  /* metadata-owned allocation directory */
+  LuaAllocPage **previous;  /* pool-mutex allocation directory */
   LuaAllocPage *available_next;
   LuaAllocPage **available_previous;  /* pool mutex; NULL unless offered */
   LuaAllocPage *dirty_next;  /* uniquely published notification/retirement link */

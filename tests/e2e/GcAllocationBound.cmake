@@ -1,8 +1,11 @@
 # A transient workload must not accumulate garbage in proportion to its total
 # allocation volume when automatic requests wait behind parallel workers.
+if(NOT DEFINED iterations)
+  set(iterations 40000)
+endif()
 foreach(collector IN ITEMS incremental generational)
   execute_process(COMMAND "${program}" "${script}" allocation_only
-    "${collector}" 8 1 32 40000 1 0 0
+    "${collector}" 8 1 32 "${iterations}" 1 0 0
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
   if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
     message(FATAL_ERROR "Bounded allocation failed (${collector}): ${result}: ${output}${error}")

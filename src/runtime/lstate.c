@@ -466,7 +466,8 @@ static void close_state (lua_State *L, int owns_gate) {
   luaX_destroygate(&L->stack_gate);
   luaW_unregister(L);
   luaW_destroy(&g->world);
-  (*g->frealloc)(g->ud, g, sizeof(global_State), 0);  /* free main block */
+  luaAL_destroy(&g->allocator);
+  (*g->allocator.function)(g->allocator.context, g, sizeof(global_State), 0);
 }
 
 
@@ -595,6 +596,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   global_State *g = cast(global_State*,
                        (*f)(ud, NULL, LUA_TTHREAD, sizeof(global_State)));
   if (g == NULL) return NULL;
+  if (luaAL_init(&g->allocator, f, ud) != 0) {
+    (*f)(ud, g, sizeof(global_State), 0);
+    return NULL;
+  }
   L = &g->mainth.l;
   L->tt = LUA_VTHREAD;
   g->major_mark = bitmask(MAJOR0BIT);
@@ -602,17 +607,20 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->new_mark = g->major_mark;
   L->marked = luaC_newmark(g);
   if (preinit_thread(L, g) != 0) {
+    luaAL_destroy(&g->allocator);
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
   if (luaW_init(&g->world) != 0) {
     luaX_destroygate(&L->stack_gate);
+    luaAL_destroy(&g->allocator);
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
   if (luaM_initpools(L) != 0) {
     luaW_destroy(&g->world);
     luaX_destroygate(&L->stack_gate);
+    luaAL_destroy(&g->allocator);
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
@@ -620,12 +628,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
   L->next = NULL;
   incnny(L);  /* main thread is always non yieldable */
-  g->frealloc = f;
   g->scheduler = NULL;
   g->policy_factory = NULL;
   g->policy_context = NULL;
   g->slot_caches = NULL;
-  g->ud = ud;
   g->warnf = NULL;
   g->ud_warn = NULL;
   g->seed = seed;
@@ -668,9 +674,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCdebt = 0;
   g->GCretired = 0;
   g->GCmajorlive = sizeof(global_State);
-  g->GCgoal = sizeof(global_State);
   g->GCcyclelive = sizeof(global_State);
-  g->GCmarkdebt = 0;
   g->gcstep_pending = 0;
   g->trace_active = g->trace_epoch = g->trace_busy = 0;
   g->trace_weakcutoff = 0;
@@ -686,6 +690,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   setgcparam(g, MINORMUL, LUAI_GENMINORMUL);
   setgcparam(g, MINORMAJOR, LUAI_MINORMAJOR);
   setgcparam(g, MAJORMINOR, LUAI_MAJORMINOR);
+  luaP_init(g);
   for (i=0; i < LUA_NUMTYPES; i++) {
     g->mt[i] = NULL;
     luaA_initlock(&g->metatable_access[i]);

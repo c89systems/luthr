@@ -146,14 +146,25 @@ foreach(case IN ITEMS fast batching overlap retirement pressure failure hash_fai
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
+luthr_test_program(gc_controller_test gc_controller_test.c)
+set_target_properties(gc_controller_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_controller_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_controller_test PRIVATE luthr_static)
+foreach(case IN ITEMS controller gate pair withdrawal)
+  add_test(NAME gc_controller_${case} COMMAND gc_controller_test ${case})
+  set_tests_properties(gc_controller_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(gc_pacing_test gc_pacing_test.c)
 set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_pacing_test PRIVATE luthr_static)
 target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
-  -Wl,--wrap=luaQ_poll)
+  -Wl,--wrap=luaC_sweepbatch -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
+    sweep_pressure sweep_poll_pressure sweep_credit cohort_promotion marking_edges born_black_incremental born_black_generational
     borrowed_incremental borrowed_generational bounded_incremental
     bounded_generational idle_incremental idle_generational
     pressure_incremental pressure_generational unavailable_incremental
@@ -178,11 +189,26 @@ foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime remote_
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(allocator_admission_test allocator_admission_test.c)
+set_target_properties(allocator_admission_test PROPERTIES C_STANDARD 99)
+target_compile_options(allocator_admission_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(allocator_admission_test PRIVATE luthr_static Threads::Threads)
+target_link_options(allocator_admission_test PRIVATE -Wl,--wrap=luaW_heapenter
+  -Wl,--wrap=luaQ_wake)
+foreach(case IN ITEMS metadata_incremental metadata_generational callback_incremental callback_generational
+    external_incremental external_generational
+    notification_incremental notification_generational)
+  add_test(NAME allocator_admission_${case} COMMAND allocator_admission_test ${case})
+  set_tests_properties(allocator_admission_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(page_ownership_test page_ownership_test.c)
 set_target_properties(page_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(page_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(page_ownership_test PRIVATE luthr_static)
 target_link_options(page_ownership_test PRIVATE -Wl,--wrap=luaW_heapenter
+  -Wl,--wrap=luaAL_enter
   -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
 foreach(case IN ITEMS retained pressure task lease_unwind busy_cache remote_returns growth_handoff growth_epoch assist_rebind boundary credit overlap helpers unwind finite)
   add_test(NAME page_ownership_${case} COMMAND page_ownership_test ${case})
@@ -195,8 +221,11 @@ set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_requests_test PRIVATE luthr_static)
 target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
-  -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_stop)
-foreach(case IN ITEMS incremental generational explicit stopped phase_incremental phase_generational)
+  -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_trycollectenter
+  -Wl,--wrap=luaW_heapleave -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS incremental generational explicit stopped phase_incremental phase_generational
+    overdue_incremental overdue_generational
+    handoff_trace_incremental handoff_trace_generational handoff_sweep_incremental handoff_sweep_generational)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -303,7 +332,7 @@ target_link_libraries(memory_publication_test PRIVATE luthr_static)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_realloc_)
-target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
+target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaAL_enter)
 foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache local_returns stack_retry marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational page_growth page_cap page_isolation
     metadata_handoff metadata_spurious metadata_collect metadata_priority metadata_contention stopped_gc refill_recheck)
@@ -794,8 +823,8 @@ target_link_libraries(synchronization_failure_test PRIVATE luthr_static)
 target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
-foreach(case IN ITEMS main_mutex main_condition world_mutex world_condition thread_mutex thread_condition
-    closed_capture open_capture facade_policy_mutex facade_trace_mutex facade_state_mutex
+foreach(case IN ITEMS allocator_mutex allocator_condition main_mutex main_condition world_mutex world_condition thread_mutex thread_condition
+    closed_capture open_capture facade_policy_mutex facade_trace_mutex facade_allocator_mutex facade_state_mutex
     facade_world_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
@@ -924,7 +953,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
-  allocation_pool_test page_ownership_test gc_pacing_test
+  allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test
   gc_sweeping_test

@@ -101,10 +101,12 @@ static int facade_case(const char *name) {
     fail_mutex = 1;
   else if (strcmp(name, "facade_trace_mutex") == 0)
     fail_mutex = 2;
-  else if (strcmp(name, "facade_state_mutex") == 0)
+  else if (strcmp(name, "facade_allocator_mutex") == 0)
     fail_mutex = 3;
-  else if (strcmp(name, "facade_world_mutex") == 0)
+  else if (strcmp(name, "facade_state_mutex") == 0)
     fail_mutex = 4;
+  else if (strcmp(name, "facade_world_mutex") == 0)
+    fail_mutex = 5;
   else
     return 1;
   failed = luthr_lua_runtime_new_with_allocator(&runtime, &config) !=
@@ -126,13 +128,16 @@ static int run_case(const char *name) {
   int status = LUA_OK;
   int failed = 0;
   int world_case = strncmp(name, "world_", 6) == 0;
-  int main_case = strncmp(name, "main_", 5) == 0 || world_case;
+  int allocator_case = strncmp(name, "allocator_", 10) == 0;
+  int main_case =
+      strncmp(name, "main_", 5) == 0 || world_case || allocator_case;
   int condition_case = strstr(name, "condition") != NULL;
   if (strncmp(name, "facade_", 7) == 0)
     return facade_case(name);
   if (main_case) {
-    fail_mutex = condition_case ? 0 : (world_case ? 2 : 1);
-    fail_condition = condition_case ? (world_case ? 2 : 1) : 0;
+    int position = allocator_case ? 1 : world_case ? 3 : 2;
+    fail_mutex = condition_case ? 0 : position;
+    fail_condition = condition_case ? position : 0;
   }
   state = lua_newstate(allocate, NULL, 0);
   if (main_case) {

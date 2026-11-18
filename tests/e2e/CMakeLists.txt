@@ -120,11 +120,12 @@ target_sources(gc_handoff_probe_test PRIVATE gc_probe.c)
 set_target_properties(gc_handoff_probe_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_handoff_probe_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_handoff_probe_test PRIVATE luthr_static)
-foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter luaW_heapleave
+foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter luaW_trycollectenter luaW_heapleave
+    luaAL_realloc
     luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
     luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector
     luaC_tracebatch luaC_scantrace luaC_assisttrace luaC_polltrace luaC_snapshot luaC_checksnapshot luaC_finishtrace
-    luaC_sweepbatch luaC_scansweep luaC_pollsweep luaQ_wake)
+    luaC_sweepbatch luaC_scansweep luaC_pollsweep luaC_assistsweep luaQ_wake)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
   target_link_options(gc_handoff_probe_test PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
@@ -174,6 +175,12 @@ add_test(NAME gc_allocation_bound COMMAND "${CMAKE_COMMAND}"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
   -P "${CMAKE_CURRENT_SOURCE_DIR}/GcAllocationBound.cmake")
 set_tests_properties(gc_allocation_bound PROPERTIES
+  LABELS "runtime;parallel;benchmark" TIMEOUT 120)
+add_test(NAME gc_allocation_bound_extended COMMAND "${CMAKE_COMMAND}"
+  "-Dprogram=$<TARGET_FILE:scheduled_gc_control>"
+  "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" -Diterations=80000
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/GcAllocationBound.cmake")
+set_tests_properties(gc_allocation_bound_extended PROPERTIES
   LABELS "runtime;parallel;benchmark" TIMEOUT 120)
 add_custom_target(benchmark_scheduler
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0

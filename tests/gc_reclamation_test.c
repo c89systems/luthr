@@ -237,7 +237,7 @@ int main(int argc, char **argv) {
     if (fixture.trace) {
       luaW_stop(fixture.worker);
       luaC_runtilstate(fixture.worker, GCSpropagate, 1);
-      G(fixture.worker)->GCmarkdebt = MAX_LMEM;
+      G(fixture.worker)->pacer.debt = MAX_LMEM;
       luaW_start(fixture.worker);
       require(luaC_tracing(fixture.worker));
     }

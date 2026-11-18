@@ -63,6 +63,8 @@ LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);
 LUAI_FUNC void luaW_collectenter (lua_State *L);
+/* Phase polls may defer behind an existing metadata owner without parking. */
+LUAI_FUNC int luaW_trycollectenter (lua_State *L);
 LUAI_FUNC void luaW_heapleave (lua_State *L);
 /* Caller owns world.mutex, retains native depth and borrows no shared work. */
 LUAI_FUNC void luaW_waitcollector (lua_State *L);

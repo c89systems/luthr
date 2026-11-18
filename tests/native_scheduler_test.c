@@ -491,6 +491,11 @@ static int block_binding(lua_State *state) {
       lua_State *child;
       int results;
       unlock(pool);
+      /* Backing allocation is independent of collector metadata. Choose an
+       * explicit public GC-control request for this resource-wait fixture,
+       * while the host deliberately retains the metadata permit. */
+      if (pool->native_resource)
+        require(lua_gc(state, LUA_GCPARAM, LUA_GCPPAUSE, -1) >= 0);
       /* A foreign activation on the parent also pins the child's VM work. */
       child = lua_newthread(state);
       require(

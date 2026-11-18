@@ -1186,14 +1186,24 @@ int main(int argc, char **argv) {
       while (!fixture.allocator_blocked)
         check(pthread_cond_wait(&fixture.changed, &fixture.mutex));
       check(pthread_mutex_unlock(&fixture.mutex));
-      check(pthread_mutex_lock(&world->mutex));
-      while (((table_case || capi_case)
-                  ? fixture.actors[1].state->object_waiting
-                  : fixture.actors[1].state->heap_waiting) == 0)
-        luaQ_wait(main_state, &world->mutex, &world->changed, &world->waiters);
-      failed |= luaW_activecount(world) != 1 || world->heap_depth == 0 ||
+      /* Callback contention has its own notification domain. Observe its
+       * registered inactive waiter without subscribing to collector wakes. */
+      for (;;) {
+        int waiting;
+        check(pthread_mutex_lock(&world->mutex));
+        waiting = table_case || capi_case
+                      ? fixture.actors[1].state->object_waiting != 0
+                      : __atomic_load_n(&G(main_state)->allocator.waiting,
+                                        __ATOMIC_ACQUIRE) != 0;
+        if (waiting)
+          break;
+        check(pthread_mutex_unlock(&world->mutex));
+        sched_yield();
+      }
+      failed |= luaW_activecount(world) != 1 || world->heap_depth != 0 ||
                 fixture.actors[1].state->native_depth == 0 ||
-                world->heap_owner.token != fixture.failure_owner;
+                __atomic_load_n(&G(main_state)->allocator.owner,
+                                __ATOMIC_ACQUIRE) != fixture.failure_owner;
       fixture.waiter_observed = 1;
       check(pthread_mutex_unlock(&world->mutex));
       check(pthread_mutex_lock(&fixture.mutex));

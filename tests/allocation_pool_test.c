@@ -131,7 +131,6 @@ static void batch(int capped, int collect_during_init) {
     actors[i].id = i + 1;
     actors[i].frame = 1;
     actors[i].cache.global = G(L);
-    actors[i].cache.parallelism = ACTORS;
     require(actors[i].state->nci == 0);
   }
   lua_gc(L, LUA_GCSTOP);
@@ -201,7 +200,7 @@ static void batch(int capped, int collect_during_init) {
   require(allocator.live == 0);
   require(initialized != 0);
   fprintf(stderr, "cold-pool metadata admissions: %u\n", total);
-  require(capped || collect_during_init || total == 1);
+  require(capped || collect_during_init || total == 0);
 }
 
 static void control_lifetime(void) {

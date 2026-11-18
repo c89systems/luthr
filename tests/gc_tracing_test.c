@@ -178,7 +178,7 @@ void __wrap_luaQ_poll(lua_State *L) {
     require(L->world_depth == 0 && !G(L)->world.stopped && !G(L)->trace_busy);
     /* These cases isolate graph publication and explicit helper handoffs.
      * Keep automatic allocation backpressure in gc_pacing's pressure cases. */
-    __atomic_store_n(&G(L)->GCmarkdebt, MAX_LMEM, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
     if (collection->emergency || collection->help)
       scope = luaW_detach(L); /* a real safepoint with no claimed graph work */
     require(pthread_mutex_lock(&collection->mutex) == 0);
@@ -212,7 +212,7 @@ static void begin(lua_State *L) {
   require(g->gray == NULL && g->grayagain == NULL);
   luaC_runtilstate(L, GCSpropagate, 1);
   require(luaC_tracing(L));
-  g->GCmarkdebt = MAX_LMEM; /* This fixture supplies its own phase driver. */
+  g->pacer.debt = MAX_LMEM; /* This fixture supplies its own phase driver. */
   luaW_start(L);
   lua_unlock(L);
 }

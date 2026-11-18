@@ -731,7 +731,6 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
     s->slots[i].allocation.permission = &s->slots[i].owner;
     s->slots[i].allocation.returned = cachereturned;
     s->slots[i].allocation.context = s;
-    s->slots[i].allocation.parallelism = config->slots;
     s->slots[i].allocation.next = G(L)->slot_caches;
     G(L)->slot_caches = &s->slots[i].allocation;
   }

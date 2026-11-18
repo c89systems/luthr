@@ -70,9 +70,9 @@ void __real_luaW_leave(LuaWorld *world, LuaParticipation *participant);
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
                            size_t size);
-void __real_luaW_heapenter(lua_State *state);
+void __real_luaAL_enter(lua_State *state);
 
-void __wrap_luaW_heapenter(lua_State *state) {
+void __wrap_luaAL_enter(lua_State *state) {
   if (state == frame_refill_probe) {
     CallInfo *frame;
     /* Populate the cache after the outer refill chose to seek admission.
@@ -82,7 +82,7 @@ void __wrap_luaW_heapenter(lua_State *state) {
     require(frame != NULL);
     luaM_free_(state, frame, sizeof(*frame));
   }
-  __real_luaW_heapenter(state);
+  __real_luaAL_enter(state);
 }
 
 void *__wrap_luaM_realloc_(lua_State *state, void *oldblock, size_t old,

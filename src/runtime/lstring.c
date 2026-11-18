@@ -346,9 +346,9 @@ TString *luaS_newextlstr (lua_State *L,
   else {
     ne.kind = LSTRMEM;
     if (luaD_rawrunprotected(L, f_newext, &ne) != LUA_OK) {  /* mem. error? */
-      luaW_heapenter(L);
+      luaAL_enter(L);
       (*falloc)(ud, cast_voidp(s), len + 1, 0);  /* free external string */
-      luaW_heapleave(L);
+      luaAL_leave(L);
       luaM_error(L);  /* re-raise memory error */
     }
     ne.ts->falloc = falloc;

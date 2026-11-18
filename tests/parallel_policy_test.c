@@ -297,8 +297,12 @@ static int set_warning(lua_State *state) {
 static void *release_external(void *user, void *pointer, size_t old_size,
                               size_t size) {
   struct fixture *fixture = user;
+  lua_State *state = fixture->external_state;
+  LuaAllocator *allocator = &G(state)->allocator;
   if (pointer != fixture->external || old_size != 128 || size != 0 ||
-      luaW_scope(fixture->external_state).heap == 0)
+      __atomic_load_n(&allocator->owner, __ATOMIC_ACQUIRE) !=
+          luaX_token(state) ||
+      allocator->depth == 0 || luaW_scope(state).heap != 0)
     abort();
   fixture->external_releases++;
   free(pointer);

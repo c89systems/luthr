@@ -11,6 +11,7 @@
 #include "lgate.h"
 #include "ldo.h"
 #include "lgc.h"
+#include "lmem.h"
 #include "lstate.h"
 #include "ltask.h"
 #include "ltablestorage.h"
@@ -153,6 +154,7 @@ static void unlockstate (lua_State *L, void *token) {
   if (!L->reclaiming && L->storage_retired != NULL) luaHS_reclaim(L, LUAHS_WITHDRAW);
   if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
+  luaM_publishdebt(L);
   lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
@@ -248,6 +250,7 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
     second = swap;
   }
   participant = first->admission;
+  luaM_publishdebt(first);
   first->stack_peer = second->stack_peer = NULL;
   second->admission = &second->participation;
   if (first->errorJmp == NULL && execution != NULL) {

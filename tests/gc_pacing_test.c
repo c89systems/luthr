@@ -17,8 +17,26 @@
     }                                                                          \
   } while (0)
 
-enum step_mode { AUTOMATIC, EXPLICIT, FULL };
-static unsigned unavailable_batches, scan_batches, interrupt_assist;
+enum step_mode {
+  AUTOMATIC,
+  EXPLICIT,
+  FULL,
+  SWEEP_PRESSURE,
+  SWEEP_CREDIT,
+  SWEEP_POLL_PRESSURE
+};
+static unsigned unavailable_batches, scan_batches, sweep_batches;
+static unsigned interrupt_assist, stops;
+lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
+lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
+  sweep_batches++;
+  return __real_luaC_sweepbatch(L, limit);
+}
+void __real_luaW_stop(lua_State *);
+void __wrap_luaW_stop(lua_State *L) {
+  stops += L->world_depth == 0;
+  __real_luaW_stop(L);
+}
 void __real_luaQ_poll(lua_State *);
 void __wrap_luaQ_poll(lua_State *L) {
   if (interrupt_assist && luaC_ingc(L)) {
@@ -80,7 +98,29 @@ static l_mem progress(l_mem debt, enum step_mode mode) {
   luaC_waittrace(L);
   require(G(L)->gcstate == GCSswpallgc);
   luaE_setdebt(G(L), debt);
-  if (mode == EXPLICIT) {
+  if (mode == SWEEP_CREDIT) {
+    unsigned before = sweep_batches;
+    /* Other helpers paid the proportional work at this allocation point.
+     * Work-quota debt must not bypass the shared credit on the next check. */
+    G(L)->pacer.goal = G(L)->pacer.start;
+    G(L)->pacer.expected = G(L)->pacer.work;
+    __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
+    L->trace_debt = LUA_GC_ASSIST_BYTES;
+    luaC_checkGC(L);
+    require(L->trace_debt == 0 && sweep_batches == before);
+    luaC_checkGC(L);
+    require(luaC_sweeping(L) && sweep_batches == before);
+  } else if (mode == SWEEP_PRESSURE || mode == SWEEP_POLL_PRESSURE) {
+    __atomic_store_n(&G(L)->pacer.debt, 0, __ATOMIC_RELAXED);
+    L->trace_debt = 0;
+    if (mode == SWEEP_POLL_PRESSURE) {
+      luaC_pollsweep(L);
+      require(luaC_sweeping(L)); /* nonallocating workers owe a bounded slice */
+    } else {
+      luaC_checkGC(L);
+      require(!luaC_sweeping(L));
+    }
+  } else if (mode == EXPLICIT) {
     lua_unlock(L);
     lua_gc(L, LUA_GCSTEP, (size_t)8192);
     lua_lock(L);
@@ -133,18 +173,23 @@ static void bounded_marking(const char *kind) {
   if (!stopped)
     lua_gc(L, LUA_GCRESTART);
   lua_lock(L);
-  G(L)->GCgoal = MAX_LMEM; /* Isolate slice budgeting from heap pressure. */
+  G(L)->pacer.goal = MAX_LMEM; /* Isolate slice budgeting from heap pressure. */
   if (stopped) {
     lua_unlock(L);
     require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
     lua_lock(L);
   } else {
+    unsigned before = stops;
     luaE_setdebt(G(L), 0);
     luaC_step(L); /* A normal request returns with its job unfinished. */
+    require(stops == before + 1); /* returning a slice owes no new pause */
   }
   require(luaC_tracing(L));
   require(!G(L)->world.stopped && L->world_depth == 0);
   require(G(L)->trace_busy == 0);
+  /* The synthetic debt below represents allocation through the soft target.
+   * Keep the independent hard guard at MAX_LMEM to test bounded slices. */
+  G(L)->pacer.goal = G(L)->pacer.start;
   if (unwind) {
     unsigned before;
     require(luaD_rawrunprotected(L, interrupted_assist, NULL) == LUA_ERRRUN);
@@ -159,7 +204,7 @@ static void bounded_marking(const char *kind) {
     lua_lock(L);
     /* Even a worker which has not allocated a full debt batch must help when
      * the shared allocation runway is spent. No stale epoch may bypass it. */
-    __atomic_store_n(&G(L)->GCmarkdebt, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.debt, 0, __ATOMIC_RELAXED);
     L->assist_epoch = G(L)->world.work_epoch - 1;
     L->trace_debt = 0;
     luaC_assisttrace(L);
@@ -223,7 +268,7 @@ static void sweep_growth(void) {
   lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
   lua_gc(L, LUA_GCRESTART);
   lua_lock(L);
-  G(L)->GCgoal = MAX_LMEM;
+  G(L)->pacer.goal = MAX_LMEM;
   luaE_setdebt(G(L), 0);
   luaC_step(L);
   require(luaC_tracing(L));
@@ -236,11 +281,11 @@ static void sweep_growth(void) {
   luaW_stop(L);
   luaC_entergc(L, &frame);
   luaC_runtilstate(L, GCSpause, 1);
-  /* Mark-end storage counts the earlier persistent allocation. The later
-   * allocation consumes runway instead of granting another pause allowance. */
+  /* Both allocations happened after this cohort began. They remain charged,
+   * but neither grants the next pause an unverified survival allowance. */
   require(gettotalbytes(G(L)) - G(L)->GCretired ==
-          G(L)->GCcyclelive + CONTROL_BYTES);
-  require(G(L)->GCgoal == applygcparam(G(L), PAUSE, G(L)->GCcyclelive));
+          G(L)->GCcyclelive + 2 * CONTROL_BYTES);
+  require(G(L)->pacer.goal == applygcparam(G(L), PAUSE, G(L)->GCcyclelive));
   luaC_leavegc(L, &frame);
   luaW_start(L);
   luaC_reclaim(L);
@@ -311,7 +356,7 @@ static void closing_pressure(const char *kind) {
     lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
     lua_gc(L, LUA_GCRESTART);
     lua_lock(L);
-    G(L)->GCgoal = MAX_LMEM;
+    G(L)->pacer.goal = MAX_LMEM;
     luaE_setdebt(G(L), 0);
     luaC_step(L);
     require(luaC_tracing(L));
@@ -321,6 +366,49 @@ static void closing_pressure(const char *kind) {
   lua_close(L);
   require(heap.failures == 1 && heap.finalized == 1 && heap.completed == 1 &&
           heap.live == 0);
+}
+
+/* Black allocations made during marking have not survived a tracing cycle.
+ * They spend its allowance; they cannot also enlarge the next live base. */
+static void born_black(int generational) {
+  lua_State *L = luaL_newstate();
+  size_t birth;
+  require(L != NULL);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_loadstring(L, "local head; for i=1,10000 do "
+                             "head={next=head} end; return head") == LUA_OK);
+  require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPMUL, 100);
+  lua_gc(L, LUA_GCRESTART);
+  lua_lock(L);
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  require(luaC_tracing(L));
+  birth = (size_t)gettotalbytes(G(L)) * 4;
+  require(birth < 32 * 1024 * 1024);
+  /* The public GC-control API finishes marking before changing options. This
+   * fixture keeps that same job open while temporarily suppressing assists. */
+  luaW_stop(L);
+  G(L)->gcstp = GCSTPUSR;
+  luaW_start(L);
+  lua_unlock(L);
+  require(lua_newuserdatauv(L, birth, 0) != NULL);
+  lua_pop(L, 1);
+  lua_lock(L);
+  require(luaC_tracing(L));
+  luaW_stop(L);
+  luaC_waittrace(L);
+  luaC_waitsweep(L);
+  if (G(L)->gckind != KGC_GENMINOR)
+    luaC_runtilstate(L, GCSpause, 1);
+  luaW_start(L);
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  /* No new growth allowance remains while these untraced bytes are live. */
+  require(G(L)->pacer.goal < (l_mem)gettotalbytes(G(L)) - G(L)->GCretired);
+  lua_unlock(L);
+  lua_close(L);
 }
 
 static void persistent_storage(int generational, int refresh) {
@@ -441,9 +529,143 @@ static void borrowed_storage(int generational) {
   free(dumped.bytes);
 }
 
+static void young_cycle(lua_State *L) {
+  unsigned steps = 0;
+  do {
+    require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
+    require(++steps < 10000);
+  } while (luaC_tracing(L) || luaC_sweeping(L));
+}
+
+/* A concurrent sweep can promote a parent before a child allocated outside
+ * its frozen cohort. Their ages must not imply that the edge is already old.
+ */
+static void cohort_promotion(void) {
+  lua_State *L = luaL_newstate();
+  GCObject *parent, *child;
+  require(L != NULL);
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(L, LUA_GCSTOP);
+  lua_newtable(L);
+  parent = (GCObject *)lua_topointer(L, -1);
+  lua_setglobal(L, "parent");
+  young_cycle(L);
+  require(getage(parent) == G_SURVIVAL);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
+  lua_lock(L);
+  luaC_waittrace(L);
+  require(luaC_sweeping(L) && getage(parent) == G_SURVIVAL);
+  lua_unlock(L);
+  lua_getglobal(L, "parent");
+  lua_newtable(L);
+  child = (GCObject *)lua_topointer(L, -1);
+  lua_pushinteger(L, 42);
+  lua_setfield(L, -2, "value");
+  lua_setfield(L, -2, "child");
+  lua_pop(L, 1);
+  lua_lock(L);
+  luaC_waitsweep(L);
+  require(getage(parent) == G_OLD1 && getage(child) == G_NEW);
+  lua_unlock(L);
+  young_cycle(L);
+  require(getage(child) == G_SURVIVAL);
+  young_cycle(L);
+  require(lua_getglobal(L, "parent") == LUA_TTABLE);
+  require(lua_getfield(L, -1, "child") == LUA_TTABLE);
+  require(lua_getfield(L, -1, "value") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 42);
+  require(getage(parent) == G_OLD && !isgray(parent));
+  lua_close(L);
+}
+
+static void marking_edges(void) {
+  lua_State *L = luaL_newstate();
+  GCObject *parent;
+  unsigned i;
+  require(L != NULL);
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(L, LUA_GCSTOP);
+  lua_newtable(L);
+  parent = (GCObject *)lua_topointer(L, -1);
+  lua_setglobal(L, "parent");
+  for (i = 0; i < 4; i++)
+    young_cycle(L);
+  require(getage(parent) == G_OLD && !isgray(parent));
+  /* Leave enough young graph work to test writes both before and after this
+   * owner is scanned, in the same collection. No automatic slices can race
+   * the fixture's explicitly chosen publication points. */
+  require(luaL_loadstring(L, "local h; for i=1,10000 do h={h} end; keep=h") ==
+          LUA_OK);
+  require(lua_pcall(L, 0, 0, 0) == LUA_OK);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0 && luaC_tracing(L));
+  for (i = 0; i < 2; i++) {
+    GCObject *child;
+    lua_getglobal(L, "parent");
+    lua_newtable(L);
+    child = (GCObject *)lua_topointer(L, -1);
+    lua_pushinteger(L, 42 + i);
+    lua_setfield(L, -2, "value");
+    lua_setfield(L, -2, i == 0 ? "first" : "second");
+    lua_pop(L, 1);
+    require(getage(child) == G_NEW && getage(parent) == G_TOUCHED0);
+    if (i == 0) {
+      unsigned batches = 0;
+      lua_lock(L);
+      while (getage(parent) == G_TOUCHED0) {
+        luaC_tracebatch(L, 1);
+        require(++batches < 1000);
+      }
+      require(getage(parent) == G_TOUCHED1 && luaC_tracing(L));
+      lua_unlock(L);
+    }
+  }
+  lua_lock(L);
+  luaC_waittrace(L);
+  luaC_waitsweep(L);
+  lua_unlock(L);
+  for (i = 0; i < 4; i++) {
+    young_cycle(L);
+    require(lua_getglobal(L, "parent") == LUA_TTABLE);
+    require(lua_getfield(L, -1, "first") == LUA_TTABLE);
+    lua_getfield(L, -1, "value");
+    require(lua_tointeger(L, -1) == 42);
+    lua_pop(L, 2);
+    require(lua_getfield(L, -1, "second") == LUA_TTABLE);
+    lua_getfield(L, -1, "value");
+    require(lua_tointeger(L, -1) == 43);
+    lua_pop(L, 3);
+  }
+  require(getage(parent) == G_OLD && !isgray(parent));
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   l_mem basic, overdue;
   require(argc == 2);
+  if (strcmp(argv[1], "marking_edges") == 0) {
+    marking_edges();
+    return 0;
+  }
+  if (strcmp(argv[1], "cohort_promotion") == 0) {
+    cohort_promotion();
+    return 0;
+  }
+  if (strcmp(argv[1], "sweep_pressure") == 0) {
+    require(progress(0, SWEEP_PRESSURE) != 0);
+    return 0;
+  }
+  if (strcmp(argv[1], "sweep_poll_pressure") == 0) {
+    require(progress(0, SWEEP_POLL_PRESSURE) > 0);
+    return 0;
+  }
+  if (strcmp(argv[1], "sweep_credit") == 0) {
+    require(progress(0, SWEEP_CREDIT) == 0);
+    return 0;
+  }
   if (strncmp(argv[1], "closing_", 8) == 0) {
     closing_pressure(argv[1]);
     return 0;
@@ -463,6 +685,10 @@ int main(int argc, char **argv) {
   }
   if (strncmp(argv[1], "borrowed_", 9) == 0) {
     borrowed_storage(strstr(argv[1], "generational") != NULL);
+    return 0;
+  }
+  if (strncmp(argv[1], "born_black_", 11) == 0) {
+    born_black(strstr(argv[1], "generational") != NULL);
     return 0;
   }
   if (strncmp(argv[1], "persistent_", 11) == 0 ||

@@ -145,12 +145,15 @@ static void finish (lua_State *L) {
   LuaSweepPlan *plan = &g->sweep_plan;
   uint64_t epoch = plan->epoch;
   unsigned expected = 0;
-  /* One ordinary requester may wait for metadata. A quiescent emergency
-  ** owner can complete the same shared job without waiting on that requester. */
+  /* One poll may attempt this boundary. Defer busy metadata without parking;
+  ** explicit/debt-paying callers join the owner in their shared work loop. */
   if (!luaW_iscollector(L) &&
       !__atomic_compare_exchange_n(&plan->finishing, &expected, 1, 0,
                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
-  luaW_collectenter(L);
+  if (!luaW_trycollectenter(L)) {
+    __atomic_store_n(&plan->finishing, 0, __ATOMIC_RELEASE);
+    return;
+  }
   if (!luaC_sweeping(L) || plan->epoch != epoch ||
       plan->phase != SWEEP_DONE || plan->busy != 0) {
     if (plan->epoch == epoch)
@@ -189,6 +192,7 @@ lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaC_publishretired(L, &frame);
     publish(L, &work);
+    luaP_work(G(L), cast(lu_mem, work.count) * sizeof(GCObject));
     done = G(L)->sweep_plan.phase == SWEEP_DONE;
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }

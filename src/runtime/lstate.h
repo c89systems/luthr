@@ -12,6 +12,8 @@
 #include "lgate.h"
 #include "lworld.h"
 #include "lexec.h"
+#include "lallocator.h"
+#include "lpacer.h"
 
 
 /* Some header files included here need this definition */
@@ -456,21 +458,20 @@ typedef struct LuaSweepPlan {
 typedef struct global_State {
   LuaWorld world;
   struct LuaScheduler *scheduler;
-  struct LuaAllocPage *allocation_pages;
+  struct LuaAllocPage *allocation_pages[LUA_ALLOC_POOLS];  /* pool mutex */
   struct LuaAllocPage *allocation_dirty;  /* atomic changed-page queue */
   struct LuaAllocPage *allocation_pending;  /* mutex-claimed finite page job */
   struct LuaAllocPage *allocation_retired;  /* atomic privately empty pages */
   uint64_t allocation_epoch;  /* a finite queue snapshot; helpers may finish it */
   unsigned allocation_busy;
-  struct LuaAllocPage *allocation_returning;  /* backing returns; metadata-owned */
+  struct LuaAllocPage *allocation_returning;  /* world mutex, finite return job */
   uint64_t allocation_return_epoch;
   pthread_cond_t allocation_changed;  /* slow cache leases; pool zero mutex */
   unsigned allocation_waiters;
   pthread_mutex_t allocation_mutex[LUA_ALLOC_POOLS];
   struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
-  unsigned allocation_reserving[LUA_ALLOC_POOLS];  /* atomic batch publishers */
   LuaAllocationCache *slot_caches;
-  lua_Alloc frealloc;  /* function to reallocate memory */
+  LuaAllocator allocator;
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */
@@ -485,14 +486,12 @@ typedef struct global_State {
   struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   TString *operation_error;
-  void *ud;         /* auxiliary data to 'frealloc' */
   l_mem GCbytes;  /* atomic charged storage, including pending destruction */
   l_mem GCdebt;  /* atomic remaining logical allocation/work allowance */
   l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
-  l_mem GCgoal;  /* fixed logical allocation target for the current idle cycle */
-  l_mem GCcyclelive;  /* mark-end storage, less this cycle's logical garbage */
-  l_mem GCmarkdebt;  /* remaining allocation runway while marking */
+  LuaGCPacer pacer;
+  l_mem GCcyclelive;  /* initial tracing cohort, less its logical garbage */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
   unsigned trace_active;  /* atomic concurrent marking phase */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */

@@ -177,11 +177,13 @@ lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   luaC_claimtrace(L, &work, limit);
+  if (work.count == 0) luaP_work(G(L), work.scanned);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   if (work.count == 0) return work.scanned;
   luaC_scantrace(L, &work, limit);
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   luaC_publishtrace(L, &work);
+  luaP_work(G(L), cast(lu_mem, work.marked) + work.scanned);
   luaQ_wake(&g->world.changed, &g->world.waiters);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   return cast(lu_mem, work.marked) + work.scanned;

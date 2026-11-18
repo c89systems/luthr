@@ -30,7 +30,6 @@ typedef struct LuaAllocationCache {
   unsigned borrowers;  /* short page-work leases; record retirement joins them */
   void (*returned)(void *);  /* notify an idle slot after a collector borrows it */
   void *context;
-  unsigned parallelism;  /* immutable team width; zero means one consumer */
   struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
   unsigned char growth[LUA_ALLOC_POOLS];  /* backing-size history survives handoffs */
   uint64_t growth_epoch;  /* a collection invalidates stale capacity demand */

@@ -15,7 +15,8 @@ enum {
   COLLECT_FULL,
   COLLECT_ASSIST,
   COLLECT_POLL,
-  COLLECT_SWEEP
+  COLLECT_SWEEP,
+  COLLECT_SWEEP_ASSIST
 };
 static lua_State *host;
 static GcProbe *host_probe;
@@ -56,6 +57,14 @@ void gc_probe_bind(lua_State *L, GcProbe *record) {
   host_probe = record;
 }
 
+void *__real_luaAL_realloc(lua_State *, void *, size_t, size_t);
+void *__wrap_luaAL_realloc(lua_State *L, void *block, size_t old, size_t size) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->allocator_calls++;
+  return __real_luaAL_realloc(L, block, old, size);
+}
+
 void gc_probe_add(GcProbe *total, const GcProbe *record) {
 #define GC_PROBE_ADD(name) total->name += record->name;
   GC_PROBE_COUNTERS(GC_PROBE_ADD)
@@ -81,6 +90,18 @@ void gc_probe_allocation(uint64_t live) {
   if (record == NULL || !record->enabled)
     return;
   g = G(host);
+  previous =
+      __atomic_load_n(&record->logical_live_peak_bytes, __ATOMIC_RELAXED);
+  {
+    l_mem observed =
+        gettotalbytes(g) - __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
+    uint64_t logical = observed > 0 ? (uint64_t)observed : 0;
+    while (previous < logical &&
+           !__atomic_compare_exchange_n(&record->logical_live_peak_bytes,
+                                        &previous, logical, 0, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED)) {
+    }
+  }
   if (luaC_tracing(host))
     peak = &record->mark_peak_bytes;
   else if (g->gcstate >= GCSswpallgc && g->gcstate <= GCSswpend)
@@ -109,6 +130,7 @@ void __real_luaW_stop(lua_State *);
 void __real_luaW_start(lua_State *);
 void __real_luaW_heapenter(lua_State *);
 void __real_luaW_collectenter(lua_State *);
+int __real_luaW_trycollectenter(lua_State *);
 void __real_luaW_heapleave(lua_State *);
 void __real_luaQ_wake(pthread_cond_t *, LuaWaiter **);
 void __real_luaC_step(lua_State *);
@@ -118,6 +140,7 @@ void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *);
 lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
 void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __real_luaC_pollsweep(lua_State *);
+void __real_luaC_assistsweep(lua_State *);
 void __real_luaC_publish(lua_State *);
 void __real_luaC_drainbarriers(lua_State *);
 void __real_luaC_reclaim(lua_State *);
@@ -194,6 +217,20 @@ void __wrap_luaW_heapenter(lua_State *L) {
 void __wrap_luaW_collectenter(lua_State *L) {
   heapenter(L, __real_luaW_collectenter);
 }
+int __wrap_luaW_trycollectenter(lua_State *L) {
+  GcProbe *record = probe(L);
+  int acquired;
+  if (record != NULL)
+    coordination_begin(record);
+  acquired = __real_luaW_trycollectenter(L);
+  if (record != NULL) {
+    coordination_end(record);
+    record->heap_entries += acquired;
+    record->heap_gc_entries += acquired;
+    record->heap_deferred_entries += !acquired;
+  }
+  return acquired;
+}
 void __wrap_luaW_heapleave(lua_State *L) {
   GcProbe *record = probe(L);
   if (record != NULL)
@@ -248,6 +285,8 @@ static void collect(lua_State *L, int operation, int emergency) {
     __real_luaC_assisttrace(L);
   else if (operation == COLLECT_POLL)
     __real_luaC_polltrace(L);
+  else if (operation == COLLECT_SWEEP_ASSIST)
+    __real_luaC_assistsweep(L);
   else
     __real_luaC_pollsweep(L);
   if (record != NULL) {
@@ -298,6 +337,19 @@ void __wrap_luaC_publish(lua_State *L) {
     record->stopped_start = started;
   __real_luaC_publish(L);
   if (record != NULL) {
+    /* Publication owns quiescence, so these scalar controller observations
+     * cannot combine values from two different cycles. */
+    if (L->world_depth != 0) {
+      LuaGCPacer *pacer = &G(L)->pacer;
+      if (record->pacer_parallelism_peak < pacer->parallelism)
+        record->pacer_parallelism_peak = pacer->parallelism;
+      if (pacer->goal > 0 &&
+          record->pacer_goal_peak_bytes < (uint64_t)pacer->goal)
+        record->pacer_goal_peak_bytes = (uint64_t)pacer->goal;
+      if (pacer->hard > 0 &&
+          record->pacer_hard_peak_bytes < (uint64_t)pacer->hard)
+        record->pacer_hard_peak_bytes = (uint64_t)pacer->hard;
+    }
     record->publish_calls++;
     record->publish_ns += now() - started;
   }
@@ -470,6 +522,12 @@ void __wrap_luaC_pollsweep(lua_State *L) {
     record->sweep_poll_calls++;
   collect(L, COLLECT_SWEEP, 0);
 }
+void __wrap_luaC_assistsweep(lua_State *L) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->sweep_assist_calls++;
+  collect(L, COLLECT_SWEEP_ASSIST, 0);
+}
 
 static unsigned snapshot_needed(lua_State *L, lua_State *thread) {
   return luaC_tracing(L) &&
@@ -539,7 +597,10 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
   struct metadata_wait pending = {0};
   uint64_t started = 0;
   int category = 0;
-  if (record != NULL && mutex == &G(L)->world.mutex) {
+  if (record != NULL && mutex == &G(L)->allocator.mutex) {
+    started = now();
+    category = 4;
+  } else if (record != NULL && mutex == &G(L)->world.mutex) {
     started = now();
     if (G(L)->world.stopped && luaQ_isowner(&G(L)->world.collector))
       category = 1;
@@ -586,5 +647,8 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
   } else if (category == 3) {
     record->mutator_stop_waits++;
     record->mutator_stop_wait_ns += now() - started;
+  } else if (category == 4) {
+    record->allocator_waits++;
+    record->allocator_wait_ns += now() - started;
   }
 }

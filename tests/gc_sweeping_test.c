@@ -274,10 +274,10 @@ static int promoted_builder(lua_State *state) {
   proto->k = luaM_newvector(state, 1, TValue);
   proto->sizek = 1;
   setobj(state, &proto->k[0], s2v(state->top.p - 1));
-  /* A builder born black during marking can be installed into an old owner
-   * before ever supplying a size snapshot. Its promotion still needs a scan. */
+  /* A surviving builder can promote before supplying a size snapshot.
+   * Zero-sized accounting must not suppress its subsequent scans. */
   require(proto->trace_bytes == 0);
-  setmarked(proto, luaC_newmark(G(state)) | G_OLD0);
+  setmarked(proto, luaC_newmark(G(state)) | G_SURVIVAL);
   setmarked(gcvalue(&proto->k[0]), luaC_newmark(G(state)));
   state->building_protos = proto->build_next;
   proto->build_next = NULL;
@@ -368,7 +368,7 @@ int main(int argc, char **argv) {
   require(luaL_loadstring(test.worker, updates) == LUA_OK);
   lua_gc(state, LUA_GCRESTART);
   lua_lock(state);
-  G(state)->GCgoal = MAX_LMEM;
+  G(state)->pacer.goal = MAX_LMEM;
   luaE_setdebt(G(state), MAX_LMEM);
   lua_unlock(state);
   fixture = &test;

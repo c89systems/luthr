@@ -169,7 +169,7 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 /* object age in generational mode */
 #define G_NEW		0	/* created in current cycle */
 #define G_SURVIVAL	1	/* created in previous cycle */
-#define G_OLD0		2	/* marked old by frw. barrier in this cycle */
+#define G_TOUCHED0	2	/* old owner written during concurrent marking */
 #define G_OLD1		3	/* first full cycle as old */
 #define G_OLD		4	/* really old object (not to be visited) */
 #define G_TOUCHED1	5	/* old object touched this cycle */
@@ -220,16 +220,17 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 
 /*
 ** New and survival objects are young. Survivals promote to OLD1, whose
-** outgoing edges are scanned once more before becoming OLD. During marking,
-** a young referent installed into an old owner becomes OLD0 and must also
-** pass through that extra scan. A major selected for generational execution
+** outgoing edges are scanned in two subsequent young collections. A child
+** born during the parent's sweep lies outside that frozen cohort and needs
+** both scans before it matures. A major selected for generational execution
 ** stamps its objects and allocations old during marking. The quiescent switch
 ** then enables remembered barriers before any young allocation or write, so
 ** conversion needs no later whole-heap promotion scan.
 **
-** Between marking epochs, an old-to-young write claims the owner's age as
-** TOUCHED1, independently of its mark colour. The remembered link survives
-** through TOUCHED2 until its edges have been scanned in the following minor.
+** An old-to-young write remembers its owner, independently of marking its
+** referent. TOUCHED1 and TOUCHED2 cover two subsequent minor scans. Writes
+** during marking start at TOUCHED0: a scan in the current cycle cannot count
+** as one of those two future scans when the child was allocated black.
 ** Gray weak tables and watched threads already own their collection link.
 */
 
@@ -313,26 +314,28 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
     (__atomic_load_n(&G(L)->world.reclaimers, __ATOMIC_ACQUIRE) != NULL)
 #define luaC_needassist(L) \
     ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
-#define luaC_markpressure(L) \
-    (__atomic_load_n(&G(L)->GCmarkdebt, __ATOMIC_RELAXED) <= \
+#define luaC_cyclepressure(L) \
+    (__atomic_load_n(&G(L)->pacer.debt, __ATOMIC_RELAXED) <= \
      -(L)->allocation_debt)
 #define luaC_needtraceassist(L) \
     (luaC_tracing(L) && gcrunning(G(L)) && \
      !(L)->reclaiming && \
-     ((L)->trace_debt >= LUA_GC_ASSIST_BYTES || luaC_markpressure(L)))
+     ((L)->trace_debt >= LUA_GC_ASSIST_BYTES || luaC_cyclepressure(L)))
 
 #define luaC_condGC(L,pre,pos) \
     { if (!luaC_ingc(L)) { \
       if (luaC_sweeping(L) && gcrunning(G(L)) && \
-          (L)->trace_debt >= LUA_GC_ASSIST_BYTES) \
-        { pre; luaC_pollsweep(L); pos; } \
+          ((L)->trace_debt >= LUA_GC_ASSIST_BYTES || luaC_cyclepressure(L))) \
+        { pre; luaC_assistsweep(L); pos; } \
       else if (luaC_needtraceassist(L)) { pre; luaC_assisttrace(L); pos; } \
       else { \
         if (gcrunning(G(L)) && luaC_needassist(L)) \
           { pre; luaC_assistreclaim(L); pos; } \
-        if (!luaC_tracing(L) && gcrunning(G(L)) && luaC_needstep(L) && \
+        if (!luaC_tracing(L) && !luaC_sweeping(L) && \
+          gcrunning(G(L)) && (luaC_needstep(L) || luaC_cyclepressure(L)) && \
           ((L)->world_depth != 0 || \
-           !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED))) \
+           !__atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED) || \
+           luaC_cyclepressure(L))) \
           { pre; luaC_step(L); pos; } } \
 	  condchangemem(L,pre,pos,0); } }
 
@@ -378,6 +381,7 @@ LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_scansweep (lua_State *L, LuaSweepWork *work);
 LUAI_FUNC void luaC_waitsweep (lua_State *L);
 LUAI_FUNC void luaC_pollsweep (lua_State *L);
+LUAI_FUNC void luaC_assistsweep (lua_State *L);
 LUAI_FUNC int luaC_sweepobject (lua_State *L, GCObject *object, unsigned kind,
                               l_mem *addedold, unsigned *promoted);
 LUAI_FUNC void luaC_endsweep (lua_State *L);
