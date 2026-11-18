@@ -41,6 +41,8 @@ struct fixture {
 };
 static struct fixture *fixture;
 static __thread int inspecting;
+static __thread int measuring_reentry;
+static __thread unsigned reentry_locks;
 static unsigned poll_locks, poll_calls;
 static int fail_mutex = -1, fail_condition = -1, fail_carrier = -1;
 static int fail_mapping, fail_protection;
@@ -144,6 +146,8 @@ int __real_pthread_mutex_lock(pthread_mutex_t *);
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   if (inspecting)
     __atomic_fetch_add(&poll_locks, 1, __ATOMIC_RELAXED);
+  if (measuring_reentry && mutex == &fixture->scheduler.mutex)
+    reentry_locks++;
   return __real_pthread_mutex_lock(mutex);
 }
 void __real_luaX_poll(lua_State *);
@@ -400,6 +404,35 @@ static int event_wait(lua_State *L) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   lua_pushinteger(L, 77);
   return 1;
+}
+
+static int local_api(lua_State *L) {
+  pthread_t carrier = pthread_self();
+  lua_Integer sum = 0;
+  unsigned i;
+  reentry_locks = 0;
+  measuring_reentry = 1;
+  for (i = 0; i < 2000; i++) {
+    lua_pushinteger(L, (lua_Integer)i);
+    sum += lua_tointeger(L, -1);
+    lua_settop(L, 0);
+  }
+  measuring_reentry = 0;
+  require(sum == 1999000 && pthread_equal(pthread_self(), carrier));
+  require(reentry_locks == 0);
+  lua_pushinteger(L, sum);
+  return 1;
+}
+
+static void native_reentry(struct fixture *f) {
+  init(f, 1);
+  lua_pushcfunction(f->main, local_api);
+  lua_setglobal(f->main, "local_api");
+  submit(f, 0, "return local_api()", 0);
+  require(collect(f, 0, LUA_OK) == 1999000);
+  require(f->scheduler.native_peak == 1 && f->scheduler.native == 0);
+  require(f->scheduler.reentry_waiting == 0);
+  finish(f);
 }
 
 static int pinned_wait(lua_State *L) {
@@ -792,6 +825,8 @@ int main(int argc, char **argv) {
     wake_before_publication(f, 1);
   else if (strcmp(argv[1], "native") == 0)
     native_progress(f, 0);
+  else if (strcmp(argv[1], "native_reentry") == 0)
+    native_reentry(f);
   else if (strcmp(argv[1], "shutdown") == 0)
     native_progress(f, 1);
   else if (strcmp(argv[1], "yield") == 0)

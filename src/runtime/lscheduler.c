@@ -106,7 +106,7 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   luaX_checksync(pthread_mutex_lock(&slot->mutex));
   append(&slot->head, &slot->tail, task);
   slot->count++;
-  __atomic_fetch_add(&s->runnable, 1, __ATOMIC_RELEASE);
+  __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
   notify(s);
@@ -167,17 +167,27 @@ static void cachereturned (void *context) {
   unlock(s);
 }
 
+static int slotdemand (LuaScheduler *s) {
+  return __atomic_load_n(&s->runnable, __ATOMIC_SEQ_CST) != 0 ||
+         __atomic_load_n(&s->reentry_waiting, __ATOMIC_SEQ_CST) != 0;
+}
+
 static void releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
   if (slot == NULL) return;
   task->fiber.execution.allocation_cache = NULL;
   task->slot = NULL;
   lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == task);
-  __atomic_store_n(&slot->owner, NULL, __ATOMIC_RELEASE);
-  lock(task->scheduler);
-  notify(task->scheduler);
-  wakework(task->scheduler, 0);
-  unlock(task->scheduler);
+  /* Demand publication precedes a waiter's final slot scan. Either that scan
+  ** observes this return, or this observer check sees demand and signals under
+  ** the scheduler mutex. A return with no demand needs no global transaction. */
+  __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
+  if (slotdemand(task->scheduler)) {
+    lock(task->scheduler);
+    notify(task->scheduler);
+    wakework(task->scheduler, 0);
+    unlock(task->scheduler);
+  }
 }
 
 static void flushrouting (LuaScheduler *s) {
@@ -227,6 +237,21 @@ static void pause (LuaScheduledTask *task, int reason) {
   else lua_assert(task->carrier == affinity);  /* opaque frames never migrate */
 }
 
+static int tryslot (LuaScheduledTask *task) {
+  LuaScheduler *s = task->scheduler;
+  unsigned i;
+  for (i = 0; i < s->config.slots; i++) {
+    void *expected = NULL;
+    LuaExecutionSlot *slot = &s->slots[(task->home + i) % s->config.slots];
+    if (__atomic_compare_exchange_n(&slot->owner, &expected, task, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      bindslot(task, slot);
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void managedenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
@@ -237,25 +262,16 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     lua_assert(task->slot != NULL);
   }
   else {
+    /* Reacquire local permission directly when nobody needs a handoff. Opaque
+    ** native execution still releases its slot between API operations. */
+    if (!slotdemand(s) && tryslot(task)) return;
     /* A synchronous reentry cannot move an opaque native activation. There
     ** are slots + native_limit carriers, so a waiting callback cannot occupy
     ** the last carrier able to dispatch queued managed work. */
     lock(s);
-    __atomic_fetch_add(&s->reentry_waiting, 1, __ATOMIC_RELEASE);
-    while (task->slot == NULL) {
-      unsigned i;
-      for (i = 0; i < s->config.slots; i++) {
-        void *expected = NULL;
-        LuaExecutionSlot *slot = &s->slots[(task->home + i) % s->config.slots];
-        if (__atomic_compare_exchange_n(&slot->owner, &expected, task, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-          bindslot(task, slot);
-          break;
-        }
-      }
-      if (task->slot == NULL) changed(s);
-    }
-    __atomic_fetch_sub(&s->reentry_waiting, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&s->reentry_waiting, 1, __ATOMIC_SEQ_CST);
+    while (!tryslot(task)) changed(s);
+    __atomic_fetch_sub(&s->reentry_waiting, 1, __ATOMIC_SEQ_CST);
     notify(s);
     wakework(s, 1);
     unlock(s);
@@ -512,7 +528,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
     ** a task. No managed operation starts until bindslot replaces it. */
     if (!__atomic_compare_exchange_n(&slot->owner, &expected,
           cast(LuaScheduledTask *, carrier), 0,
-          __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) continue;
+          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) continue;
     task = localwork(s, index, carrier);
     if (task == NULL) {
       __atomic_store_n(&slot->owner, NULL, __ATOMIC_RELEASE);
@@ -522,7 +538,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
       if (!locked) unlock(s);
       continue;
     }
-    __atomic_fetch_sub(&s->runnable, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_sub(&s->runnable, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&slot->owner, task, __ATOMIC_RELEASE);
     bindslot(task, slot);
     task->home = index;
