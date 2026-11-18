@@ -112,22 +112,20 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   notify(s);
 }
 
-/* Pop local work, then exchange at most eight queued tasks with a peer.
+/* Exchange at most eight queued tasks with a peer, rotating the first peer.
 ** Never hold two local-queue mutexes together. Detached batches remain rooted
 ** by the engine's admitted task registry. */
-static LuaScheduledTask *localwork (LuaScheduler *s, unsigned index,
+static LuaScheduledTask *stealwork (LuaScheduler *s, unsigned index,
                                     LuaCarrier *carrier) {
   LuaExecutionSlot *local = &s->slots[index];
   LuaScheduledTask *task;
   unsigned i;
-  luaX_checksync(pthread_mutex_lock(&local->mutex));
-  task = takefor(local, carrier);
-  luaX_checksync(pthread_mutex_unlock(&local->mutex));
-  if (task != NULL) return task;
-  for (i = 1; i < s->config.slots; i++) {
-    LuaExecutionSlot *peer = &s->slots[(index + i) % s->config.slots];
+  for (i = 0; i < s->config.slots; i++) {
+    unsigned peer_index = (carrier->steal_cursor + i) % s->config.slots;
+    LuaExecutionSlot *peer = &s->slots[peer_index];
     LuaScheduledTask *head = NULL, *tail = NULL;
     unsigned count, moved = 0;
+    if (peer_index == index) continue;
     luaX_checksync(pthread_mutex_lock(&peer->mutex));
     count = peer->count / 2 + peer->count % 2;
     if (count > 8) count = 8;
@@ -148,10 +146,33 @@ static LuaScheduledTask *localwork (LuaScheduler *s, unsigned index,
         local->count += moved - 1;
       }
       luaX_checksync(pthread_mutex_unlock(&local->mutex));
+      carrier->steal_cursor = (peer_index + 1) % s->config.slots;
       return task;
     }
   }
   return NULL;
+}
+
+/* Periodically prefer peer work even when the local queue stays nonempty.
+** A yielding local workload must not monopolize the available carriers while
+** eligible work waits on a busy peer. The counter and cursor are carrier-local.
+** Like Go's periodic global-queue check, this bounds a local scheduling burst
+** without adding an engine-wide transaction to ordinary dispatch. */
+static LuaScheduledTask *localwork (LuaScheduler *s, unsigned index,
+                                    LuaCarrier *carrier) {
+  LuaExecutionSlot *local = &s->slots[index];
+  LuaScheduledTask *task;
+  enum { LOCAL_DISPATCH_BURST = 61 };
+  if (s->config.slots > 1 &&
+      ++carrier->local_dispatches == LOCAL_DISPATCH_BURST) {
+    carrier->local_dispatches = 0;
+    task = stealwork(s, index, carrier);
+    if (task != NULL) return task;
+  }
+  luaX_checksync(pthread_mutex_lock(&local->mutex));
+  task = takefor(local, carrier);
+  luaX_checksync(pthread_mutex_unlock(&local->mutex));
+  return task != NULL ? task : stealwork(s, index, carrier);
 }
 
 static void bindslot (LuaScheduledTask *task, LuaExecutionSlot *slot) {

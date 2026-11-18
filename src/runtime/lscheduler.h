@@ -54,6 +54,7 @@ struct LuaCarrier {
   LuaCarrier *idle_next;  /* scheduler mutex; unselected sleepers only */
   int sleeping;
   unsigned cursor;
+  unsigned local_dispatches, steal_cursor;  /* carrier-local fairness state */
 };
 
 struct LuaScheduler {
