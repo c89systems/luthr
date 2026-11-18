@@ -597,8 +597,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   if (g == NULL) return NULL;
   L = &g->mainth.l;
   L->tt = LUA_VTHREAD;
-  g->currentwhite = bitmask(WHITE0BIT);
-  L->marked = luaC_white(g);
+  g->major_mark = bitmask(MAJOR0BIT);
+  g->minor_mark = g->markminor = 0;
+  g->new_mark = g->major_mark;
+  L->marked = luaC_newmark(g);
   if (preinit_thread(L, g) != 0) {
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;

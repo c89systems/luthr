@@ -230,6 +230,17 @@ foreach(case IN ITEMS incremental minor conversion white_minor resurrect_minor b
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthr_test_program(gc_epochs_test gc_epochs_test.c)
+set_target_properties(gc_epochs_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_epochs_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_epochs_test PRIVATE luthr_static)
+target_link_options(gc_epochs_test PRIVATE -Wl,--wrap=luaC_scansweep)
+foreach(case IN ITEMS live live_generational modes rotations weak_age)
+  add_test(NAME gc_epochs_${case} COMMAND gc_epochs_test ${case})
+  set_tests_properties(gc_epochs_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
+
 luthr_test_program(gc_membership_test gc_membership_test.c)
 set_target_properties(gc_membership_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_membership_test PRIVATE -Wall -Wextra -Werror)
@@ -902,6 +913,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test
   gc_sweeping_test
+  gc_epochs_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)

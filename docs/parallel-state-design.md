@@ -65,6 +65,12 @@ runway is spent. Explicit full collections and emergency retries drain it.
 Ordinary logical sweep classification and physical destruction also overlap
 application workers. Sweepers publish bounded batches before yielding, and
 cycle boundaries join their work under quiescence.
+Major marking rotates a three-state stamp; young marking has independent parity.
+Sweepers own disjoint list ranges and splice survivors back as ranges, leaving
+ordinary major survivors' headers and interior allocation links untouched.
+Majors selected for generational execution stamp objects and new allocations old
+during marking. The quiescent transition enables remembered barriers before
+young allocation resumes, avoiding a separate conversion or promotion scan.
 
 Allocation consumes owner-local page lists and batches atomic remote returns.
 Nonempty caches retain their pages across ordinary collection. Slotless task

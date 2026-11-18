@@ -122,7 +122,7 @@ void luaS_clearcache (global_State *g) {
     for (i = 0; i < STRCACHE_N; i++)
       for (j = 0; j < STRCACHE_M; j++) {
         TString **entry = &participant->thread->strcache[i][j];
-        if (*entry != NULL && iswhite(*entry))
+        if (*entry != NULL && iswhite(g, *entry))
           *entry = g->memerrmsg;
       }
 }
@@ -230,7 +230,7 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
         (memcmp(str, getshrstr(ts), l * sizeof(char)) == 0)) {
       /* found! */
       if (isdead(g, ts))  /* dead (but not collected yet)? */
-        changewhite(ts);  /* resurrect it */
+        luaC_revive(g, obj2gco(ts));
       luaC_tracepointer(L, ts);  /* weak interning becomes a strong reference */
       luaA_end(L, &access);
       return ts;

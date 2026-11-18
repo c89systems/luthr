@@ -48,7 +48,8 @@ static void prepare(lua_State *L) {
 }
 
 static int recorded(lua_State *L, int index) {
-  return luaC_tracing(L) ? isblack(object(L, index)) : isgray(object(L, index));
+  return luaC_tracing(L) ? isblack(G(L), object(L, index))
+                         : isgray(object(L, index));
 }
 
 static void drain(lua_State *L) {
@@ -62,7 +63,7 @@ static void repeated(lua_State *L) {
   unsigned i;
   lua_newtable(L);
   prepare(L);
-  require(isblack(object(L, 1)));
+  require(isblack(G(L), object(L, 1)));
   lua_newtable(L);
   measured = 1;
   for (i = 0; i < 256; i++) {
@@ -88,7 +89,7 @@ static void forward(lua_State *L) {
   lua_pushnil(L);
   lua_pushcclosure(L, closure, 1);
   prepare(L);
-  require(isblack(object(L, 1)));
+  require(isblack(G(L), object(L, 1)));
   measured = 1;
   for (i = 0; i < 256; i++) {
     lua_newtable(L);
@@ -105,7 +106,7 @@ static void mixed(lua_State *L) {
   lua_pushnil(L);
   lua_pushcclosure(L, closure, 1);
   prepare(L);
-  require(isblack(object(L, 1)) && isblack(object(L, 2)));
+  require(isblack(G(L), object(L, 1)) && isblack(G(L), object(L, 2)));
   lua_newtable(L);
   lua_newtable(L);
   /* Sharing child 3 must not suppress either owner's publication or the
@@ -139,7 +140,7 @@ static void collisions(lua_State *L, int reset) {
     measured = 1;
     for (i = 1; i <= OWNERS; i++) {
       unsigned index = round & 1 ? OWNERS + 1 - i : i;
-      require(isblack(object(L, (int)index)));
+      require(isblack(G(L), object(L, (int)index)));
       lua_pushvalue(L, OWNERS + 1);
       lua_rawseti(L, (int)index, (lua_Integer)round + 1);
       lua_pushvalue(L, OWNERS + 1);

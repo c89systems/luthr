@@ -9,11 +9,6 @@
 #include <string.h>
 #include "lgc.h"
 
-static void prepend (GCObject **head, GCObject *object) {
-  luaC_allocnext(object) = *head;
-  *head = object;
-}
-
 void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
@@ -23,6 +18,7 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   memset(plan, 0, sizeof(*plan));
   plan->epoch = epoch;
   plan->kind = kind;
+  g->new_mark = cast_byte(g->major_mark | g->minor_mark);
   plan->base_marked = marked;
   plan->next = g->allgc;
   plan->middle = kind == SWEEP_YOUNG ? g->survival : NULL;
@@ -36,8 +32,6 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   g->gcstate = GCSswpallgc;
   if (kind == SWEEP_MAJOR) {
     g->grayagain = g->weak = g->allweak = g->ephemeron = NULL;
-    setmarked(main, cast_byte((getmarked(main) & ~(AGEBITS | WHITEBITS |
-                         bitmask(BLACKBIT))) | luaC_white(g)));
   }
   else if (kind == SWEEP_OLD) {
     int result;
@@ -54,6 +48,23 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
 
 /* world.mutex protects claims and short list publication. A batch remains
 ** admitted until all of its objects and discoveries have been returned. */
+static void take (LuaSweepWork *work, GCObject **source, GCObject *limit,
+                  GCObject *middle, unsigned count, int gray) {
+  GCObject *first = *source, *object = first, **tail = NULL;
+  while (object != limit && work->count < count) {
+    lua_assert(object != NULL);
+    if (object == middle && work->count != 0) break;
+    tail = gray ? luaC_graylink(object) : luaC_alloclink(object);
+    object = *tail;
+    work->count++;
+  }
+  if (tail != NULL) {
+    *source = object;
+    work->next = first;
+    *tail = NULL;  /* the range now belongs exclusively to this batch */
+  }
+}
+
 static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
@@ -73,39 +84,30 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
   }
   work->kind = plan->kind;
   work->phase = plan->phase;
-  while (plan->phase == SWEEP_OBJECTS && plan->next != plan->limit &&
-         work->count < limit) {
-    GCObject *object = plan->next;
-    if (object == plan->middle) plan->region = 1;
-    plan->next = luaC_allocnext(object);
-    work->regions[work->count] = cast_byte(plan->region);
-    work->objects[work->count++] = object;
+  if (plan->phase == SWEEP_OBJECTS && plan->next != plan->limit) {
+    if (plan->next == plan->middle) plan->region = 1;
+    work->region = plan->region;
+    take(work, &plan->next, plan->limit,
+         plan->region == 0 ? plan->middle : NULL, limit, 0);
   }
-  for (region = 0; region < 2; region++) {
-    while (plan->phase == SWEEP_OBJECTS && plan->retry[region] != NULL &&
-           work->count < limit) {
-      GCObject *object = plan->retry[region];
-      plan->retry[region] = luaC_allocnext(object);
-      work->regions[work->count] = cast_byte(region);
-      work->objects[work->count++] = object;
+  for (region = 0; region < 2 && work->count == 0; region++) {
+    if (plan->phase == SWEEP_OBJECTS && plan->retry[region] != NULL) {
+      work->region = region;
+      take(work, &plan->retry[region], NULL, NULL, limit, 0);
     }
   }
-  while (plan->phase == SWEEP_THREADS && plan->threads != NULL &&
-         work->count < limit) {
-    GCObject *object = plan->threads;
-    plan->threads = luaC_allocnext(object);
-    work->objects[work->count++] = object;
-  }
-  while (plan->phase == SWEEP_GRAY && work->count < limit) {
-    GCObject *object;
+  if (plan->phase == SWEEP_THREADS && plan->threads != NULL)
+    take(work, &plan->threads, NULL, NULL, limit, 0);
+  while (plan->phase == SWEEP_GRAY && work->count == 0) {
     if (plan->gray_index == 4) {
       if (plan->busy == 0 && work->count == 0) plan->phase = SWEEP_DONE;
       break;
     }
-    object = plan->gray[plan->gray_index];
-    if (object == NULL) { plan->gray_index++; continue; }
-    plan->gray[plan->gray_index] = *luaC_graylink(object);
-    work->objects[work->count++] = object;
+    if (plan->gray[plan->gray_index] == NULL) {
+      plan->gray_index++;
+      continue;
+    }
+    take(work, &plan->gray[plan->gray_index], NULL, NULL, limit, 1);
   }
   if (work->count != 0) plan->busy++;
 }
@@ -113,23 +115,19 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
 static void publish (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
-  unsigned region;
-  for (region = 0; region < 2; region++) {
-    if (work->live[region] != NULL) {
-      *work->tail[region] = plan->live[region];
-      if (plan->live[region] == NULL) plan->tail[region] = work->tail[region];
-      plan->live[region] = work->live[region];
-    }
-    while (work->retry[region] != NULL) {
-      GCObject *object = work->retry[region];
-      work->retry[region] = luaC_allocnext(object);
-      prepend(&plan->retry[region], object);
-    }
+  unsigned region = work->region;
+  if (work->live != NULL) {
+    *work->tail = plan->live[region];
+    if (plan->live[region] == NULL) plan->tail[region] = work->tail;
+    plan->live[region] = work->live;
   }
-  while (work->threads != NULL) {
-    GCObject *object = work->threads;
-    work->threads = luaC_allocnext(object);
-    prepend(&plan->threads, object);
+  if (work->retry != NULL) {
+    *work->retry_tail = plan->retry[region];
+    plan->retry[region] = work->retry;
+  }
+  if (work->threads != NULL) {
+    *work->threads_tail = plan->threads;
+    plan->threads = work->threads;
   }
   if (work->watch.head != NULL) {
     *work->watch.tail = g->grayagain;

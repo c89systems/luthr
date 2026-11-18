@@ -127,7 +127,7 @@ int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
   }
   if (acquired && weak_marker != NULL && luaC_tracing(weak_marker)) {
     if (object == weak_table) {
-      if (iswhite(weak_key))
+      if (iswhite(G(weak_marker), weak_key))
         weak_deferred_seen = 1;
       else if (!weak_target_scanned) {
         require(!G(weak_marker)->world.stopped && !weak_marker->world_depth);
@@ -210,16 +210,9 @@ static void begin(lua_State *L) {
   lua_lock(L);
   luaW_stop(L);
   require(g->gray == NULL && g->grayagain == NULL);
-  g->trace_epoch++;
-  g->GCmarked = 0;
-  g->trace_changes = 0;
+  luaC_runtilstate(L, GCSpropagate, 1);
+  require(luaC_tracing(L));
   g->GCmarkdebt = MAX_LMEM; /* This fixture supplies its own phase driver. */
-  g->gcstate = GCSpropagate;
-  setmarked(L, (getmarked(L) & ~(WHITEBITS | (1 << BLACKBIT))));
-  L->gclist = NULL;
-  g->gray = obj2gco(L);
-  __atomic_store_n(&g->trace_active, 1, __ATOMIC_RELEASE);
-  luaC_tracevalue(L, &g->l_registry);
   luaW_start(L);
   lua_unlock(L);
 }
@@ -239,11 +232,7 @@ static void drain(lua_State *L) {
 static void finish(lua_State *L) {
   drain(L);
   lua_lock(L);
-  luaW_stop(L);
   require(G(L)->trace_deferred == NULL && !G(L)->trace_busy);
-  __atomic_store_n(&G(L)->trace_active, 0, __ATOMIC_RELEASE);
-  G(L)->trace_weakcutoff = 0;
-  luaW_start(L);
   lua_unlock(L);
   lua_gc(L, LUA_GCCOLLECT);
   lua_close(L);
@@ -294,7 +283,7 @@ static void overwrite(const char *kind) {
   }
   lua_remove(L, 1);
   begin(L);
-  require(iswhite(child) && iswhite(descendant));
+  require(iswhite(G(L), child) && iswhite(G(L), descendant));
   lua_pushnil(L);
   if (strcmp(kind, "array") == 0)
     lua_rawseti(L, 1, 1);
@@ -306,9 +295,9 @@ static void overwrite(const char *kind) {
     require(lua_setupvalue(L, 1, 1) != NULL);
   else
     require(lua_setmetatable(L, 1));
-  require(!iswhite(child));
+  require(!iswhite(G(L), child));
   drain(L);
-  require(isblack(child) && isblack(descendant));
+  require(isblack(G(L), child) && isblack(G(L), descendant));
   finish(L);
 }
 
@@ -319,11 +308,11 @@ static void stack_snapshot(void) {
   lua_newtable(worker);
   child = (GCObject *)lua_topointer(worker, -1);
   begin(L);
-  require(iswhite(child));
+  require(iswhite(G(L), child));
   lua_settop(worker, 0); /* admission must snapshot before removing the root */
-  require(worker->trace_snapshot == G(L)->trace_epoch && !iswhite(child));
+  require(worker->trace_snapshot == G(L)->trace_epoch && !iswhite(G(L), child));
   drain(L);
-  require(isblack(child));
+  require(isblack(G(L), child));
   finish(L);
 }
 
@@ -372,7 +361,7 @@ static void busy_object(void) {
   lua_lock(L);
   luaC_tracebatch(L, 256);
   require(!G(L)->world.stopped && L->world_depth == 0);
-  require(isgray(busy.table) && isblack(independent));
+  require(isgray(busy.table) && isblack(G(L), independent));
   lua_unlock(L);
   require(pthread_mutex_lock(&busy.mutex) == 0);
   busy.release = 1;
@@ -380,7 +369,7 @@ static void busy_object(void) {
   require(pthread_mutex_unlock(&busy.mutex) == 0);
   require(pthread_join(thread, NULL) == 0);
   drain(L);
-  require(isblack(busy.table));
+  require(isblack(G(L), busy.table));
   require(pthread_cond_destroy(&busy.changed) == 0);
   require(pthread_mutex_destroy(&busy.mutex) == 0);
   finish(L);
@@ -438,7 +427,7 @@ static void closure_construction(int thread_build) {
   require(!G(L)->world.stopped &&
           isgray(thread_build ? obj2gco(builder.child)
                               : obj2gco(builder.closure)) &&
-          isblack(independent));
+          isblack(G(L), independent));
   lua_unlock(L);
   require(pthread_mutex_lock(&builder.mutex) == 0);
   builder.release = 1;
@@ -448,12 +437,13 @@ static void closure_construction(int thread_build) {
   building_closure = NULL;
   drain(L);
   if (thread_build) {
-    require(isblack(builder.child));
+    require(isblack(G(L), builder.child));
     require(luaL_loadstring(builder.child, "return 42") == LUA_OK);
     require(lua_pcall(builder.child, 0, 1, 0) == LUA_OK);
     require(lua_tointeger(builder.child, -1) == 42);
   } else {
-    require(isblack(builder.closure) && isblack(builder.closure->upvals[0]));
+    require(isblack(G(L), builder.closure) &&
+            isblack(G(L), builder.closure->upvals[0]));
     lua_pushglobaltable(builder.worker);
     require(lua_setupvalue(builder.worker, 1, 1) != NULL);
     require(lua_pcall(builder.worker, 0, 1, 0) == LUA_OK);
@@ -542,7 +532,7 @@ static void parser_snapshot(void) {
   drain(L);
   for (proto = parser.worker->building_protos; proto != NULL;
        proto = proto->build_next)
-    require(proto->trace_snapshot == G(L)->trace_epoch && isblack(proto));
+    require(proto->trace_snapshot == G(L)->trace_epoch && isblack(G(L), proto));
   require(pthread_mutex_lock(&parser.mutex) == 0);
   parser.release = 1;
   require(pthread_cond_broadcast(&parser.changed) == 0);
@@ -554,7 +544,7 @@ static void parser_snapshot(void) {
   require(lua_pcall(parser.worker, 0, 1, 0) == LUA_OK);
   require(lua_pcall(parser.worker, 0, 1, 0) == LUA_OK);
   require(lua_istable(parser.worker, -1));
-  require(isblack((GCObject *)lua_topointer(parser.worker, -1)));
+  require(isblack(G(L), (GCObject *)lua_topointer(parser.worker, -1)));
   require(pthread_cond_destroy(&parser.changed) == 0);
   require(pthread_mutex_destroy(&parser.mutex) == 0);
   finish(L);
@@ -581,7 +571,7 @@ static void weak_cutoff(const char *kind) {
   lua_setmetatable(L, 1);
   begin(L);
   drain(L);
-  require(iswhite(child));
+  require(iswhite(G(L), child));
   lua_lock(L);
   luaW_stop(L);
   __atomic_store_n(&G(L)->trace_weakcutoff, keys ? 3 : 1, __ATOMIC_RELEASE);
@@ -598,11 +588,12 @@ static void weak_cutoff(const char *kind) {
     require(lua_getfield(L, 1, "child") == LUA_TNIL);
     lua_pop(L, 1);
   }
-  require(iswhite(child)); /* resolving a dead weak edge must not promote it */
+  require(iswhite(G(L),
+                  child)); /* resolving a dead weak edge must not promote it */
   /* A new entry after the cutoff remains valid. The first read must not
    * repeat an old clearing decision against new allocations. */
   lua_newtable(L);
-  require(isblack((GCObject *)lua_topointer(L, -1)));
+  require(isblack(G(L), (GCObject *)lua_topointer(L, -1)));
   lua_setfield(L, 1, "new");
   require(lua_getfield(L, 1, "new") == LUA_TTABLE);
   lua_pop(L, 1);
@@ -627,7 +618,7 @@ static void resurrected_weak(void) {
   lua_pop(L, 1);
   begin(L);
   drain(L);
-  require(iswhite(inner) && iswhite(child));
+  require(iswhite(G(L), inner) && iswhite(G(L), child));
   lua_lock(L);
   luaW_stop(L);
   __atomic_store_n(&G(L)->trace_weakcutoff, 1, __ATOMIC_RELEASE);
@@ -636,12 +627,12 @@ static void resurrected_weak(void) {
   luaW_start(L);
   lua_unlock(L);
   drain(L);
-  require(inner->weak_epoch == G(L)->trace_epoch && iswhite(child));
+  require(inner->weak_epoch == G(L)->trace_epoch && iswhite(G(L), child));
   /* A weak-value decision from before resurrection cannot erase this edge.
    * The read promotes it; completing the later cutoff must retain that root. */
   require(lua_getfield(L, 1, "child") == LUA_TTABLE);
   drain(L);
-  require(isblack(child));
+  require(isblack(G(L), child));
   lua_lock(L);
   luaW_stop(L);
   __atomic_store_n(&G(L)->trace_weakcutoff, 3, __ATOMIC_RELEASE);
@@ -664,14 +655,14 @@ static void string_lookup(int cache) {
   string = gcvalue(s2v(L->top.p - 1));
   lua_pop(L, 1);
   begin(L);
-  require(iswhite(string));
+  require(iswhite(G(L), string));
   if (cache)
     lua_pushstring(L, cached);
   else
     lua_pushlstring(L, interned, sizeof(interned) - 1);
-  require(gcvalue(s2v(L->top.p - 1)) == string && !iswhite(string));
+  require(gcvalue(s2v(L->top.p - 1)) == string && !iswhite(G(L), string));
   drain(L);
-  require(isblack(string));
+  require(isblack(G(L), string));
   finish(L);
 }
 
@@ -705,11 +696,14 @@ static void concurrent_collection(const char *kind) {
                      strcmp(kind, "help_to_incremental") == 0;
   int to_generation = strcmp(kind, "help_to_generational") == 0;
   int to_incremental = strcmp(kind, "help_to_incremental") == 0;
+  int check_generations;
   if (to_generation)
     generational = 0;
   require(pthread_mutex_init(&collection.mutex, NULL) == 0);
   require(pthread_cond_init(&collection.changed, NULL) == 0);
   collection.emergency = strncmp(kind, "emergency", 9) == 0;
+  check_generations = (generational || to_generation) && !to_incremental &&
+                      !collection.emergency;
   collection.help = strncmp(kind, "help", 4) == 0;
   collection.minor = strstr(kind, "minor") != NULL;
   collection.main = lua_newstate(backing, &collection, 0);
@@ -755,10 +749,9 @@ static void concurrent_collection(const char *kind) {
   require(lua_pcall(collection.worker, 0, 1, 0) == LUA_OK);
   require(lua_tointeger(collection.worker, -1) == 2003000);
   require(collection.assisted != 0);
-  if (collection.minor && !collection.emergency) {
-    /* An old owner receives a black object allocated during the minor. Its
-     * descendants must remain reachable through subsequent minor cycles,
-     * after this worker has dropped every local reference to the new graph. */
+  if (check_generations) {
+    /* Retain a graph allocated while marking, including objects born old in
+     * a generational major. Locals must not mask missing promotion/barriers. */
     require(luaL_loadstring(collection.worker, "retained[1]={{42}}") == LUA_OK);
     require(lua_pcall(collection.worker, 0, 0, 0) == LUA_OK);
   }
@@ -795,15 +788,25 @@ static void concurrent_collection(const char *kind) {
     require(G(collection.main)->gckind == KGC_GENMINOR);
   if (to_incremental)
     require(G(collection.main)->gckind == KGC_INC);
-  if (collection.minor && !collection.emergency) {
+  if (check_generations) {
     unsigned cycle;
-    for (cycle = 0; cycle < 6; cycle++)
-      require(lua_gc(collection.main, LUA_GCSTEP, (size_t)0) >= 0);
-    require(G(collection.main)->gckind == KGC_GENMINOR);
-    require(luaL_loadstring(collection.worker, "return retained[1][1][1]") ==
+    require(luaL_loadstring(collection.worker, "retained[1][1].later={{99}}") ==
             LUA_OK);
-    require(lua_pcall(collection.worker, 0, 1, 0) == LUA_OK);
-    require(lua_tointeger(collection.worker, -1) == 42);
+    require(lua_pcall(collection.worker, 0, 0, 0) == LUA_OK);
+    for (cycle = 0; cycle < 8; cycle++) {
+      unsigned steps = 0;
+      do {
+        require(lua_gc(collection.main, LUA_GCSTEP, (size_t)0) >= 0);
+        require(++steps < 10000);
+      } while (luaC_tracing(collection.main) || luaC_sweeping(collection.main));
+    }
+    require(G(collection.main)->gckind == KGC_GENMINOR);
+    require(luaL_loadstring(collection.worker,
+                            "return retained[1][1][1], "
+                            "retained[1][1].later[1][1]") == LUA_OK);
+    require(lua_pcall(collection.worker, 0, 2, 0) == LUA_OK);
+    require(lua_tointeger(collection.worker, -2) == 42 &&
+            lua_tointeger(collection.worker, -1) == 99);
   }
   lua_pushvalue(collection.main, 1);
   while (lua_istable(collection.main, -1)) {

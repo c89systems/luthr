@@ -510,7 +510,10 @@ typedef struct global_State {
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
   lu_byte gcparams[LUA_GCPN];
-  lu_byte currentwhite;
+  lu_byte major_mark;  /* rotating nonzero major stamp; zero denotes fixed */
+  lu_byte minor_mark;  /* alternating young-generation stamp */
+  lu_byte new_mark;    /* complete allocation/major-mark stamp for this phase */
+  lu_byte markminor;   /* interpretation of the last/current mark job */
   lu_byte gcstate;  /* state of garbage collector */
   lu_byte gckind;  /* kind of GC running */
   lu_byte gcstopem;  /* stops emergency collections */

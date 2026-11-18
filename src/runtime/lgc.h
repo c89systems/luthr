@@ -78,12 +78,11 @@ typedef struct LuaTraceWork {
 } LuaTraceWork;
 
 typedef struct LuaSweepWork {
-  GCObject *objects[LUA_TRACE_BATCH];
-  unsigned char regions[LUA_TRACE_BATCH];
-  GCObject *live[2], **tail[2], *retry[2], *threads;
+  GCObject *next, *live, **tail;
+  GCObject *retry, **retry_tail, *threads, **threads_tail;
   LuaTraceList watch;
   l_mem addedold;
-  unsigned count, kind, phase, promoted;
+  unsigned count, kind, phase, region, promoted;
 } LuaSweepWork;
 
 LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
@@ -125,17 +124,6 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 
 
 /*
-** macro to tell when main invariant (white objects cannot point to black
-** ones) must be kept. During a collection, the sweep phase may break
-** the invariant, as objects turned white may point to still-black
-** objects. The invariant is restored when sweep ends and all objects
-** are white again.
-*/
-
-#define keepinvariant(g)	((g)->gcstate <= GCSatomic)
-
-
-/*
 ** some useful bit tricks
 */
 #define resetbits(x,m) __atomic_fetch_and(&(x), cast_byte(~(m)), __ATOMIC_RELAXED)
@@ -149,20 +137,20 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 
 
 /*
-** Layout for bit use in 'marked' field. First three bits are
-** used for object "age" in generational mode. Last bit is used
-** by tests.
+** The two major stamp bits rotate between three nonzero values. Zero belongs
+** to fixed objects. Minor marking has its own parity, so old objects need not
+** be touched by young collections. Queue ownership is independent of either
+** stamp and of generational age. No live-object whitening sweep is needed.
 */
-#define WHITE0BIT	3  /* object is white (type 0) */
-#define WHITE1BIT	4  /* object is white (type 1) */
-#define BLACKBIT	5  /* object is black */
+#define MAJOR0BIT	3
+#define MAJOR1BIT	4
+#define MINORBIT	5
 #define FINALIZEDBIT	6  /* object has been marked for finalization */
-
-#define TESTBIT		7
-
+#define QUEUEDBIT	7
 
 
-#define WHITEBITS	bit2mask(WHITE0BIT, WHITE1BIT)
+
+#define MAJORBITS	bit2mask(MAJOR0BIT, MAJOR1BIT)
 
 
 #define getmarked(x) __atomic_load_n(&(x)->marked, __ATOMIC_RELAXED)
@@ -170,22 +158,12 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 ** makes these atomic writes visible to Helgrind's instruction-level model. */
 #define setmarked(x,m) \
   ((void)__atomic_exchange_n(&(x)->marked, (m), __ATOMIC_RELAXED))
-#define iswhite(x)      testbits(getmarked(x), WHITEBITS)
-#define isblack(x)      testbit(getmarked(x), BLACKBIT)
-#define isgray(x)  /* neither white nor black */  \
-	(!testbits(getmarked(x), WHITEBITS | bitmask(BLACKBIT)))
+#define isgray(x) testbit(getmarked(x), QUEUEDBIT)
 
 #define tofinalize(x)	testbit(getmarked(x), FINALIZEDBIT)
 
-#define otherwhite(g)	((g)->currentwhite ^ WHITEBITS)
-#define isdeadm(ow,m)	((m) & (ow))
-#define isdead(g,v)	isdeadm(otherwhite(g), getmarked(v))
-
-#define changewhite(x) __atomic_fetch_xor(&(x)->marked, WHITEBITS, __ATOMIC_RELAXED)
-#define nw2black(x)  \
-	check_exp(!iswhite(x), l_setbit((x)->marked, BLACKBIT))
-
-#define luaC_white(g)	cast_byte((g)->currentwhite & WHITEBITS)
+#define nw2black(x) resetbit((x)->marked, QUEUEDBIT)
+#define luaC_newmark(g) ((g)->new_mark)
 
 
 /* object age in generational mode */
@@ -210,13 +188,44 @@ static inline void luaC_setage (GCObject *o, lu_byte age) {
 #define setage(o,a) luaC_setage(obj2gco(o), (a))
 #define isold(o)	(getage(o) > G_SURVIVAL)
 
+static inline int luaC_unmarked (global_State *g, lu_byte marked) {
+  if (g->markminor)
+    return (marked & AGEBITS) <= G_SURVIVAL &&
+           (marked & bitmask(MINORBIT)) != g->minor_mark;
+  return (marked & MAJORBITS) != 0 &&
+         (marked & MAJORBITS) != g->major_mark;
+}
+#define iswhite(g,o) luaC_unmarked((g), getmarked(o))
+#define isblack(g,o) (!iswhite((g),(o)) && !isgray(o))
+#define isdead(g,o) \
+  (!__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && iswhite((g),(o)))
+
+static inline lu_byte luaC_stamp (global_State *g, lu_byte marked) {
+  return g->markminor
+    ? cast_byte((marked & ~bitmask(MINORBIT)) | g->minor_mark)
+    : cast_byte((marked & ~(MAJORBITS | bitmask(MINORBIT) | AGEBITS)) |
+                 g->new_mark);
+}
+
+/* Intern resurrection owns the shard, while a sweeper rechecks under the
+** same ownership. A leaf is immediately marked and owns no trace queue. */
+static inline void luaC_revive (global_State *g, GCObject *o) {
+  lu_byte marked = getmarked(o), changed;
+  do {
+    changed = cast_byte(luaC_stamp(g, marked) & ~bitmask(QUEUEDBIT));
+  } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
 
 /*
 ** New and survival objects are young. Survivals promote to OLD1, whose
 ** outgoing edges are scanned once more before becoming OLD. During marking,
 ** a young referent installed into an old owner becomes OLD0 and must also
-** pass through that extra scan. Conversion uses OLD1 for the same reason:
-** mutators can install new edges before an owner's concurrent classification.
+** pass through that extra scan. A major selected for generational execution
+** stamps its objects and allocations old during marking. The quiescent switch
+** then enables remembered barriers before any young allocation or write, so
+** conversion needs no later whole-heap promotion scan.
 **
 ** Between marking epochs, an old-to-young write claims the owner's age as
 ** TOUCHED1, independently of its mark colour. The remembered link survives
@@ -335,12 +344,11 @@ static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
   if (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE)) return 1;
+  if (G(L)->gckind != KGC_GENMINOR) return 0;
   marked = getmarked(owner);
-  if ((marked & AGEBITS) <= G_SURVIVAL && !testbit(marked, BLACKBIT)) return 0;
+  if ((marked & AGEBITS) <= G_SURVIVAL) return 0;
   referent = getmarked(value);
-  return ((marked & AGEBITS) > G_SURVIVAL &&
-          (referent & AGEBITS) <= G_SURVIVAL) ||
-         (testbit(marked, BLACKBIT) && testbits(referent, WHITEBITS));
+  return (referent & AGEBITS) <= G_SURVIVAL;
 }
 
 #define luaC_objbarrier(L,p,o) \

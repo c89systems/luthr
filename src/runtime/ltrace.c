@@ -194,7 +194,7 @@ static int weakdead (lua_State *L, GCObject *object) {
     luaC_traceobject(L, object);
     return 0;
   }
-  return iswhite(object);
+  return iswhite(G(L), object);
 }
 
 /* Weak reads first resolve the same decision as the collector, while holding

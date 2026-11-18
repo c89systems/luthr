@@ -71,12 +71,14 @@ void __wrap_luaQ_poll(lua_State *state) {
 void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
   struct fixture *test = fixture;
-  unsigned i;
+  GCObject *object;
   int candidate = 0;
-  for (i = 0; i < work->count; i++)
+  for (object = work->next; object != NULL;
+       object = work->phase == SWEEP_GRAY ? *luaC_graylink(object)
+                                          : luaC_allocnext(object))
     candidate |= test != NULL && test->revive != NULL
-                     ? work->objects[i] == test->revive
-                     : work->objects[i]->tt == LUA_VTABLE;
+                     ? object == test->revive
+                     : object->tt == LUA_VTABLE;
   if (test != NULL && !test->boundary && state == test->collector &&
       work->kind == test->kind && work->phase == SWEEP_OBJECTS && candidate) {
     require(pthread_mutex_lock(&test->mutex) == 0);
@@ -275,8 +277,8 @@ static int promoted_builder(lua_State *state) {
   /* A builder born black during marking can be installed into an old owner
    * before ever supplying a size snapshot. Its promotion still needs a scan. */
   require(proto->trace_bytes == 0);
-  setmarked(proto, (1 << BLACKBIT) | G_OLD0);
-  setmarked(gcvalue(&proto->k[0]), 1 << BLACKBIT);
+  setmarked(proto, luaC_newmark(G(state)) | G_OLD0);
+  setmarked(gcvalue(&proto->k[0]), luaC_newmark(G(state)));
   state->building_protos = proto->build_next;
   proto->build_next = NULL;
   proto->builder = NULL;
@@ -386,8 +388,8 @@ int main(int argc, char **argv) {
     lua_getglobal(state, "anchor");
     owner = (GCObject *)lua_topointer(state, -1);
     require(isold(owner));
-    setmarked(owner, (getmarked(owner) & ~(WHITEBITS | (1 << BLACKBIT))) |
-                         luaC_white(G(state)));
+    setmarked(owner, (getmarked(owner) & ~(1 << MINORBIT)) |
+                         (G(state)->minor_mark ^ (1 << MINORBIT)));
     lua_pop(state, 1);
   }
   require(lua_pcall(test.worker, 0, 0, 0) == LUA_OK);
