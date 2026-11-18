@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <laccess.h>
 #include <lauxlib.h>
 #include <ldebug.h>
@@ -13,6 +16,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 struct fixture {
   pthread_mutex_t mutex;
@@ -486,12 +491,96 @@ static void wide_operands(lua_State *state) {
   require(lua_tointeger(state, -1) == 17);
 }
 
+struct compiled {
+  char *bytes;
+  size_t size, offset, chunk, mapping_size;
+  void *mapping;
+};
+
+static int write_chunk(lua_State *state, const void *data, size_t size,
+                       void *context) {
+  struct compiled *code = context;
+  (void)state;
+  if (size != 0) {
+    code->bytes = realloc(code->bytes, code->size + size);
+    require(code->bytes != NULL);
+    memcpy(code->bytes + code->size, data, size);
+    code->size += size;
+  }
+  return 0;
+}
+
+static const char *read_chunk(lua_State *state, void *context, size_t *size) {
+  struct compiled *code = context;
+  const char *bytes = code->mapping != NULL ? code->mapping : code->bytes;
+  size_t remaining = code->size - code->offset;
+  (void)state;
+  *size = remaining < code->chunk ? remaining : code->chunk;
+  bytes += code->offset;
+  code->offset += *size;
+  return *size == 0 ? NULL : bytes;
+}
+
+static unsigned hook_events;
+static void inspect_instruction(lua_State *state, lua_Debug *event) {
+  require(lua_getinfo(state, "Sl", event));
+  if (event->event == LUA_HOOKLINE) {
+    require(event->currentline > 0);
+    require(strcmp(event->source, "=lowered") == 0);
+  }
+  hook_events++;
+}
+
+/* The same captures, conditional writes, fused iterators, stack moves and
+ * yielded metamethods must work from source and fragmented portable chunks.
+ * Fixed chunks remain read-only and borrowed until state destruction. Hooks
+ * inspect canonical program positions while the execution stream is running. */
+static void lowered(lua_State *state, const char *kind, struct compiled *code) {
+  int fixed = strstr(kind, "fixed") != NULL;
+  if (strstr(kind, "generational") != NULL)
+    lua_gc(state, LUA_GCGEN);
+  require(luaL_loadbuffer(state, semantics, sizeof(semantics) - 1,
+                          "=lowered") == LUA_OK);
+  if (strstr(kind, "source") == NULL) {
+    require(lua_dump(state, write_chunk, code, 0) == 0);
+    lua_pop(state, 1);
+    code->chunk = 7;
+    if (fixed) {
+      size_t page = (size_t)sysconf(_SC_PAGESIZE);
+      require(page != 0);
+      code->mapping_size = (code->size + page - 1) / page * page;
+      code->mapping = mmap(NULL, code->mapping_size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      require(code->mapping != MAP_FAILED);
+      memcpy(code->mapping, code->bytes, code->size);
+      require(mprotect(code->mapping, code->mapping_size, PROT_READ) == 0);
+      code->chunk = code->size;
+    }
+    require(lua_load(state, read_chunk, code, "=restored", fixed ? "B" : "b") ==
+            LUA_OK);
+  }
+  lua_sethook(state, inspect_instruction,
+              LUA_MASKLINE | LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET, 3);
+  if (lua_pcall(state, 0, 0, 0) != LUA_OK) {
+    fprintf(stderr, "%s\n", lua_tostring(state, -1));
+    abort();
+  }
+  lua_sethook(state, NULL, 0, 0);
+  require(hook_events > 100);
+  if (fixed)
+    require(memcmp(code->mapping, code->bytes, code->size) == 0);
+  lua_gc(state, LUA_GCCOLLECT);
+}
+
 int main(int argc, char **argv) {
+  struct compiled code = {0};
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
   luaL_openlibs(state);
   if (strcmp(argv[1], "independent") == 0)
     independent(state);
+  else if (strncmp(argv[1], "lowered_", 8) == 0)
+    lowered(state, argv[1], &code);
   else if (strcmp(argv[1], "readers") == 0) {
     run(state, "local x=17; local function read() return x end; "
                "for i=1,20000 do assert(read()==17) end");
@@ -556,5 +645,8 @@ int main(int argc, char **argv) {
     run(state, barriers);
   }
   lua_close(state);
+  if (code.mapping != NULL)
+    require(munmap(code.mapping, code.mapping_size) == 0);
+  free(code.bytes);
   return 0;
 }

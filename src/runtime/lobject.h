@@ -632,6 +632,7 @@ typedef struct Proto {
   int lastlinedefined;  /* debug information  */
   TValue *k;  /* constants used by the function */
   Instruction *code;  /* opcodes */
+  lu_byte *dispatch;  /* immutable capture dispatch; NULL without local captures */
   struct Proto **p;  /* functions defined inside the function */
   Upvaldesc *upvalues;  /* upvalue information */
   ls_byte *lineinfo;  /* information about source lines (debug information) */

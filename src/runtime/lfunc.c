@@ -22,6 +22,7 @@
 #include "lgc.h"
 #include "lmem.h"
 #include "lobject.h"
+#include "lopcodes.h"
 #include "lstate.h"
 #include "lroots.h"
 
@@ -450,6 +451,99 @@ StkId luaF_close (lua_State *L, StkId level, TStatus status, int yy) {
 }
 
 
+/* Does this instruction access a register which can have a shared cell?
+** Only closure creation can bind registers. Child descriptors therefore give
+** an exact set of possible bindings, independent of a particular invocation.
+** Variable ranges remain conservative; call results use poscall's publication.
+** The fused generic-for group must select one family throughout the group. */
+static int capturedoperand (Proto *p, int pc, int reg) {
+  Instruction i = p->code[pc];
+  OpCode op = GET_OPCODE(i);
+  int a = GETARG_A(i);
+  int b = getarg(i, POS_B, SIZE_B);
+  int c = getarg(i, POS_C, SIZE_C);
+  switch (op) {
+    case OP_RETURN0: case OP_JMP: case OP_EXTRAARG:
+      return 0;
+    case OP_CALL: case OP_TAILCALL: case OP_RETURN: case OP_CLOSE:
+      return reg >= a;
+    case OP_CONCAT:
+      return reg >= a && reg < a + b;
+    case OP_LOADNIL:
+      return reg >= a && reg <= a + b;
+    case OP_SELF:
+      return reg == a || reg == a + 1 || reg == b;
+    case OP_FORLOOP: case OP_FORPREP:
+      return reg >= a && reg < a + 3;
+    case OP_TFORPREP: case OP_TFORCALL: case OP_TFORLOOP:
+    case OP_VARARGPREP:
+      return 1;
+    case OP_SETLIST: {
+      int n = GETARG_vB(i);
+      return reg >= a && (n == 0 || reg <= a + n);
+    }
+    case OP_VARARG:
+      return (TESTARG_k(i) && reg == b) ||
+        (reg >= a && (c == 0 || reg < a + c - 1));
+    case OP_MMBIN: case OP_MMBINI: case OP_MMBINK:
+      return reg == a || (op == OP_MMBIN && reg == b) ||
+        (pc > 0 && reg == GETARG_A(p->code[pc - 1]));
+    case OP_SETTABUP:
+      return !TESTARG_k(i) && reg == c;
+    case OP_SETTABLE:
+      return reg == a || reg == b || (!TESTARG_k(i) && reg == c);
+    case OP_SETI: case OP_SETFIELD:
+      return reg == a || (!TESTARG_k(i) && reg == c);
+    case OP_SETUPVAL: case OP_TBC: case OP_EQK: case OP_EQI:
+    case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI: case OP_TEST:
+    case OP_RETURN1: case OP_ERRNNIL:
+      return reg == a;
+    case OP_EQ: case OP_LT: case OP_LE: case OP_TESTSET:
+      return reg == a || reg == b;
+    default:
+      if (testAMode(op) && reg == a) return 1;
+      if (op == OP_MOVE || op == OP_GETI || op == OP_GETFIELD ||
+          (OP_ADDI <= op && op <= OP_SHRI) ||
+          (OP_UNM <= op && op <= OP_LEN))
+        return reg == b;
+      if (op == OP_GETTABLE || op == OP_GETVARG ||
+          (OP_ADD <= op && op <= OP_SHR))
+        return reg == b || reg == c;
+      return 0;
+  }
+}
+
+void luaF_lowerproto (lua_State *L, Proto *p) {
+  lu_byte seen[256] = {0}, registers[256];
+  unsigned count = 0, r;
+  int child, upvalue, pc;
+  lua_assert(p->dispatch == NULL);
+  for (child = 0; child < p->sizep; child++) {
+    Proto *nested = p->p[child];
+    for (upvalue = 0; upvalue < nested->sizeupvalues; upvalue++) {
+      Upvaldesc *binding = &nested->upvalues[upvalue];
+      if (binding->instack && !seen[binding->idx]) {
+        seen[binding->idx] = 1;
+        registers[count++] = binding->idx;
+      }
+    }
+  }
+  if (count != 0)
+    p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
+  for (pc = 0; pc < p->sizecode; pc++) {
+    unsigned op = GET_OPCODE(p->code[pc]);
+    if (op >= NUM_OPCODES) luaG_runerror(L, "invalid opcode");
+    for (r = 0; r < count; r++) {
+      if (capturedoperand(p, pc, registers[r])) {
+        op += NUM_OPCODES;
+        break;
+      }
+    }
+    if (p->dispatch != NULL) p->dispatch[pc] = cast_byte(op);
+  }
+}
+
+
 Proto *luaF_newproto (lua_State *L) {
   GCObject *o = luaC_newobj(L, LUA_VPROTO, sizeof(Proto));
   Proto *f = gco2p(o);
@@ -458,6 +552,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->p = NULL;
   f->sizep = 0;
   f->code = NULL;
+  f->dispatch = NULL;
   f->sizecode = 0;
   f->lineinfo = NULL;
   f->sizelineinfo = 0;
@@ -488,6 +583,8 @@ lu_mem luaF_protosize (Proto *p) {
             + cast_uint(p->sizek) * sizeof(TValue)
             + cast_uint(p->sizelocvars) * sizeof(LocVar)
             + cast_uint(p->sizeupvalues) * sizeof(Upvaldesc);
+  if (p->dispatch != NULL)
+    sz += cast_uint(p->sizecode) * sizeof(lu_byte);
   if (!(p->flag & PF_FIXED)) {
     sz += cast_uint(p->sizecode) * sizeof(Instruction);
     sz += cast_uint(p->sizelineinfo) * sizeof(lu_byte);
@@ -498,6 +595,8 @@ lu_mem luaF_protosize (Proto *p) {
 
 
 void luaF_retireproto (lua_State *L, Proto *f) {
+  if (f->dispatch != NULL)
+    luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {
     luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
     luaM_retirearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
@@ -511,6 +610,8 @@ void luaF_retireproto (lua_State *L, Proto *f) {
 }
 
 void luaF_freeproto (lua_State *L, Proto *f) {
+  if (f->dispatch != NULL)
+    luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {
     luaM_freearray(L, f->code, cast_sizet(f->sizecode));
     luaM_freearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));

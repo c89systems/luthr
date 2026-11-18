@@ -339,6 +339,7 @@ static void loadFunction (LoadState *S, Proto *f) {
   loadProtos(S, f);
   loadString(S, f, &f->source);
   loadDebug(S, f);
+  luaF_lowerproto(S->L, f);
 }
 
 
