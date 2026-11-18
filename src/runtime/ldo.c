@@ -460,10 +460,11 @@ static void correctstack (lua_State *L, StkId oldstack) {
 */
 int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   int oldsize = stacksize(L);
-  int i;
+  int i, retried = 0;
   StkId newstack;
   StkId oldstack = L->stack.p;
   lu_byte oldgcstop;
+ retry:
   luaW_heapenter(L);  /* acquire before making stack pointers unscannable */
   oldsize = stacksize(L);  /* a collection while waiting may have shrunk it */
   oldstack = L->stack.p;
@@ -477,6 +478,13 @@ int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   if (l_unlikely(newstack == NULL)) {  /* reallocation failed? */
     correctstack(L, oldstack);  /* change offsets back to pointers */
     luaW_heapleave(L);
+    /* Collection needs a scannable stack. Restore it before the one emergency
+    ** retry; nonraising capacity checks retain their ordinary failure result. */
+    if (raiseerror && !oldgcstop && !retried) {
+      retried = 1;
+      luaC_fullgc(L, 1);
+      goto retry;
+    }
     if (raiseerror)
       luaM_error(L);
     else return 0;  /* do not raise an error */

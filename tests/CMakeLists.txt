@@ -289,7 +289,7 @@ target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_loc
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaM_realloc_)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaW_heapenter)
-foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache marking_cache coalesced_gc handoff paired_handoff late waiting
+foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache local_returns stack_retry marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize incremental generational page_growth page_cap page_isolation
     metadata_handoff metadata_spurious metadata_collect metadata_priority metadata_contention stopped_gc refill_recheck)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})

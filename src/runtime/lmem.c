@@ -506,14 +506,29 @@ l_noret luaM_toobig (lua_State *L) {
 */
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
   LuaAllocBlock *allocation;
+  LuaAllocPage *page;
   int exclusive, retired;
   lua_assert((osize == 0) == (block == NULL));
   if (block == NULL) return;
   exclusive = !completestate(G(L)) || luaW_iscollector(L);
   allocation = cast(LuaAllocBlock *, block) - 1;
   retired = luaMP_retired(allocation);
-  if (luaMP_page(allocation) != NULL)
-    luaMP_return(G(L), allocation);
+  page = luaMP_page(allocation);
+  if (page != NULL) {
+    LuaAllocationCache *cache = allocationcache(L);
+    /* The allocation consumer's lease protects its local list. Its returned
+    ** block needs no remote notice or page-reclamation pass. Empty pages still
+    ** notify reclamation so idle caches release their backing storage. */
+    if (cache->pages[page->pool] == page) {
+      lua_assert(page->owner == cache && page->used != 0);
+      page->used--;
+      allocation->block.link.next = page->local;
+      page->local = allocation;
+      if (page->used == 0) luaMP_notify(G(L), page);
+    }
+    else
+      luaMP_return(G(L), allocation);
+  }
   else {
     luaW_heapenter(L);
     callfrealloc(G(L), allocation, osize + sizeof(LuaAllocBlock), 0);

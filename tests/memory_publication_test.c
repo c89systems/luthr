@@ -3,6 +3,7 @@
 #include <ldo.h>
 #include <lgc.h>
 #include <lmem.h>
+#include <lmempage.h>
 #include <lstate.h>
 #include <ltable.h>
 #include <ltask.h>
@@ -814,6 +815,110 @@ static void marking_cache(lua_State *state) {
   lua_gc(state, LUA_GCCOLLECT);
 }
 
+/* A full cache must immediately reuse its owner's returned block, including
+ * during marking. Retiring an empty cache must still return its backing bytes.
+ */
+static void local_returns(void) {
+  struct allocator allocator = {0};
+  lua_State *state = lua_newstate(allocate, &allocator, 0);
+  void **blocks = calloc(2048, sizeof(*blocks));
+  LuaAllocPage *page;
+  void *returned, *again;
+  size_t baseline, count = 0;
+  unsigned i;
+  require(state != NULL && blocks != NULL);
+  lua_gc(state, LUA_GCSTOP);
+  lua_gc(state, LUA_GCCOLLECT);
+  baseline = allocator.live;
+  luaX_lockstate(state);
+  blocks[count++] = luaM_newframe(state);
+  require(blocks[0] != NULL);
+  page = luaMP_page((LuaAllocBlock *)blocks[0] - 1);
+  require(page != NULL);
+  while (page->local != NULL) {
+    require(count < 2048);
+    blocks[count++] = luaM_newframe(state);
+    require(blocks[count - 1] != NULL);
+  }
+  require(count >= 2);
+  returned = blocks[--count];
+  luaM_free_(state, returned, sizeof(CallInfo));
+  luaW_stop(state);
+  luaC_runtilstate(state, GCSpropagate, 0);
+  luaW_start(state);
+  require(luaC_tracing(state));
+  allocator.cap = allocator.live;
+  watched = &G(state)->world;
+  world_locks = 0;
+  measured++;
+  for (i = 0; i < 1000; i++) {
+    again = luaM_newframe(state);
+    require(again == returned);
+    memset(again, 0x5a, sizeof(CallInfo));
+    luaM_free_(state, again, sizeof(CallInfo));
+  }
+  measured--;
+  require(world_locks == 0);
+  require(allocator.failures == 0);
+  watched = NULL;
+  allocator.cap = 0;
+  while (count != 0)
+    luaM_free_(state, blocks[--count], sizeof(CallInfo));
+  luaX_unlockstate(state);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(allocator.live <= baseline);
+  lua_close(state);
+  require(allocator.live == 0);
+  free(blocks);
+}
+
+static void grow_stack(lua_State *state, void *context) {
+  require(luaD_growstack(state, *(int *)context, 1));
+}
+
+static void stack_retry(void) {
+  struct allocator allocator = {0};
+  lua_State *state = lua_newstate(allocate, &allocator, 0);
+  int requested = 512, status, i;
+  require(state != NULL);
+  lua_gc(state, LUA_GCSTOP);
+  for (i = 1; i <= 10; i++) {
+    lua_newtable(state);
+    lua_pushinteger(state, i);
+    lua_rawseti(state, -2, 1);
+  }
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_newuserdatauv(state, 65536, 0);
+  lua_pop(state, 1); /* recoverable garbage fills the physical heap budget */
+  allocator.cap = allocator.live;
+  allocator.failures = 0;
+  luaX_lockstate(state);
+  status = luaD_rawrunprotected(state, grow_stack, &requested);
+  luaX_unlockstate(state);
+  require(status == LUA_OK && allocator.failures != 0);
+  require(lua_gettop(state) == 10);
+  for (i = 1; i <= 10; i++) {
+    lua_rawgeti(state, i, 1);
+    require(lua_tointeger(state, -1) == i);
+    lua_pop(state, 1);
+  }
+  allocator.cap = allocator.live;
+  allocator.failures = 0;
+  require(!lua_checkstack(state, 32768));
+  require(allocator.failures == 1 && lua_gettop(state) == 10);
+  allocator.failures = 0;
+  requested = 32768;
+  luaX_lockstate(state);
+  status = luaD_rawrunprotected(state, grow_stack, &requested);
+  require(!G(state)->gcstopem && !G(state)->gcemergency);
+  luaX_unlockstate(state);
+  require(status == LUA_ERRMEM && allocator.failures == 2);
+  require(lua_gettop(state) == 10);
+  allocator.cap = 0;
+  lua_close(state);
+  require(allocator.live == 0);
+}
+
 static void allocation_cache(void) {
   struct allocator allocator = {0};
   struct returned_block returned;
@@ -1124,11 +1229,17 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "totals") == 0 ||
       strcmp(argv[1], "allocation_cache") == 0 ||
+      strcmp(argv[1], "local_returns") == 0 ||
+      strcmp(argv[1], "stack_retry") == 0 ||
       strcmp(argv[1], "page_growth") == 0 || strcmp(argv[1], "page_cap") == 0) {
     if (strcmp(argv[1], "totals") == 0)
       totals();
     else if (strcmp(argv[1], "allocation_cache") == 0)
       allocation_cache();
+    else if (strcmp(argv[1], "local_returns") == 0)
+      local_returns();
+    else if (strcmp(argv[1], "stack_retry") == 0)
+      stack_retry();
     else
       page_growth(strcmp(argv[1], "page_cap") == 0);
     return 0;

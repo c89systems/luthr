@@ -1500,17 +1500,24 @@ static int exercise_stream(const char *name) {
       do {
         parked = 0;
         if (!foreign && pool->tasks[2].finished) {
+          const char *error;
+          unlock(pool);
+          error = lua_tostring(pool->tasks[2].state, -1);
           fprintf(stderr,
-                  "stream producer finished before checkpoint: status=%d\n",
-                  pool->tasks[2].status);
+                  "stream producer finished before checkpoint: status=%d: %s\n",
+                  pool->tasks[2].status, error ? error : "non-string error");
           require(!pool->tasks[2].finished);
         }
         for (id = 3; id < 3 + consumers; ++id) {
           if (pool->tasks[id].finished) {
-            fprintf(
-                stderr,
-                "stream consumer %d finished before checkpoint: status=%d\n",
-                id, pool->tasks[id].status);
+            const char *error;
+            unlock(pool);
+            error = lua_tostring(pool->tasks[id].state, -1);
+            fprintf(stderr,
+                    "stream consumer %d finished before checkpoint: status=%d: "
+                    "%s\n",
+                    id, pool->tasks[id].status,
+                    error ? error : "non-string error");
             require(!pool->tasks[id].finished);
           }
           parked += pool->tasks[id].published != 0;
