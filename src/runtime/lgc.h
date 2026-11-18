@@ -13,6 +13,21 @@
 
 #include "lobject.h"
 #include "lstate.h"
+#include "lmempage.h"
+
+/* Allocation membership is independent of finalization and trace queues.
+** The embedded main thread alone has no allocator prefix; it is always the
+** last allocation and its header link is never used by other queues. */
+static inline GCObject **luaC_alloclink (GCObject *o) {
+  char *memory = cast_charp(o);
+  if (o->tt == LUA_VTHREAD) {
+    if (o == obj2gco(mainthread(G(gco2th(o))))) return &o->next;
+    memory -= offsetof(LX, l);
+  }
+  return &(cast(LuaAllocBlock *, memory) - 1)->block.link.object;
+}
+
+#define luaC_allocnext(o) (*luaC_alloclink(o))
 
 typedef struct LuaGCFrame {
   struct LuaGCFrame *previous;
@@ -73,11 +88,9 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define GCSenteratomic	1
 #define GCSatomic	2
 #define GCSswpallgc	3
-#define GCSswpfinobj	4
-#define GCSswptobefnz	5
-#define GCSswpend	6
-#define GCScallfin	7
-#define GCSpause	8
+#define GCSswpend	4
+#define GCScallfin	5
+#define GCSpause	6
 
 
 #define issweepphase(g)  \

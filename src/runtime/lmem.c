@@ -217,7 +217,7 @@ static LuaAllocBlock *takeblock (LuaAllocPage *page) {
   if (page->local == NULL) luaMP_collectpage(page);
   head = page->local;
   if (head == NULL) return NULL;
-  page->local = head->block.next;
+  page->local = head->block.link.next;
   page->used++;
   head->block.page = cast(uintptr_t, page);  /* clear the prior retire credit */
   return head;
@@ -293,7 +293,7 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
     if (held != NULL) {
       lua_assert(page->used != 0);
       page->used--;
-      held->block.next = page->local;
+      held->block.link.next = page->local;
       page->local = held;
     }
     empty = page->used == 0;

@@ -35,6 +35,8 @@ static struct collection *collecting;
 static lua_State *weak_marker;
 static GCObject *weak_table, *weak_key, *weak_target;
 static unsigned weak_deferred_seen, weak_rescans, weak_target_scanned;
+static unsigned weak_retries[TRACE_VERIFY + 1];
+static int retry_weak;
 static struct parallel_scan {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -97,7 +99,16 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
 
 int __real_luaA_tryscan(lua_State *, GCObject *);
 int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
-  int acquired = __real_luaA_tryscan(state, object);
+  int acquired;
+  unsigned phase = G(state)->trace_plan.phase;
+  if (retry_weak && !luaW_iscollector(state) && object->tt == LUA_VTABLE &&
+      (phase == TRACE_EPHEMERONS || phase == TRACE_VALUES ||
+       phase == TRACE_CLEAR) &&
+      weak_retries[phase] < 129) {
+    weak_retries[phase]++;
+    return 0;
+  }
+  acquired = __real_luaA_tryscan(state, object);
   if (acquired && parallel_scanning != NULL && parallel_worker != 0 &&
       object->tt == LUA_VTABLE) {
     struct parallel_scan *scan = parallel_scanning;
@@ -868,6 +879,34 @@ static void *parallel_scanner(void *context) {
   return NULL;
 }
 
+static void weak_retry(void) {
+  lua_State *L = newstate();
+  luaL_openlibs(L);
+  require(luaL_loadstring(
+              L,
+              "finalized=0; roots={}; "
+              "local v={__mode='v',__gc=function() finalized=finalized+1 end}; "
+              "local k={__mode='k',__gc=v.__gc}; for i=1,128 do "
+              "roots[i]=setmetatable({{i}},v); "
+              "roots[i+128]=setmetatable({[{}]={i}},k) end") == LUA_OK);
+  require(lua_pcall(L, 0, 0, 0) == LUA_OK);
+  /* More than one batch must fail ownership in each weak phase. Allocation,
+   * weak-list and finalizer membership coexist throughout those retries. */
+  retry_weak = 1;
+  lua_gc(L, LUA_GCCOLLECT);
+  retry_weak = 0;
+  require(weak_retries[TRACE_EPHEMERONS] == 129 &&
+          weak_retries[TRACE_VALUES] == 129 &&
+          weak_retries[TRACE_CLEAR] == 129);
+  require(
+      luaL_loadstring(L, "assert(finalized==0); for i=1,256 do "
+                         "assert(next(roots[i])==nil) end; roots=nil; "
+                         "collectgarbage('collect'); assert(finalized==256)") ==
+      LUA_OK);
+  require(lua_pcall(L, 0, 0, 0) == LUA_OK);
+  lua_close(L);
+}
+
 static void *parallel_finisher(void *context) {
   struct parallel_scan *scan = context;
   require(lua_gc(scan->finisher, LUA_GCCOLLECT) == 0);
@@ -1018,6 +1057,8 @@ int main(int argc, char **argv) {
     concurrent_collection(argv[1]);
   else if (strcmp(argv[1], "ephemerons") == 0)
     ephemerons();
+  else if (strcmp(argv[1], "weak_retry") == 0)
+    weak_retry();
   else if (strncmp(argv[1], "parallel_", 9) == 0)
     parallel_marking(argv[1]);
   else if (strncmp(argv[1], "weak", 4) == 0)

@@ -845,6 +845,7 @@ Table *luaH_new (lua_State *L) {
   t->sequence = 0;
   t->metatable = NULL;
   t->weak_epoch = 0;
+  t->weaknext = NULL;
   t->gcweak = 0;
   t->weak_cleared = 0;
   t->weak_initial_cutoff = 0;

@@ -301,29 +301,25 @@ static void applybarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
   }
 }
 
-/* A live object's allocator link is unused until reclamation. Reuse it for
-** claimed work rather than allocating records or growing coroutine buffers.
-** The main thread is embedded in global_State and is never a barrier target:
-** restartcollection marks it before admitting any mutator. */
-static LuaAllocBlock *barrierblock (GCObject *o) {
-  char *memory = cast_charp(o);
-  if (o->tt == LUA_VTHREAD)
-    memory -= offsetof(LX, l);
-  return cast(LuaAllocBlock *, memory) - 1;
+/* A successful colour claim owns the object's trace link. Strings are leaves
+** with no gclist; their header link is otherwise unused while collectable. */
+static GCObject **barrierlink (GCObject *o) {
+  if (novariant(o->tt) == LUA_TSTRING) return &o->next;
+  return getgclist(o);
 }
 
 GCObject *luaC_barriernext (GCObject *o) {
-  return cast(GCObject *, barrierblock(o)->block.next);
+  return *barrierlink(o);
 }
 
 static void publishbarrier (global_State *g, GCObject **queue, GCObject *o) {
-  LuaAllocBlock *block;
+  GCObject **link;
   GCObject *head = __atomic_load_n(queue, __ATOMIC_RELAXED);
   lua_assert(o != obj2gco(mainthread(g)));
   UNUSED(g);
-  block = barrierblock(o);
+  link = barrierlink(o);
   do {
-    block->block.next = cast(LuaAllocBlock *, head);
+    *link = head;
   } while (!__atomic_compare_exchange_n(queue, &head, o, 0,
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 }
@@ -429,7 +425,7 @@ void luaC_fix (lua_State *L, GCObject *o) {
   link = &L->new_objects;
   while (*link != NULL && *link != o) {
     previous = *link;
-    link = &(*link)->next;
+    link = luaC_alloclink(*link);
   }
   if (*link == o) {
     if (L->new_objects_tail == o) L->new_objects_tail = previous;
@@ -440,7 +436,7 @@ void luaC_fix (lua_State *L, GCObject *o) {
   }
   set2gray(o);  /* they will be gray forever */
   setage(o, G_OLD);  /* and old forever */
-  *link = o->next;
+  *link = luaC_allocnext(o);
   o->next = g->fixedgc;  /* link it to 'fixedgc' list */
   g->fixedgc = o;
   luaW_heapleave(L);
@@ -460,12 +456,13 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   o = cast(GCObject *, p + offset);
   setmarked(o, luaC_tracing(L) ? bitmask(BLACKBIT) : luaC_white(g));
   o->tt = tt;
+  o->next = NULL;
   if (luaW_iscollector(L)) {
-    o->next = g->allgc;
+    (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
     g->allgc = o;
   }
   else {
-    o->next = L->new_objects;
+    (cast(LuaAllocBlock *, p) - 1)->block.link.object = L->new_objects;
     if (L->new_objects == NULL) L->new_objects_tail = o;
     L->new_objects = o;
   }
@@ -1075,20 +1072,19 @@ void luaC_polltrace (lua_State *L) {
 
 
 
-/* Weak work already owns its live object's allocation scratch link: the
-** white-to-gray publication which could use it has completed. Deferral does
-** not disturb the weak-list links used by other phases. */
+/* A claimed weak table retains its gclist for later weak phases. Retrying
+** object ownership uses a separate link, never its allocation membership. */
 static void deferweak (GCObject **head, GCObject **tail, GCObject *object) {
-  barrierblock(object)->block.next = NULL;
+  gco2t(object)->weaknext = NULL;
   if (*tail != NULL)
-    barrierblock(*tail)->block.next = cast(LuaAllocBlock *, object);
+    gco2t(*tail)->weaknext = object;
   else *head = object;
   *tail = object;
 }
 
 static GCObject *takeweak (GCObject **head, GCObject **tail) {
   GCObject *object = *head;
-  *head = luaC_barriernext(object);
+  *head = gco2t(object)->weaknext;
   if (*head == NULL) *tail = NULL;
   return object;
 }
@@ -1120,13 +1116,6 @@ static unsigned pendingfinalizers (global_State *g, unsigned limit) {
     GCObject *object = plan->pending;
     count++;
     plan->pending = object->next;
-    if (g->gckind == KGC_GENMINOR && getage(object) == G_OLD1) {
-      setage(object, G_OLD);
-      if (isblack(object)) {
-        set2gray(object);
-        linktrace(g, object);
-      }
-    }
     markobject(g, object);
   }
   return count;
@@ -1263,8 +1252,7 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   publishwork(&work->ephemeron, &g->ephemeron);
   publishwork(&work->deferred, &g->trace_deferred);
   if (work->retry != NULL) {
-    barrierblock(work->retry_tail)->block.next =
-      cast(LuaAllocBlock *, plan->deferred);
+    gco2t(work->retry_tail)->weaknext = plan->deferred;
     if (plan->deferred == NULL) plan->tail = work->retry_tail;
     plan->deferred = work->retry;
   }
@@ -1357,12 +1345,12 @@ static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
     GCObject *curr = *p;
     int marked = curr->marked;
     if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
-      *p = curr->next;  /* remove 'curr' from list */
+      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
       luaC_retireobject(L, curr);
     }
     else {  /* change mark to 'white' and age to 'new' */
       curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
-      p = &curr->next;  /* go to next element */
+      p = luaC_alloclink(curr);  /* go to next element */
     }
   }
   return (*p == NULL) ? NULL : p;
@@ -1408,24 +1396,18 @@ static void checkSizes (lua_State *L, global_State *g) {
 
 
 /*
-** Get the next udata to be finalized from the 'tobefnz' list, and
-** link it back into the 'allgc' list.
+** Get the next object to finalize. Its allocation membership never changes.
 */
 static GCObject *udata2finalize (global_State *g) {
   GCObject *o = g->tobefnz;  /* get first element */
   lua_assert(tofinalize(o));
   /* An older callback can finish while another cycle scans queued roots.
-  ** Remove this root from that walk before reusing its allocation link. */
+  ** Remove this root from that walk before releasing its queue link. */
   if (g->trace_plan.pending == o) g->trace_plan.pending = o->next;
   g->tobefnz = o->next;  /* remove it from 'tobefnz' list */
   if (g->tobefnz == NULL) g->tobefnz_tail = &g->tobefnz;
-  o->next = g->allgc;  /* return it to 'allgc' list */
-  g->allgc = o;
+  o->next = NULL;
   resetbit(o->marked, FINALIZEDBIT);  /* object is "normal" again */
-  if (issweepphase(g))
-    makewhite(g, o);  /* "sweep" object */
-  else if (getage(o) == G_OLD1)
-    g->firstold1 = o;  /* it is the first OLD1 object in the list */
   return o;
 }
 
@@ -1491,48 +1473,21 @@ static void separateallfinalizers (global_State *g) {
 }
 
 
-/*
-** If pointer 'p' points to 'o', move it to the next element.
-*/
-static void checkpointer (GCObject **p, GCObject *o) {
-  if (o == *p)
-    *p = o->next;
-}
-
-
-/*
-** Correct pointers to objects inside 'allgc' list when
-** object 'o' is being removed from the list.
-*/
-static void correctpointers (global_State *g, GCObject *o) {
-  checkpointer(&g->survival, o);
-  checkpointer(&g->old1, o);
-  checkpointer(&g->reallyold, o);
-  checkpointer(&g->firstold1, o);
-}
-
-
-/*
-** if object 'o' has a finalizer, remove it from 'allgc' list (must
-** search the list to find it) and link it in 'finobj' list.
-*/
+/* Finalization is an independent index. Registration never searches or
+** modifies allocation membership, generation boundaries, or a sweep cursor. */
 static void registerfinalizer (lua_State *L, GCObject *o) {
   global_State *g = G(L);
-  GCObject **p;
-  if (tofinalize(o)) return;
-  for (p = &g->allgc; *p != o; p = &(*p)->next)
-    lua_assert(*p != NULL);
-  if (issweepphase(g)) {
-    makewhite(g, o);
-    if (g->sweepgc == &o->next)
-      g->sweepgc = p;  /* retain the next unswept link without freeing nodes */
+  if (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT), __ATOMIC_RELAXED) &
+      bitmask(FINALIZEDBIT)) return;
+  if (luaW_iscollector(L)) {
+    o->next = g->finobj;
+    g->finobj = o;
   }
-  else
-    correctpointers(g, o);
-  *p = o->next;
-  o->next = g->finobj;
-  g->finobj = o;
-  l_setbit(o->marked, FINALIZEDBIT);
+  else {
+    o->next = L->new_finalizers;
+    if (L->new_finalizers == NULL) L->new_finalizers_tail = o;
+    L->new_finalizers = o;
+  }
 }
 
 void luaC_publish (lua_State *L) {
@@ -1543,7 +1498,7 @@ void luaC_publish (lua_State *L) {
     lua_State *thread = participant->thread;
     luaM_flushdebt(L, thread);
     if (thread->new_objects != NULL) {
-      thread->new_objects_tail->next = g->allgc;
+      luaC_allocnext(thread->new_objects_tail) = g->allgc;
       g->allgc = thread->new_objects;
       thread->new_objects = thread->new_objects_tail = NULL;
     }
@@ -1551,10 +1506,11 @@ void luaC_publish (lua_State *L) {
   for (participant = g->world.participants; participant != NULL;
        participant = participant->next) {
     lua_State *thread = participant->thread;
-    unsigned i, count = thread->finalizer_count;
-    thread->finalizer_count = 0;
-    for (i = 0; i < count; i++)
-      registerfinalizer(L, thread->finalizers[i]);
+    if (thread->new_finalizers != NULL) {
+      thread->new_finalizers_tail->next = g->finobj;
+      g->finobj = thread->new_finalizers;
+      thread->new_finalizers = thread->new_finalizers_tail = NULL;
+    }
   }
 }
 
@@ -1571,16 +1527,7 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
       ttisnil(&method.value) ||         /* or has no finalizer... */
       (g->gcstp & GCSTPCLS))                   /* or closing state? */
     goto done;  /* nothing to be done */
-  else if (luaW_iscollector(L))
-    registerfinalizer(L, o);
-  else {
-    lua_assert(L->finalizer_count < LUA_FINALIZER_CAPACITY);
-    L->finalizers[L->finalizer_count++] = o;
-    if (L->finalizer_count == LUA_FINALIZER_CAPACITY) {
-      luaW_stop(L);
-      luaW_start(L);
-    }
-  }
+  registerfinalizer(L, o);
  done:
   luaR_poproot(L, &method);
   luaR_poproot(L, &metatable_root);
@@ -1644,7 +1591,7 @@ static void sweep2old (lua_State *L, GCObject **p) {
   while ((curr = *p) != NULL) {
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(isdead(g, curr));
-      *p = curr->next;  /* remove 'curr' from list */
+      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
       luaC_retireobject(L, curr);
     }
     else {  /* all surviving objects become old */
@@ -1655,7 +1602,7 @@ static void sweep2old (lua_State *L, GCObject **p) {
       }
       else  /* everything else is black */
         nw2black(curr);
-      p = &curr->next;  /* go to next element */
+      p = luaC_alloclink(curr);  /* go to next element */
     }
   }
 }
@@ -1690,7 +1637,7 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
   while ((curr = *p) != limit) {
     if (iswhite(curr)) {  /* is 'curr' dead? */
       lua_assert(!isold(curr) && isdead(g, curr));
-      *p = curr->next;  /* remove 'curr' from list */
+      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
       luaC_retireobject(L, curr);
     }
     else {  /* correct mark and age */
@@ -1708,7 +1655,7 @@ static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
             *pfirstold1 = curr;  /* first OLD1 object in the list */
         }
       }
-      p = &curr->next;  /* go to next element */
+      p = luaC_alloclink(curr);  /* go to next element */
     }
   }
   *paddedold += addedold;
@@ -1778,7 +1725,7 @@ static void correctgraylists (global_State *g) {
 */
 static void markold (global_State *g, GCObject *from, GCObject *to) {
   GCObject *p;
-  for (p = from; p != to; p = p->next) {
+  for (p = from; p != to; p = luaC_allocnext(p)) {
     if (getage(p) == G_OLD1) {
       lua_assert(!iswhite(p));
       setage(p, G_OLD);  /* now they are old */
@@ -1818,7 +1765,7 @@ static void minor2inc (lua_State *L, global_State *g, lu_byte kind) {
   g->GCmajorminor = g->GCmarked;  /* number of live bytes */
   g->gckind = kind;
   g->reallyold = g->old1 = g->survival = NULL;
-  g->finobjrold = g->finobjold1 = g->finobjsur = NULL;
+  g->finobjold1 = g->finobjsur = NULL;
   entersweep(L);  /* continue as an incremental cycle */
   /* set a debt equal to the step size */
   luaE_setdebt(g, applygcparam(g, STEPSIZE, 100));
@@ -1849,13 +1796,11 @@ static void startyoungcollection (lua_State *L, global_State *g) {
     markold(g, g->firstold1, g->reallyold);  /* mark them */
     g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
   }
-  markold(g, g->finobj, g->finobjrold);
 }
 
 static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
   l_mem addedold1 = 0;
   GCObject **psurvival;
-  GCObject *dummy;
   /* sweep nursery and get a pointer to its last live element */
   g->gcstate = GCSswpallgc;
   psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
@@ -1865,16 +1810,10 @@ static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
   g->old1 = *psurvival;  /* 'survival' survivals are old now */
   g->survival = g->allgc;  /* all news are survivals */
 
-  /* repeat for 'finobj' lists */
-  dummy = NULL;  /* no 'firstold1' optimization for 'finobj' lists */
-  psurvival = sweepgen(L, g, &g->finobj, g->finobjsur, &dummy, &addedold1);
-  /* sweep 'survival' */
-  sweepgen(L, g, psurvival, g->finobjold1, &dummy, &addedold1);
-  g->finobjrold = g->finobjold1;
-  g->finobjold1 = *psurvival;  /* 'survival' survivals are old now */
+  /* Every finalizable object was aged once by the allocation sweep. Only
+  ** advance the registration index's discovery boundaries here. */
+  g->finobjold1 = g->finobjsur;
   g->finobjsur = g->finobj;  /* all news are survivals */
-
-  sweepgen(L, g, &g->tobefnz, NULL, &dummy, &addedold1);
 
   /* keep total number of added old1 bytes */
   g->GCmarked = marked + addedold1;
@@ -1904,11 +1843,8 @@ static void atomic2gen (lua_State *L, global_State *g) {
   g->reallyold = g->old1 = g->survival = g->allgc;
   g->firstold1 = NULL;  /* there are no OLD1 objects anywhere */
 
-  /* repeat for 'finobj' lists */
-  sweep2old(L, &g->finobj);
-  g->finobjrold = g->finobjold1 = g->finobjsur = g->finobj;
-
-  sweep2old(L, &g->tobefnz);
+  /* Finalizer membership shares the already-swept allocation population. */
+  g->finobjold1 = g->finobjsur = g->finobj;
 
   g->gckind = KGC_GENMINOR;
   g->GCmajorlive = livebytes(g);
@@ -2025,9 +1961,9 @@ static void entersweep (lua_State *L) {
 ** Delete all objects in list 'p' until (but not including) object
 ** 'limit'.
 */
-static void deletelist (lua_State *L, GCObject *p, GCObject *limit) {
+static void deletelist (lua_State *L, GCObject *p, GCObject *limit, int fixed) {
   while (p != limit) {
-    GCObject *next = p->next;
+    GCObject *next = fixed ? p->next : luaC_allocnext(p);
     luaC_retireobject(L, p);
     p = next;
   }
@@ -2054,10 +1990,10 @@ void luaC_freeallobjects (lua_State *L) {
   separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
   callallpendingfinalizers(L);
-  deletelist(L, g->allgc, obj2gco(mainthread(g)));
+  deletelist(L, g->allgc, obj2gco(mainthread(g)), 0);
   lua_assert(g->finobj == NULL);  /* no new finalizers */
   luaC_reclaim(L);  /* external callbacks precede fixed DLL handle destruction */
-  deletelist(L, g->fixedgc, NULL);  /* collect fixed objects */
+  deletelist(L, g->fixedgc, NULL, 1);  /* collect fixed objects */
   luaC_reclaim(L);  /* shutdown owns the complete VM until destruction ends */
   { int i; for (i = 0; i < LUA_STRING_SHARDS; i++)
       lua_assert(g->strt[i].nuse == 0); }
@@ -2183,13 +2119,11 @@ static int atomic (lua_State *L) {
 ** Do a sweep step. The normal case (not fast) sweeps at most GCSWEEPMAX
 ** elements. The fast case sweeps the whole list.
 */
-static void sweepstep (lua_State *L, global_State *g,
-                       lu_byte nextstate, GCObject **nextlist, int fast) {
+static void sweepstep (lua_State *L, global_State *g, int fast) {
   if (g->sweepgc)
     g->sweepgc = sweeplist(L, g->sweepgc, fast ? MAX_LMEM : GCSWEEPMAX);
   else {  /* enter next state */
-    g->gcstate = nextstate;
-    g->sweepgc = nextlist;
+    g->gcstate = GCSswpend;
   }
 }
 
@@ -2235,18 +2169,8 @@ static l_mem singlestep (lua_State *L, int fast) {
         stepresult = atomicstep;
       break;
     }
-    case GCSswpallgc: {  /* sweep "regular" objects */
-      sweepstep(L, g, GCSswpfinobj, &g->finobj, fast);
-      stepresult = GCSWEEPMAX;
-      break;
-    }
-    case GCSswpfinobj: {  /* sweep objects with finalizers */
-      sweepstep(L, g, GCSswptobefnz, &g->tobefnz, fast);
-      stepresult = GCSWEEPMAX;
-      break;
-    }
-    case GCSswptobefnz: {  /* sweep objects to be finalized */
-      sweepstep(L, g, GCSswpend, NULL, fast);
+    case GCSswpallgc: {  /* sweep every allocation exactly once */
+      sweepstep(L, g, fast);
       stepresult = GCSWEEPMAX;
       break;
     }

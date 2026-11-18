@@ -26,12 +26,14 @@ typedef struct CallInfo CallInfo;
 /*
 ** Some notes about garbage-collected objects: All objects in Lua must
 ** be kept somehow accessible until being freed, so all objects always
-** belong to one (and only one) of these lists, using field 'next' of
-** the 'CommonHeader' for the link:
+** belong to an allocation list using the allocator prefix link:
 **
-** 'allgc': all objects not marked for finalization;
-** 'finobj': all objects marked for finalization;
-** 'tobefnz': all objects ready to be finalized;
+** 'allgc': every collectable object, including finalizable objects;
+** each coroutine's 'new_objects': allocations awaiting publication.
+**
+** Independent indices use 'next' in CommonHeader:
+** 'finobj': objects marked for finalization;
+** 'tobefnz': objects ready to be finalized;
 ** 'fixedgc': all objects that are not to be collected (currently
 ** only small strings, such as reserved words).
 **
@@ -46,13 +48,10 @@ typedef struct CallInfo CallInfo;
 **
 ** 'finobj' -> 'finobjsur': new objects marked for finalization;
 ** 'finobjsur' -> 'finobjold1': survived   """";
-** 'finobjold1' -> 'finobjrold': just old  """";
-** 'finobjrold' -> NULL: really old       """".
+** 'finobjold1' -> NULL: old objects, skipped by minor discovery.
 **
-** All lists can contain elements older than their main ages, due
-** to 'luaC_checkfinalizer' and 'udata2finalize', which move
-** objects between the normal lists and the "marked for finalization"
-** lists. Moreover, barriers can age young objects in young lists as
+** Registration can put older objects at the head of the finalizer index.
+** Allocation membership remains stable. Barriers can age young objects as
 ** OLD0, which then become OLD1. However, a list never contains
 ** elements younger than their main ages.
 **
@@ -316,7 +315,6 @@ typedef struct LuaNativeRoot {
   const Table *table_view;  /* borrowed resize image, strongly traced until pop */
 } LuaNativeRoot;
 
-#define LUA_FINALIZER_CAPACITY 64
 
 /*
 ** 'per thread' state
@@ -393,8 +391,8 @@ struct lua_State {
   GCObject *new_objects_tail;
   l_mem allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
-  unsigned finalizer_count;
-  GCObject *finalizers[LUA_FINALIZER_CAPACITY];
+  GCObject *new_finalizers;
+  GCObject *new_finalizers_tail;
   TString *strcache[STRCACHE_N][STRCACHE_M];
   LuaAllocationCache allocation;
 };
@@ -517,7 +515,6 @@ typedef struct global_State {
   GCObject *firstold1;  /* first OLD1 object in the list (if any) */
   GCObject *finobjsur;  /* list of survival objects with finalizers */
   GCObject *finobjold1;  /* list of old1 objects with finalizers */
-  GCObject *finobjrold;  /* list of really old objects with finalizers */
   lua_CFunction panic;  /* to be called in unprotected errors */
   TString *memerrmsg;  /* message for memory-allocation errors */
   TString *stoperrmsg;  /* fixed task stop delivery; never allocates */

@@ -381,7 +381,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
-  L->finalizer_count = 0;
+  L->new_finalizers = L->new_finalizers_tail = NULL;
   memset(&L->allocation, 0, sizeof(L->allocation));
   L->allocation.global = g;
   L->allocation.thread = L;
@@ -657,7 +657,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->finobj = g->tobefnz = g->fixedgc = NULL;
   g->tobefnz_tail = &g->tobefnz;
   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
-  g->finobjsur = g->finobjold1 = g->finobjrold = NULL;
+  g->finobjsur = g->finobjold1 = NULL;
   g->sweepgc = NULL;
   g->gray = g->grayagain = NULL;
   g->weak = g->ephemeron = g->allweak = NULL;

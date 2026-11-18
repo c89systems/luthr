@@ -17,7 +17,7 @@ void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
        offset + stride <= page->bytes; offset += stride) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
     block->block.page = cast(uintptr_t, page);
-    block->block.next = page->local;
+    block->block.link.next = page->local;
     page->local = block;
   }
 }
@@ -35,12 +35,12 @@ void luaMP_collectpage (LuaAllocPage *page) {
   if (head == NULL) return;
   for (;;) {
     returned++;
-    if (tail->block.next == NULL) break;
-    tail = tail->block.next;
+    if (tail->block.link.next == NULL) break;
+    tail = tail->block.link.next;
   }
   lua_assert(page->used >= returned);
   page->used -= returned;
-  tail->block.next = page->local;
+  tail->block.link.next = page->local;
   page->local = head;
 }
 
@@ -79,7 +79,7 @@ void luaMP_return (global_State *g, LuaAllocBlock *block) {
       }
     }
     else {
-      block->block.next = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
+      block->block.link.next = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
       if (__atomic_compare_exchange_n(&page->remote, &old,
             cast(uintptr_t, block) | LUA_PAGE_NOTIFIED, 0,
             __ATOMIC_RELEASE, __ATOMIC_RELAXED))

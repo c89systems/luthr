@@ -209,10 +209,22 @@ target_link_libraries(gc_tracing_test PRIVATE luthr_static)
 target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaA_tryscan -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_stop
   -Wl,--wrap=luaM_malloc_)
-foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak intern cache
+foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak weak_retry intern cache
     concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues)
   add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})
   set_tests_properties(gc_tracing_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
+
+luthr_test_program(gc_membership_test gc_membership_test.c)
+set_target_properties(gc_membership_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_membership_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_membership_test PRIVATE luthr_static)
+target_link_options(gc_membership_test PRIVATE -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS incremental generational old_generational
+    sweeping_incremental pending_incremental pending_generational)
+  add_test(NAME gc_membership_${case} COMMAND gc_membership_test ${case})
+  set_tests_properties(gc_membership_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
@@ -874,6 +886,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   capture_cells_test execution_context_test table_read_test memory_publication_test
   allocation_pool_test page_ownership_test gc_pacing_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
+  gc_membership_test
   scheduler_test native_lifecycle_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)

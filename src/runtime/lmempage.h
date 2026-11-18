@@ -9,13 +9,17 @@
 struct global_State;
 struct LuaAllocationCache;
 struct LuaExecution;
+struct GCObject;
 
 typedef struct LuaAllocPage LuaAllocPage;
 typedef union LuaAllocBlock LuaAllocBlock;
 union LuaAllocBlock {
   struct {
     uintptr_t page;  /* aligned page identity, with logical-retirement bit */
-    LuaAllocBlock *next;  /* free list, or collector work while allocated */
+    union {
+      LuaAllocBlock *next;  /* free blocks only */
+      struct GCObject *object;  /* live allocation membership */
+    } link;
   } block;
   union { LUAI_MAXALIGN; } alignment;
 };

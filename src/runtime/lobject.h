@@ -811,6 +811,7 @@ typedef struct Table {
   LuaObjectLock access;
   uint64_t sequence;  /* even published contents; odd during exclusive access */
   uint64_t weak_epoch;
+  GCObject *weaknext;  /* retry ownership, independent of the weak lists */
   lu_byte gcweak;  /* weakness selected for this collection cycle */
   lu_byte weak_cleared;
   lu_byte weak_initial_cutoff;
