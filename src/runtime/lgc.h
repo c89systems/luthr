@@ -57,6 +57,9 @@ enum {
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
 #define luaC_tracephase(g) \
   __atomic_load_n(&(g)->trace_plan.phase, __ATOMIC_ACQUIRE)
+#define luaC_tracepending(g) \
+  (__atomic_load_n(&(g)->trace_ready, __ATOMIC_ACQUIRE) || \
+   __atomic_load_n(&(g)->trace_barriers, __ATOMIC_ACQUIRE))
 
 /* A batch owns its payloads until it publishes every list and counter. It
 ** must not yield or park while these private references are outstanding. */

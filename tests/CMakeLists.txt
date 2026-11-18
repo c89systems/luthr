@@ -216,6 +216,22 @@ foreach(case IN ITEMS retained pressure task lease_unwind busy_cache remote_retu
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
 
+luthr_test_program(gc_availability_test gc_availability_test.c)
+set_target_properties(gc_availability_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_availability_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_availability_test PRIVATE luthr_static)
+target_link_options(gc_availability_test PRIVATE -Wl,--wrap=luaC_tracebatch
+  -Wl,--wrap=luaC_scantrace
+  -Wl,--wrap=luaW_trycollectenter)
+foreach(case IN ITEMS defer_incremental defer_generational publish_incremental publish_generational
+    remote_incremental remote_generational
+    busy_incremental busy_generational
+    pressure_incremental pressure_generational)
+  add_test(NAME gc_availability_${case} COMMAND gc_availability_test ${case})
+  set_tests_properties(gc_availability_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(gc_requests_test gc_requests_test.c)
 set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
@@ -238,7 +254,7 @@ target_link_libraries(gc_reclamation_test PRIVATE luthr_static)
 target_link_options(gc_reclamation_test PRIVATE -Wl,--wrap=luaM_free_
   -Wl,--wrap=luaQ_wait -Wl,--wrap=luaC_publish -Wl,--wrap=luaQ_poll)
 foreach(collector IN ITEMS incremental generational)
-  foreach(case IN ITEMS overlap collect_again handshake assist assist_trace assist_unwind)
+  foreach(case IN ITEMS overlap collect_again handshake assist assist_trace assist_trace_unavailable assist_unwind)
     add_test(NAME gc_reclamation_${case}_${collector}
       COMMAND gc_reclamation_test ${case} ${collector})
     set_tests_properties(gc_reclamation_${case}_${collector} PROPERTIES
@@ -954,7 +970,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
-  gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
+  gc_barriers_test gc_availability_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test
   gc_sweeping_test
   gc_epochs_test

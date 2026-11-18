@@ -264,8 +264,11 @@ static void collect(lua_State *L, int operation, int emergency) {
   GcProbe *record = probe(L);
   uint64_t started = 0, excluded = 0, elapsed;
   unsigned reason = REASON_OTHER;
+  unsigned previous_operation = 0;
   int outer = 0, running = 0;
   if (record != NULL) {
+    previous_operation = record->operation;
+    record->operation = operation;
     outer = record->gc_depth++ == 0;
     reason = record->reason;
     record->reason = REASON_GC;
@@ -300,6 +303,7 @@ static void collect(lua_State *L, int operation, int emergency) {
       else
         record->collector_disabled_ns += elapsed - excluded;
     }
+    record->operation = previous_operation;
     record->reason = reason;
     record->gc_depth--;
   }
@@ -449,6 +453,12 @@ void __wrap_luaC_assistreclaim(lua_State *L) { reclaim(L, 1); }
 
 lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   GcProbe *record = probe(L);
+  unsigned phase = luaC_tracephase(G(L));
+  unsigned busy = __atomic_load_n(&G(L)->trace_busy, __ATOMIC_RELAXED);
+  unsigned ready = __atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE);
+  int pressure = luaC_cyclepressure(L);
+  void *metadata =
+      __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE);
   uint64_t started = record != NULL ? now() : 0;
   lu_mem marked = __real_luaC_tracebatch(L, limit);
   if (record != NULL) {
@@ -456,6 +466,36 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
     record->trace_calls++;
     record->trace_ns += elapsed;
     record->trace_work_bytes += marked;
+    record->trace_zero_progress_batches += marked == 0;
+    if (marked == 0) {
+      record->trace_empty_soft += !pressure;
+      record->trace_empty_busy += busy != 0;
+      record->trace_empty_ready += ready != 0;
+      record->trace_empty_metadata +=
+          metadata != NULL && metadata != luaX_token(L);
+      record->trace_empty_quiescing +=
+          __atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) != 0;
+      if (phase == TRACE_INIT)
+        record->trace_empty_init++;
+      else if (phase == TRACE_MARK)
+        record->trace_empty_mark++;
+      else
+        record->trace_empty_weak++;
+      switch (record->operation) {
+      case COLLECT_ASSIST:
+        record->trace_empty_assist++;
+        break;
+      case COLLECT_POLL:
+        record->trace_empty_poll++;
+        break;
+      case COLLECT_FULL:
+        record->trace_empty_full++;
+        break;
+      default:
+        record->trace_empty_step++;
+        break;
+      }
+    }
     if (!record->gc_depth)
       record->collector_body_ns += elapsed;
   }
@@ -470,8 +510,40 @@ void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
     record->trace_peak_workers = active;
   __real_luaC_scantrace(L, work, limit);
   __atomic_fetch_sub(&scanners, 1, __ATOMIC_ACQ_REL);
-  if (record != NULL)
+  if (record != NULL) {
+    GCObject *object;
     record->trace_scan_ns += now() - started;
+    /* These lists are still private to this admitted batch. Attribute failed
+     * payload reservations before publication makes them available again. */
+    for (object = work->deferred.head; object != NULL;
+         object = *luaC_graylink(object)) {
+      switch (object->tt) {
+      case LUA_VTABLE:
+        record->trace_retry_tables++;
+        break;
+      case LUA_VTHREAD:
+        record->trace_retry_threads++;
+        break;
+      case LUA_VPROTO:
+        record->trace_retry_protos++;
+        break;
+      case LUA_VUPVAL:
+        record->trace_retry_upvalues++;
+        break;
+      case LUA_VLCL:
+      case LUA_VCCL:
+        record->trace_retry_closures++;
+        break;
+      case LUA_VUSERDATA:
+        record->trace_retry_userdata++;
+        break;
+      default:
+        abort();
+      }
+    }
+    for (object = work->retry; object != NULL; object = gco2t(object)->weaknext)
+      record->trace_retry_tables++;
+  }
 }
 
 void __wrap_luaC_assisttrace(lua_State *L) {

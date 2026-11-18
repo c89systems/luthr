@@ -27,6 +27,7 @@ struct fixture {
   int entered, release, detached, freed, done;
   int handshake, waiting, observed;
   int assist, assisted, trace, trace_assisted, unwind, interrupt;
+  int unavailable, metadata_entered, metadata_release;
 };
 static struct fixture *active;
 
@@ -174,16 +175,32 @@ static const char progress[] =
     "sum=sum+v[2]; assert(v.tag==('retired-%d'):format(i%100+1)) "
     "end; assert(sum==2003000)";
 
+static void *hold_metadata(void *argument) {
+  struct fixture *f = argument;
+  lua_lock(f->main);
+  luaW_heapenter(f->main);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->metadata_entered = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->metadata_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  luaW_heapleave(f->main);
+  lua_unlock(f->main);
+  return NULL;
+}
+
 int main(int argc, char **argv) {
   struct fixture fixture = {0};
-  pthread_t collector, other;
+  pthread_t collector, other, metadata;
   int generational;
   require(argc == 3);
   generational = strcmp(argv[2], "generational") == 0;
   require(generational || strcmp(argv[2], "incremental") == 0);
   fixture.detached = strcmp(argv[1], "collect_again") == 0;
   fixture.handshake = strcmp(argv[1], "handshake") == 0;
-  fixture.trace = strcmp(argv[1], "assist_trace") == 0;
+  fixture.trace = strncmp(argv[1], "assist_trace", 12) == 0;
+  fixture.unavailable = strcmp(argv[1], "assist_trace_unavailable") == 0;
   fixture.unwind = strcmp(argv[1], "assist_unwind") == 0;
   fixture.assist =
       fixture.trace || fixture.unwind || strcmp(argv[1], "assist") == 0;
@@ -240,6 +257,18 @@ int main(int argc, char **argv) {
       G(fixture.worker)->pacer.debt = MAX_LMEM;
       luaW_start(fixture.worker);
       require(luaC_tracing(fixture.worker));
+      if (fixture.unavailable) {
+        unsigned batches = 0;
+        while (luaC_tracepending(G(fixture.worker))) {
+          luaC_tracebatch(fixture.worker, LUA_TRACE_BATCH);
+          require(++batches < 10000);
+        }
+        require(pthread_create(&metadata, NULL, hold_metadata, &fixture) == 0);
+        require(pthread_mutex_lock(&fixture.mutex) == 0);
+        while (!fixture.metadata_entered)
+          require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+        require(pthread_mutex_unlock(&fixture.mutex) == 0);
+      }
     }
     fixture.worker->assist_debt =
         fixture.trace ? LUA_GC_ASSIST_BYTES : MAX_LMEM;
@@ -262,6 +291,13 @@ int main(int argc, char **argv) {
     } else
       luaC_assistreclaim(fixture.worker);
     lua_unlock(fixture.worker);
+    if (fixture.unavailable) {
+      require(pthread_mutex_lock(&fixture.mutex) == 0);
+      fixture.metadata_release = 1;
+      require(pthread_cond_broadcast(&fixture.changed) == 0);
+      require(pthread_mutex_unlock(&fixture.mutex) == 0);
+      require(pthread_join(metadata, NULL) == 0);
+    }
     /* All shared work is gone; only the deliberately held claim remains.
      * Assistance must return and allow ordinary allocation to continue. */
     if (!fixture.trace)

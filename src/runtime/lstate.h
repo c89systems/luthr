@@ -498,7 +498,8 @@ typedef struct global_State {
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
-  unsigned trace_ready;  /* atomic work hint; termination still checks producers */
+  unsigned trace_ready;  /* atomic queued-work hint, independent of busy claims */
+  unsigned trace_barriers;  /* atomic: producer queues may contain new work */
   uint64_t trace_changes;  /* atomic monotonic shading progress */
   GCObject *trace_deferred;
   LuaTracePlan trace_plan;

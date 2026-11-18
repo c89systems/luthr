@@ -52,6 +52,11 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   collector_running_calls collector_body_ns collector_disabled_ns coordination_ns
   stop_request_ns resume_ns heap_entries heap_gc_entries heap_contended_entries
   stopped_ns trace_calls trace_ns trace_scan_ns trace_work_bytes trace_assist_calls trace_poll_calls trace_cycles
+  trace_zero_progress_batches trace_retry_tables trace_retry_threads trace_retry_protos
+  trace_empty_assist trace_empty_poll trace_empty_step trace_empty_full
+  trace_empty_init trace_empty_mark trace_empty_weak trace_empty_quiescing
+  trace_empty_soft trace_empty_busy trace_empty_ready trace_empty_metadata
+  trace_retry_upvalues trace_retry_closures trace_retry_userdata
   mark_peak_bytes sweep_peak_bytes reclaim_peak_bytes idle_peak_bytes trace_peak_workers
   trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
   sweep_paused_records sweep_poll_calls sweep_assist_calls sweep_peak_workers root_snapshot_calls root_snapshot_ns

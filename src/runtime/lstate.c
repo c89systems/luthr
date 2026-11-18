@@ -682,6 +682,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->trace_interrupt = 0;
   g->trace_changes = 0;
   g->trace_ready = 0;
+  g->trace_barriers = 0;
   g->trace_deferred = NULL;
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g, PAUSE, LUAI_GCPAUSE);

@@ -14,6 +14,11 @@
   X(coordination_ns) X(stop_request_ns) X(resume_ns) \
   X(stopped_ns) X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
   X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
+  X(trace_zero_progress_batches) X(trace_retry_tables) X(trace_retry_threads) \
+  X(trace_empty_assist) X(trace_empty_poll) X(trace_empty_step) X(trace_empty_full) \
+  X(trace_empty_init) X(trace_empty_mark) X(trace_empty_weak) X(trace_empty_quiescing) \
+  X(trace_empty_soft) X(trace_empty_busy) X(trace_empty_ready) X(trace_empty_metadata) \
+  X(trace_retry_protos) X(trace_retry_upvalues) X(trace_retry_closures) X(trace_retry_userdata) \
   X(sweep_calls) X(sweep_ns) X(sweep_scan_ns) X(sweep_records) \
   X(sweep_paused_records) X(sweep_poll_calls) X(sweep_assist_calls) \
   X(root_snapshot_calls) X(root_snapshot_ns) \
@@ -42,7 +47,7 @@ typedef struct GcProbe {
 #undef GC_PROBE_FIELD
   uint64_t coordination_start;
   uint64_t stopped_start;
-  unsigned coordination_depth, gc_depth, root_depth, reason;
+  unsigned coordination_depth, gc_depth, root_depth, reason, operation;
   int enabled;
 } GcProbe;
 

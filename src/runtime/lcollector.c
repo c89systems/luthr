@@ -42,10 +42,12 @@ void luaC_advancetrace (lua_State *L) {
   LuaTracePlan *plan = &g->trace_plan;
   /* Several helpers may observe the same empty queue. Metadata admission
   ** orders phase requests; recheck after it, before stopping every worker. */
+  if (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0) return;
   if (!luaW_trycollectenter(L)) return;
   if (!luaC_tracing(L) || plan->finish == 0 ||
+      __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0 ||
       (luaC_tracephase(g) != TRACE_INIT &&
-       __atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))) {
+       luaC_tracepending(g))) {
     luaW_heapleave(L);
     return;
   }

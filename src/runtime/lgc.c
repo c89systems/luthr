@@ -212,12 +212,13 @@ static void publishbarrier (global_State *g, GCObject **queue, GCObject *o) {
   GCObject **link;
   GCObject *head = __atomic_load_n(queue, __ATOMIC_RELAXED);
   lua_assert(o != obj2gco(mainthread(g)));
-  UNUSED(g);
   link = barrierlink(o);
   do {
     *link = head;
   } while (!__atomic_compare_exchange_n(queue, &head, o, 0,
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  if (__atomic_load_n(&g->trace_active, __ATOMIC_ACQUIRE))
+    __atomic_store_n(&g->trace_barriers, 1, __ATOMIC_RELEASE);
 }
 
 /* Mark work can be produced by any execution. Claiming a white object is
@@ -252,6 +253,10 @@ static void drainthreadbarriers (lua_State *L, lua_State *thread) {
 
 void luaC_drainbarriers (lua_State *L) {
   LuaParticipation *participant;
+  /* Clear before draining. A producer publishes its link before setting this
+  ** hint: either this pass sees that link, or its later hint remains set.
+  ** Payload readiness cannot overwrite work published on another producer. */
+  __atomic_exchange_n(&G(L)->trace_barriers, 0, __ATOMIC_ACQ_REL);
   for (participant = G(L)->world.participants; participant != NULL;
        participant = participant->next)
     drainthreadbarriers(L, participant->thread);
@@ -485,6 +490,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   g->trace_weakcutoff = 0;
   g->trace_changes = 0;
   g->trace_ready = 0;
+  g->trace_barriers = 0;
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.old = g->trace_plan.old_limit = NULL;
@@ -908,6 +914,17 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   return 1;
 }
 
+/* Runnable payload work and phase admission are different resources. An
+** empty phase cannot advance behind another metadata owner. Ordinary assists
+** keep their debt and retry when either resource changes; no allocation-based
+** backoff, lost credit or queued continuation belongs to this check. Producer
+** barriers supply payload work even while the phase permit is occupied. */
+static int traceavailable (lua_State *L) {
+  return luaC_tracepending(G(L)) ||
+    (__atomic_load_n(&G(L)->trace_busy, __ATOMIC_ACQUIRE) == 0 &&
+     __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == NULL);
+}
+
 void luaC_assisttrace (lua_State *L) {
   global_State *g = G(L);
   LuaGCFrame frame;
@@ -918,18 +935,20 @@ void luaC_assisttrace (lua_State *L) {
       L->world_depth != 0 || L->object_scopes != NULL ||
       luaW_scope(L).heap != 0 || !luaC_tracing(L))
     return;
+  if (!pressure && !traceavailable(L) && !luaC_needassist(L)) return;
   luaC_entergc(L, &frame);
   /* Earlier cycles can still have physical garbage. A stream of new marking
   ** jobs must not monopolize every allocation assist and starve that storage. */
   if (luaC_needassist(L)) luaC_assistreclaim(L);
-  if (pressure || L->assist_epoch ==
-      __atomic_load_n(&g->world.work_epoch, __ATOMIC_ACQUIRE))
-    {
+  if (pressure || traceavailable(L)) {
+    if (pressure || L->assist_epoch ==
+        __atomic_load_n(&g->world.work_epoch, __ATOMIC_ACQUIRE)) {
       lu_mem due = pressure ? budget : luaP_budget(L, budget);
       if (pressure || due != 0) tracework(L, due, pressure);
       else L->trace_debt = 0;
     }
-  else L->trace_debt = 0;
+    else L->trace_debt = 0;
+  }
   if (luaC_retired(L) != NULL || L->reclaim_pages) luaC_reclaim(L);
   luaC_leavegc(L, &frame);
 }
@@ -942,7 +961,7 @@ void luaC_polltrace (lua_State *L) {
   LuaGCFrame frame;
   if (!luaC_tracing(L) || !gcrunning(G(L)) || luaC_ingc(L) || L->reclaiming ||
       L->world_depth != 0 || L->object_scopes != NULL ||
-      luaW_scope(L).heap != 0)
+      luaW_scope(L).heap != 0 || !traceavailable(L))
     return;
   luaC_entergc(L, &frame);
   tracework(L, 1, 0);
@@ -981,7 +1000,6 @@ static void readytrace (lua_State *L) {
     g->gray != NULL || g->trace_deferred != NULL ||
     plan->next != NULL || plan->deferred != NULL ||
     plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL ||
-    __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
     __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
     __ATOMIC_RELEASE);
 }
@@ -1888,14 +1906,14 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
   }
   else {
     LuaWorldScope scope;
-    if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE) &&
+    if (!luaC_tracepending(g) &&
         g->trace_plan.finish != 0)
       luaC_advancetrace(L);
     if (L->world_depth != 0) g->gcstopem = 0;
     scope = luaW_suspend(L);
     while (luaC_tracing(L) && g->trace_epoch == epoch) {
       lu_mem done;
-      if (!__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE) &&
+      if (!luaC_tracepending(g) &&
           g->trace_plan.finish != 0)
         luaC_advancetrace(L);
       if (!luaC_tracing(L) || g->trace_epoch != epoch) break;
@@ -1908,7 +1926,7 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
         ** allocated in that gap and inflate the following cycle's live base. */
         if (luaC_tracing(L) && g->trace_epoch == epoch &&
             g->trace_plan.finish != 0 &&
-            !__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))
+            !luaC_tracepending(g))
           luaC_advancetrace(L);
         break;
       }
@@ -1921,7 +1939,8 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
             __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE))
           luaW_waitcollector(L);
         boundary = luaC_tracing(L) && g->trace_epoch == epoch &&
-          !__atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE);
+          !luaC_tracepending(g) &&
+          __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) == 0;
         luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
         if (boundary) {
           luaW_collectenter(L);
