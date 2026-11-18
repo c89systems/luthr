@@ -138,10 +138,14 @@ void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
 static void *collect(void *argument) {
   struct fixture *fixture = argument;
   require(lua_gc(fixture->collector, LUA_GCCOLLECT) == 0);
+  /* Another collector can trim this now-idle coroutine. Inspect its private
+   * cleanup state under the same gate used by those runtime borrowers. */
+  lua_lock(fixture->collector);
   require(fixture->collector->retired == NULL &&
           fixture->collector->retired_tail == NULL &&
           !fixture->collector->reclaiming &&
           !fixture->collector->reclaim_pages);
+  lua_unlock(fixture->collector);
   require(pthread_mutex_lock(&fixture->mutex) == 0);
   fixture->done = 1;
   require(pthread_cond_broadcast(&fixture->changed) == 0);

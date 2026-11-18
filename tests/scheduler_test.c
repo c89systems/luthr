@@ -380,6 +380,9 @@ static void fairness(struct fixture *f, unsigned slots, int generational) {
 
 static void no_requests(struct fixture *f) {
   init(f, 1);
+  /* Measure idle polling without an outstanding collector-assistance job. */
+  lua_gc(f->main, LUA_GCCOLLECT);
+  lua_gc(f->main, LUA_GCSTOP);
   f->inspect_polls = 1;
   submit(f, 0, "local n=0; for i=1,10000 do n=n+i end; return n", 0);
   require(collect(f, 0, LUA_OK) == 50005000);

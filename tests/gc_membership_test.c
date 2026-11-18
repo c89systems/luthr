@@ -2,6 +2,7 @@
 #include <lauxlib.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 
 enum { OBJECTS = 768, CAPACITY = 8192 };
 static GCObject *allocations[CAPACITY];
+static GCObject *observed[CAPACITY];
 static unsigned allocation_count, finalized, expected;
 static int resurrected;
 static unsigned registration_stops;
@@ -43,29 +45,53 @@ static int finalize(lua_State *state) {
   return 0;
 }
 
-/* Registration, queued callbacks, and callback dispatch must not splice or
- * reorder the allocation population. This also visits offset coroutine
- * objects, pooled objects, oversized allocations, and the embedded main. */
+static int address_order(const void *a, const void *b) {
+  uintptr_t first = (uintptr_t)*(GCObject *const *)a;
+  uintptr_t second = (uintptr_t)*(GCObject *const *)b;
+  return (first > second) - (first < second);
+}
+
+static unsigned capture(GCObject **out, unsigned count, GCObject *object,
+                        GCObject *limit) {
+  for (; object != limit; object = luaC_allocnext(object)) {
+    require(object != NULL && count < CAPACITY);
+    out[count++] = object;
+  }
+  return count;
+}
+
+/* Registration and callback dispatch preserve the allocation population.
+ * Disjoint sweep batches can reorder it. Include the sweep's detached cohort
+ * as well as newly published allocations and its unswept old-generation tail.
+ */
 static void membership(lua_State *state, int snapshot) {
-  GCObject *object;
-  unsigned index = 0;
+  GCObject **out = snapshot ? allocations : observed;
+  unsigned index, i;
   lua_lock(state);
   luaW_stop(state);
   luaC_publish(state);
-  for (object = G(state)->allgc; object != NULL;
-       object = luaC_allocnext(object)) {
-    require(index < CAPACITY);
-    if (snapshot)
-      allocations[index] = object;
-    else
-      require(index < allocation_count && allocations[index] == object);
-    index++;
+  index = capture(out, 0, G(state)->allgc, NULL);
+  require(index != 0 && out[index - 1] == obj2gco(state));
+  if (luaC_sweeping(state)) {
+    LuaSweepPlan *plan = &G(state)->sweep_plan;
+    require(plan->busy == 0);
+    index = capture(out, index, plan->next, plan->limit);
+    index = capture(out, index, plan->live[0], NULL);
+    index = capture(out, index, plan->live[1], NULL);
+    index = capture(out, index, plan->retry[0], NULL);
+    index = capture(out, index, plan->retry[1], NULL);
+    index = capture(out, index, plan->threads, NULL);
   }
+  qsort(out, index, sizeof(*out), address_order);
+  for (i = 1; i < index; i++)
+    require(out[i] != out[i - 1]);
   if (snapshot)
     allocation_count = index;
-  else
+  else {
     require(index == allocation_count);
-  require(index != 0 && allocations[index - 1] == obj2gco(state));
+    for (i = 0; i < index; i++)
+      require(allocations[i] == out[i]);
+  }
   luaW_start(state);
   lua_unlock(state);
 }

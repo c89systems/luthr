@@ -55,6 +55,7 @@ LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
                              struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
+LUAI_FUNC int luaF_trycloseupval (lua_State *L);
 /* Register shadows belong to the executing frame. Shared cells are authoritative;
 ** refresh only operands that are read and publish only actual writes. A frame's
 ** filter may keep false positives after close, collection or register collisions. */

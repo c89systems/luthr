@@ -29,16 +29,34 @@ static inline GCObject **luaC_alloclink (GCObject *o) {
 
 #define luaC_allocnext(o) (*luaC_alloclink(o))
 
+static inline GCObject **luaC_graylink (GCObject *o) {
+  switch (o->tt) {
+    case LUA_VTABLE: return &gco2t(o)->gclist;
+    case LUA_VLCL: return &gco2lcl(o)->gclist;
+    case LUA_VCCL: return &gco2ccl(o)->gclist;
+    case LUA_VTHREAD: return &gco2th(o)->gclist;
+    case LUA_VPROTO: return &gco2p(o)->gclist;
+    case LUA_VUPVAL: return &gco2upv(o)->gclist;
+    case LUA_VUSERDATA: return &gco2u(o)->gclist;
+    default: lua_assert(0); return NULL;
+  }
+}
+
 typedef struct LuaGCFrame {
   struct LuaGCFrame *previous;
   global_State *global;
+  GCObject *retired, *retired_tail;
+  l_mem retired_bytes;
+  int batch;
 } LuaGCFrame;
 
 enum {
-  TRACE_INIT, TRACE_PENDING, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
+  TRACE_INIT, TRACE_OLD, TRACE_PENDING, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
   TRACE_CLEAR, TRACE_VERIFY
 };
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
+#define luaC_tracephase(g) \
+  __atomic_load_n(&(g)->trace_plan.phase, __ATOMIC_ACQUIRE)
 
 /* A batch owns its payloads until it publishes every list and counter. It
 ** must not yield or park while these private references are outstanding. */
@@ -58,6 +76,15 @@ typedef struct LuaTraceWork {
   lu_mem scanned;
   unsigned count, phase, direction, changed;
 } LuaTraceWork;
+
+typedef struct LuaSweepWork {
+  GCObject *objects[LUA_TRACE_BATCH];
+  unsigned char regions[LUA_TRACE_BATCH];
+  GCObject *live[2], **tail[2], *retry[2], *threads;
+  LuaTraceList watch;
+  l_mem addedold;
+  unsigned count, kind, phase, promoted;
+} LuaSweepWork;
 
 LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
 LUAI_FUNC void luaC_restoregcframe (LuaGCFrame *frame);
@@ -173,45 +200,28 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define AGEBITS		7  /* all age bits (111) */
 
 #define getage(o)	(getmarked(o) & AGEBITS)
-#define setage(o,a) setmarked(o, cast_byte((getmarked(o) & (~AGEBITS)) | a))
+static inline void luaC_setage (GCObject *o, lu_byte age) {
+  lu_byte marked = getmarked(o), changed;
+  do {
+    changed = cast_byte((marked & ~AGEBITS) | age);
+  } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+#define setage(o,a) luaC_setage(obj2gco(o), (a))
 #define isold(o)	(getage(o) > G_SURVIVAL)
 
 
 /*
-** In generational mode, objects are created 'new'. After surviving one
-** cycle, they become 'survival'. Both 'new' and 'survival' can point
-** to any other object, as they are traversed at the end of the cycle.
-** We call them both 'young' objects.
-** If a survival object survives another cycle, it becomes 'old1'.
-** 'old1' objects can still point to survival objects (but not to
-** new objects), so they still must be traversed. After another cycle
-** (that, being old, 'old1' objects will "survive" no matter what)
-** finally the 'old1' object becomes really 'old', and then they
-** are no more traversed.
+** New and survival objects are young. Survivals promote to OLD1, whose
+** outgoing edges are scanned once more before becoming OLD. During marking,
+** a young referent installed into an old owner becomes OLD0 and must also
+** pass through that extra scan. Conversion uses OLD1 for the same reason:
+** mutators can install new edges before an owner's concurrent classification.
 **
-** To keep its invariants, the generational mode uses the same barriers
-** also used by the incremental mode. If a young object is caught in a
-** forward barrier, it cannot become old immediately, because it can
-** still point to other young objects. Instead, it becomes 'old0',
-** which in the next cycle becomes 'old1'. So, 'old0' objects is
-** old but can point to new and survival objects; 'old1' is old
-** but cannot point to new objects; and 'old' cannot point to any
-** young object.
-**
-** If any old object ('old0', 'old1', 'old') is caught in a back
-** barrier, it becomes 'touched1' and goes into a gray list, to be
-** visited at the end of the cycle.  There it evolves to 'touched2',
-** which can point to survivals but not to new objects. In yet another
-** cycle then it becomes 'old' again.
-**
-** The generational mode must also control the colors of objects,
-** because of the barriers.  While the mutator is running, young objects
-** are kept white. 'old', 'old1', and 'touched2' objects are kept black,
-** as they cannot point to new objects; exceptions are threads and open
-** upvalues, which age to 'old1' and 'old' but are kept gray. 'old0'
-** objects may be gray or black, as in the incremental mode. 'touched1'
-** objects are kept gray, as they must be visited again at the end of
-** the cycle.
+** Between marking epochs, an old-to-young write claims the owner's age as
+** TOUCHED1, independently of its mark colour. The remembered link survives
+** through TOUCHED2 until its edges have been scanned in the following minor.
+** Gray weak tables and watched threads already own their collection link.
 */
 
 
@@ -304,7 +314,10 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 
 #define luaC_condGC(L,pre,pos) \
     { if (!luaC_ingc(L)) { \
-      if (luaC_needtraceassist(L)) { pre; luaC_assisttrace(L); pos; } \
+      if (luaC_sweeping(L) && gcrunning(G(L)) && \
+          (L)->trace_debt >= LUA_GC_ASSIST_BYTES) \
+        { pre; luaC_pollsweep(L); pos; } \
+      else if (luaC_needtraceassist(L)) { pre; luaC_assisttrace(L); pos; } \
       else { \
         if (gcrunning(G(L)) && luaC_needassist(L)) \
           { pre; luaC_assistreclaim(L); pos; } \
@@ -318,16 +331,26 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
 
+static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
+                                     GCObject *value) {
+  lu_byte marked, referent;
+  if (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE)) return 1;
+  marked = getmarked(owner);
+  if ((marked & AGEBITS) <= G_SURVIVAL && !testbit(marked, BLACKBIT)) return 0;
+  referent = getmarked(value);
+  return ((marked & AGEBITS) > G_SURVIVAL &&
+          (referent & AGEBITS) <= G_SURVIVAL) ||
+         (testbit(marked, BLACKBIT) && testbits(referent, WHITEBITS));
+}
+
 #define luaC_objbarrier(L,p,o) \
-        ((luaC_tracing(L) || (isblack(p) && iswhite(o))) ? \
-         luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 0) : cast_void(0))
+        (luaC_barrierneeded(L, obj2gco(p), obj2gco(o)) ? \
+         luaC_syncbarrier(L, obj2gco(p), obj2gco(o)) : cast_void(0))
 
 #define luaC_barrier(L,p,v) (  \
 	iscollectable(v) ? luaC_objbarrier(L,p,gcvalue(v)) : cast_void(0))
 
-#define luaC_objbarrierback(L,p,o) \
-        ((luaC_tracing(L) || (isblack(p) && iswhite(o))) ? \
-         luaC_syncbarrier(L, obj2gco(p), obj2gco(o), 1) : cast_void(0))
+#define luaC_objbarrierback(L,p,o) luaC_objbarrier(L,p,o)
 
 #define luaC_barrierback(L,p,v) (  \
 	iscollectable(v) ? luaC_objbarrierback(L, p, gcvalue(v)) : cast_void(0))
@@ -337,12 +360,27 @@ LUAI_FUNC void luaC_freeallobjects (lua_State *L);
 LUAI_FUNC void luaC_step (lua_State *L);
 LUAI_FUNC void luaC_runtilstate (lua_State *L, int state, int fast);
 LUAI_FUNC void luaC_fullgc (lua_State *L, int isemergency);
+enum { SWEEP_MAJOR, SWEEP_YOUNG, SWEEP_OLD };
+enum { SWEEP_OBJECTS, SWEEP_THREADS, SWEEP_GRAY, SWEEP_DONE };
+enum { SWEEP_RETRY, SWEEP_LIVE, SWEEP_RETIRED, SWEEP_WATCH };
+#define luaC_sweeping(L) \
+  __atomic_load_n(&G(L)->sweep_plan.active, __ATOMIC_ACQUIRE)
+LUAI_FUNC void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked);
+LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit);
+LUAI_FUNC void luaC_scansweep (lua_State *L, LuaSweepWork *work);
+LUAI_FUNC void luaC_waitsweep (lua_State *L);
+LUAI_FUNC void luaC_pollsweep (lua_State *L);
+LUAI_FUNC int luaC_sweepobject (lua_State *L, GCObject *object, unsigned kind,
+                              l_mem *addedold, unsigned *promoted);
+LUAI_FUNC void luaC_endsweep (lua_State *L);
+LUAI_FUNC int luaC_tryretire (lua_State *L, GCObject *object);
+/* Publish a complete private batch while holding world.mutex. */
+LUAI_FUNC void luaC_publishretired (lua_State *L, LuaGCFrame *frame);
+LUAI_FUNC int luaC_sweepgray (GCObject *object);
 LUAI_FUNC GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz);
 LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
                                                  size_t offset);
-LUAI_FUNC void luaC_barrier_ (lua_State *L, GCObject *o, GCObject *v);
-LUAI_FUNC void luaC_barrierback_ (lua_State *L, GCObject *o);
-LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back);
+LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
 /* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
 /* Private work-list inspection; caller owns quiescent collection. */

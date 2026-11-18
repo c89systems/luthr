@@ -34,6 +34,7 @@ LUAI_FUNC void luaM_releasecache (lua_State *L, struct LuaAllocationCache *cache
 LUAI_FUNC void luaM_reclaimpages (lua_State *L);
 /* Quiescent GC: record unreachable storage independently of physical freeing. */
 LUAI_FUNC void luaM_retire_ (lua_State *L, void *memory, size_t size);
+LUAI_FUNC void luaM_creditretired (lua_State *L, l_mem bytes);
 #define luaM_retirearray(L,b,n) luaM_retire_(L, (b), (n)*sizeof(*(b)))
 
 

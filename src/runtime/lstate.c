@@ -658,7 +658,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->tobefnz_tail = &g->tobefnz;
   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
   g->finobjsur = g->finobjold1 = NULL;
-  g->sweepgc = NULL;
+  memset(&g->sweep_plan, 0, sizeof(g->sweep_plan));
   g->gray = g->grayagain = NULL;
   g->weak = g->ephemeron = g->allweak = NULL;
   g->GCbytes = sizeof(global_State);

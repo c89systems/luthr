@@ -57,8 +57,13 @@
 
 
 /* macro to erase all color bits then set only the current white bit */
-#define makewhite(g,x)	\
-  setmarked(x, cast_byte((getmarked(x) & ~maskcolors) | luaC_white(g)))
+static void makewhite (global_State *g, GCObject *o) {
+  lu_byte marked = getmarked(o), changed;
+  do {
+    changed = cast_byte((marked & ~maskcolors) | luaC_white(g));
+  } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
 
 /* make an object gray (neither white nor black) */
 #define set2gray(x)	resetbits(x->marked, maskcolors)
@@ -97,6 +102,8 @@
 static void reallymarkobject (global_State *g, GCObject *o);
 static int atomic (lua_State *L);
 static lu_mem tracework (lua_State *L, lu_mem budget, int complete);
+static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete);
+static void waitcollection (lua_State *L);
 static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
 static l_mem livebytes (global_State *g);
@@ -106,6 +113,7 @@ static void starttrace (lua_State *L);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
 static void atomic2gen (lua_State *L, global_State *g);
 static int checkmajorminor (lua_State *L, global_State *g);
+static unsigned markold (global_State *g, unsigned limit);
 
 
 
@@ -172,44 +180,6 @@ l_mem luaC_objsize (GCObject *o) {
 }
 
 
-static GCObject **getgclist (GCObject *o) {
-  switch (o->tt) {
-    case LUA_VTABLE: return &gco2t(o)->gclist;
-    case LUA_VLCL: return &gco2lcl(o)->gclist;
-    case LUA_VCCL: return &gco2ccl(o)->gclist;
-    case LUA_VTHREAD: return &gco2th(o)->gclist;
-    case LUA_VPROTO: return &gco2p(o)->gclist;
-    case LUA_VUPVAL: return &gco2upv(o)->gclist;
-    case LUA_VUSERDATA: {
-      Udata *u = gco2u(o);
-      return &u->gclist;
-    }
-    default: lua_assert(0); return 0;
-  }
-}
-
-
-/*
-** Link a collectable object 'o' with a known type into the list 'p'.
-** (Must be a macro to access the 'gclist' field in different types.)
-*/
-#define linkgclist(o,p)	linkgclist_(obj2gco(o), &(o)->gclist, &(p))
-
-static void linkgclist_ (GCObject *o, GCObject **pnext, GCObject **list) {
-  lua_assert(!isgray(o));  /* cannot be in a gray list */
-  *pnext = *list;
-  *list = o;
-  set2gray(o);  /* now it is */
-}
-
-
-/*
-** Link a generic collectable object 'o' into the list 'p'.
-*/
-#define linkobjgclist(o,p) linkgclist_(obj2gco(o), getgclist(o), &(p))
-
-
-
 /*
 ** Clear keys for empty entries in tables. If entry is empty, mark its
 ** entry as dead. This allows the collection of the key, but keeps its
@@ -244,68 +214,11 @@ static int iscleared (LuaTraceWork *work, const GCObject *o) {
 }
 
 
-/*
-** Barrier that moves collector forward, that is, marks the white object
-** 'v' being pointed by the black object 'o'.  In the generational
-** mode, 'v' must also become old, if 'o' is old; however, it cannot
-** be changed directly to OLD, because it may still point to non-old
-** objects. So, it is marked as OLD0. In the next cycle it will become
-** OLD1, and in the next it will finally become OLD (regular old). By
-** then, any object it points to will also be old.  If called in the
-** incremental sweep phase, it clears the black object to white (sweep
-** it) to avoid other barrier calls for this same object. (That cannot
-** be done is generational mode, as its sweep does not distinguish
-** white from dead.)
-*/
-void luaC_barrier_ (lua_State *L, GCObject *o, GCObject *v) {
-  global_State *g = G(L);
-  lua_assert(isblack(o) && iswhite(v) && !isdead(g, v) && !isdead(g, o));
-  if (keepinvariant(g)) {  /* must keep invariant? */
-    reallymarkobject(g, v);  /* restore invariant */
-    if (isold(o)) {
-      lua_assert(!isold(v));  /* white object could not be old */
-      setage(v, G_OLD0);  /* restore generational invariant */
-    }
-  }
-  else {  /* sweep phase */
-    lua_assert(issweepphase(g));
-    if (g->gckind != KGC_GENMINOR)  /* incremental mode? */
-      makewhite(g, o);  /* mark 'o' as white to avoid other barriers */
-  }
-}
-
-
-/*
-** barrier that moves collector backward, that is, mark the black object
-** pointing to a white object as gray again.
-*/
-void luaC_barrierback_ (lua_State *L, GCObject *o) {
-  global_State *g = G(L);
-  lua_assert(isblack(o) && !isdead(g, o));
-  lua_assert((g->gckind != KGC_GENMINOR)
-          || (isold(o) && getage(o) != G_TOUCHED1));
-  if (getage(o) == G_TOUCHED2)  /* already in gray list? */
-    set2gray(o);  /* make it gray to become touched1 */
-  else  /* link it in 'grayagain' and paint it gray */
-    linkobjgclist(o, g->grayagain);
-  if (isold(o))  /* generational mode? */
-    setage(o, G_TOUCHED1);  /* touched in current cycle */
-}
-
-static void applybarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
-  if (isblack(o)) {
-    if (back)
-      luaC_barrierback_(L, o);  /* dirty owner, regardless of first child's color */
-    else if (iswhite(v))
-      luaC_barrier_(L, o, v);
-  }
-}
-
 /* A successful colour claim owns the object's trace link. Strings are leaves
 ** with no gclist; their header link is otherwise unused while collectable. */
 static GCObject **barrierlink (GCObject *o) {
   if (novariant(o->tt) == LUA_TSTRING) return &o->next;
-  return getgclist(o);
+  return luaC_graylink(o);
 }
 
 GCObject *luaC_barriernext (GCObject *o) {
@@ -346,7 +259,7 @@ static void drainthreadbarriers (lua_State *L, lua_State *thread) {
   while (o != NULL) {
     GCObject *next = luaC_barriernext(o);
     lua_assert(isgray(o));
-    *getgclist(o) = g->grayagain;
+    *luaC_graylink(o) = g->grayagain;
     g->grayagain = o;
     o = next;
   }
@@ -366,13 +279,11 @@ void luaC_drainbarriers (lua_State *L) {
     drainthreadbarriers(L, participant->thread);
 }
 
-/* The colour transition claims the object's one work-list link. Other writers
-** observe gray and need no further record. Participation covers the interval
-** from claiming to release-publication, so termination cannot miss a producer.
+/* Marking shades new edges; between minor cycles the owner's age claims its
+** remembered link. Participation covers claim-to-publication in either case.
 ** No allocation, ownership wait or safepoint occurs on this path. */
-void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
+void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
   global_State *g = G(L);
-  GCObject *target = back ? o : v;
   lu_byte marked, claimed;
   if (luaC_tracing(L)) {
     luaC_traceobject(L, v);
@@ -392,28 +303,21 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v, int back) {
     }
     return;
   }
-  if (luaW_iscollector(L)) {
-    applybarrier(L, o, v, back);
+  if (g->gckind == KGC_GENMINOR) {
+    marked = getmarked(o);
+    do {
+      if ((marked & AGEBITS) <= G_SURVIVAL || isold(v) ||
+          (marked & AGEBITS) == G_TOUCHED1) return;
+      claimed = cast_byte((marked & ~(AGEBITS | maskcolors)) | G_TOUCHED1);
+    } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
+                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+    /* Generation tracking is independent of mark colour. TOUCHED2 already
+    ** owns its remembered link, including a sweep batch's private link. */
+    if ((marked & AGEBITS) != G_TOUCHED2 && testbits(marked, maskcolors))
+      publishbarrier(g, &L->barrier_back, o);
     return;
   }
-  if (!back && !keepinvariant(g)) {
-    makewhite(g, o);  /* sweeping needs no referent publication */
-    return;
-  }
-  marked = getmarked(target);
-  do {
-    if (back ? !testbit(marked, BLACKBIT) : !testbits(marked, WHITEBITS))
-      return;
-    claimed = cast_byte(marked & ~maskcolors);
-    if (back && (marked & AGEBITS) > G_SURVIVAL)
-      claimed = cast_byte((claimed & ~AGEBITS) | G_TOUCHED1);
-    else if (!back && isold(o))
-      claimed = cast_byte((claimed & ~AGEBITS) | G_OLD0);
-  } while (!__atomic_compare_exchange_n(&target->marked, &marked, claimed, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-  /* TOUCHED2 is already on grayagain. Its existing link remains authoritative. */
-  if (!back || (marked & AGEBITS) != G_TOUCHED2)
-    publishbarrier(g, back ? &L->barrier_back : &L->barrier_forward, target);
+  makewhite(g, o);
 }
 
 
@@ -436,6 +340,8 @@ void luaC_fix (lua_State *L, GCObject *o) {
   }
   set2gray(o);  /* they will be gray forever */
   setage(o, G_OLD);  /* and old forever */
+  if (luaC_sweeping(L) && G(L)->sweep_plan.append == luaC_alloclink(o))
+    G(L)->sweep_plan.append = link;
   *link = luaC_allocnext(o);
   o->next = g->fixedgc;  /* link it to 'fixedgc' list */
   g->fixedgc = o;
@@ -459,6 +365,8 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   o->next = NULL;
   if (luaW_iscollector(L)) {
     (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
+    if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
+      g->sweep_plan.append = &(cast(LuaAllocBlock *, p) - 1)->block.link.object;
     g->allgc = o;
   }
   else {
@@ -520,13 +428,13 @@ static void linktrace (global_State *g, GCObject *o) {
     nw2black(o);
   }
   else {
-    *getgclist(o) = g->gray;
+    *luaC_graylink(o) = g->gray;
     g->gray = o;
   }
 }
 
 static void queuework (LuaTraceList *list, GCObject *object) {
-  GCObject **next = getgclist(object);
+  GCObject **next = luaC_graylink(object);
   if (list->head == NULL) list->tail = next;
   *next = list->head;
   list->head = object;
@@ -622,7 +530,7 @@ static void starttrace (lua_State *L) {
   global_State *g = G(L);
   l_mem runway, deadline;
   if ((g->gcstp & GCSTPCLS) && !g->gcemergency) return;
-  lua_assert(L->world_depth != 0 && !luaC_tracing(L));
+  lua_assert(L->world_depth != 0 && !luaC_tracing(L) && !luaC_sweeping(L));
   g->trace_epoch++;
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
@@ -630,6 +538,7 @@ static void starttrace (lua_State *L) {
   g->trace_ready = 0;
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
+  g->trace_plan.old = g->trace_plan.old_limit = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
   g->trace_plan.pending = g->tobefnz;
   g->trace_plan.finalizers = NULL;
@@ -704,19 +613,15 @@ static void restartcollection (lua_State *L, global_State *g) {
 
 
 /*
-** Check whether object 'o' should be kept in the 'grayagain' list for
-** post-processing by 'correctgraylist'. (It could put all old objects
-** in the list and leave all the work to 'correctgraylist', but it is
-** more efficient to avoid adding elements that will be removed.) Only
-** TOUCHED1 objects need to be in the list. TOUCHED2 doesn't need to go
-** back to a gray list, but then it must become OLD. (That is what
-** 'correctgraylist' does when it finds a TOUCHED2 object.)
-** This function is a no-op in incremental mode, as objects cannot be
-** marked as touched in that mode.
+** A remembered owner covers two future young traces. Advance its age only
+** after scanning its payload, while tracing barriers cover subsequent writes.
+** Sweeping cannot consume an age: a concurrent write may refer to a NEW
+** allocation outside that sweep's cohort, which still needs both traces.
 */
 static void genlink (LuaTraceWork *work, GCObject *o) {
   lua_assert(isblack(o));
   if (getage(o) == G_TOUCHED1) {  /* touched in this cycle? */
+    setage(o, G_TOUCHED2);
     linkwork(&work->grayagain, o);
   }  /* everything else do not need to be linked back */
   else if (getage(o) == G_TOUCHED2)
@@ -988,6 +893,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     }
     work->marked += cast(l_mem, proto->trace_bytes);
     nw2black(o);
+    genlink(work, o);
     return 1;
   }
   if (o->tt == LUA_VUPVAL) {
@@ -1002,6 +908,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     else tracevalue(work, &upvalue->value);
     work->marked += sizeof(UpVal);
     nw2black(o);
+    genlink(work, o);
     return 1;
   }
   if (!luaW_iscollector(L) && !luaA_tryscan(L, o)) return 0;
@@ -1023,8 +930,10 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     nw2black(o);
     switch (o->tt) {
       case LUA_VUSERDATA: traverseudata(work, gco2u(o)); break;
-      case LUA_VLCL: traverseLclosure(work, gco2lcl(o)); break;
-      case LUA_VCCL: traverseCclosure(work, gco2ccl(o)); break;
+      case LUA_VLCL:
+        traverseLclosure(work, gco2lcl(o)); genlink(work, o); break;
+      case LUA_VCCL:
+        traverseCclosure(work, gco2ccl(o)); genlink(work, o); break;
       default: lua_assert(0); break;
     }
   }
@@ -1100,7 +1009,7 @@ static void readytrace (lua_State *L) {
   __atomic_store_n(&g->trace_ready,
     g->gray != NULL || g->trace_deferred != NULL ||
     plan->next != NULL || plan->deferred != NULL ||
-    plan->pending != NULL || plan->finalizers != NULL ||
+    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL ||
     __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
     __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
     __ATOMIC_RELEASE);
@@ -1145,8 +1054,8 @@ static unsigned discoverfinalizers (global_State *g, unsigned limit) {
       ** so in an earlier batch could hide another unreachable finalizable
       ** object and defer its callback to a later collection. */
       if (plan->finalizer_gray == NULL)
-        plan->finalizer_tail = getgclist(object);
-      *getgclist(object) = plan->finalizer_gray;
+        plan->finalizer_tail = luaC_graylink(object);
+      *luaC_graylink(object) = plan->finalizer_gray;
       plan->finalizer_gray = object;
     }
   }
@@ -1168,7 +1077,17 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   work->global = g;
   if (!luaC_tracing(L)) return;
   luaC_drainbarriers(L);
-  if (plan->phase == TRACE_PENDING)
+  if (plan->phase == TRACE_OLD) {
+    work->scanned += markold(g, limit) * sizeof(GCObject);
+    /* Complete this bounded metadata walk before any old thread's gray
+    ** payload can be claimed and put back on its watched-thread list. */
+    if (plan->old == NULL)
+      __atomic_store_n(&plan->phase,
+        plan->pending != NULL ? TRACE_PENDING : TRACE_MARK, __ATOMIC_RELEASE);
+    readytrace(L);
+    return;
+  }
+  else if (plan->phase == TRACE_PENDING)
     work->scanned += pendingfinalizers(g, limit) * sizeof(GCObject);
   else if (plan->phase == TRACE_FINALIZERS)
     work->scanned += discoverfinalizers(g, limit) * sizeof(GCObject);
@@ -1180,7 +1099,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   work->phase = TRACE_MARK;
   while (g->gray != NULL && work->count < limit) {
     GCObject *object = g->gray;
-    g->gray = *getgclist(object);
+    g->gray = *luaC_graylink(object);
     work->objects[work->count++] = object;
   }
   if (work->count == 0 &&
@@ -1193,7 +1112,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
       GCObject *object;
       if (plan->next != NULL) {
         object = plan->next;
-        plan->next = *getgclist(object);
+        plan->next = *luaC_graylink(object);
       }
       else object = takeweak(&plan->deferred, &plan->tail);
       work->objects[work->count++] = object;
@@ -1230,7 +1149,7 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   /* Consume locally produced edges before returning to the shared queue. */
   while (work->gray.head != NULL && attempted++ < limit) {
     GCObject *object = work->gray.head;
-    work->gray.head = *getgclist(object);
+    work->gray.head = *luaC_graylink(object);
     if (!scantrace(L, work, object)) queuework(&work->deferred, object);
   }
 }
@@ -1331,41 +1250,68 @@ static int trimstacks (lua_State *L) {
 
 
 /*
-** sweep at most 'countin' elements from a list of GCObjects erasing dead
-** objects, where a dead object is one marked with the old (non current)
-** white; change all non-dead objects back to white (and new), preparing
-** for next collection cycle. Return where to continue the traversal or
-** NULL if list is finished.
+** Classify one exclusively claimed record. Death uses the completed mark's
+** old white; live records advance with a CAS that preserves mutator barriers.
 */
-static GCObject **sweeplist (lua_State *L, GCObject **p, l_mem countin) {
+int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
+                       l_mem *addedold, unsigned *promoted) {
+  static const lu_byte nextage[] = {
+    G_SURVIVAL, G_OLD1, G_OLD1, G_OLD, G_OLD, G_TOUCHED1, G_TOUCHED2
+  };
   global_State *g = G(L);
-  int ow = otherwhite(g);
-  int white = luaC_white(g);  /* current white */
-  while (*p != NULL && countin-- > 0) {
-    GCObject *curr = *p;
-    int marked = curr->marked;
-    if (isdeadm(ow, marked)) {  /* is 'curr' dead? */
-      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
-      luaC_retireobject(L, curr);
-    }
-    else {  /* change mark to 'white' and age to 'new' */
-      curr->marked = cast_byte((marked & ~maskgcbits) | white | G_NEW);
-      p = luaC_alloclink(curr);  /* go to next element */
-    }
+  lu_byte marked, changed;
+  l_mem bytes = 0;
+  int locked = 0, watching = 0;
+  if (isdead(g, o)) {
+    int retired = luaC_tryretire(L, o);
+    if (retired != SWEEP_LIVE) return retired;
   }
-  return (*p == NULL) ? NULL : p;
-}
-
-
-/*
-** sweep a list until a live object (or end of list)
-*/
-static GCObject **sweeptolive (lua_State *L, GCObject **p) {
-  GCObject **old = p;
+  marked = getmarked(o);
+  if (kind == SWEEP_YOUNG &&
+      ((marked & AGEBITS) == G_SURVIVAL || (marked & AGEBITS) == G_OLD0)) {
+    if (o->tt == LUA_VTABLE && !luaW_iscollector(L)) {
+      if (!luaA_tryscan(L, o)) return SWEEP_RETRY;
+      locked = 1;
+    }
+    /* A root or builder can keep changing its storage after its snapshot.
+    ** Promotion accounting uses that cycle's stable scanned size. */
+    if (o->tt == LUA_VTHREAD) bytes = cast(l_mem, gco2th(o)->trace_bytes);
+    else if (o->tt == LUA_VPROTO) bytes = cast(l_mem, gco2p(o)->trace_bytes);
+    else bytes = luaC_objsize(o);
+  }
   do {
-    p = sweeplist(L, p, 1);
-  } while (p == old);
-  return p;
+    unsigned age = marked & AGEBITS;
+    watching = 0;
+    if (kind == SWEEP_MAJOR)
+      changed = cast_byte((marked & ~maskgcbits) | luaC_white(g));
+    else if (kind == SWEEP_YOUNG && age == G_NEW)
+      changed = cast_byte((marked & ~maskgcbits) | G_SURVIVAL | luaC_white(g));
+    else {
+      unsigned next = kind == SWEEP_YOUNG ? nextage[age]
+        : age >= G_TOUCHED1 ? age : G_OLD1;
+      changed = cast_byte((marked & ~AGEBITS) | next);
+      if (kind == SWEEP_OLD && testbits(marked, maskcolors))
+        changed = cast_byte((changed & ~maskcolors) | bitmask(BLACKBIT));
+      else if (o->tt == LUA_VSHRSTR)
+        /* Interning can resurrect a dead leaf after marking. Promotion must
+        ** make that survivor black, just like a leaf found by tracing. */
+        changed = cast_byte((changed & ~maskcolors) | bitmask(BLACKBIT));
+      if (o->tt == LUA_VTHREAD && next > G_SURVIVAL &&
+          testbits(changed, maskcolors)) {
+        changed = cast_byte(changed & ~maskcolors);
+        watching = 1;
+      }
+    }
+  } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  if (locked) luaA_endscan(L, o);
+  if (kind == SWEEP_YOUNG && (changed & AGEBITS) == G_OLD1) {
+    /* A builder born black can promote before its first size snapshot. Its
+    ** next-cycle scan is mandatory even when its accounted size is zero. */
+    *promoted = 1;
+    *addedold += bytes;
+  }
+  return watching ? SWEEP_WATCH : SWEEP_LIVE;
 }
 
 /* }====================================================== */
@@ -1499,6 +1445,8 @@ void luaC_publish (lua_State *L) {
     luaM_flushdebt(L, thread);
     if (thread->new_objects != NULL) {
       luaC_allocnext(thread->new_objects_tail) = g->allgc;
+      if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
+        g->sweep_plan.append = luaC_alloclink(thread->new_objects_tail);
       g->allgc = thread->new_objects;
       thread->new_objects = thread->new_objects_tail = NULL;
     }
@@ -1580,164 +1528,28 @@ static void setidledebt (global_State *g) {
 
 
 /*
-** Sweep a list of objects to enter generational mode.  Deletes dead
-** objects and turns the non dead to old. All non-dead threads---which
-** are now old---must be in a gray list. Everything else is not in a
-** gray list. Open upvalues are also kept gray.
-*/
-static void sweep2old (lua_State *L, GCObject **p) {
-  GCObject *curr;
-  global_State *g = G(L);
-  while ((curr = *p) != NULL) {
-    if (iswhite(curr)) {  /* is 'curr' dead? */
-      lua_assert(isdead(g, curr));
-      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
-      luaC_retireobject(L, curr);
-    }
-    else {  /* all surviving objects become old */
-      setage(curr, G_OLD);
-      if (curr->tt == LUA_VTHREAD) {  /* threads must be watched */
-        lua_State *th = gco2th(curr);
-        linkgclist(th, g->grayagain);  /* insert into 'grayagain' list */
-      }
-      else  /* everything else is black */
-        nw2black(curr);
-      p = luaC_alloclink(curr);  /* go to next element */
-    }
-  }
-}
-
-
-/*
-** Sweep for generational mode. Delete dead objects. (Because the
-** collection is not incremental, there are no "new white" objects
-** during the sweep. So, any white object must be dead.) For
-** non-dead objects, advance their ages and clear the color of
-** new objects. (Old objects keep their colors.)
-** The ages of G_TOUCHED1 and G_TOUCHED2 objects cannot be advanced
-** here, because these old-generation objects are usually not swept
-** here.  They will all be advanced in 'correctgraylist'. That function
-** will also remove objects turned white here from any gray list.
-*/
-static GCObject **sweepgen (lua_State *L, global_State *g, GCObject **p,
-                            GCObject *limit, GCObject **pfirstold1,
-                            l_mem *paddedold) {
-  static const lu_byte nextage[] = {
-    G_SURVIVAL,  /* from G_NEW */
-    G_OLD1,      /* from G_SURVIVAL */
-    G_OLD1,      /* from G_OLD0 */
-    G_OLD,       /* from G_OLD1 */
-    G_OLD,       /* from G_OLD (do not change) */
-    G_TOUCHED1,  /* from G_TOUCHED1 (do not change) */
-    G_TOUCHED2   /* from G_TOUCHED2 (do not change) */
-  };
-  l_mem addedold = 0;
-  int white = luaC_white(g);
-  GCObject *curr;
-  while ((curr = *p) != limit) {
-    if (iswhite(curr)) {  /* is 'curr' dead? */
-      lua_assert(!isold(curr) && isdead(g, curr));
-      *p = luaC_allocnext(curr);  /* remove 'curr' from list */
-      luaC_retireobject(L, curr);
-    }
-    else {  /* correct mark and age */
-      int age = getage(curr);
-      if (age == G_NEW) {  /* new objects go back to white */
-        int marked = curr->marked & ~maskgcbits;  /* erase GC bits */
-        curr->marked = cast_byte(marked | G_SURVIVAL | white);
-      }
-      else {  /* all other objects will be old, and so keep their color */
-        lua_assert(age != G_OLD1);  /* advanced in 'markold' */
-        setage(curr, nextage[age]);
-        if (getage(curr) == G_OLD1) {
-          addedold += luaC_objsize(curr);  /* bytes becoming old */
-          if (*pfirstold1 == NULL)
-            *pfirstold1 = curr;  /* first OLD1 object in the list */
-        }
-      }
-      p = luaC_alloclink(curr);  /* go to next element */
-    }
-  }
-  *paddedold += addedold;
-  return p;
-}
-
-
-/*
-** Correct a list of gray objects. Return a pointer to the last element
-** left on the list, so that we can link another list to the end of
-** this one.
-** Because this correction is done after sweeping, young objects might
-** be turned white and still be in the list. They are only removed.
-** 'TOUCHED1' objects are advanced to 'TOUCHED2' and remain on the list;
-** Non-white threads also remain on the list. 'TOUCHED2' objects and
-** anything else become regular old, are marked black, and are removed
-** from the list.
-*/
-static GCObject **correctgraylist (GCObject **p) {
-  GCObject *curr;
-  while ((curr = *p) != NULL) {
-    GCObject **next = getgclist(curr);
-    if (iswhite(curr))
-      goto remove;  /* remove all white objects */
-    else if (getage(curr) == G_TOUCHED1) {  /* touched in this cycle? */
-      lua_assert(isgray(curr));
-      nw2black(curr);  /* make it black, for next barrier */
-      setage(curr, G_TOUCHED2);
-      goto remain;  /* keep it in the list and go to next element */
-    }
-    else if (curr->tt == LUA_VTHREAD) {
-      lua_assert(isgray(curr));
-      goto remain;  /* keep non-white threads on the list */
-    }
-    else {  /* everything else is removed */
-      lua_assert(isold(curr));  /* young objects should be white here */
-      if (getage(curr) == G_TOUCHED2)  /* advance from TOUCHED2... */
-        setage(curr, G_OLD);  /* ... to OLD */
-      nw2black(curr);  /* make object black (to be removed) */
-      goto remove;
-    }
-    remove: *p = *next; continue;
-    remain: p = next; continue;
-  }
-  return p;
-}
-
-
-/*
-** Correct all gray lists, coalescing them into 'grayagain'.
-*/
-static void correctgraylists (global_State *g) {
-  GCObject **list = correctgraylist(&g->grayagain);
-  *list = g->weak; g->weak = NULL;
-  list = correctgraylist(list);
-  *list = g->allweak; g->allweak = NULL;
-  list = correctgraylist(list);
-  *list = g->ephemeron; g->ephemeron = NULL;
-  correctgraylist(list);
-}
-
-
-/*
 ** Mark black 'OLD1' objects when starting a new young collection.
 ** Gray objects are already in some gray list, and so will be visited in
 ** the atomic step.
 */
-static void markold (global_State *g, GCObject *from, GCObject *to) {
-  GCObject *p;
-  for (p = from; p != to; p = luaC_allocnext(p)) {
+static unsigned markold (global_State *g, unsigned limit) {
+  LuaTracePlan *plan = &g->trace_plan;
+  unsigned count = 0;
+  while (plan->old != NULL && plan->old != plan->old_limit && count < limit) {
+    GCObject *p = plan->old;
+    plan->old = luaC_allocnext(p);
+    count++;
     if (getage(p) == G_OLD1) {
       lua_assert(!iswhite(p));
       setage(p, G_OLD);  /* now they are old */
       if (isblack(p)) {
-        if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED)) {
-          set2gray(p);
-          linktrace(g, p);
-        }
-        else reallymarkobject(g, p);
+        set2gray(p);
+        linktrace(g, p);
       }
     }
   }
+  if (plan->old == plan->old_limit) plan->old = NULL;
+  return count;
 }
 
 
@@ -1748,7 +1560,6 @@ static void finishgencycle (lua_State *L, global_State *g) {
   l_mem live = g->GCcyclelive;
   l_mem growth = applygcparam(g, MINORMUL, g->GCmajorlive);
   g->GCgoal = growth > MAX_LMEM - live ? MAX_LMEM : live + growth;
-  correctgraylists(g);
   checkSizes(L, g);
   g->gcstate = GCSpropagate;  /* skip restart */
   if (g->tobefnz != NULL && !g->gcemergency && luaD_checkminstack(L))
@@ -1793,38 +1604,15 @@ static void startyoungcollection (lua_State *L, global_State *g) {
   lua_assert(g->gcstate == GCSpropagate);
   starttrace(L);
   if (g->firstold1) {  /* are there regular OLD1 objects? */
-    markold(g, g->firstold1, g->reallyold);  /* mark them */
+    g->trace_plan.old = g->firstold1;
+    g->trace_plan.old_limit = g->reallyold;
     g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
   }
 }
 
 static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
-  l_mem addedold1 = 0;
-  GCObject **psurvival;
-  /* sweep nursery and get a pointer to its last live element */
-  g->gcstate = GCSswpallgc;
-  psurvival = sweepgen(L, g, &g->allgc, g->survival, &g->firstold1, &addedold1);
-  /* sweep 'survival' */
-  sweepgen(L, g, psurvival, g->old1, &g->firstold1, &addedold1);
-  g->reallyold = g->old1;
-  g->old1 = *psurvival;  /* 'survival' survivals are old now */
-  g->survival = g->allgc;  /* all news are survivals */
-
-  /* Every finalizable object was aged once by the allocation sweep. Only
-  ** advance the registration index's discovery boundaries here. */
-  g->finobjold1 = g->finobjsur;
-  g->finobjsur = g->finobj;  /* all news are survivals */
-
-  /* keep total number of added old1 bytes */
-  g->GCmarked = marked + addedold1;
-
-  /* decide whether to shift to major mode */
-  if (checkminormajor(g)) {
-    minor2inc(L, g, KGC_GENMAJOR);  /* go to major mode */
-    g->GCmarked = 0;  /* fresh accounting for the forthcoming major */
-  }
-  else
-    finishgencycle(L, g);  /* still in minor mode; finish it */
+  UNUSED(g);
+  luaC_beginsweep(L, SWEEP_YOUNG, marked);
 }
 
 
@@ -1835,22 +1623,90 @@ static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
 ** else is turned black (not in any gray list).
 */
 static void atomic2gen (lua_State *L, global_State *g) {
-  cleargraylists(g);
-  /* sweep all elements making them old */
-  g->gcstate = GCSswpallgc;
-  sweep2old(L, &g->allgc);
-  /* everything alive now is old */
-  g->reallyold = g->old1 = g->survival = g->allgc;
-  g->firstold1 = NULL;  /* there are no OLD1 objects anywhere */
+  luaC_beginsweep(L, SWEEP_OLD, g->GCmarked);
+}
 
-  /* Finalizer membership shares the already-swept allocation population. */
-  g->finobjold1 = g->finobjsur = g->finobj;
+int luaC_sweepgray (GCObject *o) {
+  lu_byte marked = getmarked(o), changed;
+  int keep;
+  do {
+    unsigned age = marked & AGEBITS;
+    if (testbits(marked, WHITEBITS)) return 0;
+    keep = age == G_TOUCHED1 || age == G_TOUCHED2 || o->tt == LUA_VTHREAD;
+    changed = cast_byte((marked & ~maskcolors) | bitmask(BLACKBIT));
+    if (o->tt == LUA_VTHREAD) changed = cast_byte(changed & ~maskcolors);
+  } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  return keep;
+}
 
-  g->gckind = KGC_GENMINOR;
-  g->GCmajorlive = livebytes(g);
-  g->GCmajorminor = g->GCmarked;  /* "base" for number of bytes */
-  g->GCmarked = 0;  /* to count the number of added old1 bytes */
+void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
+  unsigned i;
+  work->tail[0] = &work->live[0];
+  work->tail[1] = &work->live[1];
+  for (i = 0; i < work->count; i++) {
+    GCObject *object = work->objects[i];
+    unsigned region = work->regions[i];
+    int result;
+    if (work->phase == SWEEP_GRAY) {
+      if (luaC_sweepgray(object)) queuework(&work->watch, object);
+      continue;
+    }
+    if (work->phase == SWEEP_OBJECTS && object->tt == LUA_VTHREAD &&
+        isdead(G(L), object)) {
+      luaC_allocnext(object) = work->threads;
+      work->threads = object;
+      continue;
+    }
+    result = luaC_sweepobject(L, object, work->kind, &work->addedold,
+                              &work->promoted);
+    if (result == SWEEP_RETRY) {
+      GCObject **retry = work->phase == SWEEP_THREADS
+        ? &work->threads : &work->retry[region];
+      luaC_allocnext(object) = *retry;
+      *retry = object;
+    }
+    else if (result != SWEEP_RETIRED) {
+      *work->tail[region] = object;
+      work->tail[region] = luaC_alloclink(object);
+      *work->tail[region] = NULL;
+      if (result == SWEEP_WATCH) queuework(&work->watch, object);
+    }
+  }
+}
+
+void luaC_endsweep (lua_State *L) {
+  global_State *g = G(L);
+  LuaSweepPlan *plan = &g->sweep_plan;
+  if (plan->kind == SWEEP_MAJOR) {
+    g->gcstate = GCSswpend;
+    luaE_setdebt(g, 0);
+    return;
+  }
+  /* Joining the lists also fills empty band heads with the following band. */
+  g->survival = plan->live[0];
+  g->old1 = plan->kind == SWEEP_YOUNG ? plan->live[1] : plan->live[0];
+  g->reallyold = plan->kind == SWEEP_YOUNG ? plan->limit : NULL;
+  g->firstold1 = plan->kind == SWEEP_OLD || plan->promoted
+    ? plan->live[0] : NULL;
+  g->finobjsur = plan->finhead;
+  g->finobjold1 = plan->kind == SWEEP_YOUNG ? plan->finsurvival : plan->finhead;
+  if (plan->kind == SWEEP_YOUNG) {
+    g->GCmarked = plan->base_marked + plan->addedold;
+    if (checkminormajor(g)) {
+      minor2inc(L, g, KGC_GENMAJOR);
+      g->GCmarked = 0;
+      return;
+    }
+  }
+  else {
+    g->GCmajorlive = livebytes(g);
+    g->GCmajorminor = plan->base_marked;
+    g->GCmarked = 0;
+  }
+  L->reclaim_pages = 1;
   finishgencycle(L, g);
+  setidledebt(g);
 }
 
 
@@ -1877,6 +1733,7 @@ static void entergen (lua_State *L, global_State *g) {
   luaC_runtilstate(L, GCSpropagate, 1);
   g->trace_plan.finish = TRACE_GENERATIONAL;
   atomic(L);
+  luaC_waitsweep(L);
   L->reclaim_pages = 1;
 }
 
@@ -1886,6 +1743,7 @@ static void entergen (lua_State *L, global_State *g) {
 */
 void luaC_changemode (lua_State *L, int newmode) {
   global_State *g = G(L);
+  waitcollection(L);
   if (g->gckind == KGC_GENMAJOR)  /* doing major collections? */
     g->gckind = KGC_INC;  /* already incremental but in name */
   if (newmode != g->gckind) {  /* does it need to change? */
@@ -1896,6 +1754,7 @@ void luaC_changemode (lua_State *L, int newmode) {
       entergen(L, g);
     }
   }
+  luaC_waitsweep(L);
 }
 
 
@@ -1923,7 +1782,6 @@ static int checkmajorminor (lua_State *L, global_State *g) {
     l_mem tobecollected = numbytes - g->GCmarked;
     if (tobecollected > limit) {
       atomic2gen(L, g);  /* return to generational mode */
-      setidledebt(g);
       return 1;  /* exit incremental collection */
     }
   }
@@ -1942,18 +1800,12 @@ static int checkmajorminor (lua_State *L, global_State *g) {
 
 
 /*
-** Enter first sweep phase.
-** The call to 'sweeptolive' makes the pointer point to an object
-** inside the list (instead of to the header), so that the real sweep do
-** not need to skip objects created between "now" and the start of the
-** real sweep.
+** Detach the completed mark's cohort. Later publications stay outside it.
 */
 static void entersweep (lua_State *L) {
   global_State *g = G(L);
   g->GCcyclelive = livebytes(g);
-  g->gcstate = GCSswpallgc;
-  lua_assert(g->sweepgc == NULL);
-  g->sweepgc = sweeptolive(L, &g->allgc);
+  luaC_beginsweep(L, SWEEP_MAJOR, g->GCmarked);
 }
 
 
@@ -1987,6 +1839,7 @@ void luaC_freeallobjects (lua_State *L) {
     g->gcemergency = emergency;
   }
   luaC_changemode(L, KGC_INC);
+  luaC_waitsweep(L);
   separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
   callallpendingfinalizers(L);
@@ -2008,7 +1861,8 @@ void luaC_initialtrace (lua_State *L) {
   lua_assert(g->ephemeron == NULL && g->weak == NULL);
   lua_assert(!iswhite(mainthread(g)));
   g->gcstate = GCSatomic;
-  g->trace_plan.phase = g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
+  g->trace_plan.phase = g->trace_plan.old != NULL ? TRACE_OLD
+    : g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
   markobject(g, L);  /* mark running thread */
   marknativeframes(g);
   /* registry and global metatables may be changed by API */
@@ -2037,11 +1891,9 @@ void luaC_finishtrace (lua_State *L) {
   lua_assert(g->gray == NULL);
   if (finish == TRACE_YOUNG) {
     finishyoung(L, g, marked);
-    setidledebt(g);
   }
   else if (finish == TRACE_GENERATIONAL) {
     atomic2gen(L, g);
-    setidledebt(g);
     L->reclaim_pages = 1;
   }
   else if (!checkmajorminor(L, g))
@@ -2114,17 +1966,83 @@ static int atomic (lua_State *L) {
   return g->trace_epoch == epoch;
 }
 
+/* Each slice returns all claimed records before a poll or ownership handoff.
+** Explicit and emergency callers pay the complete job; allocation assists and
+** VM polls can supply bounded work without retaining a driver. */
+static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete) {
+  global_State *g = G(L);
+  uint64_t epoch = g->sweep_plan.epoch;
+  lu_mem worked = 0;
+  int quiescent = g->gcemergency || L->object_scopes != NULL ||
+                  luaW_scope(L).heap != 0;
+  LuaWorldScope scope = {0, 0};
+  if (!quiescent) {
+    if (L->world_depth != 0) g->gcstopem = 0;
+    scope = luaW_suspend(L);
+  }
+  while (luaC_sweeping(L) && g->sweep_plan.epoch == epoch) {
+    lu_mem done = luaC_sweepbatch(L, LUA_TRACE_BATCH);
+    worked = done > cast(lu_mem, MAX_LMEM) - worked
+      ? cast(lu_mem, MAX_LMEM) : worked + done;
+    if (!complete && (worked >= budget || done == 0)) break;
+    if (!quiescent) {
+      luaX_pollrequests(L);
+      luaQ_poll(L);
+      if (done == 0) {
+        luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+        if (luaC_sweeping(L) && g->sweep_plan.busy != 0)
+          luaW_waitcollector(L);
+        luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+      }
+    }
+  }
+  if (!quiescent) luaW_restore(L, scope, L->native_depth);
+  return worked;
+}
+
+void luaC_waitsweep (lua_State *L) {
+  LuaGCFrame frame;
+  if (!luaC_sweeping(L)) return;
+  luaC_entergc(L, &frame);
+  while (luaC_sweeping(L)) sweepwork(L, cast(lu_mem, MAX_LMEM), 1);
+  luaC_leavegc(L, &frame);
+}
+
+/* Restoring a caller's quiescent scope can admit a later cycle before the
+** scope is reacquired. Recheck both shared jobs before changing collector
+** mode; draining marking and sweeping only once leaves that handoff open. */
+static void waitcollection (lua_State *L) {
+  while (luaC_tracing(L) || luaC_sweeping(L)) {
+    if (luaC_tracing(L)) atomic(L);
+    luaC_waitsweep(L);
+  }
+}
+
+void luaC_pollsweep (lua_State *L) {
+  LuaGCFrame frame;
+  lu_mem budget;
+  if (!luaC_sweeping(L) || !gcrunning(G(L)) || luaC_ingc(L) ||
+      L->reclaiming || L->object_scopes != NULL || luaW_scope(L).heap != 0)
+    return;
+  budget = L->trace_debt >= LUA_GC_ASSIST_BYTES ? L->trace_debt : 1;
+  luaC_entergc(L, &frame);
+  {
+    lu_mem worked = sweepwork(L, budget, 0);
+    L->trace_debt = worked >= L->trace_debt ? 0 : L->trace_debt - worked;
+  }
+  if (luaC_retired(L) != NULL || L->reclaim_pages) luaC_reclaim(L);
+  luaC_leavegc(L, &frame);
+}
+
 
 /*
 ** Do a sweep step. The normal case (not fast) sweeps at most GCSWEEPMAX
 ** elements. The fast case sweeps the whole list.
 */
-static void sweepstep (lua_State *L, global_State *g, int fast) {
-  if (g->sweepgc)
-    g->sweepgc = sweeplist(L, g->sweepgc, fast ? MAX_LMEM : GCSWEEPMAX);
-  else {  /* enter next state */
-    g->gcstate = GCSswpend;
-  }
+static int sweepstep (lua_State *L, global_State *g, int fast) {
+  uint64_t interrupted = g->trace_interrupt, epoch = g->trace_epoch;
+  sweepwork(L, GCSWEEPMAX * sizeof(GCObject), fast);
+  return interrupted == g->trace_interrupt && epoch == g->trace_epoch;
 }
 
 
@@ -2170,8 +2088,7 @@ static l_mem singlestep (lua_State *L, int fast) {
       break;
     }
     case GCSswpallgc: {  /* sweep every allocation exactly once */
-      sweepstep(L, g, fast);
-      stepresult = GCSWEEPMAX;
+      stepresult = sweepstep(L, g, fast) ? GCSWEEPMAX : stepinterrupted;
       break;
     }
     case GCSswpend: {  /* finish sweeps */
@@ -2279,6 +2196,33 @@ void luaC_step (lua_State *L) {
   int reclaim = 0;
   int claimed = 0;
   l_mem debt;
+  if (luaC_sweeping(L)) {
+    l_mem stepsize = applygcparam(g, STEPSIZE, 100);
+    l_mem allocated = stepsize;
+    l_mem outstanding = L->world_depth == 0
+      ? __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) : 0;
+    lu_mem budget;
+    if (stepsize != 0 && outstanding < 0)
+      allocated = stepsize > MAX_LMEM + outstanding
+        ? MAX_LMEM : stepsize - outstanding;
+    budget = cast(lu_mem, applygcparam(g, STEPMUL, allocated));
+    uint64_t trace_epoch = g->trace_epoch;
+    if ((!gcrunning(g) && !luaC_ingc(L)) ||
+        (L->world_depth == 0 &&
+         (L->object_scopes != NULL || luaW_scope(L).heap != 0))) return;
+    luaC_entergc(L, &frame);
+    sweepwork(L, budget, budget == 0);
+    if (budget == 0 && g->trace_epoch == trace_epoch &&
+        g->gckind != KGC_GENMINOR && g->gcstate != GCSpause) {
+      luaW_stop(L);
+      luaC_runtilstate(L, GCSpause, 1);
+      luaW_start(L);
+    }
+    luaC_leavegc(L, &frame);
+    if (!L->reclaiming && L->world_depth == 0 &&
+        (luaC_retired(L) != NULL || L->reclaim_pages)) luaC_reclaim(L);
+    return;
+  }
   if (luaC_tracing(L)) { luaC_assisttrace(L); return; }
   if (L->world_depth == 0 &&
       (L->object_scopes != NULL || luaW_scope(L).heap != 0)) return;
@@ -2300,7 +2244,7 @@ void luaC_step (lua_State *L) {
   ** Include unpublished local debt, just like the allocation-side check.
   ** Explicit API steps set their debt while already owning the collector. */
   luaW_collectenter(L);
-  if (luaC_tracing(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
+  if (luaC_tracing(L) || luaC_sweeping(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
       !luaC_needstep(L)) {
     luaW_heapleave(L);
     goto done;
@@ -2331,8 +2275,8 @@ void luaC_step (lua_State *L) {
       epoch = g->trace_epoch;
       tracework(L, cast(lu_mem, budget), budget == 0);
       if (g->trace_epoch != epoch) break;
-      if (!luaC_tracing(L)) setidledebt(g);
-      reclaim = !luaC_tracing(L);
+      if (!luaC_tracing(L) && !luaC_sweeping(L)) setidledebt(g);
+      reclaim = !luaC_tracing(L) && !luaC_sweeping(L);
       break;
     }
   }
@@ -2389,19 +2333,19 @@ void luaC_fullgc (lua_State *L, int isemergency) {
   lua_assert(!g->gcemergency);
   interrupted = g->trace_interrupt;
   g->gcemergency = cast_byte(isemergency);  /* set flag */
-  if (luaC_tracing(L)) {
-    if (isemergency) {
-      g->trace_interrupt++;
-      L->trace_snapshot = 0;
-      luaC_snapshot(L, L);
-    }
-    atomic(L);
+  if (isemergency && luaC_sweeping(L)) g->trace_interrupt++;
+  if (isemergency && luaC_tracing(L)) {
+    g->trace_interrupt++;
+    L->trace_snapshot = 0;
+    luaC_snapshot(L, L);
   }
+  waitcollection(L);
   kind = g->gckind;
   switch (kind) {
     case KGC_GENMINOR: fullgen(L, g); break;
     case KGC_INC: case KGC_GENMAJOR: fullinc(L, g); break;
   }
+  luaC_waitsweep(L);
   L->reclaim_pages = 1;
   /* An allocation retry may still borrow its caller's stack/object storage.
   ** Finish emergency destruction before relinquishing that quiescent scope. */

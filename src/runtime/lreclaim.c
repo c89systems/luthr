@@ -5,7 +5,9 @@
 #define lreclaim_c
 #define LUA_CORE
 #include "lprefix.h"
+#include <errno.h>
 
+#include "laccess.h"
 #include "lfunc.h"
 #include "lgc.h"
 #include "lmem.h"
@@ -74,28 +76,15 @@ static void freeobj (lua_State *L, GCObject *o) {
   }
 }
 
-/* Retire only after tracing and weak processing establish unreachability.
-** Unlink shared indexes and stack bindings while participants are quiescent;
-** destruction afterwards touches only privately owned storage. In particular,
-** a later collection must never scan a retired coroutine's half-freed stack. */
-void luaC_retireobject (lua_State *L, GCObject *o) {
-  if (o->tt == LUA_VSHRSTR)
-    luaS_remove(L, gco2ts(o));
-  else if (o->tt == LUA_VUPVAL) {
-    UpVal *uv = gco2upv(o);
-    if (upisopen(uv)) {
-      luaF_unlinkupval(uv);
-      uv->owner = NULL;
-    }
-  }
-  else if (o->tt == LUA_VTHREAD) {
-    lua_State *thread = gco2th(o);
+/* The caller owns the dead coroutine's gate, or complete quiescence. */
+static void retirethreadlinks (lua_State *L, lua_State *thread) {
     lua_assert(thread != L && thread->native_depth == 0);
     luaM_releasecache(L, &thread->allocation);
     luaF_closeupval(thread, thread->stack.p);
     luaW_unregister(thread);
     if (thread->reclaim_pages) L->reclaim_pages = 1;
     /* An abandoned protected collection may leave private garbage behind. */
+    luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
     if (luaC_retired(thread) != NULL) {
       thread->retired_tail->next = luaC_retired(L);
       if (luaC_retired(L) == NULL) L->retired_tail = thread->retired_tail;
@@ -104,12 +93,34 @@ void luaC_retireobject (lua_State *L, GCObject *o) {
       thread->retired_tail = NULL;
     }
     if (thread->reclaim_registered) {
-      luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
       lua_assert(thread->reclaim_workers == 0);
       unregisterreclaimer(thread, &G(L)->world);
-      luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
     }
+    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+}
+
+static void publishgarbage (lua_State *L, GCObject *head, GCObject *tail) {
+  if (L->retired_tail != NULL) L->retired_tail->next = head;
+  else __atomic_store_n(&L->retired, head, __ATOMIC_RELEASE);
+  L->retired_tail = tail;
+  if (!(G(L)->gcstp & GCSTPCLS) && !L->reclaim_registered)
+    registerreclaimer(L, &G(L)->world);
+}
+
+void luaC_publishretired (lua_State *L, LuaGCFrame *frame) {
+  /* Credits precede queue visibility: physical helpers may immediately return
+  ** any published block. Publish accounting once for the whole private batch. */
+  if (frame->retired_bytes != 0) {
+    luaM_creditretired(L, frame->retired_bytes);
+    frame->retired_bytes = 0;
   }
+  if (frame->retired == NULL) return;
+  publishgarbage(L, frame->retired, frame->retired_tail);
+  frame->retired = frame->retired_tail = NULL;
+}
+
+static void retirestorage (lua_State *L, GCObject *o) {
+  LuaGCFrame *frame = luaC_gcframe();
   switch (o->tt) {
     case LUA_VPROTO: luaF_retireproto(L, gco2p(o)); break;
     case LUA_VTABLE: luaH_retire(L, gco2t(o)); break;
@@ -117,16 +128,87 @@ void luaC_retireobject (lua_State *L, GCObject *o) {
     default: luaM_retire_(L, o, cast_sizet(luaC_objsize(o))); break;
   }
   o->next = NULL;
-  if (L->retired_tail != NULL) L->retired_tail->next = o;
-  else __atomic_store_n(&L->retired, o, __ATOMIC_RELEASE);
-  L->retired_tail = o;
-  /* Publish retirement while still quiescent. Helpers must not wait for the
-  ** retiring execution to leave its API/VM frame before seeing this work. */
-  if (!(G(L)->gcstp & GCSTPCLS) && !L->reclaim_registered) {
-    luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
-    registerreclaimer(L, &G(L)->world);
-    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+  if (frame != NULL && frame->global == G(L) && frame->batch) {
+    if (frame->retired_tail != NULL) frame->retired_tail->next = o;
+    else frame->retired = o;
+    frame->retired_tail = o;
+    return;
   }
+  luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+  publishgarbage(L, o, o);
+  luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+}
+
+/* Shutdown and emergency callers can borrow fields under quiescence. */
+void luaC_retireobject (lua_State *L, GCObject *o) {
+  if (o->tt == LUA_VSHRSTR) luaS_remove(L, gco2ts(o));
+  else if (o->tt == LUA_VUPVAL) {
+    UpVal *uv = gco2upv(o);
+    if (upisopen(uv)) {
+      luaF_unlinkupval(uv);
+      uv->owner = NULL;
+    }
+  }
+  else if (o->tt == LUA_VTHREAD) retirethreadlinks(L, gco2th(o));
+  retirestorage(L, o);
+}
+
+/* A busy shared index or stack binding is retried, never waited on while a
+** batch owns private objects. Threads are processed after every upvalue batch,
+** so an open cell can safely reserve its owner's still-allocated gate. */
+int luaC_tryretire (lua_State *L, GCObject *o) {
+  if (luaW_iscollector(L)) {
+    luaC_retireobject(L, o);
+    return SWEEP_RETIRED;
+  }
+  if (o->tt == LUA_VSHRSTR) {
+    TString *string = gco2ts(o);
+    stringtable *table = &G(L)->strt[string->hash % LUA_STRING_SHARDS];
+    if (!luaA_trylock(L, &table->access)) return SWEEP_RETRY;
+    if (!isdead(G(L), o)) {
+      luaA_endlock(L, &table->access);
+      return SWEEP_LIVE;
+    }
+    luaS_remove(L, string);
+    luaA_endlock(L, &table->access);
+  }
+  else if (o->tt == LUA_VUPVAL) {
+    UpVal *uv = gco2upv(o);
+    lua_State *owner;
+    int reservation = 0;
+    int status = uv->mutex_ready ? pthread_mutex_trylock(&uv->mutex) : 0;
+    if (status == EBUSY) return SWEEP_RETRY;
+    luaX_checksync(status);
+    owner = uv->owner;
+    if (owner != NULL) {
+      reservation = luaX_tryreserve(owner);
+      if (reservation != 0) {
+        luaF_unlinkupval(uv);
+        uv->owner = NULL;
+        luaX_endreserve(owner, reservation);
+      }
+    }
+    if (uv->mutex_ready) luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    if (owner != NULL && reservation == 0) return SWEEP_RETRY;
+  }
+  else if (o->tt == LUA_VTHREAD) {
+    lua_State *thread = gco2th(o);
+    int reservation = luaX_tryreserve(thread);
+    int busy;
+    if (reservation == 0) return SWEEP_RETRY;
+    luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+    busy = thread->native_depth != 0 || thread->reclaim_registered ||
+           thread->reclaim_workers != 0;
+    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+    if (busy || !luaF_trycloseupval(thread)) {
+      luaX_endreserve(thread, reservation);
+      return SWEEP_RETRY;
+    }
+    retirethreadlinks(L, thread);
+    luaX_endreserve(thread, reservation);
+  }
+  retirestorage(L, o);
+  return SWEEP_RETIRED;
 }
 
 /* Claim a bounded private chain while the work owner remains registered.
@@ -188,7 +270,7 @@ static void registerreclaimer (lua_State *L, LuaWorld *world) {
   lua_State *head;
   lua_assert(!L->reclaim_registered);
   head = __atomic_load_n(&world->reclaimers, __ATOMIC_RELAXED);
-  if (head == NULL && !luaC_tracing(L))
+  if (head == NULL && !luaC_tracing(L) && !luaC_sweeping(L))
     __atomic_fetch_add(&world->work_epoch, 1, __ATOMIC_RELEASE);
   L->reclaim_next = head;
   L->reclaim_registered = 1;
@@ -245,8 +327,19 @@ void luaC_reclaim (lua_State *L) {
     /* Emergency retries and teardown keep their existing exclusive scope. */
     for (;;) {
       GCObject *work;
+      lua_State *owner = L;
       luaX_checksync(pthread_mutex_lock(&world->mutex));
       work = takework(L);
+      if (work == NULL && G(L)->gcemergency) {
+        /* A concurrent sweeper can have published garbage on any execution.
+        ** An allocation retry must reclaim available storage from all of them,
+        ** without waiting on already-claimed native destruction callbacks. */
+        for (owner = __atomic_load_n(&world->reclaimers, __ATOMIC_RELAXED);
+             owner != NULL; owner = owner->reclaim_next) {
+          work = takework(owner);
+          if (work != NULL) break;
+        }
+      }
       if (work == NULL) {
         if (L->reclaim_registered && L->reclaim_workers == 0)
           unregisterreclaimer(L, world);
@@ -255,7 +348,7 @@ void luaC_reclaim (lua_State *L) {
       }
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
       destroywork(L, work);
-      completework(L, L);
+      completework(L, owner);
     }
   }
   luaM_flushdebt(L, L);

@@ -48,6 +48,7 @@ set(trace_total 0)
 set(marked_total 0)
 set(roots_total 0)
 set(stopped_total 0)
+set(swept_total 0)
 set(workers_peak 0)
 foreach(path IN LISTS gc_profile_paths)
   file(STRINGS "${path}" rows)
@@ -55,7 +56,8 @@ foreach(path IN LISTS gc_profile_paths)
     foreach(field IN ITEMS stop_requests stop_gc stop_barrier stop_other
         collector_body_ns collector_calls collector_running_calls barrier_records
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
-        trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns)
+        trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
+        sweep_ns sweep_scan_ns sweep_records sweep_paused_records)
       string(JSON ${field} GET "${row}" "gc_${field}")
     endforeach()
     math(EXPR classified "${stop_gc} + ${stop_barrier} + ${stop_other}")
@@ -81,7 +83,8 @@ foreach(path IN LISTS gc_profile_paths)
     if(NOT classified EQUAL stop_requests OR
         repeated_back_records GREATER back_records OR
         back_records GREATER barrier_records OR
-        object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns)
+        object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
+        sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0)
       message(FATAL_ERROR "Invalid GC probe accounting: ${path}: ${row}")
     endif()
     math(EXPR body_total "${body_total} + ${collector_body_ns}")
@@ -91,6 +94,7 @@ foreach(path IN LISTS gc_profile_paths)
     math(EXPR marked_total "${marked_total} + ${trace_work_bytes}")
     math(EXPR roots_total "${roots_total} + ${root_snapshot_ns}")
     math(EXPR stopped_total "${stopped_total} + ${stopped_ns}")
+    math(EXPR swept_total "${swept_total} + ${sweep_records}")
     if(path MATCHES "-stopped-")
       if(NOT collector_running_calls EQUAL 0)
         message(FATAL_ERROR "Stopped probe ran the collector")
@@ -100,7 +104,7 @@ foreach(path IN LISTS gc_profile_paths)
 endforeach()
 if(body_total EQUAL 0 OR records_total EQUAL 0 OR object_total EQUAL 0 OR
     trace_total EQUAL 0 OR marked_total EQUAL 0 OR roots_total EQUAL 0 OR
-    stopped_total EQUAL 0 OR workers_peak EQUAL 0)
+    stopped_total EQUAL 0 OR workers_peak EQUAL 0 OR swept_total EQUAL 0)
   message(FATAL_ERROR "Probe did not observe tracing, roots, stops and reclamation")
 endif()
 file(WRITE "${output_dir}/explicit.lua"

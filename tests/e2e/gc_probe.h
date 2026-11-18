@@ -14,6 +14,8 @@
   X(coordination_ns) X(stop_request_ns) X(resume_ns) \
   X(stopped_ns) X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
   X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
+  X(sweep_calls) X(sweep_ns) X(sweep_scan_ns) X(sweep_records) \
+  X(sweep_paused_records) X(sweep_poll_calls) \
   X(root_snapshot_calls) X(root_snapshot_ns) \
   X(heap_entries) X(heap_gc_entries) X(heap_contended_entries) X(heap_gc_wait_ns) \
   X(quiesce_waits) X(quiesce_wait_ns) X(metadata_waits) X(metadata_wait_ns) \
@@ -25,7 +27,7 @@
   X(reclaim_calls) X(reclaim_ns) X(inspection_ns)
 #define GC_PROBE_MAXIMA(X) \
   X(mark_peak_bytes) X(sweep_peak_bytes) X(reclaim_peak_bytes) X(idle_peak_bytes) \
-  X(trace_peak_workers)
+  X(trace_peak_workers) X(sweep_peak_workers)
 // clang-format on
 
 typedef struct GcProbe {

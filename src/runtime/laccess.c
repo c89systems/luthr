@@ -131,6 +131,24 @@ void luaA_beginlock (lua_State *L, LuaObjectLock *lock, LuaObjectScope *scope) {
   beginaccess(L, lock, NULL, scope);
 }
 
+int luaA_trylock (lua_State *L, LuaObjectLock *lock) {
+  return tryaccess(L, lock, NULL);
+}
+
+void luaA_endlock (lua_State *L, LuaObjectLock *lock) {
+  lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
+             luaX_token(L) && lock->depth != 0);
+  if (--lock->depth == 0) {
+    __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&lock->waiting, __ATOMIC_SEQ_CST) != 0) {
+      LuaWorld *world = &G(L)->world;
+      luaX_checksync(pthread_mutex_lock(&world->mutex));
+      luaQ_wake(&world->changed, &world->waiters);
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    }
+  }
+}
+
 static void releasescope (lua_State *L, LuaObjectScope *scope) {
   if (scope->held) {
     LuaWorld *world = &G(L)->world;

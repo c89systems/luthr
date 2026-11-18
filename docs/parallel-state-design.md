@@ -52,7 +52,7 @@ retain only register shadows still needed as operands or partial results. An
 obsolete shadow cannot keep a replaced value alive while its owner is parked.
 
 Pointer barriers atomically claim gray objects and publish them on the current
-coroutine's work queues. Each object uses its existing allocation link; repeated
+coroutine's work queues. Each object uses its dedicated trace link; repeated
 claims need no additional storage. Publication cannot allocate, wait or request
 a global rendezvous. Collection drains every queue before tracing or reclaiming
 objects, including queues on otherwise unreachable threads. Parallel scanners
@@ -62,8 +62,9 @@ slice; VM safepoints advance the same job even without further allocation.
 Unpaid marking work survives an unavailable batch. Allocation assists share
 capacity with physical reclamation and drain marking when its allocation
 runway is spent. Explicit full collections and emergency retries drain it.
-Logical sweep classification still requires quiescence, while physical
-destruction overlaps application workers.
+Ordinary logical sweep classification and physical destruction also overlap
+application workers. Sweepers publish bounded batches before yielding, and
+cycle boundaries join their work under quiescence.
 
 Allocation consumes owner-local page lists and batches atomic remote returns.
 Nonempty caches retain their pages across ordinary collection. Slotless task

@@ -11,6 +11,7 @@
 
 
 #include <stddef.h>
+#include <errno.h>
 
 #include "lua.h"
 
@@ -386,18 +387,34 @@ void luaF_unlinkupval (UpVal *uv) {
 /*
 ** Close all upvalues up to the given stack level.
 */
+static void closeupval (UpVal *uv) {
+  lua_assert(uplevel(uv) < uv->owner->top.p);
+  s2v(uplevel(uv))->value_ = uv->value.value_;
+  s2v(uplevel(uv))->tt_ = uv->value.tt_;
+  luaF_unlinkupval(uv);
+  uv->owner = NULL;
+}
+
+int luaF_trycloseupval (lua_State *L) {
+  UpVal *uv;
+  while ((uv = L->openupval) != NULL) {
+    int status = pthread_mutex_trylock(&uv->mutex);
+    if (status == EBUSY) return 0;
+    luaX_checksync(status);
+    closeupval(uv);
+    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+  }
+  return 1;
+}
+
 void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
-    lua_assert(uplevel(uv) < L->top.p);
     /* Preserve the authoritative binding for to-be-closed/debug operands after
     ** unlink. This also runs for dead threads: copy without inspecting the
     ** referent, which may already be logically retired by this collection. */
-    s2v(uplevel(uv))->value_ = uv->value.value_;
-    s2v(uplevel(uv))->tt_ = uv->value.tt_;
-    luaF_unlinkupval(uv);  /* remove upvalue from 'openupval' list */
-    uv->owner = NULL;
+    closeupval(uv);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   }
 }

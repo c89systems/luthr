@@ -44,7 +44,7 @@ void luaC_advancetrace (lua_State *L) {
   ** orders phase requests; recheck after it, before stopping every worker. */
   luaW_collectenter(L);
   if (!luaC_tracing(L) || plan->finish == 0 ||
-      (plan->phase != TRACE_INIT &&
+      (luaC_tracephase(g) != TRACE_INIT &&
        __atomic_load_n(&g->trace_ready, __ATOMIC_ACQUIRE))) {
     luaW_heapleave(L);
     return;
@@ -63,8 +63,11 @@ void luaC_advancetrace (lua_State *L) {
       break;
     }
     if (plan->next != NULL || plan->deferred != NULL ||
-        plan->pending != NULL || plan->finalizers != NULL) break;
+        plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL) break;
     switch (plan->phase) {
+      case TRACE_OLD:
+        plan->phase = plan->pending != NULL ? TRACE_PENDING : TRACE_MARK;
+        break;
       case TRACE_PENDING:
         plan->phase = TRACE_MARK;
         break;
@@ -124,6 +127,6 @@ void luaC_advancetrace (lua_State *L) {
     __atomic_store_n(&g->trace_ready,
       g->gray != NULL || g->trace_deferred != NULL ||
       plan->next != NULL || plan->deferred != NULL ||
-      plan->pending != NULL || plan->finalizers != NULL, __ATOMIC_RELEASE);
+      plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL, __ATOMIC_RELEASE);
   luaW_start(L);
 }

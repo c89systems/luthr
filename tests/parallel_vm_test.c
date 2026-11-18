@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <laccess.h>
+#include <lapi.h>
 #include <lauxlib.h>
 #include <lstate.h>
 #include <lua.h>
@@ -785,8 +786,10 @@ static int native_allocate_ready(lua_State *state) {
 static int finalize_resource(lua_State *state) {
   struct resource *resource = lua_touserdata(state, 1);
   struct fixture *fixture = resource->fixture;
+  lua_lock(state);
   if (resource->magic != 0x1234abcdU || luaW_scope(state).heap != 0)
     abort();
+  lua_unlock(state);
   resource->magic = 0;
   check(pthread_mutex_lock(&fixture->mutex));
   fixture->resources_finalized++;

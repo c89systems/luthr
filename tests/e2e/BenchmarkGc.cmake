@@ -53,7 +53,8 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   stop_request_ns resume_ns heap_entries heap_gc_entries heap_contended_entries
   stopped_ns trace_calls trace_ns trace_scan_ns trace_work_bytes trace_assist_calls trace_poll_calls trace_cycles
   mark_peak_bytes sweep_peak_bytes reclaim_peak_bytes idle_peak_bytes trace_peak_workers
-  trace_waits trace_wait_ns root_snapshot_calls root_snapshot_ns
+  trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
+  sweep_paused_records sweep_poll_calls sweep_peak_workers root_snapshot_calls root_snapshot_ns
   heap_gc_wait_ns quiesce_waits quiesce_wait_ns metadata_waits metadata_wait_ns
   mutator_stop_waits mutator_stop_wait_ns publish_calls publish_ns drain_calls
   drain_ns barrier_records back_records repeated_back_records reclaim_calls

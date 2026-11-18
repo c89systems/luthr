@@ -100,7 +100,7 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
 int __real_luaA_tryscan(lua_State *, GCObject *);
 int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
   int acquired;
-  unsigned phase = G(state)->trace_plan.phase;
+  unsigned phase = luaC_tracephase(G(state));
   if (retry_weak && !luaW_iscollector(state) && object->tt == LUA_VTABLE &&
       (phase == TRACE_EPHEMERONS || phase == TRACE_VALUES ||
        phase == TRACE_CLEAR) &&

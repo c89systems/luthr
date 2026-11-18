@@ -28,8 +28,10 @@ typedef struct CallInfo CallInfo;
 ** be kept somehow accessible until being freed, so all objects always
 ** belong to an allocation list using the allocator prefix link:
 **
-** 'allgc': every collectable object, including finalizable objects;
+** 'allgc': published allocations, including finalizable objects;
 ** each coroutine's 'new_objects': allocations awaiting publication.
+** 'sweep_plan': the detached cohort, survivors, and retries of an active sweep;
+** claimed batches remain owned until publication, with no safepoint between.
 **
 ** Independent indices use 'next' in CommonHeader:
 ** 'finobj': objects marked for finalization;
@@ -38,7 +40,7 @@ typedef struct CallInfo CallInfo;
 ** only small strings, such as reserved words).
 **
 ** For the generational collector, some of these lists have marks for
-** generations. Each mark points to the first element in the list for
+** generations between sweep jobs. Each mark points to the first element for
 ** that particular generation; that generation goes until the next mark.
 **
 ** 'allgc' -> 'survival': new objects;
@@ -56,7 +58,7 @@ typedef struct CallInfo CallInfo;
 ** elements younger than their main ages.
 **
 ** The generational collector also uses a pointer 'firstold1', which
-** points to the first OLD1 object in the list. It is used to optimize
+** conservatively bounds the first OLD1 object. It is used to optimize
 ** 'markold'. (Potentially OLD1 objects can be anywhere between 'allgc'
 ** and 'reallyold', but often the list has no OLD1 objects or they are
 ** after 'old1'.) Note the difference between it and 'old1':
@@ -414,6 +416,7 @@ typedef struct LX {
 ** A helper can therefore finish a phase while its original caller is parked. */
 typedef struct LuaTracePlan {
   GCObject *again;
+  GCObject *old, *old_limit;
   GCObject *next;
   GCObject *deferred;
   GCObject *tail;
@@ -433,6 +436,21 @@ typedef struct LuaTracePlan {
   unsigned weak_list;
   unsigned finish;
 } LuaTracePlan;
+
+/* A sweep owns its old allocation cohort until every claimed batch returns.
+** Newly published allocations stay in allgc, before the append anchor. */
+typedef struct LuaSweepPlan {
+  GCObject *next, *middle, *limit;
+  GCObject *live[2], **tail[2];
+  GCObject *retry[2];
+  GCObject *threads;
+  GCObject *gray[4];
+  GCObject *finhead, *finsurvival;
+  GCObject **append;
+  l_mem addedold, base_marked;
+  uint64_t epoch;
+  unsigned active, busy, kind, region, phase, gray_index, finishing, promoted;
+} LuaSweepPlan;
 
 typedef struct global_State {
   LuaWorld world;
@@ -484,6 +502,7 @@ typedef struct global_State {
   uint64_t trace_changes;  /* atomic monotonic shading progress */
   GCObject *trace_deferred;
   LuaTracePlan trace_plan;
+  LuaSweepPlan sweep_plan;
   l_mem GCmarked;  /* bytes marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
   stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */
@@ -498,7 +517,6 @@ typedef struct global_State {
   lu_byte gcstp;  /* control whether GC is running */
   lu_byte gcemergency;  /* true if this is an emergency collection */
   GCObject *allgc;  /* list of all collectable objects */
-  GCObject **sweepgc;  /* current position of sweep in list */
   GCObject *finobj;  /* list of collectable objects with finalizers */
   GCObject *gray;  /* list of gray objects */
   GCObject *grayagain;  /* list of objects to be traversed atomically */

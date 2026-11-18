@@ -261,6 +261,7 @@ void luaX_poll (lua_State *L) {
   luaX_pollrequests(L);
   /* Complete the existing task handoff before requesting a GC phase change. */
   if (luaC_tracing(L)) luaC_polltrace(L);
+  else if (luaC_sweeping(L)) luaC_pollsweep(L);
   luaTK_checkstop(L);
   luaCP_checklimit(L);
 }

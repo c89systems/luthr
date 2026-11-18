@@ -32,7 +32,7 @@ void __wrap_luaC_claimtrace(lua_State *state, LuaTraceWork *work,
   struct fixture *test = fixture;
   GCObject **tail = G(state)->trace_plan.finalizer_newtail;
   GCObject *pending = G(state)->trace_plan.pending;
-  unsigned phase = G(state)->trace_plan.phase, count = 0;
+  unsigned phase = luaC_tracephase(G(state)), count = 0;
   __real_luaC_claimtrace(state, work, limit);
   if (test == NULL)
     return;
@@ -57,7 +57,7 @@ void __wrap_luaC_claimtrace(lua_State *state, LuaTraceWork *work,
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
 lu_mem __wrap_luaC_tracebatch(lua_State *state, unsigned limit) {
   struct fixture *test = fixture;
-  unsigned phase = G(state)->trace_plan.phase;
+  unsigned phase = luaC_tracephase(G(state));
   lu_mem worked = __real_luaC_tracebatch(state, limit);
   if (test != NULL && state == test->collector && phase == test->phase &&
       worked != 0) {

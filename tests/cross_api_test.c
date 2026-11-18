@@ -281,9 +281,13 @@ static int exercise_wait(struct fixture *fixture) {
   check(pthread_mutex_unlock(&fixture->mutex));
   /* A waiter owning another reservation must not prevent real collection. */
   luaC_fullgc(controller, 0);
+  check(pthread_mutex_lock(&fixture->mutex));
+  /* Collector polls can admit the parent's waiter, allowing a close to drop
+   * its child token before the collection returns. The parent stays rooted. */
   if ((uintptr_t)fixture->boxes[0]->stack.p == before ||
-      fixture->finalized != 0)
+      fixture->finalized > (fixture->mode == WAIT_CLOSE ? 1 : 0))
     abort();
+  check(pthread_mutex_unlock(&fixture->mutex));
   luaX_unlockstate(controller);
   check(pthread_join(carrier, NULL));
   if (fixture->mode == WAIT_MOVE) {
@@ -292,8 +296,17 @@ static int exercise_wait(struct fixture *fixture) {
         token_id(fixture->boxes[1], 1) != 2 ||
         token_id(fixture->boxes[1], 2) != 1)
       abort();
-  } else if (fixture->mode == WAIT_CLOSE && lua_gettop(fixture->boxes[1]) != 0)
-    abort();
+  } else if (fixture->mode == WAIT_CLOSE) {
+    struct resource *resource;
+    if (lua_gettop(fixture->boxes[1]) != 0 ||
+        token_id(fixture->boxes[0], 1) != 1)
+      abort();
+    lua_getfield(fixture->boxes[0], 1, "resource");
+    resource = lua_touserdata(fixture->boxes[0], -1);
+    if (resource == NULL || resource->magic != 0x1234abcdU)
+      abort();
+    lua_pop(fixture->boxes[0], 1);
+  }
   return fixture->failed || !seen;
 }
 

@@ -10,10 +10,17 @@
 #include <time.h>
 
 enum { REASON_OTHER, REASON_GC, REASON_BARRIER };
-enum { COLLECT_STEP, COLLECT_FULL, COLLECT_ASSIST, COLLECT_POLL };
+enum {
+  COLLECT_STEP,
+  COLLECT_FULL,
+  COLLECT_ASSIST,
+  COLLECT_POLL,
+  COLLECT_SWEEP
+};
 static lua_State *host;
 static GcProbe *host_probe;
 static unsigned scanners;
+static unsigned sweepers;
 
 static uint64_t now(void) {
   struct timespec stamp;
@@ -93,7 +100,10 @@ void __real_luaW_heapleave(lua_State *);
 void __real_luaC_step(lua_State *);
 void __real_luaC_fullgc(lua_State *, int);
 void __real_luaC_finishtrace(lua_State *);
-void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *, int);
+void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *);
+lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
+void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
+void __real_luaC_pollsweep(lua_State *);
 void __real_luaC_publish(lua_State *);
 void __real_luaC_drainbarriers(lua_State *);
 void __real_luaC_reclaim(lua_State *);
@@ -202,8 +212,10 @@ static void collect(lua_State *L, int operation, int emergency) {
     __real_luaC_step(L);
   else if (operation == COLLECT_ASSIST)
     __real_luaC_assisttrace(L);
-  else
+  else if (operation == COLLECT_POLL)
     __real_luaC_polltrace(L);
+  else
+    __real_luaC_pollsweep(L);
   if (record != NULL) {
     if (outer) {
       elapsed = now() - started;
@@ -231,15 +243,14 @@ void __wrap_luaC_finishtrace(lua_State *L) {
   __real_luaC_finishtrace(L);
 }
 
-void __wrap_luaC_syncbarrier(lua_State *L, GCObject *owner, GCObject *value,
-                             int back) {
+void __wrap_luaC_syncbarrier(lua_State *L, GCObject *owner, GCObject *value) {
   GcProbe *record = probe(L);
   unsigned previous = REASON_OTHER;
   if (record != NULL) {
     previous = record->reason;
     record->reason = REASON_BARRIER;
   }
-  __real_luaC_syncbarrier(L, owner, value, back);
+  __real_luaC_syncbarrier(L, owner, value);
   if (record != NULL)
     record->reason = previous;
 }
@@ -389,6 +400,41 @@ void __wrap_luaC_polltrace(lua_State *L) {
   if (record != NULL)
     record->trace_poll_calls++;
   collect(L, COLLECT_POLL, 0);
+}
+
+lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  lu_mem worked = __real_luaC_sweepbatch(L, limit);
+  if (record != NULL) {
+    record->sweep_calls++;
+    record->sweep_ns += now() - started;
+  }
+  return worked;
+}
+
+void __wrap_luaC_scansweep(lua_State *L, LuaSweepWork *work) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  unsigned active = __atomic_add_fetch(&sweepers, 1, __ATOMIC_ACQ_REL);
+  if (record != NULL) {
+    if (record->sweep_peak_workers < active)
+      record->sweep_peak_workers = active;
+    record->sweep_records += work->count;
+    if (L->world_depth != 0)
+      record->sweep_paused_records += work->count;
+  }
+  __real_luaC_scansweep(L, work);
+  __atomic_fetch_sub(&sweepers, 1, __ATOMIC_ACQ_REL);
+  if (record != NULL)
+    record->sweep_scan_ns += now() - started;
+}
+
+void __wrap_luaC_pollsweep(lua_State *L) {
+  GcProbe *record = probe(L);
+  if (record != NULL)
+    record->sweep_poll_calls++;
+  collect(L, COLLECT_SWEEP, 0);
 }
 
 static unsigned snapshot_needed(lua_State *L, lua_State *thread) {

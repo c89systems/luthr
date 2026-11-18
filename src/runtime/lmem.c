@@ -101,7 +101,7 @@ static void accountassist (lua_State *L, l_mem change) {
   uint64_t epoch;
   lu_mem bytes;
   if (change >= 0 || L->reclaiming || !completestate(G(L)) ||
-      (!luaC_hasreclaimers(L) && !luaC_tracing(L)))
+      (!luaC_hasreclaimers(L) && !luaC_tracing(L) && !luaC_sweeping(L)))
     return;
   epoch = __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE);
   if (L->assist_epoch != epoch) {
@@ -112,7 +112,7 @@ static void accountassist (lua_State *L, l_mem change) {
   bytes = cast(lu_mem, 0) - cast(lu_mem, change);
   L->assist_debt = bytes > cast(lu_mem, MAX_LMEM) - L->assist_debt
     ? cast(lu_mem, MAX_LMEM) : L->assist_debt + bytes;
-  if (luaC_tracing(L)) {
+  if (luaC_tracing(L) || luaC_sweeping(L)) {
     lu_mem work = cast(lu_mem, applygcparam(G(L), STEPMUL, cast(l_mem, bytes)));
     L->trace_debt = work > cast(lu_mem, MAX_LMEM) - L->trace_debt
       ? cast(lu_mem, MAX_LMEM) : L->trace_debt + work;
@@ -535,25 +535,29 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
   else accountowned(L, cast(l_mem, osize), exclusive);
 }
 
+void luaM_creditretired (lua_State *L, l_mem bytes) {
+  global_State *g = G(L);
+  __atomic_fetch_add(&g->GCretired, bytes, __ATOMIC_RELAXED);
+  __atomic_fetch_add(&g->GCdebt, bytes, __ATOMIC_RELAXED);
+  if (issweepphase(g) && !(g->gcstp & GCSTPCLS))
+    __atomic_fetch_sub(&g->GCcyclelive, bytes, __ATOMIC_RELAXED);
+}
+
 void luaM_retire_ (lua_State *L, void *memory, size_t size) {
   global_State *g = G(L);
   LuaAllocBlock *block;
-  lu_mem debt;
+  LuaGCFrame *frame;
   if (memory == NULL) { lua_assert(size == 0); return; }
-  lua_assert(!completestate(g) || luaW_iscollector(L));
+  lua_assert(!completestate(g) || luaW_iscollector(L) || luaC_sweeping(L));
   block = cast(LuaAllocBlock *, memory) - 1;
   lua_assert(!luaMP_retired(block));
   block->block.page |= 1u;
-  __atomic_fetch_add(&g->GCretired, cast(l_mem, size), __ATOMIC_RELAXED);
-  /* Logical classification already owns the collector boundary. Mutator
-  ** allowances cannot change here; physical returners never credit debt. */
-  debt = cast(lu_mem, __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED));
-  __atomic_store_n(&g->GCdebt, cast(l_mem, debt + cast(lu_mem, size)),
-                     __ATOMIC_RELAXED);
-  if (issweepphase(g) && !(g->gcstp & GCSTPCLS)) {
-    lua_assert(g->GCcyclelive >= cast(l_mem, size));
-    g->GCcyclelive -= cast(l_mem, size);
+  frame = luaC_gcframe();
+  if (frame != NULL && frame->global == g && frame->batch) {
+    lua_assert(frame->retired_bytes <= MAX_LMEM - cast(l_mem, size));
+    frame->retired_bytes += cast(l_mem, size);
   }
+  else luaM_creditretired(L, cast(l_mem, size));
 }
 
 

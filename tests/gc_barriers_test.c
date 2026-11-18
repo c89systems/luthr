@@ -108,8 +108,8 @@ static void mixed(lua_State *L) {
   require(isblack(object(L, 1)) && isblack(object(L, 2)));
   lua_newtable(L);
   lua_newtable(L);
-  /* The first edge marks child 3 before the remembered owner is processed.
-   * Its later child 4 still needs a rescan, even though child 3 is now gray. */
+  /* Sharing child 3 must not suppress either owner's publication or the
+   * table's independent second edge. */
   lua_pushvalue(L, 3);
   require(lua_setupvalue(L, 2, 1) != NULL);
   lua_pushvalue(L, 3);
@@ -117,10 +117,13 @@ static void mixed(lua_State *L) {
   lua_pushvalue(L, 4);
   lua_rawseti(L, 1, 2);
   drain(L);
-  require(!iswhite(object(L, 3)) && recorded(L, 1));
+  require(recorded(L, 1) && recorded(L, 2));
   lua_settop(L, 2);
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_rawgeti(L, 1, 2) == LUA_TTABLE);
+  lua_pop(L, 1);
+  require(lua_rawgeti(L, 1, 1) == LUA_TTABLE);
+  require(lua_getupvalue(L, 2, 1) != NULL && lua_rawequal(L, -1, -2));
 }
 
 enum { OWNERS = 160, ACTORS = 4, WRITES = 256 };

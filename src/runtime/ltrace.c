@@ -38,12 +38,16 @@ int luaC_ingc (lua_State *L) {
 void luaC_entergc (lua_State *L, LuaGCFrame *frame) {
   frame->previous = luaC_gcframe();
   frame->global = G(L);
+  frame->retired = frame->retired_tail = NULL;
+  frame->retired_bytes = 0;
+  frame->batch = 0;
   L->native_depth++;
   luaC_restoregcframe(frame);
 }
 
 void luaC_leavegc (lua_State *L, LuaGCFrame *frame) {
   lua_assert(luaC_gcframe() == frame && L->native_depth != 0);
+  lua_assert(frame->retired == NULL && frame->retired_bytes == 0 && !frame->batch);
   luaC_restoregcframe(frame->previous);
   L->native_depth--;
 }
