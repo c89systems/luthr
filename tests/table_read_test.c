@@ -1,11 +1,14 @@
 #include <laccess.h>
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lmem.h>
+#include <lroots.h>
 #include <lstate.h>
 #include <lstring.h>
 #include <ltable.h>
 #include <ltablestorage.h>
+#include <ltm.h>
 #include <lua.h>
 #include <pthread.h>
 #include <sched.h>
@@ -25,6 +28,21 @@ static __thread unsigned measuring, reading;
 static unsigned access_calls, mutex_calls;
 static void *watched;
 static unsigned returned;
+static __thread lua_State *relocating;
+static __thread unsigned relocations;
+
+void __real_luaA_metafield(lua_State *, const TValue *, TString *,
+                           LuaNativeRoot *, int);
+void __wrap_luaA_metafield(lua_State *state, const TValue *object, TString *key,
+                           LuaNativeRoot *result, int event) {
+  if (state == relocating && event == TM_NEWINDEX && relocations == 0) {
+    uintptr_t before = (uintptr_t)state->stack.p;
+    relocations++;
+    require(luaD_reallocstack(state, stacksize(state) + 128, 1));
+    require((uintptr_t)state->stack.p != before);
+  }
+  __real_luaA_metafield(state, object, key, result, event);
+}
 struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -443,11 +461,168 @@ static void mixed(lua_State *state, int generational) {
   require(G(state)->world.storage_bytes == 0 && state->storage_bytes == 0);
 }
 
+static int unexpected_write(lua_State *state) {
+  return luaL_error(state, "existing-key assignment invoked __newindex");
+}
+
+static void lua_writes(lua_State *state, Table *metatable) {
+  Table *table = (Table *)lua_topointer(state, 1);
+  uint64_t before, meta_before = metatable == NULL
+                                     ? 0
+                                     : __atomic_load_n(&metatable->sequence,
+                                                       __ATOMIC_ACQUIRE);
+  require(luaL_loadstring(state,
+                          "local t,k=...; local function up() t.field=31 end; "
+                          "t[1]=11; t.field=13; t[k]=17; up(); "
+                          "return t[1]+t.field+t[k]") == LUA_OK);
+  lua_pushvalue(state, 1);
+  lua_pushliteral(state, "lua-key");
+  before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  require(lua_pcall(state, 2, 1, 0) == LUA_OK);
+  require(lua_tointeger(state, -1) == 59);
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before == 8);
+  require(metatable == NULL ||
+          __atomic_load_n(&metatable->sequence, __ATOMIC_ACQUIRE) ==
+              meta_before);
+  lua_pop(state, 1);
+}
+
+/* Insertion, including resize, has the same single ownership boundary as an
+ * update. Existing values must not acquire the table's unrelated metatable. */
+static void writes(lua_State *state, int generational) {
+  Table *table, *metatable;
+  uint64_t before;
+  unsigned i;
+  if (generational)
+    lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCSTOP);
+  lua_newtable(state);
+  table = (Table *)lua_topointer(state, 1);
+  before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  for (i = 1; i <= 128; i++) {
+    char field[32], long_key[96];
+    snprintf(field, sizeof(field), "field-%u", i);
+    snprintf(long_key, sizeof(long_key),
+             "a-long-distinct-table-key-that-is-not-a-short-interned-string-%u",
+             i);
+    lua_pushinteger(state, i);
+    lua_setfield(state, 1, field);
+    lua_pushinteger(state, i * 2);
+    lua_seti(state, 1, i);
+    lua_pushstring(state, long_key);
+    lua_pushinteger(state, i * 3);
+    lua_settable(state, 1);
+  }
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before ==
+          2 * 3 * 128);
+  lua_getfield(state, 1, "field-128");
+  require(lua_tointeger(state, -1) == 128);
+  lua_pop(state, 1);
+  lua_rawgeti(state, 1, 128);
+  require(lua_tointeger(state, -1) == 256);
+  lua_pop(state, 1);
+  lua_writes(state, NULL);
+  lua_newtable(state);
+  metatable = (Table *)lua_topointer(state, -1);
+  lua_pushcfunction(state, unexpected_write);
+  lua_setfield(state, -2, "__newindex");
+  lua_setmetatable(state, 1);
+  lua_writes(state, metatable);
+  lua_gc(state, LUA_GCCOLLECT);
+}
+
+/* Releasing access must retain exactly the receiver root until the caller
+ * drops it: collection can run in the gap before a metamethod is called. */
+static void retained_root(lua_State *state, int generational) {
+  LuaObjectScope scope;
+  Table *table;
+  TValue value;
+  if (generational)
+    lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCSTOP);
+  lua_newtable(state);
+  lua_pushinteger(state, 42);
+  lua_rawseti(state, -2, 1);
+  luaX_lockstate(state);
+  table = hvalue(s2v(state->top.p - 1));
+  watched = table;
+  returned = 0;
+  luaA_begin(state, obj2gco(table), &scope);
+  state->top.p--; /* the retained root becomes the sole reference */
+  luaA_endrooted(state, &scope);
+  require(state->object_scopes == NULL);
+  luaC_fullgc(state, 0);
+  require(returned == 0);
+  require(luaH_getint(state, table, 1, &value) == LUA_VNUMINT);
+  require(ivalue(&value) == 42);
+  luaR_poproot(state, &scope.root);
+  luaC_fullgc(state, 0);
+  require(returned == 1);
+  watched = NULL;
+  luaX_unlockstate(state);
+}
+
+struct moving_allocator {
+  lua_Alloc original;
+  void *context;
+};
+
+static void *move_realloc(void *context, void *memory, size_t old_size,
+                          size_t size) {
+  struct moving_allocator *allocator = context;
+  if (memory != NULL && size != 0) {
+    void *replacement = allocator->original(allocator->context, NULL, 0, size);
+    if (replacement == NULL)
+      return NULL;
+    memcpy(replacement, memory, old_size < size ? old_size : size);
+    allocator->original(allocator->context, memory, old_size, 0);
+    return replacement;
+  }
+  return allocator->original(allocator->context, memory, old_size, size);
+}
+
+static void write_error(lua_State *state, int generational) {
+  static const char *const sources[] = {
+      "local receiver=17; receiver.value=42",
+      "local receiver=17; return function() receiver.value=42 end",
+  };
+  struct moving_allocator allocator;
+  unsigned i;
+  if (generational)
+    lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCSTOP);
+  allocator.original = lua_getallocf(state, &allocator.context);
+  for (i = 0; i < 2; i++) {
+    const char *error;
+    require(luaL_loadstring(state, sources[i]) == LUA_OK);
+    if (i == 1)
+      require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+    lua_setallocf(state, move_realloc, &allocator);
+    relocating = state;
+    relocations = 0;
+    require(lua_pcall(state, 0, 0, 0) == LUA_ERRRUN);
+    relocating = NULL;
+    lua_setallocf(state, allocator.original, allocator.context);
+    error = lua_tostring(state, -1);
+    require(relocations == 1 && error != NULL);
+    require(strstr(error, "index a number value") != NULL);
+    require(strstr(error, i == 0 ? "(local 'receiver')"
+                                 : "(upvalue 'receiver')") != NULL);
+    lua_pop(state, 1);
+  }
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
-  if (strcmp(argv[1], "mixed_incremental") == 0 ||
-      strcmp(argv[1], "mixed_generational") == 0)
+  if (strncmp(argv[1], "retained_", 9) == 0)
+    retained_root(state, strcmp(argv[1], "retained_generational") == 0);
+  else if (strncmp(argv[1], "write_error_", 12) == 0)
+    write_error(state, strcmp(argv[1], "write_error_generational") == 0);
+  else if (strncmp(argv[1], "writes_", 7) == 0)
+    writes(state, strcmp(argv[1], "writes_generational") == 0);
+  else if (strcmp(argv[1], "mixed_incremental") == 0 ||
+           strcmp(argv[1], "mixed_generational") == 0)
     mixed(state, strcmp(argv[1], "mixed_generational") == 0);
   else if (strcmp(argv[1], "resume") == 0)
     resume_epoch(state);

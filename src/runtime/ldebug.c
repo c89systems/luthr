@@ -760,6 +760,17 @@ l_noret luaG_typeerror (lua_State *L, const TValue *o, const char *op) {
   typeerror(L, o, op, varinfo(L, o));
 }
 
+/* A rooted operand can outlive a stack relocation during ownership waits. */
+l_noret luaG_regtypeerror (lua_State *L, const TValue *o, int reg,
+                          const char *op) {
+  CallInfo *ci = L->ci;
+  const char *name = NULL;
+  const char *kind;
+  lua_assert(isLua(ci));
+  kind = getobjname(ci_func(ci)->p, currentpc(ci), reg, &name);
+  typeerror(L, o, op, formatvarinfo(L, kind, name));
+}
+
 /* Captured-value snapshots have identity by slot, not by a borrowed address. */
 l_noret luaG_upvaltypeerror (lua_State *L, const TValue *o, int upvalue,
                             const char *op) {

@@ -169,12 +169,16 @@ static void releasescope (lua_State *L, LuaObjectScope *scope) {
   }
 }
 
-void luaA_end (lua_State *L, LuaObjectScope *scope) {
+void luaA_endrooted (lua_State *L, LuaObjectScope *scope) {
   lua_assert(L->object_scopes == scope);
   releasescope(L, scope);
   if (scope->saved_top >= 0)
     L->top.p = restorestack(L, scope->saved_top);
   L->object_scopes = scope->previous;
+}
+
+void luaA_end (lua_State *L, LuaObjectScope *scope) {
+  luaA_endrooted(L, scope);
   luaR_poproot(L, &scope->root);
 }
 
@@ -387,27 +391,25 @@ lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
   return tag;
 }
 
-int luaA_assign (lua_State *L, Table *table, const TValue *key,
+int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
                  TValue *value, LuaNativeRoot *method) {
-  LuaNativeRoot owner, metatable;
+  Table *table = hvalue(object);
+  LuaNativeRoot metatable;
   LuaObjectScope first, second;
-  TValue old;
   int handled, count;
-  luaR_pushroot(L, &owner);
-  sethvalue(L, &owner.value, table);
-  luaR_pushroot(L, &metatable);
-  count = objectandmeta(L, &owner.value, &first, &second, &metatable);
   setnilvalue(&method->value);
-  handled = !tagisempty(luaH_getowned(table, key, &old));
+  /* Only a missing key with a metatable needs paired ownership. Recheck
+  ** after the ordered pair is acquired: either object may have changed. */
+  luaR_pushroot(L, &metatable);
+  count = objectandmeta(L, object, &first, &second, &metatable);
+  handled = luaH_assignowned(L, table, key, value, 0);
   if (!handled) {
-    Table *mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
+    Table *mt = hvalue(&metatable.value);
     metafield(L, mt, G(L)->tmname[TM_NEWINDEX], method, TM_NEWINDEX);
     handled = ttisnil(&method->value);
+    if (handled) luaH_assignowned(L, table, key, value, 1);
   }
-  if (handled)
-    luaH_setowned(L, table, key, value);
   endpair(L, &first, &second, count);
   luaR_poproot(L, &metatable);
-  luaR_poproot(L, &owner);
   return handled;
 }

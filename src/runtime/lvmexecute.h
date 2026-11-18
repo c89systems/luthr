@@ -134,63 +134,40 @@
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
-        int hres;
         LuaNativeRoot snapshot;
         TValue *upval = &snapshot.value;
         TValue *rb = KB(i);
         TValue *rc;
-        TString *key = tsvalue(rb);  /* key must be a short string */
         savestate(L, ci);
         luaR_pushroot(L, &snapshot);
         luaF_readcapture(L, cl, GETARG_A(i), &snapshot);
         updatebase(ci);
         rc = RKC(i);
-        luaV_fastset(upval, key, rc, hres, luaH_psetshortstr);
-        if (hres != HOK)
-          Protect(finishset(L, upval, rb, rc, hres, GETARG_A(i) + 1u));
+        Protect(settable(L, upval, rb, rc, GETARG_A(i) + 1u));
         luaR_poproot(L, &snapshot);
         vmbreak;
       }
       vmcase(OP_SETTABLE) {
         StkId ra = readRA(i);
-        int hres;
         TValue *rb = vRB(i);  /* key (table is in 'ra') */
         TValue *rc = RKC(i);  /* value */
-        ci->u.l.rootpc = ip;
-        if (ttisinteger(rb)) {  /* fast track for integers? */
-          luaV_fastseti(s2v(ra), ivalue(rb), rc, hres);
-        }
-        else {
-          luaV_fastset(s2v(ra), rb, rc, hres, luaH_pset);
-        }
-        if (hres != HOK)
-          Protect(luaV_finishset(L, s2v(ra), rb, rc, hres));
+        Protect(luaV_settable(L, s2v(ra), rb, rc));
         vmbreak;
       }
       vmcase(OP_SETI) {
         StkId ra = readRA(i);
-        int hres;
+        TValue key;
         int b = GETARG_B(i);
         TValue *rc = RKC(i);
-        ci->u.l.rootpc = ip;
-        luaV_fastseti(s2v(ra), b, rc, hres);
-        if (hres != HOK) {
-          TValue key;
-          setivalue(&key, b);
-          Protect(luaV_finishset(L, s2v(ra), &key, rc, hres));
-        }
+        setivalue(&key, b);
+        Protect(luaV_settable(L, s2v(ra), &key, rc));
         vmbreak;
       }
       vmcase(OP_SETFIELD) {
         StkId ra = readRA(i);
-        int hres;
         TValue *rb = KB(i);
         TValue *rc = RKC(i);
-        TString *key = tsvalue(rb);  /* key must be a short string */
-        ci->u.l.rootpc = ip;
-        luaV_fastset(s2v(ra), key, rc, hres, luaH_psetshortstr);
-        if (hres != HOK)
-          Protect(luaV_finishset(L, s2v(ra), rb, rc, hres));
+        Protect(luaV_settable(L, s2v(ra), rb, rc));
         vmbreak;
       }
       vmcase(OP_NEWTABLE) {

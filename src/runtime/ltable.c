@@ -1109,6 +1109,11 @@ lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res) {
 ** When a 'pset' cannot be completed, this function returns an encoding
 ** of its result, to be used by 'rawfinishset'.
 */
+/* Private slot encodings remain valid only while ownership is retained. */
+#define HOK 0
+#define HNOTFOUND 1
+#define HFIRSTNODE 3
+
 static int retpsetcode (Table *t, const TValue *slot) {
   if (isabstkey(slot))
     return HNOTFOUND;  /* no slot with that key */
@@ -1176,13 +1181,7 @@ static int psetint (lua_State *L, Table *t, lua_Integer key, TValue *val) {
 }
 
 
-/*
-** This function could be just this:
-**    return finishnodeset(t, luaH_Hgetshortstr(t, key), val);
-** However, it optimizes the common case created by constructors (e.g.,
-** {x=1, y=2}), which creates a key in a table that has no metatable,
-** it is not old/black, and it already has space for the key.
-*/
+/* Update a short-string key or retain its owned insertion location. */
 
 static int rawpsetshortstr (lua_State *L, Table *t, TString *key, TValue *val) {
   const TValue *slot = luaH_Hgetshortstr(t, key);
@@ -1270,15 +1269,19 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
 }
 
 
-/* Complete write under existing ownership, with caller-rooted inputs. */
-void luaH_setowned (lua_State *L, Table *t, const TValue *key, TValue *value) {
+/* The ordinary no-metatable insertion needs no second ownership or lookup. */
+int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
+                       int raw) {
   int hres;
   invalidateTMcache(t);
   hres = rawpset(L, t, key, value);
-  if (hres != HOK)
+  if (hres != HOK) {
+    if (!raw && t->metatable != NULL) return 0;
     rawfinishset(L, t, key, value, hres);
+  }
   invalidateTMcache(t);
   luaC_barrierback(L, obj2gco(t), value);
+  return 1;
 }
 
 
@@ -1633,42 +1636,6 @@ lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res) {
   return luaH_getstr(L, t, key, res);
 }
 
-int luaH_pset (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  LuaNativeRoot rooted_key, rooted_value;
-  LuaObjectScope scope;
-  int result;
-  luaR_pushroot(L, &rooted_key);
-  luaR_setroot(L, &rooted_key, key);
-  luaR_pushroot(L, &rooted_value);
-  luaR_setroot(L, &rooted_value, value);
-  luaA_begin(L, obj2gco(t), &scope);
-  invalidateTMcache(t);
-  result = rawpset(L, t, &rooted_key.value, &rooted_value.value);
-  invalidateTMcache(t);
-  if (result == HOK)
-    luaC_barrierback(L, obj2gco(t), &rooted_value.value);
-  luaA_end(L, &scope);
-  luaR_poproot(L, &rooted_value);
-  luaR_poproot(L, &rooted_key);
-  return result == HOK ? HOK : HNOTFOUND;
-}
-
-int luaH_psetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
-  TValue k;
-  setivalue(&k, key);
-  return luaH_pset(L, t, &k, value);
-}
-
-int luaH_psetstr (lua_State *L, Table *t, TString *key, TValue *value) {
-  TValue k;
-  setsvalue(L, &k, key);
-  return luaH_pset(L, t, &k, value);
-}
-
-int luaH_psetshortstr (lua_State *L, Table *t, TString *key, TValue *value) {
-  return luaH_psetstr(L, t, key, value);
-}
-
 void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
   LuaNativeRoot rooted_key, rooted_value;
   LuaObjectScope scope;
@@ -1677,7 +1644,7 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
   luaR_pushroot(L, &rooted_value);
   luaR_setroot(L, &rooted_value, value);
   luaA_begin(L, obj2gco(t), &scope);
-  luaH_setowned(L, t, &rooted_key.value, &rooted_value.value);
+  luaH_assignowned(L, t, &rooted_key.value, &rooted_value.value, 1);
   luaA_end(L, &scope);
   luaR_poproot(L, &rooted_value);
   luaR_poproot(L, &rooted_key);

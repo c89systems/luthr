@@ -114,4 +114,14 @@ mixed[1.0]={answer=42}
 assert(mixed[1].answer==42)
 assert(not pcall(function() mixed[nil]=42 end))
 assert(not pcall(function() mixed[0/0]=42 end))
+-- Invalid raw keys can still be consumed by a __newindex function.
+local intercepted={}
+local invalid=setmetatable({}, {__newindex=function(_,key,value)
+  collectgarbage('collect')
+  intercepted[#intercepted+1]={key=key,value=value}
+end})
+invalid[nil]=17
+invalid[0/0]=23
+assert(#intercepted==2 and intercepted[1].key==nil and intercepted[1].value==17)
+assert(intercepted[2].key~=intercepted[2].key and intercepted[2].value==23)
 print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')

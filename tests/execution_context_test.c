@@ -80,7 +80,7 @@ static void owned(lua_State *state, int managed) {
     require(luaA_tryscan(state, obj2gco(table)));
     luaA_endscan(state, obj2gco(table));
     setivalue(&value, i);
-    luaH_setowned(state, table, &key, &value);
+    luaH_assignowned(state, table, &key, &value, 1);
     require(luaH_getint(state, table, 1, &result) == LUA_VNUMINT);
     require(ivalue(&result) == i);
     require(luaC_ingc(state));

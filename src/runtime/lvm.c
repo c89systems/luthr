@@ -340,53 +340,79 @@ lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
 
 
 /*
-** Finish a table assignment 't[key] = val'.
-** Recheck the key and metamethod together under object ownership. No slot
-** from an earlier fast-path miss survives an ownership boundary.
+** Complete a table assignment 't[key] = val'. Roots snapshot all inputs
+** once; the table operation owns lookup, insertion and resize together.
 */
-static void finishset (lua_State *L, const TValue *t, TValue *key,
-                        TValue *val, int hres, unsigned upvalue) {
-  LuaNativeRoot object, rooted_key, value, method;
-  int loop;
-  UNUSED(hres);
-  luaR_pushroot(L, &object);
-  luaR_setroot(L, &object, t);
+static void settable (lua_State *L, const TValue *t, TValue *key,
+                       TValue *val, unsigned upvalue) {
+  LuaObjectScope object;
+  LuaNativeRoot *receiver = &object.root;
+  LuaNativeRoot rooted_key, value, method;
+  Table *table = ttistable(t) ? hvalue(t) : NULL;
+  TValue other = {0};
+  int loop, source = -1;
+  /* Retain diagnostic identity, not a stack pointer that an ownership wait
+  ** can invalidate. Type information still comes from the rooted snapshot. */
+  if (table == NULL) setobj(L, &other, t);
+  if (table == NULL && upvalue == 0 && isLua(L->ci)) {
+    uintptr_t address = cast(uintptr_t, t);
+    uintptr_t begin = cast(uintptr_t, L->ci->func.p + 1);
+    uintptr_t end = cast(uintptr_t, L->ci->top.p);
+    if (address >= begin && address < end &&
+        (address - begin) % sizeof(StackValue) == 0)
+      source = cast_int((address - begin) / sizeof(StackValue));
+  }
   luaR_pushroot(L, &rooted_key);
   luaR_setroot(L, &rooted_key, key);
   luaR_pushroot(L, &value);
   luaR_setroot(L, &value, val);
+  if (table != NULL) {
+    int handled;
+    luaA_begin(L, obj2gco(table), &object);
+    handled = luaH_assignowned(L, table, &rooted_key.value, &value.value, 0);
+    /* Reuse the access scope's receiver snapshot after releasing ownership;
+    ** an ordinary write needs neither another snapshot nor a method root. */
+    luaA_endrooted(L, &object);
+    if (handled) goto complete;
+  }
+  else {
+    luaR_pushroot(L, receiver);
+    luaR_setroot(L, receiver, &other);
+  }
   luaR_pushroot(L, &method);
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
-    if (ttistable(&object.value)) {
-      if (luaA_assign(L, hvalue(&object.value), &rooted_key.value,
+    if (ttistable(&receiver->value)) {
+      if (luaA_assign(L, &receiver->value, &rooted_key.value,
                       &value.value, &method))
         goto done;
     }
     else {
-      luaT_gettmbyobj(L, &object.value, TM_NEWINDEX, &method);
+      luaT_gettmbyobj(L, &receiver->value, TM_NEWINDEX, &method);
       if (ttisnil(&method.value)) {
         if (loop == 0 && upvalue != 0)
-          luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");
-        luaG_typeerror(L, loop == 0 ? t : &object.value, "index");
+          luaG_upvaltypeerror(L, &receiver->value, upvalue - 1, "index");
+        if (loop == 0 && source >= 0)
+          luaG_regtypeerror(L, &receiver->value, source, "index");
+        luaG_typeerror(L, &receiver->value, "index");
       }
     }
     if (ttisfunction(&method.value)) {
-      luaT_callTM(L, &method.value, &object.value, &rooted_key.value, &value.value);
+      luaT_callTM(L, &method.value, &receiver->value, &rooted_key.value, &value.value);
       goto done;
     }
-    luaR_setroot(L, &object, &method.value);
+    luaR_setroot(L, receiver, &method.value);
   }
   luaG_runerror(L, "'__newindex' chain too long; possible loop");
  done:
   luaR_poproot(L, &method);
+ complete:
+  luaR_poproot(L, receiver);
   luaR_poproot(L, &value);
   luaR_poproot(L, &rooted_key);
-  luaR_poproot(L, &object);
 }
 
-void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
-                     TValue *val, int hres) {
-  finishset(L, t, key, val, hres, 0);
+void luaV_settable (lua_State *L, const TValue *t, TValue *key, TValue *val) {
+  settable(L, t, key, val, 0);
 }
 
 

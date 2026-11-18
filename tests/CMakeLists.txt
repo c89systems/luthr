@@ -124,9 +124,11 @@ set_target_properties(table_read_test PROPERTIES C_STANDARD 99)
 target_compile_options(table_read_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(table_read_test PRIVATE luthr_static)
 target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
-  -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_)
+  -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_
+  -Wl,--wrap=luaA_metafield)
 foreach(case IN ITEMS fast batching overlap retirement pressure failure hash_failure resume
-    mixed_incremental mixed_generational)
+    mixed_incremental mixed_generational writes_incremental writes_generational
+    write_error_incremental write_error_generational retained_incremental retained_generational)
   add_test(NAME table_read_${case} COMMAND table_read_test ${case})
   set_tests_properties(table_read_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

@@ -91,14 +91,6 @@ typedef enum {
   else { luaH_fastgeti(hvalue(t), k, res, tag); }
 
 
-#define luaV_fastset(t,k,val,hres,f) \
-  (hres = (!ttistable(t) ? HNOTATABLE : f(L, hvalue(t), k, val)))
-
-#define luaV_fastseti(t,k,val,hres) \
-  if (!ttistable(t)) hres = HNOTATABLE; \
-  else { luaH_fastseti(hvalue(t), k, val, hres); }
-
-
 /*
 ** Shift right is the same as shift left with a negative 'y'
 */
@@ -116,8 +108,8 @@ LUAI_FUNC int luaV_tointegerns (const TValue *obj, lua_Integer *p,
 LUAI_FUNC int luaV_flttointeger (lua_Number n, lua_Integer *p, F2Imod mode);
 LUAI_FUNC lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
                                                 StkId val, lu_byte tag);
-LUAI_FUNC void luaV_finishset (lua_State *L, const TValue *t, TValue *key,
-                                             TValue *val, int aux);
+LUAI_FUNC void luaV_settable (lua_State *L, const TValue *t, TValue *key,
+                             TValue *val);
 LUAI_FUNC void luaV_finishOp (lua_State *L);
 LUAI_FUNC void luaV_execute (lua_State *L, CallInfo *ci);
 LUAI_FUNC int luaV_shadowroot (lua_State *L, StkId slot);

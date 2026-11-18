@@ -54,25 +54,9 @@
   { tag = luaH_getint(L, t, k, res); }
 
 
-#define luaH_fastseti(t,k,val,hres) \
-  { hres = luaH_psetint(L, t, k, val); }
-
-
-/* results from pset */
-#define HOK		0
-#define HNOTFOUND	1
-#define HNOTATABLE	2
-#define HFIRSTNODE	3
-
 /*
 ** 'luaH_get*' operations set 'res', unless the value is absent, and
 ** return the tag of the result.
-** The 'luaH_pset*' (pre-set) operations set the given value and return
-** HOK, unless the original value is absent, when they return HNOTFOUND.
-** A miss must be rechecked with its metamethod under object ownership.
-** Encoded slots are private to ltable.c and never cross an unlock boundary.
-** The value HNOTATABLE is used by the fast macros to signal that the
-** value being indexed is not a table.
 */
 
 
@@ -140,16 +124,14 @@ LUAI_FUNC lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *
 /* Caller owns 't'. Reads do not allocate; writes require rooted key/value
 ** storage that remains valid through allocation and collection. */
 LUAI_FUNC lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res);
-LUAI_FUNC void luaH_setowned (lua_State *L, Table *t, const TValue *key,
-                             TValue *value);
+/* Complete a write, including insertion/resize, under the caller's ownership.
+** Unless raw, an absent key with a metatable returns zero for method lookup.
+** Encoded storage locations never leave this operation. */
+LUAI_FUNC int luaH_assignowned (lua_State *L, Table *t, const TValue *key,
+                               TValue *value, int raw);
 
 /* Borrowed lookup: requires object ownership or collector quiescence. */
 LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);
-
-LUAI_FUNC int luaH_psetint (lua_State *L, Table *t, lua_Integer key, TValue *val);
-LUAI_FUNC int luaH_psetshortstr (lua_State *L, Table *t, TString *key, TValue *val);
-LUAI_FUNC int luaH_psetstr (lua_State *L, Table *t, TString *key, TValue *val);
-LUAI_FUNC int luaH_pset (lua_State *L, Table *t, const TValue *key, TValue *val);
 
 LUAI_FUNC void luaH_setint (lua_State *L, Table *t, lua_Integer key,
                                                     TValue *value);

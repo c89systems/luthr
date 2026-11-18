@@ -30,6 +30,8 @@ LUAI_FUNC void luaA_beginlock (lua_State *L, LuaObjectLock *lock,
 LUAI_FUNC int luaA_trylock (lua_State *L, LuaObjectLock *lock);
 LUAI_FUNC void luaA_endlock (lua_State *L, LuaObjectLock *lock);
 LUAI_FUNC void luaA_end (lua_State *L, LuaObjectScope *scope);
+/* End access but retain scope->root; the caller later pops that native root. */
+LUAI_FUNC void luaA_endrooted (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_unwind (lua_State *L, LuaObjectScope *target);
 LUAI_FUNC void luaA_release (lua_State *L);
 LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
@@ -42,7 +44,8 @@ LUAI_FUNC void luaA_tabletm (lua_State *L, Table *mt, TMS event,
 /* Keys and assigned values must remain rooted across ownership waits. */
 LUAI_FUNC lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
                              TValue *result, LuaNativeRoot *method);
-LUAI_FUNC int luaA_assign (lua_State *L, Table *table, const TValue *key,
+/* The receiver, key and value are caller-rooted snapshots. */
+LUAI_FUNC int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
                           TValue *value, LuaNativeRoot *method);
 
 #endif

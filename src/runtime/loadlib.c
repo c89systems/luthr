@@ -644,10 +644,7 @@ static void getfieldroot (lua_State *L, const LuaNativeRoot *object,
 
 static void setroot (lua_State *L, const LuaNativeRoot *object,
                      LuaNativeRoot *key, LuaNativeRoot *value) {
-  int hres;
-  luaV_fastset(&object->value, &key->value, &value->value, hres, luaH_pset);
-  if (hres != HOK)
-    luaV_finishset(L, &object->value, &key->value, &value->value, hres);
+  luaV_settable(L, &object->value, &key->value, &value->value);
 }
 
 static void getregistryroot (lua_State *L, const char *field,
