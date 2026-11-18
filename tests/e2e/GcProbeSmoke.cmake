@@ -1,4 +1,10 @@
 include("${CMAKE_CURRENT_LIST_DIR}/BenchmarkGc.cmake")
+file(STRINGS "${output_dir}/summary.csv" header LIMIT_COUNT 1)
+foreach(field IN ITEMS metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns)
+  if(NOT header MATCHES "(^|,)gc_${field}(,|$)")
+    message(FATAL_ERROR "Metadata handoff metric is missing from summary: ${field}")
+  endif()
+endforeach()
 # The quick matrix can fit below the collector's debt threshold. These bounded
 # cases must actually cross it so missing probe hooks cannot pass unnoticed.
 foreach(collector IN ITEMS incremental generational)
@@ -57,7 +63,8 @@ foreach(path IN LISTS gc_profile_paths)
         collector_body_ns collector_calls collector_running_calls barrier_records
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
         trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
-        sweep_ns sweep_scan_ns sweep_records sweep_paused_records)
+        sweep_ns sweep_scan_ns sweep_records sweep_paused_records
+        metadata_waits metadata_wait_ns metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns)
       string(JSON ${field} GET "${row}" "gc_${field}")
     endforeach()
     math(EXPR classified "${stop_gc} + ${stop_barrier} + ${stop_other}")
@@ -84,7 +91,9 @@ foreach(path IN LISTS gc_profile_paths)
         repeated_back_records GREATER back_records OR
         back_records GREATER barrier_records OR
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
-        sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0)
+        sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
+        metadata_handoffs GREATER metadata_waits OR metadata_handoff_ns GREATER metadata_wait_ns OR
+        metadata_handoff_max_ns GREATER metadata_handoff_ns)
       message(FATAL_ERROR "Invalid GC probe accounting: ${path}: ${row}")
     endif()
     math(EXPR body_total "${body_total} + ${collector_body_ns}")

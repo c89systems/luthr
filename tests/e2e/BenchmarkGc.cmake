@@ -56,6 +56,7 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
   sweep_paused_records sweep_poll_calls sweep_peak_workers root_snapshot_calls root_snapshot_ns
   heap_gc_wait_ns quiesce_waits quiesce_wait_ns metadata_waits metadata_wait_ns
+  metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns
   mutator_stop_waits mutator_stop_wait_ns publish_calls publish_ns drain_calls
   drain_ns barrier_records back_records repeated_back_records reclaim_calls
   reclaim_ns object_reclaim_calls object_reclaim_ns reclaim_assist_calls
@@ -71,6 +72,8 @@ endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 string(JSON metadata SET "${metadata}" timing
   "\"Total CPU/wall includes cleanup and final collection. Execution and cleanup times are separate fields; GC probe counters cover execution only.\"")
+string(JSON metadata SET "${metadata}" metadata_handoff
+  "\"Metadata grant until recipient resumes, a subset of summed metadata wait time; includes collector and mutator grants.\"")
 string(JSON metadata SET "${metadata}" notes
   "\"Counters are invocation-local wall durations. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and trace assists, excludes coordination and page reclamation, and can include scheduler suspension. Trace batches exclude cooperative suspension; roots are measured separately. Stopped time starts after quiescence and ends before resumed root work. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)

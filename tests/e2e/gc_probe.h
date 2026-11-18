@@ -19,6 +19,7 @@
   X(root_snapshot_calls) X(root_snapshot_ns) \
   X(heap_entries) X(heap_gc_entries) X(heap_contended_entries) X(heap_gc_wait_ns) \
   X(quiesce_waits) X(quiesce_wait_ns) X(metadata_waits) X(metadata_wait_ns) \
+  X(metadata_handoffs) X(metadata_handoff_ns) \
   X(mutator_stop_waits) X(mutator_stop_wait_ns) \
   X(publish_calls) X(publish_ns) X(drain_calls) X(drain_ns) \
   X(barrier_records) X(back_records) X(repeated_back_records) \
@@ -27,6 +28,7 @@
   X(reclaim_calls) X(reclaim_ns) X(inspection_ns)
 #define GC_PROBE_MAXIMA(X) \
   X(mark_peak_bytes) X(sweep_peak_bytes) X(reclaim_peak_bytes) X(idle_peak_bytes) \
+  X(metadata_handoff_max_ns) \
   X(trace_peak_workers) X(sweep_peak_workers)
 // clang-format on
 

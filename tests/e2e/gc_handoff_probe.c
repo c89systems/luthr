@@ -1,0 +1,127 @@
+#define _POSIX_C_SOURCE 200809L
+#include "gc_probe.h"
+#include <lauxlib.h>
+#include <lstate.h>
+#include <pthread.h>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define require(c)                                                             \
+  do {                                                                         \
+    if (!(c)) {                                                                \
+      fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c);                  \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
+
+enum { TRANSFERS = 32 };
+struct fixture {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *owner;
+  unsigned ready;
+  int collect;
+};
+
+static uint64_t now(void) {
+  struct timespec stamp;
+  require(clock_gettime(CLOCK_MONOTONIC, &stamp) == 0);
+  return (uint64_t)stamp.tv_sec * 1000000000 + (uint64_t)stamp.tv_nsec;
+}
+
+static void *release_to_waiter(void *context) {
+  struct fixture *fixture = context;
+  lua_State *state = fixture->owner;
+  LuaWorld *world = &G(state)->world;
+  unsigned round;
+  luaX_lockstate(state);
+  for (round = 1; round <= TRANSFERS; round++) {
+    uint64_t deadline = now() + UINT64_C(5000000000);
+    int waiting;
+    luaW_heapenter(state);
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->ready = round;
+    require(pthread_cond_broadcast(&fixture->changed) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+    /* Queue the measured caller before releasing, regardless of thread order.
+     */
+    do {
+      require(pthread_mutex_lock(&world->mutex) == 0);
+      waiting = world->heap_head != NULL;
+      require(pthread_mutex_unlock(&world->mutex) == 0);
+      require(now() < deadline);
+      if (!waiting)
+        sched_yield();
+    } while (!waiting);
+    if (fixture->collect) {
+      /* Match the collector's nested admission: the final release is inside
+       * luaW_start's own source file, invisible to a heapleave-only wrapper. */
+      luaW_stop(state);
+      luaW_heapleave(state);
+      luaW_start(state);
+    } else
+      luaW_heapleave(state);
+  }
+  luaX_unlockstate(state);
+  return NULL;
+}
+
+static void transfer(lua_State *state, struct fixture *fixture) {
+  pthread_t worker;
+  unsigned round;
+  fixture->ready = 0;
+  require(pthread_create(&worker, NULL, release_to_waiter, fixture) == 0);
+  luaX_lockstate(state);
+  for (round = 1; round <= TRANSFERS; round++) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    while (fixture->ready < round)
+      require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+    luaW_heapenter(state);
+    luaW_heapleave(state);
+  }
+  luaX_unlockstate(state);
+  require(pthread_join(worker, NULL) == 0);
+}
+
+int main(void) {
+  lua_State *state = luaL_newstate();
+  struct fixture fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
+                            NULL, 0, 0};
+  GcProbe record = {0};
+  uint64_t handoff_ns, wait_ns;
+  require(state != NULL);
+  lua_gc(state, LUA_GCSTOP);
+  fixture.owner = lua_newthread(state);
+  gc_probe_bind(state, &record);
+  record.enabled = 1;
+  luaX_lockstate(state);
+  luaW_heapenter(state);
+  luaW_heapleave(state);
+  luaX_unlockstate(state);
+  require(record.metadata_handoffs == 0 && record.metadata_waits == 0);
+  transfer(state, &fixture);
+  require(record.metadata_handoffs == TRANSFERS);
+  fixture.collect = 1;
+  transfer(state, &fixture);
+  record.enabled = 0;
+  require(record.metadata_handoffs == 2 * TRANSFERS);
+  require(record.metadata_handoffs <= record.metadata_waits);
+  require(record.metadata_handoff_ns > 0);
+  require(record.metadata_handoff_ns <= record.metadata_wait_ns);
+  require(record.metadata_handoff_max_ns > 0 &&
+          record.metadata_handoff_max_ns <= record.metadata_handoff_ns);
+  handoff_ns = record.metadata_handoff_ns;
+  wait_ns = record.metadata_wait_ns;
+  transfer(state, &fixture);
+  require(record.metadata_handoffs == 2 * TRANSFERS &&
+          record.metadata_handoff_ns == handoff_ns &&
+          record.metadata_wait_ns == wait_ns);
+  gc_probe_bind(NULL, NULL);
+  lua_close(state);
+  require(pthread_cond_destroy(&fixture.changed) == 0);
+  require(pthread_mutex_destroy(&fixture.mutex) == 0);
+  return 0;
+}

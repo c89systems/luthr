@@ -115,13 +115,22 @@ foreach(mode IN ITEMS control profile)
 endforeach()
 target_sources(scheduled_gc_profile PRIVATE gc_probe.c)
 target_compile_definitions(scheduled_gc_profile PRIVATE LUTHR_BENCH_GC_PROBE)
+luthr_test_program(gc_handoff_probe_test gc_handoff_probe.c)
+target_sources(gc_handoff_probe_test PRIVATE gc_probe.c)
+set_target_properties(gc_handoff_probe_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_handoff_probe_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_handoff_probe_test PRIVATE luthr_static)
 foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter luaW_heapleave
     luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
     luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector
     luaC_tracebatch luaC_scantrace luaC_assisttrace luaC_polltrace luaC_snapshot luaC_checksnapshot luaC_finishtrace
-    luaC_sweepbatch luaC_scansweep luaC_pollsweep)
+    luaC_sweepbatch luaC_scansweep luaC_pollsweep luaQ_wake)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
+  target_link_options(gc_handoff_probe_test PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
+add_test(NAME gc_handoff_probe COMMAND gc_handoff_probe_test)
+set_tests_properties(gc_handoff_probe PROPERTIES
+  LABELS "runtime;benchmark;parallel;memcheck;gc_profile" TIMEOUT 15)
 set(gc_arguments
   "-Dupstream=$<TARGET_FILE:scheduled_upstream>" "-Dshared=$<TARGET_FILE:scheduled_luthr>"
   "-Dcontrol=$<TARGET_FILE:scheduled_gc_control>" "-Dprofile=$<TARGET_FILE:scheduled_gc_profile>"

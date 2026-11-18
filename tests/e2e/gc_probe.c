@@ -22,6 +22,19 @@ static GcProbe *host_probe;
 static unsigned scanners;
 static unsigned sweepers;
 
+/* Each node lives on the waiting invocation's native/fiber stack. The probe's
+ * short mutex lets wake observers inspect it from any runtime source file or
+ * resource, including releases that the linker cannot interpose directly. */
+struct metadata_wait {
+  struct metadata_wait *next;
+  LuaWaiter **waiters;
+  LuaWorld *world;
+  void *owner;
+  uint64_t granted;
+};
+static struct metadata_wait *metadata_waiters;
+static pthread_mutex_t metadata_probe_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 static uint64_t now(void) {
   struct timespec stamp;
   if (clock_gettime(CLOCK_MONOTONIC, &stamp) != 0)
@@ -97,6 +110,7 @@ void __real_luaW_start(lua_State *);
 void __real_luaW_heapenter(lua_State *);
 void __real_luaW_collectenter(lua_State *);
 void __real_luaW_heapleave(lua_State *);
+void __real_luaQ_wake(pthread_cond_t *, LuaWaiter **);
 void __real_luaC_step(lua_State *);
 void __real_luaC_fullgc(lua_State *, int);
 void __real_luaC_finishtrace(lua_State *);
@@ -187,6 +201,26 @@ void __wrap_luaW_heapleave(lua_State *L) {
   __real_luaW_heapleave(L);
   if (record != NULL)
     coordination_end(record);
+}
+
+void __wrap_luaQ_wake(pthread_cond_t *changed, LuaWaiter **waiters) {
+  if (host != NULL) {
+    struct metadata_wait *wait;
+    luaX_checksync(pthread_mutex_lock(&metadata_probe_mutex));
+    for (wait = metadata_waiters; wait != NULL; wait = wait->next) {
+      /* Identity matches only this metadata waiter's condition registration.
+       * The runtime has assigned its owner before notifying that condition. */
+      if (wait->waiters == waiters &&
+          wait->owner == __atomic_load_n(&wait->world->heap_owner.token,
+                                         __ATOMIC_ACQUIRE) &&
+          wait->granted == 0) {
+        wait->granted = now();
+        break;
+      }
+    }
+    luaX_checksync(pthread_mutex_unlock(&metadata_probe_mutex));
+  }
+  __real_luaQ_wake(changed, waiters);
 }
 
 static void collect(lua_State *L, int operation, int emergency) {
@@ -502,6 +536,7 @@ void __wrap_luaW_waitcollector(lua_State *L) {
 void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
   GcProbe *record = probe(L);
+  struct metadata_wait pending = {0};
   uint64_t started = 0;
   int category = 0;
   if (record != NULL && mutex == &G(L)->world.mutex) {
@@ -513,7 +548,35 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     else if (G(L)->world.stopped)
       category = 3;
   }
+  if (category == 2 && host != NULL && G(L) == G(host)) {
+    pending.waiters = waiters;
+    pending.world = &G(L)->world;
+    pending.owner = luaX_token(L);
+    luaX_checksync(pthread_mutex_lock(&metadata_probe_mutex));
+    pending.next = metadata_waiters;
+    metadata_waiters = &pending;
+    luaX_checksync(pthread_mutex_unlock(&metadata_probe_mutex));
+  }
   __real_luaQ_wait(L, mutex, changed, waiters);
+  if (pending.waiters != NULL) {
+    struct metadata_wait **link;
+    luaX_checksync(pthread_mutex_lock(&metadata_probe_mutex));
+    link = &metadata_waiters;
+    while (*link != &pending) {
+      if (*link == NULL)
+        abort();
+      link = &(*link)->next;
+    }
+    *link = pending.next;
+    luaX_checksync(pthread_mutex_unlock(&metadata_probe_mutex));
+    if (pending.granted != 0) {
+      uint64_t elapsed = now() - pending.granted;
+      record->metadata_handoffs++;
+      record->metadata_handoff_ns += elapsed;
+      if (record->metadata_handoff_max_ns < elapsed)
+        record->metadata_handoff_max_ns = elapsed;
+    }
+  }
   if (category == 1) {
     record->quiesce_waits++;
     record->quiesce_wait_ns += now() - started;
