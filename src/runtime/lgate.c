@@ -125,10 +125,8 @@ void luaX_endreserve (lua_State *target, int reservation) {
   if (reservation == 1) release(target, luaQ_ownertoken());
 }
 
-void luaX_lockstate (lua_State *L) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+static void lockstate (lua_State *L, LuaThreadContext *thread,
+                       NativeStackContext *context) {
   LuaExecution *execution = context->execution;
   LuaThreadContext *host = execution == NULL ? thread : NULL;
   void *token = execution != NULL ? cast(void *, execution)
@@ -141,11 +139,17 @@ void luaX_lockstate (lua_State *L) {
     luaE_refreshnativestack(L);
 }
 
-void luaX_unlockstate (lua_State *L) {
+void luaX_lockstate (lua_State *L) {
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  lockstate(L, thread, context);
+}
+
+static void unlockstate (lua_State *L, void *token) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
   LuaExecution *execution = luaX_execution(L);
-  void *token = luaQ_ownertoken();
   if (!L->reclaiming && L->storage_retired != NULL) luaHS_reclaim(L, LUAHS_WITHDRAW);
   if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
@@ -161,6 +165,39 @@ void luaX_unlockstate (lua_State *L) {
   release(L, token);
   luaW_leave(world, participant);
   luaQ_leavemanaged(execution);  /* no state accesses after the final world leave */
+}
+
+void luaX_unlockstate (lua_State *L) {
+  unlockstate(L, luaQ_ownertoken());
+}
+
+static int attachedapi (lua_State *L, NativeStackContext *context) {
+  LuaApiRegion *region = context->api_region;
+  if (region == NULL) return 0;
+  if (region->state != L || L->stack_gate.context != context) {
+    fputs("Luthr API crossed an attached runtime activation\n", stderr);
+    abort();
+  }
+  return 1;
+}
+
+void luaX_apienter (lua_State *L) {
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  if (!attachedapi(L, context)) lockstate(L, thread, context);
+  else luaX_pollrequests(L);
+}
+
+void luaX_apileave (lua_State *L) {
+  LuaThreadContext *thread = &luaE_thread_context;
+  NativeStackContext *context = thread->override != NULL
+                                 ? thread->override : &thread->native;
+  if (!attachedapi(L, context)) {
+    void *token = context->execution != NULL ? cast(void *, context->execution)
+                                            : cast(void *, &thread->native);
+    unlockstate(L, token);
+  }
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation

@@ -36,8 +36,8 @@ struct fixture {
 
 static struct fixture *active_fixture;
 
-void __real_luaX_lockstate(lua_State *state);
-void __real_luaX_unlockstate(lua_State *state);
+void __real_luaX_apienter(lua_State *state);
+void __real_luaX_apileave(lua_State *state);
 void __real_luaX_pollrequests(lua_State *state);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
 
@@ -76,17 +76,17 @@ static void collect_at_boundary(struct fixture *fixture) {
     abort();
 }
 
-void __wrap_luaX_lockstate(lua_State *state) {
+void __wrap_luaX_apienter(lua_State *state) {
   struct fixture *fixture = active_fixture;
   if (fixture != NULL && !fixture->vm_case && fixture->armed &&
       fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);
-  __real_luaX_lockstate(state);
+  __real_luaX_apienter(state);
 }
 
-void __wrap_luaX_unlockstate(lua_State *state) {
+void __wrap_luaX_apileave(lua_State *state) {
   struct fixture *fixture = active_fixture;
-  __real_luaX_unlockstate(state);
+  __real_luaX_apileave(state);
   if (fixture != NULL && !fixture->vm_case && fixture->armed &&
       !fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);

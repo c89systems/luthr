@@ -60,7 +60,7 @@ void *__wrap_luaM_malloc_(lua_State *L, size_t size, int tag) {
       size == (builder->thread_build
                    ? (BASIC_STACK_SIZE + EXTRA_STACK) * sizeof(StackValue)
                    : sizeof(UpVal))) {
-    LuaWorldScope scope = {0, 0};
+    LuaWorldScope scope = {0};
     if (builder->fail)
       luaM_error(L);
     if (builder->thread_build)
@@ -174,7 +174,7 @@ void __wrap_luaQ_poll(lua_State *L) {
   if (collection != NULL && L == collection->collector && luaC_tracing(L) &&
       !collection->entered &&
       __atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE)) {
-    LuaWorldScope scope = {0, 0};
+    LuaWorldScope scope = {0};
     require(L->world_depth == 0 && !G(L)->world.stopped && !G(L)->trace_busy);
     /* These cases isolate graph publication and explicit helper handoffs.
      * Keep automatic allocation backpressure in gc_pacing's pressure cases. */

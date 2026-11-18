@@ -153,10 +153,10 @@ static int hold_close(lua_State *state) {
   return 0;
 }
 static int obtain_target(lua_State *state) {
-  luaX_lockstate(state);
+  luaX_apienter(state);
   luaD_checkstack(state, 1);
   setthvalue(state, s2v(state->top.p++), active->target);
-  luaX_unlockstate(state);
+  luaX_apileave(state);
   return 1;
 }
 static int reenter_owner(lua_State *state) {
@@ -195,7 +195,7 @@ static int bridge_owner(lua_State *state) {
   lua_pushinteger(state, 99);
   return 1;
 }
-static int rooted_operation(lua_State *state) {
+static int rooted_body(lua_State *state) {
   LuaCoroutineScope scope;
   struct fixture *test = active;
   push_token(state);
@@ -256,6 +256,13 @@ static int rooted_operation(lua_State *state) {
   luaO_end(&scope);
   lua_pushinteger(state, 99);
   return 1;
+}
+static int rooted_operation(lua_State *state) {
+  /* This adapter waits on host events and operates on other states. */
+  LuaWorldScope world = luaW_suspendapi();
+  int results = rooted_body(state);
+  luaW_restoreapi(world);
+  return results;
 }
 static void *invoke(void *context) {
   struct fixture *test = context;

@@ -312,7 +312,7 @@ static void managedleave (LuaExecution *execution) {
 static void nativeenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
-  LuaWorldScope depth = {0, 0};
+  LuaWorldScope depth = {0};
   int detached = 0, managed = execution->managed_depth != 0;
   if (execution->native_depth != 0) return;
   task->native_pending = 1;

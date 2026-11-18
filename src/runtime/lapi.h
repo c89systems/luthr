@@ -38,8 +38,8 @@ LUAI_FUNC void luaA_unref (lua_State *L, int idx, int ref);
 ** macros that are executed whenever program enters the Lua core
 ** ('lua_lock') and leaves the core ('lua_unlock')
 */
-#define lua_lock(L) luaX_lockstate(L)
-#define lua_unlock(L) luaX_unlockstate(L)
+#define lua_lock(L) luaX_apienter(L)
+#define lua_unlock(L) luaX_apileave(L)
 
 
 

@@ -58,9 +58,9 @@ static void dumpBlock (DumpState *D, const void *b, size_t size) {
     LuaWorldScope depth;
     LuaCallScope call;
     luaQ_begincall(D->L, D->managed, &call);
-    depth = luaW_detach(D->L);
+    depth = luaQ_entercall(D->L, &call);
     D->status = (*D->writer)(D->L, b, size, D->data);
-    luaW_attach(D->L, depth);
+    luaQ_leavecall(D->L, &call, depth);
     luaQ_endcall(D->L, &call);
     D->offset += size;
   }

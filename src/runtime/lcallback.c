@@ -121,7 +121,7 @@ int luaCB_call (LuaCallback *callback, LuaExecution *execution,
                  void (*function)(lua_State *, void *), void *context,
                  char *error, size_t error_size) {
   LuaExecution *current = luaQ_current();
-  NativeStackContext native = {0, 0, NULL, NULL};
+  NativeStackContext native = {0};
   NativeStackContext *previous = NULL;
   struct Invocation call;
   lua_State *L;

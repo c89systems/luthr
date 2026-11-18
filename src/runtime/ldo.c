@@ -81,6 +81,7 @@ typedef struct lua_longjmp {
   LuaWorldScope world_scope;
   LuaObjectScope *object_scopes;
   LuaCoroutineScope *coroutine_scopes;
+  LuaApiRegion *api_region;
 } lua_longjmp;
 
 /* Only this logical execution owns these retained native stack locations.
@@ -157,6 +158,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
     }
     luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
+    luaE_getnativestackcontext()->api_region = L->errorJmp->api_region;
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */
   }
@@ -166,9 +168,10 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
     lua_CFunction panicf;
     luaO_unwind(NULL);
     luaA_unwind(L, NULL);
+    luaE_getnativestackcontext()->api_region = NULL;
     L->native_roots = NULL;  /* every native scope on this thread is abandoned */
     {
-      LuaWorldScope empty = {0, 0};
+      LuaWorldScope empty = {0};
       luaW_restore(L, empty, 1);  /* retain this state while closing frames */
     }
     errcode = luaE_resetthread(L, errcode);  /* close all upvalues */
@@ -270,10 +273,12 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   lj.world_scope = luaW_scope(L);
   lj.object_scopes = L->object_scopes;
   lj.coroutine_scopes = luaE_getnativestackcontext()->coroutine_scopes;
+  lj.api_region = luaE_getnativestackcontext()->api_region;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
   luaC_restoregcframe(lj.gc_frame);
+  luaE_getnativestackcontext()->api_region = lj.api_region;
   L->reclaiming = lj.reclaiming;
   /* Retire the jump buffer before any cleanup callback can park this stack. */
   if (lj.execution != NULL) {
@@ -607,9 +612,9 @@ void luaD_hook (lua_State *L, int event, int line,
       ci->top.p = L->top.p + LUA_MINSTACK;
     L->allowhook = 0;  /* cannot call hooks inside a hook */
     ci->callstatus |= CIST_HOOKED;
-    depth = luaW_detach(L);
+    depth = luaQ_entercall(L, &call);
     (*hook)(L, &ar);
-    luaW_attach(L, depth);
+    luaQ_leavecall(L, &call, depth);
     luaQ_endcall(L, &call);
     lua_assert(!L->allowhook);
     L->allowhook = 1;
@@ -815,9 +820,9 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
     int narg = cast_int(L->top.p - func) - 1;
     luaD_hook(L, LUA_HOOKCALL, -1, 1, narg);
   }
-  depth = luaW_detach(L);
+  depth = luaQ_entercall(L, &call);
   n = (*f)(L);  /* do the actual call */
-  luaW_attach(L, depth);
+  luaQ_leavecall(L, &call, depth);
   luaQ_endcall(L, &call);
   api_checknelems(L, n);
   luaD_poscall(L, ci, n);
@@ -1026,9 +1031,9 @@ static void finishCcall (lua_State *L, CallInfo *ci) {
       status = finishpcallk(L, ci);  /* finish it */
     adjustresults(L, LUA_MULTRET);  /* finish 'lua_callk' */
     luaQ_begincall(L, managed, &call);
-    depth = luaW_detach(L);
+    depth = luaQ_entercall(L, &call);
     n = (*kf)(L, APIstatus(status), ci->u.c.ctx);  /* call continuation */
-    luaW_attach(L, depth);
+    luaQ_leavecall(L, &call, depth);
     luaQ_endcall(L, &call);
     api_checknelems(L, n);
   }
@@ -1117,9 +1122,9 @@ static void resume (lua_State *L, void *ud) {
         int managed = ttisCclosure(s2v(ci->func.p)) &&
                       clCvalue(s2v(ci->func.p))->managed;
         luaQ_begincall(L, managed, &call);
-        depth = luaW_detach(L);
+        depth = luaQ_entercall(L, &call);
         n = (*ci->u.c.k)(L, LUA_YIELD, ci->u.c.ctx); /* call continuation */
-        luaW_attach(L, depth);
+        luaQ_leavecall(L, &call, depth);
         luaQ_endcall(L, &call);
         api_checknelems(L, n);
       }

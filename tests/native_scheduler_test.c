@@ -223,7 +223,7 @@ static void managed_leave(LuaExecution *execution) {
 static void native_enter(LuaExecution *execution, lua_State *state) {
   struct task *task = execution->context;
   struct pool *pool = task->pool;
-  LuaWorldScope scope = {0, 0};
+  LuaWorldScope scope = {0};
   int managed = execution->managed_depth != 0;
   if (execution->native_depth != 0) {
     require(task->native);

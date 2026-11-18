@@ -28,6 +28,15 @@ static lua_State *getco (lua_State *L) {
   return co;
 }
 
+/* These operations reserve another coroutine. Keep the C activation pinned,
+** but release its state before entering another stack's ownership protocol. */
+static int otherstate (lua_State *L, lua_CFunction function) {
+  LuaWorldScope scope = luaW_suspendapi();
+  int results = function(L);
+  luaW_restoreapi(scope);
+  return results;
+}
+
 
 /*
 ** Resumes a coroutine. Returns the number of results for non-error
@@ -57,7 +66,7 @@ static int auxresume (lua_State *L, lua_State *co, int narg) {
 }
 
 
-int luaB_coresume (lua_State *L) {
+static int coresume (lua_State *L) {
   lua_State *co = getco(L);
   LuaCoroutineScope scope;
   int r;
@@ -81,7 +90,12 @@ int luaB_coresume (lua_State *L) {
 }
 
 
-int luaB_wrapresume (lua_State *L, int narg) {
+int luaB_coresume (lua_State *L) {
+  return otherstate(L, coresume);
+}
+
+
+static int wrapresume (lua_State *L, int narg) {
   lua_State *co = getco(L);  /* stack argument retains the snapshot */
   LuaCoroutineScope scope;
   int r;
@@ -109,6 +123,14 @@ int luaB_wrapresume (lua_State *L, int narg) {
 }
 
 
+int luaB_wrapresume (lua_State *L, int narg) {
+  LuaWorldScope scope = luaW_suspendapi();
+  int results = wrapresume(L, narg);
+  luaW_restoreapi(scope);
+  return results;
+}
+
+
 int luaB_auxwrap (lua_State *L) {
   int narg = lua_gettop(L);
   lua_pushvalue(L, lua_upvalueindex(1));
@@ -117,13 +139,18 @@ int luaB_auxwrap (lua_State *L) {
 }
 
 
-int luaB_cocreate (lua_State *L) {
+static int cocreate (lua_State *L) {
   lua_State *NL;
   luaL_checktype(L, 1, LUA_TFUNCTION);
   NL = lua_newthread(L);
   lua_pushvalue(L, 1);  /* move function to top */
   lua_xmove(L, NL, 1);  /* move function from L to NL */
   return 1;
+}
+
+
+int luaB_cocreate (lua_State *L) {
+  return otherstate(L, cocreate);
 }
 
 
@@ -154,7 +181,7 @@ static int auxstatus (lua_State *L, lua_State *co) {
 }
 
 
-static int luaB_costatus (lua_State *L) {
+static int costatus (lua_State *L) {
   lua_State *co = getco(L);
   lua_pushstring(L, statname[auxstatus(L, co)]);
   return 1;
@@ -166,7 +193,12 @@ static lua_State *getoptco (lua_State *L) {
 }
 
 
-static int luaB_yieldable (lua_State *L) {
+static int luaB_costatus (lua_State *L) {
+  return otherstate(L, costatus);
+}
+
+
+static int coyieldable (lua_State *L) {
   lua_State *co = getoptco(L);
   lua_pushboolean(L, lua_isyieldable(co));
   return 1;
@@ -180,7 +212,12 @@ static int luaB_corunning (lua_State *L) {
 }
 
 
-int luaB_close (lua_State *L) {
+static int luaB_yieldable (lua_State *L) {
+  return otherstate(L, coyieldable);
+}
+
+
+static int closeco (lua_State *L) {
   lua_State *co = getoptco(L);
   LuaCoroutineScope scope;
   int status;
@@ -206,6 +243,11 @@ int luaB_close (lua_State *L) {
   if (status != LUA_OK) return lua_error(L);
   lua_assert(0);
   return 0;
+}
+
+
+int luaB_close (lua_State *L) {
+  return otherstate(L, closeco);
 }
 
 

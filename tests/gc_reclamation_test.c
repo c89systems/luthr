@@ -101,7 +101,7 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
 void __real_luaM_free_(lua_State *, void *, size_t);
 void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
   struct fixture *fixture = active;
-  LuaWorldScope scope = {0, 0};
+  LuaWorldScope scope = {0};
   int watched = fixture != NULL && block != NULL &&
                 block == __atomic_load_n(&fixture->target, __ATOMIC_ACQUIRE);
   if (fixture != NULL && fixture->assist && block != NULL &&

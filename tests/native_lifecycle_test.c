@@ -297,6 +297,7 @@ static int nested(lua_State *L) {
 }
 static int await_callback(lua_State *L) {
   struct fixture *f = active;
+  LuaWorldScope world = luaW_suspendapi();
   lock(f);
   f->callback_started = 1;
   notify(f);
@@ -308,6 +309,7 @@ static int await_callback(lua_State *L) {
     }
   }
   unlock(f);
+  luaW_restoreapi(world);
   return 0;
 }
 static int allocation_failure(lua_State *L) {
@@ -492,6 +494,7 @@ static void callback_fairness(struct fixture *f, int opaque) {
 
 static int await_ack(lua_State *L) {
   struct fixture *f = active;
+  LuaWorldScope world = luaW_suspendapi();
   lock(f);
   f->ack_ready = 1;
   notify(f);
@@ -503,6 +506,7 @@ static int await_ack(lua_State *L) {
     }
   }
   unlock(f);
+  luaW_restoreapi(world);
   return 0;
 }
 static int generated(lua_State *L) {

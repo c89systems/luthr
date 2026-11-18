@@ -232,7 +232,7 @@ static void create_task(int index) {
   lua_settop(state, 0);
 }
 static void drive(LuaTaskRoot *task) {
-  NativeStackContext context = {0, 0, NULL, NULL}, *previous;
+  NativeStackContext context = {0}, *previous;
   int status, results, saved_status;
   context.execution = task->execution;
   previous = luaE_setnativestackcontext(&context);
@@ -300,7 +300,7 @@ static void host_wake(LuaExecution *execution, LuaWaiter *waiter) {
 static void *awaiter_entry(void *context) {
   struct fixture *test = context;
   LuaExecution execution = {0};
-  NativeStackContext native = {0, 0, NULL, NULL}, *previous = NULL;
+  NativeStackContext native = {0}, *previous = NULL;
   int logical = strstr(test->mode, "notify") != NULL;
   test->second_status = test->second_results = 777;
   if (logical) {

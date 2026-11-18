@@ -1964,7 +1964,7 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete) {
   lu_mem worked = 0;
   int quiescent = g->gcemergency || L->object_scopes != NULL ||
                   luaW_scope(L).heap != 0;
-  LuaWorldScope scope = {0, 0};
+  LuaWorldScope scope = {0};
   if (!quiescent) {
     if (L->world_depth != 0) g->gcstopem = 0;
     scope = luaW_suspend(L);

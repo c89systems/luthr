@@ -99,15 +99,18 @@ static void retire (lua_State *L, Access *access) {
 
 static int waitforchange (lua_State *L, Access *access, unsigned *waiting) {
   Pipe *pipe = access->pipe;
+  LuaWorldScope scope;
   int stopped;
   (*waiting)++;
   /* Stable userdata arguments and the detached C activation retain the owner.
   ** Only native queue bookkeeping remains under this mutex after withdrawal. */
   luaA_end(L, &access->object);
-  lua_unlock(L);
+  scope = luaW_suspendapi();
+  if (scope.api_region == NULL) lua_unlock(L);
   stopped = luaQ_waitstop(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
   (*waiting)--;
   luaX_checksync(pthread_mutex_unlock(&pipe->mutex));
+  luaW_restoreapi(scope);
   return stopped;
 }
 

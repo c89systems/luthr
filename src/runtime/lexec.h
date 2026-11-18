@@ -11,6 +11,14 @@
 struct lua_longjmp;
 struct LuaWaiter;
 struct LuaTaskRoot;
+struct LuaWorldScope;
+
+/* An attached runtime C activation owns its state across API calls. The
+** record lives on the logical execution's retained C stack. */
+typedef struct LuaApiRegion {
+  struct LuaApiRegion *previous;
+  lua_State *state;
+} LuaApiRegion;
 #define LUA_ALLOC_BINS 6
 #define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)  /* ordinary storage and call frames */
 typedef struct LuaAllocationCache {
@@ -33,6 +41,7 @@ typedef struct LuaCallScope {
   struct LuaExecution *execution;
   unsigned native_depth;
   int managed;
+  LuaApiRegion api;
 } LuaCallScope;
 
 typedef struct LuaExecution {
@@ -122,12 +131,16 @@ LUAI_FUNC void luaQ_beginnative (lua_State *L, LuaExecution *execution);
 LUAI_FUNC void luaQ_endnative (lua_State *L, LuaExecution *execution);
 LUAI_FUNC void luaQ_begincall (lua_State *, int managed, LuaCallScope *);
 LUAI_FUNC void luaQ_endcall (lua_State *, LuaCallScope *);
+LUAI_FUNC struct LuaWorldScope luaQ_entercall (lua_State *, LuaCallScope *);
+LUAI_FUNC void luaQ_leavecall (lua_State *, LuaCallScope *,
+                              struct LuaWorldScope);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,
                                   unsigned depth);
 LUAI_FUNC void luaQ_poll (lua_State *L);
 LUAI_FUNC void luaQ_requesthandoff (lua_State *L);
-/* Bounded CPU work in trusted C helpers. Call outside state/object ownership;
-** all borrowed Lua values must remain rooted across this migration point.
+/* Bounded CPU work in trusted C helpers. Call outside object ownership, using
+** an attached C activation or this helper's API entry for state ownership.
+** All borrowed Lua values must remain rooted across this migration point.
 ** Initialize the caller-local counter to zero. Does not charge bytecode fuel. */
 LUAI_FUNC void luaQ_work (lua_State *L, unsigned *work);
 /* Charge a completed bounded chunk; the operation itself must be bounded. */

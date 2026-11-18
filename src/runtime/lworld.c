@@ -328,6 +328,7 @@ static void restoreheap (lua_State *L, unsigned depth) {
 
 LuaWorldScope luaW_scope (lua_State *L) {
   LuaWorldScope scope;
+  scope.api_region = NULL;
   scope.collection = L->world_depth;
   scope.heap = heapdepth(L);
   if (scope.collection != 0) {
@@ -375,13 +376,39 @@ LuaWorldScope luaW_detach (lua_State *L) {
 #endif
   L->native_depth++;
   scope = luaW_suspend(L);
-  lua_unlock(L);
+  scope.api_region = luaX_context(L)->api_region;
+  luaX_context(L)->api_region = NULL;
+  luaX_unlockstate(L);
   return scope;
 }
 
 void luaW_attach (lua_State *L, LuaWorldScope scope) {
-  lua_lock(L);
+  luaX_lockstate(L);
   luaW_restore(L, scope, L->native_depth);
   lua_assert(L->native_depth != 0);
   L->native_depth--;
+  luaX_context(L)->api_region = scope.api_region;
+}
+
+LuaWorldScope luaW_suspendapi (void) {
+  LuaWorldScope scope = {0};
+  NativeStackContext *context = luaE_getnativestackcontext();
+  if (context->api_region != NULL) {
+    lua_State *L = context->api_region->state;
+    lua_assert(L->native_depth != 0);
+    scope = luaW_suspend(L);
+    scope.api_region = context->api_region;
+    context->api_region = NULL;
+    luaX_unlockstate(L);
+  }
+  return scope;
+}
+
+void luaW_restoreapi (LuaWorldScope scope) {
+  if (scope.api_region != NULL) {
+    lua_State *L = scope.api_region->state;
+    luaX_lockstate(L);
+    luaW_restore(L, scope, L->native_depth);
+    luaX_context(L)->api_region = scope.api_region;
+  }
 }

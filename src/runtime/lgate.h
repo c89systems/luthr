@@ -26,6 +26,10 @@ LUAI_FUNC int luaX_initgate (LuaStackGate *gate);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);
+/* Public/private API entry can borrow an attached runtime C activation;
+** physical state gates themselves remain strictly nonrecursive. */
+LUAI_FUNC void luaX_apienter (lua_State *L);
+LUAI_FUNC void luaX_apileave (lua_State *L);
 /* Nonblocking collector reservation. 0 means busy, 1 is a new reservation,
 ** and 2 means this execution already owns the target. The collector remains
 ** admitted on its own state throughout a reservation. */

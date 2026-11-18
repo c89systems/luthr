@@ -270,7 +270,7 @@ int luaTK_finish (LuaTaskRoot *task, int *status, int *results) {
   return LUA_OK;
 }
 
-int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+static int collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   LuaWorld *world = &G(L)->world;
   int outcome, count, result;
   if (task->global != G(L) || task->thread == L ||
@@ -305,14 +305,21 @@ int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   return LUA_OK;
 }
 
-int luaTK_await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+int luaTK_collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+  LuaWorldScope world = luaW_suspendapi();
+  int result = collect(L, task, status, results);
+  luaW_restoreapi(world);
+  return result;
+}
+
+static int await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
   LuaWorld *world = &G(L)->world;
   int result;
   if (task->global != G(L) || task->thread == L ||
       task->execution == luaQ_current() || status == NULL || results == NULL)
     return LUA_TK_INVALID;
   /* Retire capacity granted to an initial driver dispatch, too. Ordinary Lua
-  ** C activations already publish their roots and detach before this call. */
+  ** C activations publish their roots and detach at the operation boundary. */
   for (;;) {
     int stopped = 0;
     lua_lock(L);
@@ -335,4 +342,11 @@ int luaTK_await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
       luaTK_throwstop(L);
     }
   }
+}
+
+int luaTK_await (lua_State *L, LuaTaskRoot *task, int *status, int *results) {
+  LuaWorldScope world = luaW_suspendapi();
+  int result = await(L, task, status, results);
+  luaW_restoreapi(world);
+  return result;
 }

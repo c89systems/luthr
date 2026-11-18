@@ -297,6 +297,7 @@ typedef struct NativeStackContext {
   lu_byte overflow;
   LuaExecution *execution;
   struct LuaCoroutineScope *coroutine_scopes;
+  LuaApiRegion *api_region;
 } NativeStackContext;
 
 /* Carrier-local defaults and ambient host scopes share one TLS record. Managed

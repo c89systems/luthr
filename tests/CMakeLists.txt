@@ -119,6 +119,18 @@ foreach(case IN ITEMS host managed borrow pair foreign publication)
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(api_region_test api_region_test.c)
+set_target_properties(api_region_test PROPERTIES C_STANDARD 99)
+target_compile_options(api_region_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(api_region_test PRIVATE luthr_static Threads::Threads)
+foreach(case IN ITEMS managed_incremental managed_generational foreign_incremental
+    foreign_generational nested_incremental nested_generational yield_incremental yield_generational
+    handoff_incremental handoff_generational collection_incremental collection_generational)
+  add_test(NAME api_region_${case} COMMAND api_region_test ${case})
+  set_tests_properties(api_region_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
+
 luthr_test_program(table_read_test table_read_test.c)
 set_target_properties(table_read_test PROPERTIES C_STANDARD 99)
 target_compile_options(table_read_test PRIVATE -Wall -Wextra -Werror)
@@ -804,7 +816,7 @@ set_target_properties(api_ownership_test PROPERTIES C_STANDARD 99)
 target_compile_options(api_ownership_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(api_ownership_test PRIVATE luthr_static)
 target_link_options(api_ownership_test PRIVATE
-  -Wl,--wrap=luaX_lockstate -Wl,--wrap=luaX_unlockstate -Wl,--wrap=luaA_end
+  -Wl,--wrap=luaX_apienter -Wl,--wrap=luaX_apileave -Wl,--wrap=luaA_end
   -Wl,--wrap=luaX_pollrequests)
 foreach(case IN ITEMS string_pointer string_length dump_entry rawset_entry capture_selfcopy
     vm_newtable_incremental vm_newtable_generational vm_concat_incremental
@@ -911,7 +923,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test execution_context_test table_read_test memory_publication_test
+  capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test page_ownership_test gc_pacing_test
   gc_barriers_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test

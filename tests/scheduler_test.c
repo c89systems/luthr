@@ -329,8 +329,10 @@ static int started(lua_State *L) {
   require(__atomic_fetch_add(&fixture->seen[id], 1, __ATOMIC_RELAXED) == 0);
   __atomic_fetch_add(&fixture->started, 1, __ATOMIC_RELEASE);
   if (fixture->parallel_check && id < 2) {
+    LuaWorldScope world = luaW_suspendapi();
     int status = pthread_barrier_wait(&fixture->parallel);
     require(status == 0 || status == PTHREAD_BARRIER_SERIAL_THREAD);
+    luaW_restoreapi(world);
   }
   return 0;
 }
@@ -393,6 +395,7 @@ static void no_requests(struct fixture *f) {
 
 static int event_wait(lua_State *L) {
   struct fixture *f = fixture;
+  LuaWorldScope world = luaW_suspendapi();
   require(pthread_mutex_lock(&f->mutex) == 0);
   f->waiting++;
   require(pthread_cond_broadcast(&f->changed) == 0);
@@ -405,6 +408,7 @@ static int event_wait(lua_State *L) {
     }
   }
   require(pthread_mutex_unlock(&f->mutex) == 0);
+  luaW_restoreapi(world);
   lua_pushinteger(L, 77);
   return 1;
 }

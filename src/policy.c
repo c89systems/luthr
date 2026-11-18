@@ -50,7 +50,9 @@ static void hook(lua_State *L, lua_Debug *debug) {
     void *context;
     Invocation *previous;
     LuaExecution *execution = luaQ_current();
+    LuaWorldScope world;
     luaQ_beginnative(L, execution);
+    world = luaW_suspendapi();
     check(pthread_mutex_lock(&invocation->observer));
     trace = invocation->options.trace;
     context = invocation->options.trace_context;
@@ -64,6 +66,7 @@ static void hook(lua_State *L, lua_Debug *debug) {
       observing = previous;
     }
     check(pthread_mutex_unlock(&invocation->observer));
+    luaW_restoreapi(world);
     luaQ_endnative(L, execution);
   }
 }

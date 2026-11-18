@@ -28,9 +28,9 @@ int luaZ_fill (ZIO *z) {
   LuaWorldScope depth;
   LuaCallScope call;
   luaQ_begincall(L, z->managed, &call);
-  depth = luaW_detach(L);
+  depth = luaQ_entercall(L, &call);
   buff = z->reader(L, z->data, &size);
-  luaW_attach(L, depth);
+  luaQ_leavecall(L, &call, depth);
   luaQ_endcall(L, &call);
   if (buff == NULL || size == 0) {
     z->n = 0; z->p = NULL;

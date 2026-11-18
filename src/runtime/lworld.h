@@ -41,6 +41,7 @@ typedef struct LuaWorld {
 typedef struct LuaWorldScope {
   unsigned collection;
   unsigned heap;
+  LuaApiRegion *api_region;  /* detached activation, restored only on attach */
 } LuaWorldScope;
 
 LUAI_FUNC int luaW_init (LuaWorld *world);
@@ -70,6 +71,10 @@ LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);
 LUAI_FUNC LuaWorldScope luaW_detach (lua_State *L);
 LUAI_FUNC void luaW_attach (lua_State *L, LuaWorldScope scope);
+/* Suspend an attached runtime C activation for blocking or cross-state work.
+** Its existing native-depth pin retains the activation across this pause. */
+LUAI_FUNC LuaWorldScope luaW_suspendapi (void);
+LUAI_FUNC void luaW_restoreapi (LuaWorldScope scope);
 /* The caller is an admitted mutator or the collector itself. */
 LUAI_FUNC int luaW_iscollector (lua_State *L);
 
