@@ -953,12 +953,12 @@ static int auxgetstr (lua_State *L, const TValue *t, const char *k) {
   t = &object.value;
   str = luaS_new(L, k);
   luaV_fastget(t, str, s2v(L->top.p), luaH_getstr, tag);
-  if (!tagisempty(tag))
+  if (!luaV_needsindex(tag))
     api_incr_top(L);
   else {
     setsvalue2s(L, L->top.p, str);
     api_incr_top(L);
-    tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1, tag);
+    tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1);
   }
   luaR_poproot(L, &object);
   return novariant(tag);
@@ -1001,8 +1001,8 @@ LUA_API int lua_gettable (lua_State *L, int idx) {
   api_checkpop(L, 1);
   t = index2value(L, idx, &indexed);
   luaV_fastget(t, s2v(L->top.p - 1), s2v(L->top.p - 1), luaH_get, tag);
-  if (tagisempty(tag))
-    tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1, tag);
+  if (luaV_needsindex(tag))
+    tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1);
   luaR_poproot(L, &indexed);
   lua_unlock(L);
   return novariant(tag);
@@ -1027,10 +1027,10 @@ LUA_API int lua_geti (lua_State *L, int idx, lua_Integer n) {
   lua_lock(L);
   t = index2value(L, idx, &indexed);
   luaV_fastgeti(t, n, s2v(L->top.p), tag);
-  if (tagisempty(tag)) {
+  if (luaV_needsindex(tag)) {
     TValue key;
     setivalue(&key, n);
-    tag = luaV_finishget(L, t, &key, L->top.p, tag);
+    tag = luaV_finishget(L, t, &key, L->top.p);
   }
   api_incr_top(L);
   luaR_poproot(L, &indexed);

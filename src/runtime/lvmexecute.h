@@ -100,8 +100,8 @@
         luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
         updatebase(ci);
         ra = RA(i);
-        if (tagisempty(tag))
-          Protect(finishget(L, upval, rc, ra, tag, GETARG_B(i) + 1u));
+        if (luaV_needsindex(tag))
+          Protect(finishget(L, upval, rc, ra, GETARG_B(i) + 1u));
         luaR_poproot(L, &snapshot);
         vmbreak;
       }
@@ -117,8 +117,8 @@
         else
           luaV_fastget(rb, rc, s2v(ra), luaH_get, tag);
         updatebase(ci);
-        if (tagisempty(tag))
-          Protect(luaV_finishget(L, vRB(i), vRC(i), RA(i), tag));
+        if (luaV_needsindex(tag))
+          Protect(luaV_finishget(L, vRB(i), vRC(i), RA(i)));
         vmbreak;
       }
       vmcase(OP_GETI) {
@@ -129,10 +129,10 @@
         ci->u.l.rootpc = ip;
         luaV_fastgeti(rb, c, s2v(ra), tag);
         updatebase(ci);
-        if (tagisempty(tag)) {
+        if (luaV_needsindex(tag)) {
           TValue key;
           setivalue(&key, c);
-          Protect(luaV_finishget(L, vRB(i), &key, RA(i), tag));
+          Protect(luaV_finishget(L, vRB(i), &key, RA(i)));
         }
         vmbreak;
       }
@@ -145,8 +145,8 @@
         ci->u.l.rootpc = ip;
         luaV_fastget(rb, key, s2v(ra), luaH_getshortstr, tag);
         updatebase(ci);
-        if (tagisempty(tag))
-          Protect(luaV_finishget(L, vRB(i), rc, RA(i), tag));
+        if (luaV_needsindex(tag))
+          Protect(luaV_finishget(L, vRB(i), rc, RA(i)));
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
@@ -208,8 +208,8 @@
         setobj2s(L, ra + 1, rb);
         luaV_fastget(rb, key, s2v(ra), luaH_getshortstr, tag);
         updatebase(ci);
-        if (tagisempty(tag))
-          Protect(luaV_finishget(L, vRB(i), rc, RA(i), tag));
+        if (luaV_needsindex(tag))
+          Protect(luaV_finishget(L, vRB(i), rc, RA(i)));
         vmbreak;
       }
       vmcase(OP_ADDI) {

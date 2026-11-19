@@ -293,8 +293,9 @@ static int floatforloop (lua_State *L, StkId ra) {
 ** 'upvalue' is the captured receiver's slot plus one, or zero for other sources.
 */
 static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
-                          StkId val, lu_byte tag, unsigned upvalue) {
+                          StkId val, unsigned upvalue) {
   LuaNativeRoot object, rooted_key, method;
+  lu_byte tag;
   int loop;
   luaR_pushroot(L, &object);
   luaR_setroot(L, &object, t);
@@ -334,8 +335,8 @@ static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
 }
 
 lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
-                        StkId val, lu_byte tag) {
-  return finishget(L, t, key, val, tag, 0);
+                        StkId val) {
+  return finishget(L, t, key, val, 0);
 }
 
 

@@ -430,9 +430,9 @@ lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
   LuaObjectScope first, second;
   lu_byte tag;
   int count;
-  /* A raw hit completes indexing regardless of the table's metatable.
-  ** This is the ordinary read of a table reached through '__index'. */
-  if (luaH_tryget(L, table, key, result, &tag) && !tagisempty(tag)) {
+  /* A hit or a miss with no metatable completes indexing from one view. */
+  if (luaH_tryget(L, table, key, result, &tag) &&
+      tag != LUA_VABSTKEY) {
     setnilvalue(&method->value);
     return tag;
   }

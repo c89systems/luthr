@@ -624,10 +624,10 @@ static void getroot (lua_State *L, const LuaNativeRoot *object,
                      LuaNativeRoot *key, LuaNativeRoot *result) {
   lu_byte tag;
   luaV_fastget(&object->value, &key->value, &result->value, luaH_get, tag);
-  if (tagisempty(tag)) {
+  if (luaV_needsindex(tag)) {
     setnilvalue2s(L->top.p);
     api_incr_top(L);
-    luaV_finishget(L, &object->value, &key->value, L->top.p - 1, tag);
+    luaV_finishget(L, &object->value, &key->value, L->top.p - 1);
     luaR_setroot(L, result, s2v(L->top.p - 1));
     L->top.p--;
   }

@@ -57,8 +57,9 @@
 
 
 /*
-** 'luaH_get*' operations set 'res', unless the value is absent, and
-** return the tag of the result.
+** 'luaH_get*' operations set 'res' and return its tag on a hit or a miss
+** resolved with no metatable. Otherwise LUA_VABSTKEY leaves 'res' intact
+** so ordinary indexing can resolve a metamethod using the original key.
 */
 
 

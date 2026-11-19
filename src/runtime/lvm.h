@@ -78,8 +78,10 @@ typedef enum {
 /*
 ** fast track for 'gettable'
 */
+#define luaV_needsindex(tag) ((tag) == LUA_VABSTKEY)
+
 #define luaV_fastget(t,k,res,f, tag) \
-  (tag = (!ttistable(t) ? LUA_VNOTABLE : f(L, hvalue(t), k, res)))
+  (tag = (!ttistable(t) ? LUA_VABSTKEY : f(L, hvalue(t), k, res)))
 
 
 /*
@@ -87,8 +89,7 @@ typedef enum {
 ** of 'luaH_getint'.
 */
 #define luaV_fastgeti(t,k,res,tag) \
-  if (!ttistable(t)) tag = LUA_VNOTABLE; \
-  else { luaH_fastgeti(hvalue(t), k, res, tag); }
+  luaV_fastget(t, k, res, luaH_getint, tag)
 
 
 /*
@@ -107,7 +108,7 @@ LUAI_FUNC int luaV_tointegerns (const TValue *obj, lua_Integer *p,
                                 F2Imod mode);
 LUAI_FUNC int luaV_flttointeger (lua_Number n, lua_Integer *p, F2Imod mode);
 LUAI_FUNC lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
-                                                StkId val, lu_byte tag);
+                                  StkId val);
 LUAI_FUNC void luaV_settable (lua_State *L, const TValue *t, TValue *key,
                              TValue *val);
 LUAI_FUNC void luaV_finishOp (lua_State *L);

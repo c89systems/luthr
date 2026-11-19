@@ -179,7 +179,8 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index)
 foreach(case IN ITEMS fast primitive batching overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
-    primitive_reattach primitive_incremental primitive_generational index_hit
+    primitive_reattach primitive_incremental primitive_generational
+    index_hit index_miss index_metatable_change
     mixed_incremental mixed_generational writes_incremental writes_generational
     write_error_incremental write_error_generational retained_incremental retained_generational)
   add_test(NAME table_read_${case} COMMAND table_read_test ${case})

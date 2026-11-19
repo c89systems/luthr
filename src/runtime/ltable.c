@@ -1691,12 +1691,10 @@ static int sameversion (Table *table, uint64_t sequence) {
 /* Typed views copy only the storage needed by this operation. Keys in this
 ** path are compared as pointer representations, never dereferenced before
 ** validation; even a mismatched concurrent tag/payload is harmless. */
-static int readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
-                         TValue *result, lu_byte *tag) {
-  uint64_t sequence;
+static int readshortstr (global_State *g, Table *table, TString *key,
+                         TValue *result, lu_byte *tag, uint64_t sequence) {
   Node *base, *node;
   unsigned lsize, size, steps;
-  if (!readsequence(L, table, &sequence)) return 0;
   base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   lsize = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
   if (!sameversion(table, sequence)) return 0;
@@ -1732,7 +1730,9 @@ static int readshortstr (global_State *g, lua_State *L, Table *table, TString *k
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
                        TValue *result) {
   lu_byte tag;
-  if (!readshortstr(g, L, table, key, result, &tag)) return 0;
+  uint64_t sequence;
+  if (!readsequence(L, table, &sequence) ||
+      !readshortstr(g, table, key, result, &tag, sequence)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }
@@ -1773,12 +1773,10 @@ unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, un
 }
 
 static int readinteger (lua_State *L, Table *table, lua_Integer key,
-                        TValue *result, lu_byte *tag) {
-  uint64_t sequence;
+                        TValue *result, lu_byte *tag, uint64_t sequence) {
   Value *array;
   TValue value;
   unsigned asize, k;
-  if (!readsequence(L, table, &sequence)) return 0;
   asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   k = checkrange(key, asize);
   if (k == 0) return 0;  /* the general view handles hash integer keys */
@@ -1797,15 +1795,11 @@ static int readinteger (lua_State *L, Table *table, lua_Integer key,
 ** atomic; an acquire of a writer's component observes its preceding odd
 ** sequence. Validate key snapshots before they can dereference pointers. */
 static int optimistic (lua_State *L, Table *table, const TValue *key,
-                        TValue *result, lu_byte *tag) {
+                        TValue *result, lu_byte *tag, uint64_t sequence) {
   Table view;
   TValue normalized;
-  uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   unsigned k, steps;
   Node *node;
-  if (sequence & 1) return 0;
-  if (luaC_tracing(L) && __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE))
-    return 0;  /* weak cutoffs are resolved under mutation ownership */
   view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
@@ -1885,9 +1879,11 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
     LuaTableSlot slot;
     LuaTableWriter *writer;
     TValue snapshot;
+    uint64_t sequence;
     if (!luaH_strongaccess(L, table)) break;
     if (luaH_waitlayout(L, table)) continue;
-    if (optimistic(L, table, &rooted_key.value, &snapshot, &tag)) {
+    if (readsequence(L, table, &sequence) &&
+        optimistic(L, table, &rooted_key.value, &snapshot, &tag, sequence)) {
       if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
       goto done;
     }
@@ -1925,18 +1921,38 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
   luaR_poproot(L, &value);
   luaR_poproot(L, &owner);
   luaR_poproot(L, &rooted_key);
-  return tag;
+  return tagisempty(tag) ? LUA_VABSTKEY : tag;
+}
+
+/* A miss completes indexing if the same view also has no metatable.
+** An unresolved miss must leave the key intact if it aliases the result. */
+static lu_byte finishread (lua_State *L, Table *t, TValue *res, lu_byte tag,
+                            int local, uint64_t sequence) {
+  if (!tagisempty(tag)) {
+    luaC_tracevalue(L, res);
+    return tag;
+  }
+  if (__atomic_load_n(&t->metatable, __ATOMIC_ACQUIRE) == NULL &&
+      (local || sameversion(t, sequence))) {
+    setnilvalue(res);
+    return LUA_VNIL;
+  }
+  return LUA_VABSTKEY;
 }
 
 int luaH_tryget (lua_State *L, Table *t, const TValue *key, TValue *res,
                  lu_byte *tag) {
-  if (luaA_localtable(L, t))
-    *tag = luaH_getowned(t, key, res);
-  else if (!(ttisshrstring(key) && readshortstr(G(L), L, t, tsvalue(key), res, tag)) &&
-           !(ttisinteger(key) && readinteger(L, t, ivalue(key), res, tag)) &&
-           !optimistic(L, t, key, res, tag))
+  uint64_t sequence;
+  if (luaA_localtable(L, t)) {
+    *tag = finishread(L, t, res, luaH_getowned(t, key, res), 1, 0);
+    return 1;
+  }
+  if (!readsequence(L, t, &sequence)) return 0;
+  if (!(ttisshrstring(key) && readshortstr(G(L), t, tsvalue(key), res, tag, sequence)) &&
+      !(ttisinteger(key) && readinteger(L, t, ivalue(key), res, tag, sequence)) &&
+      !optimistic(L, t, key, res, tag, sequence))
     return 0;
-  if (!tagisempty(*tag)) luaC_tracevalue(L, res);
+  *tag = finishread(L, t, res, *tag, 0, sequence);
   return 1;
 }
 
@@ -1950,33 +1966,28 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
 lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   lu_byte tag;
   TValue index;
-  if (luaA_localtable(L, t)) {
-    tag = rawgetint(t, key, res);
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
+  uint64_t sequence;
+  if (luaA_localtable(L, t))
+    return finishread(L, t, res, rawgetint(t, key, res), 1, 0);
   setivalue(&index, key);
-  if (readinteger(L, t, key, res, &tag) || optimistic(L, t, &index, res, &tag)) {
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
+  if (readsequence(L, t, &sequence) &&
+     (readinteger(L, t, key, res, &tag, sequence) ||
+      optimistic(L, t, &index, res, &tag, sequence)))
+    return finishread(L, t, res, tag, 0, sequence);
   return getrooted(L, t, &index, res);
 }
 
 lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   lu_byte tag;
   TValue index;
-  if (luaA_localtable(L, t)) {
-    tag = rawgetstr(t, key, res);
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
+  uint64_t sequence;
+  if (luaA_localtable(L, t))
+    return finishread(L, t, res, rawgetstr(t, key, res), 1, 0);
   setsvalue(L, &index, key);
-  if ((strisshr(key) && readshortstr(G(L), L, t, key, res, &tag)) ||
-      optimistic(L, t, &index, res, &tag)) {
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
+  if (readsequence(L, t, &sequence) &&
+     ((strisshr(key) && readshortstr(G(L), t, key, res, &tag, sequence)) ||
+      optimistic(L, t, &index, res, &tag, sequence)))
+    return finishread(L, t, res, tag, 0, sequence);
   return getrooted(L, t, &index, res);
 }
 

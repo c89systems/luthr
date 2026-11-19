@@ -28,6 +28,7 @@ static __thread unsigned measuring, reading;
 static __thread pthread_mutex_t *unexpected_mutex;
 static __thread pthread_barrier_t *metatable_read;
 static __thread Table *index_table;
+static __thread Table *finished_index;
 static unsigned access_calls, mutex_calls;
 static void *watched;
 static unsigned returned;
@@ -76,6 +77,7 @@ lu_byte __wrap_luaA_index(lua_State *state, Table *table, const TValue *key,
                           TValue *result, LuaNativeRoot *method) {
   pthread_mutex_t *previous = unexpected_mutex;
   lu_byte tag;
+  require(table != finished_index);
   if (table == index_table)
     unexpected_mutex = &G(state)->world.mutex;
   tag = __real_luaA_index(state, table, key, result, method);
@@ -333,6 +335,28 @@ static void index_hit(lua_State *state) {
   luaX_unlockstate(state);
 }
 
+static void index_miss(lua_State *state) {
+  lua_State *child;
+  lua_gc(state, LUA_GCSTOP);
+  lua_createtable(state, 8, 2);
+  child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, child, 1);
+  finished_index = (Table *)lua_topointer(child, 1);
+  require(lua_getfield(child, 1, "missing") == LUA_TNIL);
+  require(lua_geti(child, 1, 6) == LUA_TNIL);
+  lua_pushliteral(child, "other");
+  require(lua_gettable(child, 1) == LUA_TNIL);
+  require(lua_type(child, -1) == LUA_TNIL);
+  require(luaL_loadstring(child, "local t,k=...; return t.missing,t[k],t[6]") ==
+          LUA_OK);
+  lua_pushvalue(child, 1);
+  lua_pushliteral(child, "key");
+  require(lua_pcall(child, 2, 3, 0) == LUA_OK);
+  require(lua_isnil(child, -3) && lua_isnil(child, -2) && lua_isnil(child, -1));
+  finished_index = NULL;
+}
+
 static void resume_epoch(lua_State *state) {
   LuaWorld *world = &G(state)->world;
   luaX_lockstate(state);
@@ -386,6 +410,54 @@ static void *reader(void *argument) {
   lua_gettable(state, 1);
   require(lua_tointeger(state, -1) == 84);
   return NULL;
+}
+
+static int after_metatable_change(lua_State *state) {
+  lua_pushinteger(state, 84);
+  return 1;
+}
+
+static void index_metatable_change(lua_State *state) {
+  struct fixture test = {0};
+  lua_State *child;
+  pthread_t thread;
+  char key[80];
+  fixture = &test;
+  require(pthread_mutex_init(&test.mutex, NULL) == 0);
+  require(pthread_cond_init(&test.changed, NULL) == 0);
+  lua_gc(state, LUA_GCSTOP);
+  /* Both long keys use the single hash node, so equality pauses the reader
+   * with a snapshot of the table before the new __index is installed. */
+  lua_createtable(state, 0, 1);
+  memset(key, 'a', sizeof(key));
+  lua_pushlstring(state, key, sizeof(key));
+  luaX_lockstate(state);
+  test.first = tsvalue(s2v(state->top.p - 1));
+  luaX_unlockstate(state);
+  lua_pushinteger(state, 1);
+  lua_rawset(state, 1);
+  child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, child, 1);
+  key[0] = 'b';
+  lua_pushlstring(child, key, sizeof(key));
+  require(pthread_create(&thread, NULL, reader, child) == 0);
+  require(pthread_mutex_lock(&test.mutex) == 0);
+  while (!test.entered)
+    require(pthread_cond_wait(&test.changed, &test.mutex) == 0);
+  require(pthread_mutex_unlock(&test.mutex) == 0);
+  lua_newtable(state);
+  lua_pushcfunction(state, after_metatable_change);
+  lua_setfield(state, -2, "__index");
+  lua_setmetatable(state, 1);
+  require(pthread_mutex_lock(&test.mutex) == 0);
+  test.release = 1;
+  require(pthread_cond_broadcast(&test.changed) == 0);
+  require(pthread_mutex_unlock(&test.mutex) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_cond_destroy(&test.changed) == 0);
+  require(pthread_mutex_destroy(&test.mutex) == 0);
+  fixture = NULL;
 }
 
 static void *writer(void *argument) {
@@ -846,6 +918,10 @@ int main(int argc, char **argv) {
     primitive_reattach(state);
   else if (strcmp(argv[1], "index_hit") == 0)
     index_hit(state);
+  else if (strcmp(argv[1], "index_miss") == 0)
+    index_miss(state);
+  else if (strcmp(argv[1], "index_metatable_change") == 0)
+    index_metatable_change(state);
   else if (strncmp(argv[1], "primitive_", 10) == 0)
     primitive_replacement(state,
                           strcmp(argv[1], "primitive_generational") == 0);
