@@ -823,6 +823,7 @@ typedef struct Table {
   lu_byte gcweak;  /* weakness selected for this collection cycle */
   lu_byte weak_cleared;
   lu_byte weak_initial_cutoff;
+  lu_byte writers_seen;  /* element writers since the last layout admission */
 } Table;
 
 

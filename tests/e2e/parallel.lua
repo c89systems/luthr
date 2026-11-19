@@ -23,6 +23,23 @@ local workloads={
     for i=1,n do sum=sum+shared[base+i] end
     return sum
   end,
+  shared_hash=function(id)
+    local base=(id-1)*n
+    for i=1,n do shared[-(base+i)]=i end
+    local sum=0
+    for i=1,n do sum=sum+shared[-(base+i)] end
+    return sum
+  end,
+  shared_growth=function(id)
+    local base=tasks+(id-1)*n
+    local sum=0
+    for i=1,n do
+      shared[-id]=i
+      shared[-(base+i)]=i
+      sum=sum+shared[-id]
+    end
+    return sum
+  end,
   shared_reads=function()
     local sum=0
     for i=1,n do sum=sum+shared.value end
@@ -61,12 +78,22 @@ local function prepare()
     shared.value=1
   elseif kind=='shared_table' then
     for i=1,n*tasks do shared[i]=0 end
+  elseif kind=='shared_hash' then
+    for i=1,n*tasks do shared[-i]=0 end
+  elseif kind=='shared_growth' then
+    for id=1,tasks do shared[-id]=0 end
   end
 end
 local function verify()
   if kind=='shared_table' then
     for id=1,tasks do
       for i=1,n do assert(shared[(id-1)*n+i]==i) end
+    end
+  elseif kind=='shared_hash' or kind=='shared_growth' then
+    local offset=kind=='shared_growth' and tasks or 0
+    for id=1,tasks do
+      if kind=='shared_growth' then assert(shared[-id]==n) end
+      for i=1,n do assert(shared[-(offset+(id-1)*n+i)]==i) end
     end
   end
 end

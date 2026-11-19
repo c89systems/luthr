@@ -719,7 +719,7 @@ static int preparemode (lua_State *L, Table *h) {
   if (__atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == G(L)->trace_epoch)
     return 1;
   if (meta == NULL) setnilvalue(&mode);
-  else if (!luaH_gcgetmode(meta, G(L)->tmname[TM_MODE], &mode)) {
+  else if (!luaH_gcgetmode(G(L), meta, G(L)->tmname[TM_MODE], &mode)) {
     if (__atomic_load_n(&meta->access.owner, __ATOMIC_ACQUIRE) != luaX_token(L))
       return 0;
     /* A nested collection borrows this execution's stable partial image. */

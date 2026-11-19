@@ -11,6 +11,7 @@
 #include "ldo.h"
 #include "lroots.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "ltm.h"
 
 static LuaObjectLock *objectlock (GCObject *object) {
@@ -60,7 +61,7 @@ static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
     return 1;
   }
   if (owner == NULL && __atomic_compare_exchange_n(&lock->owner, &owner,
-          token, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+          token, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     lua_assert(lock->depth == 0);
     lock->depth = 1;
     version(object, lock);
@@ -70,7 +71,13 @@ static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
 }
 
 int luaA_tryscan (lua_State *L, GCObject *object) {
-  return tryaccess(L, objectlock(object), object);
+  if (!tryaccess(L, objectlock(object), object)) return 0;
+  if (object->tt == LUA_VTABLE && gco2t(object)->access.depth == 1 &&
+      !luaH_quiescewriters(L, gco2t(object), 0)) {
+    luaA_endscan(L, object);
+    return 0;
+  }
+  return 1;
 }
 
 void luaA_endscan (lua_State *L, GCObject *object) {
@@ -133,6 +140,8 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
     }
     scope->held = 1;
+    if (object != NULL && object->tt == LUA_VTABLE && lock->depth == 1)
+      luaH_quiescewriters(L, gco2t(object), 1);
     if (object != NULL && object->tt == LUA_VTABLE && luaC_tracing(L))
       luaC_prepareweak(L, gco2t(object));
   }
@@ -427,6 +436,11 @@ int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
   LuaObjectScope first, second;
   int handled, count;
   setnilvalue(&method->value);
+  if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
+    luaA_sharevalue(L, key);
+    luaA_sharevalue(L, value);
+    if (luaH_tryset(L, table, key, value, 0)) return 1;
+  }
   /* Only a missing key with a metatable needs paired ownership. Recheck
   ** after the ordered pair is acquired: either object may have changed. */
   luaR_pushroot(L, &metatable);

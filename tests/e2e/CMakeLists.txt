@@ -33,6 +33,19 @@ endforeach()
 target_link_options(upstream_lua PRIVATE -Wl,--export-dynamic)
 
 foreach(runtime IN ITEMS upstream luthr)
+  luthr_test_program(benchmark_${runtime} benchmark_host.c)
+  set_target_properties(benchmark_${runtime} PROPERTIES C_STANDARD 99)
+  target_compile_options(benchmark_${runtime} PRIVATE -Wall -Wextra -Werror)
+  target_include_directories(benchmark_${runtime} BEFORE PRIVATE "${reference_dir}")
+  target_link_options(benchmark_${runtime} PRIVATE -Wl,--export-dynamic)
+  if(runtime STREQUAL "upstream")
+    target_link_libraries(benchmark_${runtime} PRIVATE upstream_lua_reference)
+  else()
+    target_link_libraries(benchmark_${runtime} PRIVATE luthr_shared)
+  endif()
+endforeach()
+
+foreach(runtime IN ITEMS upstream luthr)
   luthr_test_program(parallel_${runtime} parallel.c)
   target_sources(parallel_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
   set_target_properties(parallel_${runtime} PROPERTIES C_STANDARD 99)
@@ -47,7 +60,7 @@ foreach(runtime IN ITEMS upstream luthr)
     target_link_libraries(parallel_${runtime} PRIVATE luthr_shared)
     set(workers 2)
   endif()
-  foreach(workload IN ITEMS integers independent_tables shared_table shared_reads closures allocation_gc)
+  foreach(workload IN ITEMS integers independent_tables shared_table shared_hash shared_growth shared_reads closures allocation_gc)
     foreach(collector IN ITEMS incremental generational)
       add_test(NAME lua_parallel_${runtime}_${workload}_${collector}
         COMMAND parallel_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
@@ -78,7 +91,7 @@ foreach(runtime IN ITEMS upstream luthr)
     set(scheduled_slots 2)
     set(scheduled_native 1)
   endif()
-  foreach(workload IN ITEMS integers independent_tables shared_table shared_reads closures allocation_gc)
+  foreach(workload IN ITEMS integers independent_tables shared_table shared_hash shared_growth shared_reads closures allocation_gc)
     foreach(collector IN ITEMS incremental generational)
       add_test(NAME lua_scheduled_${runtime}_${workload}_${collector}
         COMMAND scheduled_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
@@ -275,7 +288,7 @@ foreach(runtime IN ITEMS upstream luthr)
 endforeach()
 
 set(benchmark_arguments
-  "-Dupstream=$<TARGET_FILE:upstream_lua>" "-Dluthr=$<TARGET_FILE:luthr_test_host>"
+  "-Dupstream=$<TARGET_FILE:benchmark_upstream>" "-Dluthr=$<TARGET_FILE:benchmark_luthr>"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/benchmark.lua"
   "-Dmodule_dir=$<TARGET_FILE_DIR:compat_fixture>"
   "-Dtarget=${LUTHR_TARGET}" "-Dconfig=${CMAKE_BUILD_TYPE}"
@@ -285,7 +298,7 @@ add_custom_target(benchmark_lua
     "${CMAKE_COMMAND}" ${benchmark_arguments}
     "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/lua"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkLua.cmake"
-  DEPENDS upstream_lua luthr_test_host compat_fixture
+  DEPENDS benchmark_upstream benchmark_luthr compat_fixture
   VERBATIM USES_TERMINAL)
 add_test(NAME lua_benchmark_smoke COMMAND "${CMAKE_COMMAND}" ${benchmark_arguments}
   -Dsamples=2 -Dwarmups=1 -Dwork_divisor=100

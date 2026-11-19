@@ -58,11 +58,13 @@ int __wrap_luaC_scanstrong(lua_State *L, LuaTraceWork *work, Table *table) {
   scanning = 0;
   return result;
 }
-unsigned __real_luaH_tracechunk(const Table *, unsigned, unsigned, int,
-                                GCObject **) __attribute__((weak));
-unsigned __wrap_luaH_tracechunk(const Table *view, unsigned first,
-                                unsigned count, int hash, GCObject **edges) {
-  unsigned found = __real_luaH_tracechunk(view, first, count, hash, edges);
+unsigned __real_luaH_tracechunk(global_State *, const Table *, unsigned,
+                                unsigned, int, GCObject **)
+    __attribute__((weak));
+unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
+                                unsigned first, unsigned count, int hash,
+                                GCObject **edges) {
+  unsigned found = __real_luaH_tracechunk(g, view, first, count, hash, edges);
   hash_chunk = hash;
   first_chunk = first;
   if (scanning)

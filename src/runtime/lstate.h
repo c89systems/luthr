@@ -466,8 +466,15 @@ typedef struct LuaBarrierQueue {
   char padding[64 - 2 * sizeof(GCObject *)];
 } LuaBarrierQueue;
 
+#define LUA_TABLE_WRITERS 512
+typedef struct LuaTableWriter {
+  Table *owner;
+  uint64_t sequence;
+} LuaTableWriter;
+
 typedef struct global_State {
   LuaWorld world;
+  LuaTableWriter table_writers[LUA_TABLE_WRITERS];
   struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages[LUA_ALLOC_POOLS];  /* pool mutex */
   struct LuaAllocPage *allocation_dirty;  /* atomic changed-page queue */

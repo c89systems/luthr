@@ -346,7 +346,8 @@ lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
 static void settable (lua_State *L, const TValue *t, TValue *key,
                        TValue *val, unsigned upvalue) {
   LuaObjectScope object;
-  LuaNativeRoot *receiver = &object.root;
+  LuaNativeRoot owner;
+  LuaNativeRoot *receiver = &owner;
   LuaNativeRoot rooted_key, value, method;
   Table *table = ttistable(t) ? hvalue(t) : NULL;
   TValue other = {0};
@@ -367,17 +368,22 @@ static void settable (lua_State *L, const TValue *t, TValue *key,
   luaR_setroot(L, &rooted_key, key);
   luaR_pushroot(L, &value);
   luaR_setroot(L, &value, val);
+  luaR_pushroot(L, receiver);
   if (table != NULL) {
     int handled;
+    sethvalue(L, &receiver->value, table);
+    luaC_tracepointer(L, table);
+    if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
+      luaA_sharevalue(L, &rooted_key.value);
+      luaA_sharevalue(L, &value.value);
+      if (luaH_tryset(L, table, &rooted_key.value, &value.value, 0)) goto complete;
+    }
     luaA_begin(L, obj2gco(table), &object);
     handled = luaH_assignowned(L, table, &rooted_key.value, &value.value, 0);
-    /* Reuse the access scope's receiver snapshot after releasing ownership;
-    ** an ordinary write needs neither another snapshot nor a method root. */
-    luaA_endrooted(L, &object);
+    luaA_end(L, &object);
     if (handled) goto complete;
   }
   else {
-    luaR_pushroot(L, receiver);
     luaR_setroot(L, receiver, &other);
   }
   luaR_pushroot(L, &method);

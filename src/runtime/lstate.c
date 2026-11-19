@@ -614,6 +614,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   global_State *g = cast(global_State*,
                        (*f)(ud, NULL, LUA_TTHREAD, sizeof(global_State)));
   if (g == NULL) return NULL;
+  memset(g->table_writers, 0, sizeof(g->table_writers));
   if (luaAL_init(&g->allocator, f, ud) != 0) {
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;

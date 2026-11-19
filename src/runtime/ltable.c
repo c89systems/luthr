@@ -39,6 +39,7 @@
 #include "lstate.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "ltablestorage.h"
 #include "lvm.h"
 
@@ -850,6 +851,7 @@ Table *luaH_new (lua_State *L) {
   t->gcweak = 0;
   t->weak_cleared = 0;
   t->weak_initial_cutoff = 0;
+  t->writers_seen = 0;
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
   t->asize = 0;
@@ -1283,14 +1285,100 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
 }
 
 
+static int published (const TValue *value) {
+  uintptr_t *sharing;
+  if (!iscollectable(value) || (sharing = luaA_sharing(gcvalue(value))) == NULL)
+    return 1;
+  return (__atomic_load_n(sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) != 0;
+}
+
+/* Look up storage without modifying keys, links or layout. Admission retains
+** old buffers; validate their header and key bits before using a candidate. */
+/* Keep the shared snapshot's frame out of ordinary private assignments. */
+static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, const TValue *key,
+                       TValue *value, int raw) {
+  Table view;
+  TValue normalized;
+  Value *payload = NULL;
+  lu_byte *tag = NULL;
+  LuaTableWriter *writer;
+  Node *node = NULL;
+  uint64_t layout;
+  unsigned k, steps;
+  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
+      !published(key) || !published(value) || !luaH_strongaccess(L, table))
+    return 0;
+  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  if (layout & 1) return 0;
+  view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
+  view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
+  view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  view.lsizenode = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
+  view.flags = gettableflags(table);
+  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
+  if (ttisnil(key)) return 0;
+  if (ttisfloat(key)) {
+    lua_Integer integer;
+    if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
+      setivalue(&normalized, integer);
+      key = &normalized;
+    }
+  }
+  k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
+  if (k != 0) {
+    payload = getArrVal(&view, k - 1);
+    tag = getArrTag(&view, k - 1);
+  }
+  else {
+    node = mainpositionTV(&view, key);
+    for (steps = 0; steps < sizenode(&view); steps++) {
+      Node snapshot;
+      ptrdiff_t next;
+      __atomic_load(&node->u.key_val, &snapshot.u.key_val, __ATOMIC_ACQUIRE);
+      snapshot.u.key_tt = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+      snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+      if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
+      if (equalkey(key, &snapshot, 0)) {
+        payload = &node->u.value_;
+        tag = &node->u.tt_;
+        break;
+      }
+      if (snapshot.u.next == 0) return 0;
+      next = node - view.node + snapshot.u.next;
+      if (next < 0 || cast(size_t, next) >= sizenode(&view)) return 0;
+      node = view.node + next;
+    }
+    if (payload == NULL) return 0;
+  }
+  writer = luaH_claimwriter(L, table, payload, layout);
+  if (writer == NULL) return 0;
+  /* Key retirement is a layout operation. A missing value may also invoke
+  ** __newindex; resolve that under ordinary ordered metatable ownership. */
+  if ((!raw && tagisempty(*tag) && table->metatable != NULL) ||
+      (node != NULL && ttisnil(value) && keyiscollectable(node))) {
+    luaH_releasewriter(L, table, writer);
+    return 0;
+  }
+  luaC_tracevalue(L, key);
+  if (node != NULL && luaC_tracing(L) && keyiscollectable(node))
+    luaC_traceobject(L, gckey(node));
+  luaH_elementstore(L, table, payload, tag, value);
+  if (node != NULL) invalidateTMcache(table);
+  luaH_releasewriter(L, table, writer);
+  return 1;
+}
+
 /* The current gate is the private graph's only mutator. With no allocation,
 ** wait or callback, its live operands need no additional native root records.
 ** The collector only reads strong storage and validates our sequence. */
 int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
                  int raw) {
   uint64_t sequence;
+  uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
   int hres, done = 1;
-  if (!luaA_localtable(L, t)) return 0;
+  if (sharing & LUA_OBJECT_SHARED)
+    return sharedset(L, t, key, value, raw);
+  if (sharing != cast(uintptr_t, L) || !luaH_strongaccess(L, t)) return 0;
   sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
   if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
   __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
@@ -1501,7 +1589,7 @@ static int sameversion (Table *table, uint64_t sequence) {
 /* Typed views copy only the storage needed by this operation. Keys in this
 ** path are compared as pointer representations, never dereferenced before
 ** validation; even a mismatched concurrent tag/payload is harmless. */
-static int readshortstr (lua_State *L, Table *table, TString *key,
+static int readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
                          TValue *result, lu_byte *tag) {
   uint64_t sequence;
   Node *base, *node;
@@ -1518,10 +1606,10 @@ static int readshortstr (lua_State *L, Table *table, TString *key,
     if (keytag == ctb(LUA_VSHRSTR)) {
       TValue value;
       __atomic_load(&node->u.key_val, &candidate, __ATOMIC_ACQUIRE);
-      __atomic_load(&node->u.value_, &value.value_, __ATOMIC_ACQUIRE);
-      value.tt_ = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
       if (!sameversion(table, sequence)) return 0;
       if (memcmp(&candidate, &key, sizeof(key)) == 0) {
+        if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value) ||
+            !sameversion(table, sequence)) return 0;
         *tag = finishnodeget(&value, result);
         return 1;
       }
@@ -1539,35 +1627,42 @@ static int readshortstr (lua_State *L, Table *table, TString *key,
   return 0;
 }
 
-int luaH_gcgetmode (Table *table, TString *key, TValue *result) {
+int luaH_gcgetmode (global_State *g, Table *table, TString *key, TValue *result) {
   lu_byte tag;
-  if (!readshortstr(NULL, table, key, result, &tag)) return 0;
+  if (!readshortstr(g, NULL, table, key, result, &tag)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }
 
 /* These are raw pointer representations until the caller validates the table
 ** sequence. Empty keys are retired by writers; scanning never edits storage. */
-unsigned luaH_tracechunk (const Table *view, unsigned first, unsigned count,
+unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, unsigned count,
                          int hash, GCObject **edges) {
   unsigned i, found = 0;
   for (i = first; i < first + count; i++) {
-    if (!hash) {
-      lu_byte tag = __atomic_load_n(getArrTag(view, i), __ATOMIC_ACQUIRE);
-      if (tag & BIT_ISCOLLECTABLE)
-        __atomic_load(&getArrVal(view, i)->gc, &edges[found++], __ATOMIC_ACQUIRE);
+    const Node *node = hash ? gnode(view, i) : NULL;
+    const Value *payload = hash ? &node->u.value_ : getArrVal(view, i);
+    const lu_byte *tag = hash ? &node->u.tt_ : getArrTag(view, i);
+    LuaTableWriter *writer = g != NULL ? luaH_writer(g, payload) : NULL;
+    uint64_t sequence = 0;
+    lu_byte valuetag;
+    if (writer != NULL) {
+      sequence = __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE);
+      if (sequence & 1) return UINT_MAX;
     }
-    else {
-      const Node *node = gnode(view, i);
-      lu_byte tag = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
-      if (!tagisempty(tag)) {
-        lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
-        if (keytag & BIT_ISCOLLECTABLE)
-          __atomic_load(&node->u.key_val.gc, &edges[found++], __ATOMIC_ACQUIRE);
-        if (tag & BIT_ISCOLLECTABLE)
-          __atomic_load(&node->u.value_.gc, &edges[found++], __ATOMIC_ACQUIRE);
-      }
+    /* GC needs raw edges, not numeric payloads or complete mutator values.
+    ** They remain representations until both row and layout are validated. */
+    valuetag = __atomic_load_n(tag, __ATOMIC_ACQUIRE);
+    if (hash && !tagisempty(valuetag)) {
+      lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+      if (keytag & BIT_ISCOLLECTABLE)
+        __atomic_load(&node->u.key_val.gc, &edges[found++], __ATOMIC_ACQUIRE);
     }
+    if (valuetag & BIT_ISCOLLECTABLE)
+      __atomic_load(&payload->gc, &edges[found++], __ATOMIC_ACQUIRE);
+    if (writer != NULL &&
+        __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE) != sequence)
+      return UINT_MAX;
   }
   return found;
 }
@@ -1584,9 +1679,8 @@ static int readinteger (lua_State *L, Table *table, lua_Integer key,
   if (k == 0) return 0;  /* the general view handles hash integer keys */
   array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   if (!sameversion(table, sequence)) return 0;
-  __atomic_load(array - k, &value.value_, __ATOMIC_ACQUIRE);
-  value.tt_ = __atomic_load_n(cast(lu_byte *, array) + sizeof(unsigned) + k - 1,
-                             __ATOMIC_ACQUIRE);
+  if (!luaH_readvalue(G(L), array - k,
+        cast(lu_byte *, array) + sizeof(unsigned) + k - 1, &value)) return 0;
   if (!sameversion(table, sequence)) return 0;
   *tag = rawtt(&value);
   if (!tagisempty(*tag)) setobj(L, result, &value);
@@ -1625,8 +1719,8 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
   k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
   if (k != 0) {
     TValue value;
-    __atomic_load(getArrVal(&view, k - 1), &value.value_, __ATOMIC_ACQUIRE);
-    value.tt_ = __atomic_load_n(getArrTag(&view, k - 1), __ATOMIC_ACQUIRE);
+    if (!luaH_readvalue(G(L), getArrVal(&view, k - 1), getArrTag(&view, k - 1),
+                        &value)) return 0;
     if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;
     *tag = rawtt(&value);
@@ -1638,12 +1732,12 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
     Node snapshot;
     __atomic_load(&node->u.key_val, &snapshot.u.key_val, __ATOMIC_ACQUIRE);
     snapshot.u.key_tt = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
-    __atomic_load(&node->u.value_, &snapshot.u.value_, __ATOMIC_ACQUIRE);
-    snapshot.u.tt_ = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
     snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
     if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;
     if (equalkey(key, &snapshot, 0)) {
+      if (!luaH_readvalue(G(L), &node->u.value_, &node->u.tt_, gval(&snapshot)) ||
+          !sameversion(table, sequence)) return 0;
       *tag = finishnodeget(gval(&snapshot), result);
       return 1;
     }
@@ -1673,7 +1767,7 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
     return tag;
   }
-  if ((ttisshrstring(key) && readshortstr(L, t, tsvalue(key), res, &tag)) ||
+  if ((ttisshrstring(key) && readshortstr(G(L), L, t, tsvalue(key), res, &tag)) ||
       (ttisinteger(key) && readinteger(L, t, ivalue(key), res, &tag)) ||
       optimistic(L, t, key, res, &tag)) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
@@ -1721,7 +1815,7 @@ lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
     return tag;
   }
   setsvalue(L, &index, key);
-  if ((strisshr(key) && readshortstr(L, t, key, res, &tag)) ||
+  if ((strisshr(key) && readshortstr(G(L), L, t, key, res, &tag)) ||
       optimistic(L, t, &index, res, &tag)) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
     return tag;
@@ -1741,32 +1835,51 @@ lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res) {
 }
 
 void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  LuaNativeRoot rooted_key, rooted_value;
+  LuaNativeRoot rooted_key, rooted_value, owner;
   LuaObjectScope scope;
   if (luaH_tryset(L, t, key, value, 1)) return;
   luaR_pushroot(L, &rooted_key);
   luaR_setroot(L, &rooted_key, key);
   luaR_pushroot(L, &rooted_value);
   luaR_setroot(L, &rooted_value, value);
+  luaR_pushroot(L, &owner);
+  sethvalue(L, &owner.value, t);
+  luaC_tracepointer(L, t);
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
+    luaA_sharevalue(L, &rooted_key.value);
+    luaA_sharevalue(L, &rooted_value.value);
+    if (luaH_tryset(L, t, &rooted_key.value, &rooted_value.value, 1)) goto done;
+  }
   luaA_begin(L, obj2gco(t), &scope);
   luaH_assignowned(L, t, &rooted_key.value, &rooted_value.value, 1);
   luaA_end(L, &scope);
+ done:
+  luaR_poproot(L, &owner);
   luaR_poproot(L, &rooted_value);
   luaR_poproot(L, &rooted_key);
 }
 
 void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
-  LuaNativeRoot rooted_value;
+  LuaNativeRoot rooted_value, owner;
   LuaObjectScope scope;
   TValue index;
   setivalue(&index, key);
   if (luaH_tryset(L, t, &index, value, 1)) return;
   luaR_pushroot(L, &rooted_value);
   luaR_setroot(L, &rooted_value, value);
+  luaR_pushroot(L, &owner);
+  sethvalue(L, &owner.value, t);
+  luaC_tracepointer(L, t);
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
+    luaA_sharevalue(L, &rooted_value.value);
+    if (luaH_tryset(L, t, &index, &rooted_value.value, 1)) goto done;
+  }
   luaA_begin(L, obj2gco(t), &scope);
   rawsetint(L, t, key, &rooted_value.value);
   luaC_barrierback(L, obj2gco(t), &rooted_value.value);
   luaA_end(L, &scope);
+ done:
+  luaR_poproot(L, &owner);
   luaR_poproot(L, &rooted_value);
 }
 

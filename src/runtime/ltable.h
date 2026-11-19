@@ -160,9 +160,10 @@ LUAI_FUNC Node *luaH_mainposition (const Table *t, const TValue *key);
 
 /* Collector snapshots borrow buffers under an admission storage epoch. Only
 ** validated chunks may be followed; captured pointers can otherwise be bits
-** from a concurrently assigned numeric value. */
-LUAI_FUNC unsigned luaH_tracechunk (const Table *, unsigned, unsigned, int,
+** from a concurrently assigned numeric value. A NULL global state omits row
+** checks; the caller must validate the sequence and still-private sharing. */
+LUAI_FUNC unsigned luaH_tracechunk (struct global_State *, const Table *, unsigned, unsigned, int,
                                     GCObject **);
-LUAI_FUNC int luaH_gcgetmode (Table *, TString *, TValue *);
+LUAI_FUNC int luaH_gcgetmode (struct global_State *, Table *, TString *, TValue *);
 
 #endif

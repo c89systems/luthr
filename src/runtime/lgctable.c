@@ -2,6 +2,7 @@
 #define LUA_CORE
 #include "lprefix.h"
 #include <string.h>
+#include <limits.h>
 #include "lgc.h"
 #include "ltable.h"
 
@@ -31,7 +32,7 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
     return __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE) == 0 ? 1 : -1;
   if (metatable != NULL) {
     TValue mode;
-    if (!luaH_gcgetmode(metatable, g->tmname[TM_MODE], &mode)) {
+    if (!luaH_gcgetmode(g, metatable, g->tmname[TM_MODE], &mode)) {
       return __atomic_load_n(&metatable->access.owner, __ATOMIC_ACQUIRE) ==
              luaX_token(L) ? -1 : 0;
     }
@@ -48,18 +49,24 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
   return 1;
 }
 
-static int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
+l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
                      const Table *view, unsigned size, int hash) {
   unsigned first;
   for (first = 0; first < size;) {
     GCObject *edges[TRACE_SLOTS * 2];
     unsigned slots = size - first, count;
     uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+    uintptr_t sharing;
     if (sequence & 1) return 0;
+    sharing = __atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE);
     if (slots > TRACE_SLOTS) slots = TRACE_SLOTS;
-    count = luaH_tracechunk(view, first, slots, hash, edges);
+    count = luaH_tracechunk(sharing & LUA_OBJECT_SHARED ? G(L) : NULL,
+                            view, first, slots, hash, edges);
     /* Never inspect the target header before the tag/payload pair is valid. */
-    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+    if (count == UINT_MAX ||
+        __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence ||
+        (!(sharing & LUA_OBJECT_SHARED) &&
+         (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)))
       return 0;
     luaC_traceedges(work, edges, count);
     first += slots;
