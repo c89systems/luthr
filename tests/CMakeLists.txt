@@ -136,6 +136,18 @@ foreach(case IN ITEMS fifo_incremental fifo_generational retire_incremental reti
   set_tests_properties(stack_admission_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
+
+luthr_test_program(gc_admission_test gc_admission_test.c)
+set_target_properties(gc_admission_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_admission_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_admission_test PRIVATE luthr_static Threads::Threads)
+target_link_options(gc_admission_test PRIVATE -Wl,--wrap=luaW_stop -Wl,--wrap=luaQ_wait)
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME gc_admission_${collector} COMMAND gc_admission_test ${collector})
+  set_tests_properties(gc_admission_${collector}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
+
 foreach(case IN ITEMS managed_incremental managed_generational foreign_incremental
     foreign_generational nested_incremental nested_generational yield_incremental yield_generational
     handoff_incremental handoff_generational collection_incremental collection_generational)
@@ -1172,7 +1184,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test closure_cache_test execution_context_test api_region_test stack_admission_test value_api_test table_read_test memory_publication_test
+  capture_cells_test closure_cache_test execution_context_test api_region_test stack_admission_test gc_admission_test value_api_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test

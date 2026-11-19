@@ -35,7 +35,7 @@ typedef struct LuaWorld {
   unsigned storage_busy, storage_waiting, storage_workers;
   unsigned heap_depth;
   int stopped;
-  int ready;
+  unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
 } LuaWorld;
 
 typedef struct LuaWorldScope {

@@ -26,7 +26,8 @@ typedef struct LuaHeapWaiter {
 
 int luaW_init (LuaWorld *world) {
   int status;
-  world->ready = world->stopped = 0;
+  world->stopped = 0;
+  world->entry_waiting = 0;
   world->heap_depth = 0;
   world->heap_owner.token = world->collector.token = NULL;
   world->participants = NULL;
@@ -47,12 +48,12 @@ int luaW_init (LuaWorld *world) {
     luaX_checksync(pthread_mutex_destroy(&world->mutex));
     return status;
   }
-  world->ready = 1;
   return 0;
 }
 
 void luaW_destroy (LuaWorld *world) {
-  lua_assert(world->ready && !world->stopped && world->participants == NULL &&
+  lua_assert(!world->stopped && world->entry_waiting == 0 &&
+             world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
              world->storage_bytes == 0 && world->storage_busy == 0 &&
@@ -60,7 +61,6 @@ void luaW_destroy (LuaWorld *world) {
              world->storage_retired == NULL && world->storage_pending == NULL);
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
-  world->ready = 0;
 }
 
 void luaW_register (lua_State *L) {
@@ -152,10 +152,17 @@ void luaW_enter (lua_State *L) {
   ** particular, a late entrant cannot change roots while a collector scans
   ** this state. Its embedding caller retains the target's ordinary Lua root. */
   withdraw(L);  /* an unadmitted entrant cannot publish the stopped record */
-  luaQ_wake(&world->changed, &world->waiters);
-  while (world->stopped)
-    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  luaW_resume(L);
+  if (world->stopped) {
+    world->entry_waiting++;
+    luaQ_wake(&world->changed, &world->waiters);
+    do {
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+    } while (world->stopped);
+    luaW_resume(L);
+    if (--world->entry_waiting == 0)
+      luaQ_wake(&world->changed, &world->waiters);
+  }
+  else luaW_resume(L);
   luaC_checksnapshot(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -197,6 +204,19 @@ void luaW_stop (lua_State *L) {
   luaW_collectenter(L);  /* finish the current metadata scope before stopping */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(!world->stopped);  /* metadata ownership orders collection requests */
+  /* Admit the batch notified by the previous stop before stopping again.
+  ** Metadata ownership prevents another stop while this batch drains. */
+  if (world->entry_waiting != 0) {
+    L->native_depth++;
+    luaW_deactivate(L);
+    luaQ_wake(&world->changed, &world->waiters);
+    do {
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+    } while (world->entry_waiting != 0);
+    luaW_resume(L);
+    luaC_checksnapshot(L);
+    L->native_depth--;
+  }
   __atomic_store_n(&world->collector.token, luaX_token(L), __ATOMIC_RELEASE);
   __atomic_store_n(&world->stopped, 1, __ATOMIC_SEQ_CST);
   {
