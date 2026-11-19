@@ -578,6 +578,7 @@ typedef struct global_State {
   LuaPublishShard publishers[LUA_PUBLISH_SHARDS];
   GCObject *new_finalizers, *new_finalizers_tail;
   uint64_t strcache_epoch;
+  uint64_t metatable_sequence[LUA_NUMTYPES];  /* primitive metatable publication */
 } global_State;
 
 

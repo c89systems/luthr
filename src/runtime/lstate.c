@@ -705,6 +705,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   luaP_init(g);
   for (i=0; i < LUA_NUMTYPES; i++) {
     g->mt[i] = NULL;
+    g->metatable_sequence[i] = 0;
     luaA_initlock(&g->metatable_access[i]);
   }
   if (luaD_rawrunprotected(L, f_luaopen, NULL) != LUA_OK) {

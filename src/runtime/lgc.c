@@ -422,8 +422,10 @@ static void markmt (global_State *g) {
   }
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   markobjectN(g, g->pipe_meta);
-  for (i=0; i < LUA_NUMTYPES; i++)
-    markobjectN(g, g->mt[i]);
+  for (i=0; i < LUA_NUMTYPES; i++) {
+    Table *mt = __atomic_load_n(&g->mt[i], __ATOMIC_ACQUIRE);
+    markobjectN(g, mt);
+  }
 }
 
 
@@ -717,7 +719,7 @@ static int preparemode (lua_State *L, Table *h) {
   if (__atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == G(L)->trace_epoch)
     return 1;
   if (meta == NULL) setnilvalue(&mode);
-  else if (!luaH_gcgetmode(G(L), meta, G(L)->tmname[TM_MODE], &mode)) {
+  else if (!luaH_readshortstr(G(L), NULL, meta, G(L)->tmname[TM_MODE], &mode)) {
     if (__atomic_load_n(&meta->access.owner, __ATOMIC_ACQUIRE) != luaX_token(L))
       return 0;
     /* A nested collection borrows this execution's stable partial image. */

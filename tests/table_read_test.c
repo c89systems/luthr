@@ -25,11 +25,36 @@
   } while (0)
 
 static __thread unsigned measuring, reading;
+static __thread pthread_mutex_t *unexpected_mutex;
+static __thread pthread_barrier_t *metatable_read;
 static unsigned access_calls, mutex_calls;
 static void *watched;
 static unsigned returned;
 static __thread lua_State *relocating;
 static __thread unsigned relocations;
+
+static void rendezvous(pthread_barrier_t *barrier) {
+  int result = pthread_barrier_wait(barrier);
+  require(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+}
+
+int __real_luaH_readshortstr(global_State *, lua_State *, Table *, TString *,
+                             TValue *);
+int __wrap_luaH_readshortstr(global_State *g, lua_State *state, Table *table,
+                             TString *key, TValue *value) {
+  pthread_barrier_t *barrier = metatable_read;
+  int ok;
+  if (barrier == NULL)
+    return __real_luaH_readshortstr(g, state, table, key, value);
+  metatable_read = NULL;
+  rendezvous(barrier);
+  rendezvous(barrier);
+  ok = __real_luaH_readshortstr(g, state, table, key, value);
+  require(ok && ttisinteger(value) && ivalue(value) == 99);
+  rendezvous(barrier);
+  rendezvous(barrier);
+  return ok;
+}
 
 void __real_luaA_metafield(lua_State *, const TValue *, TString *,
                            LuaNativeRoot *, int);
@@ -61,6 +86,7 @@ void __wrap_luaA_begin(lua_State *state, GCObject *object,
 }
 int __real_pthread_mutex_lock(pthread_mutex_t *);
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  require(mutex != unexpected_mutex);
   if (measuring)
     mutex_calls++;
   return __real_pthread_mutex_lock(mutex);
@@ -123,6 +149,131 @@ static void fast(lua_State *state) {
   require(luaH_getint(state, table, 1, &result) == LUA_VNUMINT);
   require(ivalue(&result) == 84);
   luaX_unlockstate(state);
+}
+
+static void *primitive_reader(void *argument) {
+  lua_State *state = argument;
+  LuaNativeRoot metatable, method;
+  const TValue *object;
+  luaX_lockstate(state);
+  object = s2v(state->stack.p + 1);
+  luaR_pushroot(state, &metatable);
+  luaR_pushroot(state, &method);
+  unexpected_mutex = &G(state)->world.mutex;
+  luaA_metafield(state, object, G(state)->tmname[TM_INDEX], &method, TM_INDEX);
+  luaA_getmetatable(state, object, &metatable);
+  unexpected_mutex = NULL;
+  require(ttisinteger(&method.value) && ivalue(&method.value) == 42);
+  require(ttistable(&metatable.value));
+  luaR_poproot(state, &method);
+  luaR_poproot(state, &metatable);
+  luaX_unlockstate(state);
+  return NULL;
+}
+
+static lua_State *primitive_subject(lua_State *state) {
+  lua_State *child;
+  lua_gc(state, LUA_GCSTOP);
+  lua_pushliteral(state, "subject");
+  lua_newtable(state);
+  lua_pushinteger(state, 42);
+  lua_setfield(state, -2, "__index");
+  lua_setmetatable(state, 1);
+  child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, child, 1);
+  return child;
+}
+
+static void primitive(lua_State *state) {
+  LuaObjectScope writer;
+  pthread_t reader;
+  lua_State *child = primitive_subject(state);
+  luaX_lockstate(state);
+  luaA_beginlock(state, &G(state)->metatable_access[LUA_TSTRING], &writer);
+  require(pthread_create(&reader, NULL, primitive_reader, child) == 0);
+  require(pthread_join(reader, NULL) == 0);
+  luaA_end(state, &writer);
+  luaX_unlockstate(state);
+}
+
+struct metatable_fixture {
+  lua_State *child;
+  pthread_barrier_t barrier;
+};
+
+static void *read_reattached(void *argument) {
+  struct metatable_fixture *test = argument;
+  metatable_read = &test->barrier;
+  primitive_reader(test->child);
+  require(metatable_read == NULL);
+  return NULL;
+}
+
+static void primitive_reattach(lua_State *state) {
+  struct metatable_fixture test;
+  pthread_t reader;
+  test.child = primitive_subject(state);
+  require(lua_getmetatable(state, 1) == 1);
+  require(pthread_barrier_init(&test.barrier, NULL, 2) == 0);
+  require(pthread_create(&reader, NULL, read_reattached, &test) == 0);
+  /* Let the reader capture a value that was only present while detached. */
+  rendezvous(&test.barrier);
+  lua_pushnil(state);
+  lua_setmetatable(state, 1);
+  lua_pushinteger(state, 99);
+  lua_setfield(state, -2, "__index");
+  rendezvous(&test.barrier);
+  rendezvous(&test.barrier);
+  lua_pushinteger(state, 42);
+  lua_setfield(state, -2, "__index");
+  lua_pushvalue(state, -1);
+  lua_setmetatable(state, 1);
+  rendezvous(&test.barrier);
+  require(pthread_join(reader, NULL) == 0);
+  require(pthread_barrier_destroy(&test.barrier) == 0);
+}
+
+static void set_string_method(lua_State *state, const char *value) {
+  lua_newtable(state);
+  lua_newtable(state);
+  lua_pushstring(state, value);
+  lua_setfield(state, -2, "label");
+  lua_setfield(state, -2, "__index");
+  lua_setmetatable(state, 1);
+}
+
+static void *primitive_method_reader(void *argument) {
+  lua_State *state = argument;
+  unsigned i;
+  for (i = 0; i < 5000; i++) {
+    const char *method;
+    require(lua_getfield(state, 1, "label") == LUA_TSTRING);
+    method = lua_tostring(state, -1);
+    require(strcmp(method, "first") == 0 || strcmp(method, "second") == 0);
+    lua_pop(state, 1);
+  }
+  return NULL;
+}
+
+static void primitive_replacement(lua_State *state, int generational) {
+  pthread_t reader;
+  lua_State *child;
+  unsigned i;
+  if (generational)
+    lua_gc(state, LUA_GCGEN);
+  lua_pushliteral(state, "subject");
+  set_string_method(state, "first");
+  child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, child, 1);
+  require(pthread_create(&reader, NULL, primitive_method_reader, child) == 0);
+  for (i = 0; i < 2000; i++) {
+    set_string_method(state, i % 2 == 0 ? "second" : "first");
+    if (i % 67 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+  }
+  require(pthread_join(reader, NULL) == 0);
 }
 
 static void resume_epoch(lua_State *state) {
@@ -632,6 +783,13 @@ int main(int argc, char **argv) {
     resume_epoch(state);
   else if (strcmp(argv[1], "fast") == 0)
     fast(state);
+  else if (strcmp(argv[1], "primitive") == 0)
+    primitive(state);
+  else if (strcmp(argv[1], "primitive_reattach") == 0)
+    primitive_reattach(state);
+  else if (strncmp(argv[1], "primitive_", 10) == 0)
+    primitive_replacement(state,
+                          strcmp(argv[1], "primitive_generational") == 0);
   else if (strcmp(argv[1], "batching") == 0)
     batching(state);
   else if (strcmp(argv[1], "overlap") == 0)

@@ -1729,9 +1729,10 @@ static int readshortstr (global_State *g, lua_State *L, Table *table, TString *k
   return 0;
 }
 
-int luaH_gcgetmode (global_State *g, Table *table, TString *key, TValue *result) {
+int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
+                       TValue *result) {
   lu_byte tag;
-  if (!readshortstr(g, NULL, table, key, result, &tag)) return 0;
+  if (!readshortstr(g, L, table, key, result, &tag)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }

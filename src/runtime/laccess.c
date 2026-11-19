@@ -251,13 +251,12 @@ void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *resul
     luaA_end(L, &scope);
   }
   else {
-    int type = ttype(object);
-    LuaObjectScope access;
-    luaA_beginlock(L, &G(L)->metatable_access[type], &access);
-    mt = G(L)->mt[type];
-    if (mt) { sethvalue(L, &result->value, mt); }
+    mt = __atomic_load_n(&G(L)->mt[ttype(object)], __ATOMIC_ACQUIRE);
+    if (mt) {
+      sethvalue(L, &result->value, mt);
+      luaC_tracepointer(L, mt);
+    }
     else setnilvalue(&result->value);
-    luaA_end(L, &access);
   }
 }
 
@@ -290,11 +289,16 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
   }
   else {
     int type = ttype(object);
+    global_State *g = G(L);
+    uint64_t sequence;
     LuaObjectScope access;
-    luaA_beginlock(L, &G(L)->metatable_access[type], &access);
+    luaA_beginlock(L, &g->metatable_access[type], &access);
     if (mt != NULL) luaA_share(L, obj2gco(mt));
-    luaC_prewriteptr(L, G(L)->mt[type], mt);
-    G(L)->mt[type] = mt;
+    luaC_prewriteptr(L, __atomic_load_n(&g->mt[type], __ATOMIC_RELAXED), mt);
+    sequence = __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_RELAXED);
+    __atomic_store_n(&g->metatable_sequence[type], sequence + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g->mt[type], mt, __ATOMIC_RELEASE);
+    __atomic_store_n(&g->metatable_sequence[type], sequence + 2, __ATOMIC_RELEASE);
     luaA_end(L, &access);
   }
   luaR_poproot(L, &rooted_mt);
@@ -363,16 +367,38 @@ void luaA_tabletm (lua_State *L, Table *mt, TMS event, LuaNativeRoot *result) {
   luaA_end(L, &scope);
 }
 
+/* Managed admission retains the metatable and its buffers through this
+** nonparking lookup. Validate the type slot as well as the table snapshot:
+** a detached metatable can be modified before it is installed again. */
+static int readtypemetafield (lua_State *L, int type, TString *key,
+                              LuaNativeRoot *result) {
+  global_State *g = G(L);
+  uint64_t sequence =
+    __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE);
+  TValue value;
+  Table *mt;
+  if (sequence & 1) return 0;
+  mt = __atomic_load_n(&g->mt[type], __ATOMIC_ACQUIRE);
+  if (mt == NULL) setnilvalue(&value);
+  else if (!luaH_readshortstr(g, L, mt, key, &value)) return 0;
+  if (__atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE) != sequence)
+    return 0;
+  luaR_setroot(L, result, &value);
+  return 1;
+}
+
 void luaA_metafield (lua_State *L, const TValue *object, TString *key,
                      LuaNativeRoot *result, int event) {
   LuaNativeRoot owner, metatable, rooted_key;
   LuaObjectScope first, second;
+  int perobject = ttistable(object) || ttisfulluserdata(object);
+  if (!perobject && readtypemetafield(L, ttype(object), key, result)) return;
   luaR_pushroot(L, &owner);
   luaR_setroot(L, &owner, object);
   luaR_pushroot(L, &metatable);
   luaR_pushroot(L, &rooted_key);
   setsvalue(L, &rooted_key.value, key);
-  if (ttistable(&owner.value) || ttisfulluserdata(&owner.value)) {
+  if (perobject) {
     int count = objectandmeta(L, &owner.value, &first, &second, &metatable);
     Table *mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
     metafield(L, mt, key, result, event);
@@ -382,18 +408,14 @@ void luaA_metafield (lua_State *L, const TValue *object, TString *key,
     int type = ttype(&owner.value);
     for (;;) {
       Table *mt;
-      LuaObjectScope access;
       luaA_getmetatable(L, &owner.value, &metatable);
       mt = ttistable(&metatable.value) ? hvalue(&metatable.value) : NULL;
       if (mt) luaA_begin(L, obj2gco(mt), &first);
-      luaA_beginlock(L, &G(L)->metatable_access[type], &access);
-      if (G(L)->mt[type] == mt) {
+      if (__atomic_load_n(&G(L)->mt[type], __ATOMIC_ACQUIRE) == mt) {
         metafield(L, mt, key, result, event);
-        luaA_end(L, &access);
         if (mt) luaA_end(L, &first);
         break;
       }
-      luaA_end(L, &access);
       if (mt) luaA_end(L, &first);
     }
   }

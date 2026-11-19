@@ -165,6 +165,8 @@ LUAI_FUNC Node *luaH_mainposition (const Table *t, const TValue *key);
 ** checks; the caller must validate the sequence and still-private sharing. */
 LUAI_FUNC unsigned luaH_tracechunk (struct global_State *, const Table *, unsigned, unsigned, int,
                                     GCObject **);
-LUAI_FUNC int luaH_gcgetmode (struct global_State *, Table *, TString *, TValue *);
+/* Nonparking snapshot. NULL L is reserved for collector reads of weak mode. */
+LUAI_FUNC int luaH_readshortstr (struct global_State *, lua_State *, Table *,
+                                TString *, TValue *);
 
 #endif

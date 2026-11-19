@@ -32,7 +32,7 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
     return __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE) == 0 ? 1 : -1;
   if (metatable != NULL) {
     TValue mode;
-    if (!luaH_gcgetmode(g, metatable, g->tmname[TM_MODE], &mode)) {
+    if (!luaH_readshortstr(g, NULL, metatable, g->tmname[TM_MODE], &mode)) {
       return __atomic_load_n(&metatable->access.owner, __ATOMIC_ACQUIRE) ==
              luaX_token(L) ? -1 : 0;
     }
