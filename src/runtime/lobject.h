@@ -650,6 +650,8 @@ typedef struct Proto {
   struct Proto *build_next;
   uint64_t trace_snapshot;
   lu_mem trace_bytes;
+  struct LClosure *closure_cache;  /* weak, zero-capture closure for this cohort */
+  uint64_t closure_epoch;
 } Proto;
 
 /* }================================================================== */

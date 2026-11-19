@@ -878,9 +878,27 @@ lua_Integer luaV_shiftl (lua_Integer x, lua_Integer y) {
 
 
 /*
-** create a new Lua closure, push it in the stack, and initialize
-** its upvalues.
+** Reuse an immutable closure from the current tracing cohort.
+** A cache hit cannot allocate, park or raise an error.
 */
+static LClosure *cachedclosure (lua_State *L, Proto *p) {
+  /* Lua permits reusing indistinguishable functions. A zero-capture closure
+  ** is immutable, so independent executions can share it. The cache is weak:
+  ** a new tracing cohort invalidates it BEFORE any previous object can retire.
+  ** Never load its pointer on an epoch mismatch; it may already be reclaimed.
+  ** No safepoint separates this check, pointer load and stack publication. */
+  if (p->sizeupvalues == 0 &&
+      __atomic_load_n(&p->closure_epoch, __ATOMIC_ACQUIRE) ==
+                   G(L)->trace_epoch) {
+    LClosure *ncl = __atomic_load_n(&p->closure_cache, __ATOMIC_ACQUIRE);
+    if (ncl != NULL) {
+      luaC_tracepointer(L, ncl);
+      return ncl;
+    }
+  }
+  return NULL;
+}
+/* Allocate a closure and initialize its captures. */
 static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base,
                          StkId ra) {
   int nup = p->sizeupvalues;
@@ -911,6 +929,15 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
   }
   luaA_end(L, &construction);
   setclLvalue2s(L, restorestack(L, target_offset), ncl);
+  if (nup == 0) {
+    /* Construction can collect or park. Publish the CURRENT cohort only once
+    ** the rooted closure is complete. Racing publishers in that cohort all
+    ** offer live immutable closures; either choice is valid. No collector
+    ** reads this weak edge or needs to scan a cache directory. */
+    __atomic_store_n(&ncl->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->closure_cache, ncl, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->closure_epoch, G(L)->trace_epoch, __ATOMIC_RELEASE);
+  }
   luaR_poproot(L, &capture);
   luaR_poproot(L, &closure);
 }

@@ -596,6 +596,8 @@ Proto *luaF_newproto (lua_State *L) {
   f->builder = L;
   f->build_next = L->building_protos;
   f->trace_snapshot = 0;
+  f->closure_cache = NULL;
+  f->closure_epoch = 0;
   f->trace_bytes = 0;
   L->building_protos = f;
   return f;

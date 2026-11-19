@@ -430,6 +430,20 @@ foreach(collector IN ITEMS incremental generational)
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
 endforeach()
 
+luthr_test_program(closure_cache_test closure_cache_test.c)
+set_target_properties(closure_cache_test PROPERTIES C_STANDARD 99)
+target_compile_options(closure_cache_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(closure_cache_test PRIVATE luthr_static)
+target_link_options(closure_cache_test PRIVATE -Wl,--wrap=luaA_end)
+foreach(collector IN ITEMS incremental generational)
+  foreach(case IN ITEMS reuse weak construction cycles captures parallel)
+    add_test(NAME closure_cache_${case}_${collector}
+      COMMAND closure_cache_test ${case} ${collector})
+    set_tests_properties(closure_cache_${case}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+  endforeach()
+endforeach()
+
 luthr_test_program(object_layout_test object_layout_test.c)
 set_target_properties(object_layout_test PROPERTIES C_STANDARD 99)
 target_compile_options(object_layout_test PRIVATE -Wall -Wextra -Werror)
@@ -1158,7 +1172,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test execution_context_test api_region_test stack_admission_test value_api_test table_read_test memory_publication_test
+  capture_cells_test closure_cache_test execution_context_test api_region_test stack_admission_test value_api_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test

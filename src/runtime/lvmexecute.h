@@ -766,8 +766,14 @@
       vmcase(OP_CLOSURE) {
         StkId ra = readRA(i);
         Proto *p = cl->p->p[GETARG_Bx(i)];
-        halfProtect(pushclosure(L, p, cl, base, ra));
-        checkGC(L, ra + 1);
+        LClosure *cached = cachedclosure(L, p);
+        if (cached != NULL) {
+          setclLvalue2s(L, ra, cached);
+        }
+        else {
+          halfProtect(pushclosure(L, p, cl, base, ra));
+          checkGC(L, ra + 1);
+        }
         vmbreak;
       }
       vmcase(OP_VARARG) {
