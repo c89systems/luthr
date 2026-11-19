@@ -57,6 +57,9 @@ LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
                              struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
+/* Caller owns the private cell or its mutex. This publication kernel cannot
+** allocate, wait, move the stack or invoke Lua; collector barriers still apply. */
+LUAI_FUNC void luaF_writeownedupval (lua_State *L, UpVal *uv, const TValue *value);
 LUAI_FUNC int luaF_trycloseupval (lua_State *L);
 /* Register shadows belong to the executing frame. Shared cells are authoritative;
 ** refresh only operands that are read and publish only actual writes. A frame's
@@ -77,10 +80,11 @@ LUAI_FUNC void luaF_storelocals (lua_State *L, StkId first, int count);
 LUAI_FUNC StkId luaF_loadlocal (lua_State *L, StkId slot);
 LUAI_FUNC void luaF_getcapture (lua_State *L, LClosure *closure, int n,
                                struct LuaNativeRoot *capture);
-LUAI_FUNC void luaF_readcapture (lua_State *L, LClosure *closure, int n,
+/* The VM selects a cell once. Reads retain that exact cell across waits and
+** later joins; private reads cannot wait. Writes require a non-private cell. */
+LUAI_FUNC void luaF_readcapture (lua_State *L, UpVal *uv,
                                 struct LuaNativeRoot *value);
-LUAI_FUNC void luaF_writecapture (lua_State *L, LClosure *closure, int n,
-                                 const TValue *value);
+LUAI_FUNC void luaF_writecapture (lua_State *L, UpVal *uv, const TValue *value);
 LUAI_FUNC void luaF_joincaptures (lua_State *L, LClosure *to, int target,
                                  LClosure *from, int source);
 LUAI_FUNC void luaF_newtbcupval (lua_State *L, StkId level);

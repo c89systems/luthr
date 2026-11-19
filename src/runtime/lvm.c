@@ -1430,6 +1430,25 @@ typedef struct LuaInstructionFrame {
 
 enum { VM_NEXT, VM_START, VM_RETURNING, VM_DONE };
 
+/* Participation protects a selected cell until its last unsafepointed use.
+** Only the cell's exact owner may borrow its value: a private closure can
+** still refer to a shared cell after an upvalue join. Shared access keeps the
+** rooted, possibly waiting path. No private borrow survives that boundary. */
+l_sinline UpVal *capturecell (LClosure *cl, int n) {
+  return __atomic_load_n(&cl->upvals[n], __ATOMIC_ACQUIRE);
+}
+
+l_sinline int privatecapture (lua_State *L, UpVal *uv) {
+  return __atomic_load_n(&uv->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L);
+}
+
+l_sinline int readprivatecapture (lua_State *L, UpVal *uv, TValue *value) {
+  if (!privatecapture(L, uv)) return 0;
+  setobj(L, value, &uv->value);
+  luaC_tracevalue(L, value);
+  return 1;
+}
+
 /* A capture-aware instruction is generated from the same definitions as the
 ** register-only loop. Its single return boundary keeps ownership/cell paths
 ** out of ordinary dispatch and avoids replicating the fetch loop for them. */

@@ -55,25 +55,35 @@
         vmbreak;
       }
       vmcase(OP_GETUPVAL) {
-        LuaNativeRoot value;
         int b = GETARG_B(i);
+        UpVal *uv;
         readRA(i);
-        savestate(L, ci);
-        luaR_pushroot(L, &value);
-        luaF_readcapture(L, cl, b, &value);
-        updatebase(ci);
-        setobj2s(L, RA(i), &value.value);
-        luaR_poproot(L, &value);
+        uv = capturecell(cl, b);
+        if (!readprivatecapture(L, uv, s2v(RA(i)))) {
+          LuaNativeRoot value;
+          savestate(L, ci);
+          luaR_pushroot(L, &value);
+          luaF_readcapture(L, uv, &value);
+          updatebase(ci);
+          setobj2s(L, RA(i), &value.value);
+          luaR_poproot(L, &value);
+        }
         vmbreak;
       }
       vmcase(OP_SETUPVAL) {
         StkId ra = readRA(i);
-        savestate(L, ci);
-        luaF_writecapture(L, cl, GETARG_B(i), s2v(ra));
-        updatebase(ci);
+        UpVal *uv = capturecell(cl, GETARG_B(i));
+        if (privatecapture(L, uv))
+          luaF_writeownedupval(L, uv, s2v(ra));
+        else {
+          savestate(L, ci);
+          luaF_writecapture(L, uv, s2v(ra));
+          updatebase(ci);
+        }
         vmbreak;
       }
       vmcase(OP_GETTABUP) {
+        UpVal *uv;
         StkId ra;
         LuaNativeRoot snapshot;
         TValue *upval = &snapshot.value;
@@ -83,7 +93,8 @@
         readRA(i);
         savestate(L, ci);
         luaR_pushroot(L, &snapshot);
-        luaF_readcapture(L, cl, GETARG_B(i), &snapshot);
+        uv = capturecell(cl, GETARG_B(i));
+        luaF_readcapture(L, uv, &snapshot);
         updatebase(ci);
         ra = RA(i);
         luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
@@ -139,13 +150,15 @@
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
+        UpVal *uv;
         LuaNativeRoot snapshot;
         TValue *upval = &snapshot.value;
         TValue *rb = KB(i);
         TValue *rc;
         savestate(L, ci);
         luaR_pushroot(L, &snapshot);
-        luaF_readcapture(L, cl, GETARG_A(i), &snapshot);
+        uv = capturecell(cl, GETARG_A(i));
+        luaF_readcapture(L, uv, &snapshot);
         updatebase(ci);
         rc = RKC(i);
         Protect(settable(L, upval, rb, rc, GETARG_A(i) + 1u));

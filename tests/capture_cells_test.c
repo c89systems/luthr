@@ -13,6 +13,7 @@
 #include <lua.h>
 #include <lualib.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,14 +45,15 @@ static const void *measured_function;
 static unsigned local_loads;
 static int collect_pending, collected_pending;
 static int collect_lookup, collected_lookup;
+static unsigned parallel_started, parallel_finished;
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaA_begin(lua_State *state, GCObject *object,
                        LuaObjectScope *scope);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
-void __real_luaF_readcapture(lua_State *state, LClosure *closure, int n,
+void __real_luaF_readcapture(lua_State *state, UpVal *cell,
                              LuaNativeRoot *value);
-void __real_luaF_writecapture(lua_State *state, LClosure *closure, int n,
+void __real_luaF_writecapture(lua_State *state, UpVal *cell,
                               const TValue *value);
 void __real_luaF_storelocals(lua_State *state, StkId first, int count);
 StkId __real_luaF_loadlocal(lua_State *state, StkId slot);
@@ -135,21 +137,21 @@ void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
   measured--;
 }
 
-void __wrap_luaF_readcapture(lua_State *state, LClosure *closure, int n,
+void __wrap_luaF_readcapture(lua_State *state, UpVal *cell,
                              LuaNativeRoot *value) {
   measured++;
   read_calls++;
   reading++;
-  __real_luaF_readcapture(state, closure, n, value);
+  __real_luaF_readcapture(state, cell, value);
   reading--;
   measured--;
 }
 
-void __wrap_luaF_writecapture(lua_State *state, LClosure *closure, int n,
+void __wrap_luaF_writecapture(lua_State *state, UpVal *cell,
                               const TValue *value) {
   measured++;
   write_calls++;
-  __real_luaF_writecapture(state, closure, n, value);
+  __real_luaF_writecapture(state, cell, value);
   measured--;
 }
 
@@ -210,6 +212,94 @@ static void *resume_owner(void *context) {
   struct fixture *fixture = context;
   fixture->status = lua_resume(fixture->owner, NULL, 0, &fixture->results);
   return NULL;
+}
+
+static int capture_ready(lua_State *state) {
+  (void)state;
+  __atomic_store_n(&parallel_started, 1, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static int capture_done(lua_State *state) {
+  lua_pushboolean(state, __atomic_load_n(&parallel_finished, __ATOMIC_ACQUIRE));
+  return 1;
+}
+
+static void *resume_mixed(void *context) {
+  struct fixture *fixture = context;
+  fixture->status = lua_resume(fixture->owner, NULL, 1, &fixture->results);
+  return NULL;
+}
+
+static void mixed_capture(lua_State *state) {
+  struct fixture fixture = {0};
+  LClosure *reader, *writer;
+  pthread_t thread;
+  __atomic_store_n(&parallel_started, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&parallel_finished, 0, __ATOMIC_RELAXED);
+  lua_pushcfunction(state, capture_ready);
+  lua_setglobal(state, "capture_ready");
+  lua_pushcfunction(state, capture_done);
+  lua_setglobal(state, "capture_done");
+  run(state, "local function pair() local value; "
+             "return function() return value end,function(v) value=v end end; "
+             "local a,b=pair(); local c,d=pair(); return a,b,c,d");
+  require(lua_gettop(state) == 4);
+  fixture.owner = lua_newthread(state);
+  require(
+      luaL_loadstring(
+          fixture.owner,
+          "local write=...; local low,high=math.mininteger,math.maxinteger; "
+          "local i=0; capture_ready(); repeat for n=1,128 do "
+          "i=i+1; local k=i%8; local v; "
+          "if k==0 then v=low elseif k==1 then v=high "
+          "elseif k==2 then v=1.5 elseif k==3 then v=false "
+          "elseif k==4 then v='capture payload' "
+          "elseif k==5 then v={marker=42} "
+          "elseif k==6 then v=coroutine.running() end; write(v) "
+          "end until capture_done(); return i") == LUA_OK);
+  lua_pushvalue(state, 2);
+  lua_xmove(state, fixture.owner, 1); /* promotes the source cell */
+  lua_upvaluejoin(state, 3, 1, 1, 1);
+  lua_upvaluejoin(state, 4, 1, 2, 1);
+  require(lua_upvalueid(state, 3, 1) == lua_upvalueid(state, 1, 1));
+  luaX_lockstate(state);
+  reader = clLvalue(s2v(state->stack.p + 3));
+  writer = clLvalue(s2v(state->stack.p + 4));
+  require(reader->sharing == (uintptr_t)state &&
+          writer->sharing == (uintptr_t)state &&
+          (reader->upvals[0]->sharing & LUA_OBJECT_SHARED) != 0 &&
+          reader->upvals[0] == writer->upvals[0]);
+  luaX_unlockstate(state);
+  require(pthread_create(&thread, NULL, resume_mixed, &fixture) == 0);
+  while (!__atomic_load_n(&parallel_started, __ATOMIC_ACQUIRE))
+    sched_yield();
+  require(luaL_loadstring(
+              state,
+              "local read,write=...; "
+              "local low,high=math.mininteger,math.maxinteger; "
+              "for n=1,3200 do local v=read(); local t=type(v); "
+              "if t=='number' then assert(v==low or v==high or v==1.5) "
+              "elseif t=='string' then assert(v=='capture payload') "
+              "elseif t=='table' then assert(v.marker==42) "
+              "else assert(t=='nil' or t=='boolean' or t=='thread') end; "
+              "write(n%2==0 and {marker=42} or low); "
+              "if n%64==0 then collectgarbage('collect') end end") == LUA_OK);
+  lua_pushvalue(state, 3);
+  lua_pushvalue(state, 4);
+  require(lua_pcall(state, 2, 0, 0) == LUA_OK);
+  __atomic_store_n(&parallel_finished, 1, __ATOMIC_RELEASE);
+  require(pthread_join(thread, NULL) == 0);
+  require(fixture.status == LUA_OK && fixture.results == 1 &&
+          lua_tointeger(fixture.owner, -1) >= 128);
+  require(luaL_loadstring(state, "local read,write=...; write({marker=43}); "
+                                 "collectgarbage('collect'); "
+                                 "assert(read().marker==43)") == LUA_OK);
+  lua_pushvalue(state, 3);
+  lua_pushvalue(state, 4);
+  require(lua_pcall(state, 2, 0, 0) == LUA_OK);
+  lua_settop(state, 0);
+  lua_gc(state, LUA_GCCOLLECT);
 }
 
 static void independent(lua_State *state) {
@@ -579,24 +669,45 @@ int main(int argc, char **argv) {
   luaL_openlibs(state);
   if (strcmp(argv[1], "independent") == 0)
     independent(state);
-  else if (strncmp(argv[1], "lowered_", 8) == 0)
+  else if (strncmp(argv[1], "mixed_", 6) == 0) {
+    if (strcmp(argv[1], "mixed_generational") == 0)
+      lua_gc(state, LUA_GCGEN);
+    mixed_capture(state);
+  } else if (strncmp(argv[1], "private_", 8) == 0) {
+    if (strcmp(argv[1], "private_generational") == 0)
+      lua_gc(state, LUA_GCGEN);
+    run(state,
+        "local value; local function read() return value end; "
+        "local function write(v) value=v end; "
+        "local values={false,true,math.mininteger,math.maxinteger,1.5,"
+        "'capture payload',{},function() return 42 end,coroutine.running()}; "
+        "for round=1,48 do for i=1,#values do write(values[i]); "
+        "assert(rawequal(read(),values[i])) end; write(nil); "
+        "assert(read()==nil); write({marker=round}); "
+        "collectgarbage('step',1); assert(read().marker==round) end; "
+        "collectgarbage('collect'); assert(read().marker==48)");
+  } else if (strncmp(argv[1], "lowered_", 8) == 0)
     lowered(state, argv[1], &code);
   else if (strcmp(argv[1], "readers") == 0) {
-    run(state, "local x=17; local function read() return x end; "
-               "for i=1,20000 do assert(read()==17) end");
+    run(state, "local check=assert; "
+               "local x=17; local function read() return x end; "
+               "for i=1,20000 do check(read()==17) end");
     fprintf(stderr, "capture readers: mutex=%u ownership=%u\n", reader_mutexes,
             reader_ownership);
-    require(read_calls >= 20000 && reader_mutexes == 0 &&
-            reader_ownership == 0);
+    require(read_calls < 100 && reader_mutexes == 0 && reader_ownership == 0);
   } else if (strcmp(argv[1], "access") == 0) {
     observed_world = &G(state)->world;
-    access_calls = read_calls = write_calls = world_acquisitions = 0;
     lua_gc(state, LUA_GCSTOP);
-    run(state, "local x=0; local function next() x=x+1; return x end; "
-               "local t={0}; for i=1,40 do t[1]=next(); assert(t[1]==i) end");
+    require(luaL_loadstring(
+                state, "local check=assert; "
+                       "local x=0; local function next() x=x+1; return x end; "
+                       "local t={0}; for i=1,40 do t[1]=next(); "
+                       "check(t[1]==i) end") == LUA_OK);
+    access_calls = read_calls = write_calls = world_acquisitions = 0;
+    require(lua_pcall(state, 0, 0, 0) == LUA_OK);
     fprintf(stderr, "access=%u read=%u write=%u world=%u\n", access_calls,
             read_calls, write_calls, world_acquisitions);
-    require(access_calls > 0 && read_calls > 0 && write_calls > 0);
+    require(access_calls > 0 && read_calls <= 1 && write_calls == 0);
     require(world_acquisitions == 0);
     observed_world = NULL;
   } else if (strcmp(argv[1], "uncaptured") == 0) {

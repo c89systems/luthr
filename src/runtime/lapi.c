@@ -1519,7 +1519,7 @@ int luaA_load (lua_State *L, lua_Reader reader, void *data,
       TValue gt;
       getGlobalTable(L, &gt);
       /* set global table as 1st upvalue of 'f' (may be LUA_ENV) */
-      luaF_writecapture(L, f, 0, &gt);
+      luaF_writeupval(L, __atomic_load_n(&f->upvals[0], __ATOMIC_ACQUIRE), &gt);
     }
     luaR_poproot(L, &function);
   }
