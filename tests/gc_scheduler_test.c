@@ -103,7 +103,7 @@ static void *try_stopped(void *argument) {
                                       &slot->collector_execution, 0,
                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
   luaSC_collectidle(&carrier, slot);
-  require(slot->collector->participation.active == 0);
+  require(luaW_active(&slot->collector->participation) == 0);
   __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
   return NULL;
 }

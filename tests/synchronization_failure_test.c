@@ -99,13 +99,13 @@ static int facade_case(const char *name) {
   config.free_fn = facade_free;
   if (strcmp(name, "facade_policy_mutex") == 0)
     fail_mutex = 1;
-  else if (strcmp(name, "facade_trace_mutex") == 0)
+  else if (strcmp(name, "facade_backing_mutex") == 0)
     fail_mutex = 2;
   else if (strcmp(name, "facade_allocator_mutex") == 0)
     fail_mutex = 3;
-  else if (strcmp(name, "facade_state_mutex") == 0)
-    fail_mutex = 4;
   else if (strcmp(name, "facade_world_mutex") == 0)
+    fail_mutex = 4;
+  else if (strcmp(name, "facade_pool_mutex") == 0)
     fail_mutex = 5;
   else
     return 1;
@@ -129,13 +129,14 @@ static int run_case(const char *name) {
   int failed = 0;
   int world_case = strncmp(name, "world_", 6) == 0;
   int allocator_case = strncmp(name, "allocator_", 10) == 0;
-  int main_case =
-      strncmp(name, "main_", 5) == 0 || world_case || allocator_case;
+  int pool_case = strncmp(name, "pool_", 5) == 0;
+  int main_case = pool_case || world_case || allocator_case;
+  int thread_case = strcmp(name, "thread_no_resources") == 0;
   int condition_case = strstr(name, "condition") != NULL;
   if (strncmp(name, "facade_", 7) == 0)
     return facade_case(name);
   if (main_case) {
-    int position = allocator_case ? 1 : world_case ? 3 : 2;
+    int position = allocator_case ? 1 : world_case ? 2 : 3;
     fail_mutex = condition_case ? 0 : position;
     fail_condition = condition_case ? position : 0;
   }
@@ -144,11 +145,11 @@ static int run_case(const char *name) {
     failed = state != NULL;
   } else if (state == NULL) {
     return 1;
-  } else if (strncmp(name, "thread_", 7) == 0) {
+  } else if (thread_case) {
     lua_pushcfunction(state, create_thread);
-    fail_mutex = !condition_case;
-    fail_condition = condition_case;
+    fail_mutex = fail_condition = 1;
     status = lua_pcall(state, 0, 1, 0);
+    failed |= status != LUA_OK || !lua_isthread(state, -1);
   } else if (strcmp(name, "closed_capture") == 0) {
     fail_mutex = 1;
     status = luaL_loadstring(state, "return 42");
@@ -165,7 +166,7 @@ static int run_case(const char *name) {
   }
   fail_mutex = fail_condition = 0;
   if (state != NULL) {
-    if (!main_case)
+    if (!main_case && !thread_case)
       failed |= status != LUA_ERRMEM;
     lua_settop(state, 0);
     (void)lua_gc(state, LUA_GCCOLLECT);
@@ -175,8 +176,8 @@ static int run_case(const char *name) {
     failed |= lua_tointeger(state, -1) != 42;
     lua_close(state);
   }
-  if (failures != 1 || live_mutexes != 0 || live_conditions != 0 ||
-      live_bytes != 0) {
+  if (failures != (thread_case ? 0 : 1) || live_mutexes != 0 ||
+      live_conditions != 0 || live_bytes != 0) {
     fprintf(stderr, "%s: failures=%d live mutexes=%d conditions=%d bytes=%zu\n",
             name, failures, live_mutexes, live_conditions, live_bytes);
     failed = 1;

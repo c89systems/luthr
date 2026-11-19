@@ -24,34 +24,26 @@ void luaX_checksync (int status) {
   }
 }
 
-int luaX_initgate (LuaStackGate *gate) {
-  int status;
-  gate->ready = 0;
+typedef struct LuaGateWaiter {
+  struct LuaGateWaiter *next;
+} LuaGateWaiter;
+
+void luaX_initgate (LuaStackGate *gate) {
   gate->owner.token = NULL;
   gate->context = NULL;
   gate->host = NULL;
-  gate->next_ticket = gate->serving = 0;
-  gate->waiting = 0;
-  gate->waiters = NULL;
-  status = pthread_mutex_init(&gate->mutex, NULL);
-  if (status != 0)
-    return status;
-  status = pthread_cond_init(&gate->changed, NULL);
-  if (status != 0) {
-    luaX_checksync(pthread_mutex_destroy(&gate->mutex));
-    return status;
-  }
+  gate->head = NULL;
+  gate->tail = &gate->head;
+  gate->status = 0;
   gate->ready = 1;
-  return 0;
 }
 
 void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
-  lua_assert(gate->owner.token == NULL && gate->next_ticket == gate->serving &&
-             gate->waiters == NULL && gate->context == NULL && gate->host == NULL);
-  luaX_checksync(pthread_cond_destroy(&gate->changed));
-  luaX_checksync(pthread_mutex_destroy(&gate->mutex));
+  lua_assert(gate->owner.token == NULL && gate->status == 0 &&
+             gate->head == NULL && gate->tail == &gate->head &&
+             gate->context == NULL && gate->host == NULL);
   gate->ready = 0;
 }
 
@@ -63,23 +55,36 @@ static void bindcontext (LuaStackGate *gate, NativeStackContext *context,
 }
 
 static void reserve (lua_State *L, NativeStackContext *context,
-                      LuaThreadContext *thread, void *token) {
+                      LuaThreadContext *thread, void *token, unsigned active) {
   LuaStackGate *gate = &L->stack_gate;
-  unsigned long ticket;
+  unsigned expected = 0;
+  unsigned desired = LUA_GATE_HELD | active;
   /* Recursive entry is an internal boundary error, not a wait for ourselves. */
   if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) == token) {
     fputs("Luthr recursive coroutine stack gate entry\n", stderr);
     abort();
   }
-  ticket = __atomic_fetch_add(&gate->next_ticket, 1, __ATOMIC_RELAXED);
-  if (ticket != __atomic_load_n(&gate->serving, __ATOMIC_ACQUIRE)) {
-    luaX_checksync(pthread_mutex_lock(&gate->mutex));
-    __atomic_fetch_add(&gate->waiting, 1, __ATOMIC_SEQ_CST);
-    while (ticket != __atomic_load_n(&gate->serving, __ATOMIC_SEQ_CST)) {
-      luaQ_wait(L, &gate->mutex, &gate->changed, &gate->waiters);
+  if (!__atomic_compare_exchange_n(&gate->status, &expected, desired, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+    LuaWorld *world = &G(L)->world;
+    LuaGateWaiter wait = {NULL};
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    *gate->tail = &wait;
+    gate->tail = &wait.next;
+    /* The release CAS preserves this bit. Either it sees our registration
+    ** and wakes the world queue, or our recheck sees an already free gate. */
+    __atomic_fetch_or(&gate->status, LUA_GATE_WAITING, __ATOMIC_SEQ_CST);
+    for (;;) {
+      expected = LUA_GATE_WAITING;
+      if (gate->head == &wait &&
+          __atomic_compare_exchange_n(&gate->status, &expected,
+            desired | (wait.next != NULL ? LUA_GATE_WAITING : 0), 0,
+            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) break;
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
     }
-    __atomic_fetch_sub(&gate->waiting, 1, __ATOMIC_SEQ_CST);
-    luaX_checksync(pthread_mutex_unlock(&gate->mutex));
+    gate->head = wait.next;
+    if (gate->head == NULL) gate->tail = &gate->head;
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
   lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
   bindcontext(gate, context, thread, token);
@@ -87,6 +92,8 @@ static void reserve (lua_State *L, NativeStackContext *context,
 
 static void release (lua_State *L, void *token) {
   LuaStackGate *gate = &L->stack_gate;
+  LuaWorld *world = &G(L)->world;
+  unsigned previous;
   lua_assert(L->world_depth == 0);
   if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) != token) {
     fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
@@ -95,14 +102,16 @@ static void release (lua_State *L, void *token) {
   gate->context = NULL;
   gate->host = NULL;
   __atomic_store_n(&gate->owner.token, NULL, __ATOMIC_RELEASE);
-  /* Either a waiter sees its turn before parking, or this observer check
-  ** sees its registration and wakes it. Uncontended entry/exit stays local. */
-  __atomic_fetch_add(&gate->serving, 1, __ATOMIC_SEQ_CST);
-  if (__atomic_load_n(&gate->waiting, __ATOMIC_SEQ_CST) != 0) {
-    luaX_checksync(pthread_mutex_lock(&gate->mutex));
-    luaQ_wake(&gate->changed, &gate->waiters);
-    luaX_checksync(pthread_mutex_unlock(&gate->mutex));
-  }
+  previous = __atomic_load_n(&gate->status, __ATOMIC_RELAXED);
+  lua_assert(previous & LUA_GATE_HELD);
+  /* Stack release and participation retirement are one publication. Only
+  ** waiter registration can change this word while we own it. After success
+  ** neither this gate nor L is touched: a collector can reclaim it at once.
+  ** A queued gate retains WAITING so a fresh caller cannot steal the grant. */
+  while (!__atomic_compare_exchange_n(&gate->status, &previous,
+           previous & LUA_GATE_WAITING, 0,
+           __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) { }
+  luaW_leave(world, previous & LUA_GATE_WAITING);
 }
 
 int luaX_tryreserve (lua_State *target) {
@@ -112,10 +121,9 @@ int luaX_tryreserve (lua_State *target) {
                                  ? thread->override : &thread->native;
   void *token = context->execution != NULL ? cast(void *, context->execution)
                                           : cast(void *, &thread->native);
-  unsigned long turn;
+  unsigned expected = 0;
   if (__atomic_load_n(&gate->owner.token, __ATOMIC_ACQUIRE) == token) return 2;
-  turn = __atomic_load_n(&gate->serving, __ATOMIC_ACQUIRE);
-  if (!__atomic_compare_exchange_n(&gate->next_ticket, &turn, turn + 1, 0,
+  if (!__atomic_compare_exchange_n(&gate->status, &expected, LUA_GATE_HELD, 0,
                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
     return 0;
   lua_assert(__atomic_load_n(&gate->owner.token, __ATOMIC_RELAXED) == NULL);
@@ -134,7 +142,7 @@ static void lockstate (lua_State *L, LuaThreadContext *thread,
   void *token = execution != NULL ? cast(void *, execution)
                                   : cast(void *, &thread->native);
   luaQ_entermanaged(L, execution);
-  reserve(L, context, host, token);
+  reserve(L, context, host, token, LUA_GATE_ACTIVE);
   luaW_enter(L);
   if (!values) {
     luaCP_apply(L);
@@ -151,8 +159,6 @@ void luaX_lockstate (lua_State *L) {
 }
 
 static void unlockstate (lua_State *L, void *token, int values) {
-  LuaWorld *world = &G(L)->world;
-  LuaParticipation *participant = L->admission;
   LuaExecution *execution = luaX_execution(L);
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
@@ -167,7 +173,7 @@ static void unlockstate (lua_State *L, void *token, int values) {
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
-  lua_assert(participant == &L->participation);  /* paired operations retire together */
+  lua_assert(L->admission == &L->participation);
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
   if (L->errorJmp == NULL && execution != NULL) {
@@ -177,7 +183,6 @@ static void unlockstate (lua_State *L, void *token, int values) {
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L, token);
-  luaW_leave(world, participant);
   luaQ_leavemanaged(execution);  /* no state accesses after the final world leave */
 }
 
@@ -261,8 +266,10 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
     first = second;
     second = swap;
   }
-  reserve(first, context, host, token);
-  if (second != first) reserve(second, context, host, token);
+  /* Never publish participation while waiting for the second gate. A
+  ** collector holding it must be able to complete its rendezvous. */
+  reserve(first, context, host, token, 0);
+  if (second != first) reserve(second, context, host, token, 0);
   lua_assert(first->admission == &first->participation &&
              second->admission == &second->participation);
   lua_assert(first->stack_peer == NULL && second->stack_peer == NULL);
@@ -271,6 +278,7 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
     second->stack_peer = first;
   }
   second->admission = &first->participation;
+  luaW_activate(first);
   luaW_enter(first);
   if (second != first) luaC_checksnapshot(second);
   luaCP_apply(first);
@@ -282,8 +290,6 @@ void luaX_lockpair (lua_State *first, lua_State *second) {
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {
-  LuaWorld *world = &G(first)->world;
-  LuaParticipation *participant;
   LuaExecution *execution = luaX_execution(first);
   void *token = luaQ_ownertoken();
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
@@ -291,7 +297,6 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
     first = second;
     second = swap;
   }
-  participant = first->admission;
   luaM_publishdebt(first);
   first->stack_peer = second->stack_peer = NULL;
   second->admission = &second->participation;
@@ -305,7 +310,6 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
   }
   if (second != first) release(second, token);
   release(first, token);
-  luaW_leave(world, participant);
   luaQ_leavemanaged(execution);
 }
 
@@ -324,7 +328,8 @@ void luaX_pollrequests (lua_State *L) {
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
-      __atomic_load_n(&L->stack_gate.waiting, __ATOMIC_ACQUIRE) != 0) {
+      (__atomic_load_n(&L->stack_gate.status, __ATOMIC_ACQUIRE) &
+        LUA_GATE_WAITING) != 0) {
     /* A real request publishes roots and hands off ownership. The successful
     ** no-request path above reads request words without a gate transaction. */
     L->native_depth++;

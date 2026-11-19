@@ -18,6 +18,13 @@
 
 static unsigned checks;
 static unsigned entered, observed;
+static __thread unsigned admissions;
+
+void __real_luaW_enter(lua_State *state);
+void __wrap_luaW_enter(lua_State *state) {
+  admissions++;
+  __real_luaW_enter(state);
+}
 
 struct invocation {
   lua_State *state;
@@ -27,8 +34,7 @@ struct invocation {
 /* A batch in an attached activation must not transact on its physical gate.
  * Ordinary foreign bindings must continue to acquire it for their API calls. */
 static void check_api(lua_State *state, int foreign) {
-  unsigned long before =
-      __atomic_load_n(&state->stack_gate.next_ticket, __ATOMIC_ACQUIRE);
+  unsigned before = admissions;
   int top = lua_gettop(state);
   unsigned i;
   for (i = 0; i < 128; i++) {
@@ -38,11 +44,9 @@ static void check_api(lua_State *state, int foreign) {
   }
   require(lua_gettop(state) == top);
   if (foreign)
-    require(__atomic_load_n(&state->stack_gate.next_ticket, __ATOMIC_ACQUIRE) >
-            before);
+    require(admissions > before);
   else
-    require(__atomic_load_n(&state->stack_gate.next_ticket, __ATOMIC_ACQUIRE) ==
-            before);
+    require(admissions == before);
   checks++;
 }
 

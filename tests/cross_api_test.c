@@ -270,7 +270,7 @@ static int exercise_wait(struct fixture *fixture) {
     abort();
   luaX_unlockstate(fixture->boxes[0]);
   controller = fixture->boxes[fixture->mode == WAIT_MOVE ? 1 : 0];
-  fixture->watched = &controller->stack_gate.changed;
+  fixture->watched = &G(controller)->world.changed;
   luaX_lockstate(controller);
   before = (uintptr_t)fixture->boxes[0]->stack.p;
   check(pthread_create(&carrier, NULL, waiting_operation, fixture));

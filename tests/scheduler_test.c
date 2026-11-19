@@ -768,17 +768,15 @@ static void startup_failures(struct fixture *f) {
   fixture = f;
   f->main = lua_newstate(backing, f, 42);
   require(f->main != NULL);
-  for (i = 0; i < 4 + config.slots; i++) {
+  for (i = 0; i < 2 + config.slots; i++) {
     fail_mutex = (int)i;
-    require(luaSC_init(f->main, &f->scheduler, &config) ==
-            (i < 4 ? EAGAIN : ENOMEM));
+    require(luaSC_init(f->main, &f->scheduler, &config) == EAGAIN);
     require(f->main->l_G->scheduler == NULL &&
             f->main->l_G->slot_caches == NULL);
   }
-  for (i = 0; i < 2 + config.carriers + config.slots; i++) {
+  for (i = 0; i < 2 + config.carriers; i++) {
     fail_condition = (int)i;
-    require(luaSC_init(f->main, &f->scheduler, &config) ==
-            (i < 2 + config.carriers ? EAGAIN : ENOMEM));
+    require(luaSC_init(f->main, &f->scheduler, &config) == EAGAIN);
     require(f->main->l_G->scheduler == NULL &&
             f->main->l_G->slot_caches == NULL);
   }

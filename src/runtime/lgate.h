@@ -9,20 +9,23 @@
 #include "llimits.h"
 #include "lexec.h"
 
+struct LuaGateWaiter;
+
+/* The same word owns the stack and publishes managed participation. A queued
+** gate stays unavailable to fresh callers until its FIFO head takes it. */
+enum { LUA_GATE_HELD = 1, LUA_GATE_ACTIVE = 2, LUA_GATE_WAITING = 4 };
+
 typedef struct LuaStackGate {
-  pthread_mutex_t mutex;
-  pthread_cond_t changed;
   LuaOwner owner;
   struct NativeStackContext *context;  /* current reservation's logical stack */
   struct LuaThreadContext *host;  /* unmanaged reservation only; never migrates */
-  LuaWaiter *waiters;
-  unsigned long next_ticket;
-  unsigned long serving;
-  unsigned waiting;  /* atomic request count, read by no-request safepoints */
+  struct LuaGateWaiter *head;
+  struct LuaGateWaiter **tail;
+  unsigned status;  /* atomic ownership, participation and waiter handshake */
   int ready;
 } LuaStackGate;
 
-LUAI_FUNC int luaX_initgate (LuaStackGate *gate);
+LUAI_FUNC void luaX_initgate (LuaStackGate *gate);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);

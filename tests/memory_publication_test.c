@@ -66,7 +66,7 @@ static struct {
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
-void __real_luaW_leave(LuaWorld *world, LuaParticipation *participant);
+void __real_luaW_leave(LuaWorld *world, int queued);
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
                            size_t size);
@@ -92,9 +92,14 @@ void *__wrap_luaM_realloc_(lua_State *state, void *oldblock, size_t old,
       size == sizeof(Value) + 1 + sizeof(unsigned)) {
     resize_probe.armed = 0;
     state->native_depth++;
-    luaW_leave(&G(state)->world, state->admission);
+    require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
+    luaW_deactivate(state);
+    require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
     lua_gc(resize_probe.collector, LUA_GCCOLLECT);
     resize_probe.collections++;
+    require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
+    luaW_resume(state);
+    require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
     luaW_enter(state);
     state->native_depth--;
   }
@@ -165,7 +170,7 @@ void __wrap_luaW_enter(lua_State *state) {
   }
 }
 
-void __wrap_luaW_leave(LuaWorld *world, LuaParticipation *participant) {
+void __wrap_luaW_leave(LuaWorld *world, int queued) {
   if (role == 1) {
     require(pthread_mutex_lock(&handoff->mutex) == 0);
     handoff->retiring = 1;
@@ -175,7 +180,7 @@ void __wrap_luaW_leave(LuaWorld *world, LuaParticipation *participant) {
     require(pthread_mutex_unlock(&handoff->mutex) == 0);
   }
   measured++;
-  __real_luaW_leave(world, participant);
+  __real_luaW_leave(world, queued);
   measured--;
 }
 
@@ -231,7 +236,7 @@ static void no_requests(lua_State *state) {
 static void stack_admission(lua_State *state) {
   unsigned i;
   lua_gc(state, LUA_GCSTOP);
-  watched_gate = &state->stack_gate.mutex;
+  watched_gate = &G(state)->world.mutex;
   stack_locks = 0;
   measured++;
   for (i = 0; i < 100; i++) {
@@ -401,8 +406,8 @@ static unsigned active(lua_State *state) {
   return count;
 }
 
-/* Hold the departing entry after its physical gate release. The next owner
- * must enter without losing the departing reference or changing its identity
+/* Hold the departing notification after its combined gate/admission release.
+ * The next owner must retain its single admission and stable identity
  * when a paired operation borrows another state's participation record. */
 static void gate_handoff(lua_State *state, int paired) {
   struct handoff fixture;
@@ -425,7 +430,7 @@ static void gate_handoff(lua_State *state, int paired) {
   while (!fixture.entered)
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
-  require(active(state) == 2);
+  require(active(state) == 1);
   require(pthread_mutex_lock(&fixture.mutex) == 0);
   fixture.retire = 1;
   require(pthread_cond_broadcast(&fixture.changed) == 0);
@@ -449,7 +454,7 @@ static void *late_entry(void *context) {
   if (fixture->tentative) {
     /* Pause the admission handshake after publishing its reference, before
      * inspecting the collection request or accessing any managed state. */
-    LuaWorld *world = &G(fixture->target)->world;
+    require(luaX_tryreserve(fixture->target) == 1);
     luaW_activate(fixture->target);
     require(pthread_mutex_lock(&fixture->mutex) == 0);
     fixture->entered = 1;
@@ -457,7 +462,7 @@ static void *late_entry(void *context) {
     while (!fixture->release)
       require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
     require(pthread_mutex_unlock(&fixture->mutex) == 0);
-    luaW_leave(world, &fixture->target->participation);
+    luaX_endreserve(fixture->target, 1);
   } else
     require(lua_gettop(fixture->target) == 0);
   return NULL;

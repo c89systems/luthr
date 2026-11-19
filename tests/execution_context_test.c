@@ -207,7 +207,8 @@ static void foreign(lua_State *state) {
   require(execution.native_depth == 0 && test.native_leaves == 1);
   luaE_setnativestackcontext(previous);
   require(pthread_create(&second, NULL, second_owner, &test) == 0);
-  while (__atomic_load_n(&state->stack_gate.waiting, __ATOMIC_ACQUIRE) == 0)
+  while ((__atomic_load_n(&state->stack_gate.status, __ATOMIC_ACQUIRE) &
+          LUA_GATE_WAITING) == 0)
     sched_yield();
   require(pthread_mutex_lock(&test.mutex) == 0);
   test.release = 1;

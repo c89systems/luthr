@@ -124,6 +124,18 @@ luthr_test_program(api_region_test api_region_test.c)
 set_target_properties(api_region_test PROPERTIES C_STANDARD 99)
 target_compile_options(api_region_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(api_region_test PRIVATE luthr_static Threads::Threads)
+target_link_options(api_region_test PRIVATE -Wl,--wrap=luaW_enter)
+
+luthr_test_program(stack_admission_test stack_admission_test.c)
+set_target_properties(stack_admission_test PROPERTIES C_STANDARD 99)
+target_compile_options(stack_admission_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(stack_admission_test PRIVATE luthr_static Threads::Threads)
+target_link_options(stack_admission_test PRIVATE -Wl,--wrap=luaW_leave -Wl,--wrap=luaQ_wait)
+foreach(case IN ITEMS fifo_incremental fifo_generational retire_incremental retire_generational)
+  add_test(NAME stack_admission_${case} COMMAND stack_admission_test ${case})
+  set_tests_properties(stack_admission_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
+endforeach()
 foreach(case IN ITEMS managed_incremental managed_generational foreign_incremental
     foreign_generational nested_incremental nested_generational yield_incremental yield_generational
     handoff_incremental handoff_generational collection_incremental collection_generational)
@@ -1016,9 +1028,9 @@ target_link_libraries(synchronization_failure_test PRIVATE luthr_static)
 target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
-foreach(case IN ITEMS allocator_mutex allocator_condition main_mutex main_condition world_mutex world_condition thread_mutex thread_condition
-    closed_capture open_capture facade_policy_mutex facade_trace_mutex facade_allocator_mutex facade_state_mutex
-    facade_world_mutex)
+foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition pool_mutex pool_condition thread_no_resources
+    closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex facade_world_mutex
+    facade_pool_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()
@@ -1146,7 +1158,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 # Deliberately small implementation sample. Full suites remain final gates.
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
-  capture_cells_test execution_context_test api_region_test value_api_test table_read_test memory_publication_test
+  capture_cells_test execution_context_test api_region_test stack_admission_test value_api_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test

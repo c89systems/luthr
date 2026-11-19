@@ -135,7 +135,7 @@ static void resume_epoch(lua_State *state) {
   /* Resumption runs under world.mutex even when a new epoch needs reporting.
    * It must not recursively acquire that mutex to notify storage waiters. */
   luaW_resume(state);
-  require(__atomic_load_n(&state->admission->active, __ATOMIC_SEQ_CST) == 1);
+  require(luaW_active(state->admission) == 1);
   __atomic_store_n(&world->storage_waiting, 0, __ATOMIC_SEQ_CST);
   require(pthread_mutex_unlock(&world->mutex) == 0);
   luaHS_quiescent(state);

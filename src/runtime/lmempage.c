@@ -10,7 +10,7 @@ void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
   size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(page->bin);
   size_t offset;
   lua_assert(!completestate(G(L)) || luaW_iscollector(L) ||
-    __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
+    luaW_active(L->admission) != 0);
   UNUSED(L);
   lua_assert((cast(uintptr_t, page) & 1u) == 0);
   for (offset = LUA_ALLOC_PAGE_HEADER;

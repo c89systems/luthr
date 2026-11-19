@@ -13,7 +13,6 @@ typedef struct LuaParticipation {
   struct LuaParticipation *next;
   struct LuaParticipation **previous;
   lua_State *thread;
-  unsigned active;  /* atomic; overlapping gate retirement/admission is allowed */
   unsigned collector;  /* immutable system role; does not expand mutator pacing */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
 } LuaParticipation;
@@ -56,11 +55,16 @@ LUAI_FUNC unsigned luaW_activecount (LuaWorld *world);
 LUAI_FUNC void luaW_activate (lua_State *L);
 LUAI_FUNC void luaW_resume (lua_State *L);
 LUAI_FUNC void luaW_deactivate (lua_State *L);
+/* Complete an already published admission. Single-gate claims publish it in
+** their CAS; paired claims publish only after both reservations are held. */
 LUAI_FUNC void luaW_enter (lua_State *L);
 LUAI_FUNC int luaW_tryenter (lua_State *L);
-/* Cached before releasing stack ownership; never dereference its former owner
-** after this call withdraws the last participation reference. */
-LUAI_FUNC void luaW_leave (LuaWorld *world, LuaParticipation *participant);
+/* Global notification after the gate's final release publication. No state or
+** participant record remains borrowed; queued means resource waiters exist. */
+LUAI_FUNC void luaW_leave (LuaWorld *world, int queued);
+/* The gate word is the authoritative admission; no independently retired
+** counter can overlap its next owner. Safe while the directory is retained. */
+LUAI_FUNC unsigned luaW_active (const LuaParticipation *participant);
 LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);

@@ -67,7 +67,7 @@ void luaW_register (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(participant->previous == NULL && participant->active == 0);
+  lua_assert(participant->previous == NULL && luaW_active(participant) == 0);
   participant->next = world->participants;
   participant->previous = &world->participants;
   if (participant->next != NULL)
@@ -80,7 +80,7 @@ void luaW_unregister (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(__atomic_load_n(&participant->active, __ATOMIC_SEQ_CST) == 0);
+  lua_assert(luaW_active(participant) == 0);
   if (participant->previous != NULL) {
     *participant->previous = participant->next;
     if (participant->next != NULL)
@@ -95,12 +95,20 @@ unsigned luaW_activecount (LuaWorld *world) {
   unsigned active = 0;
   for (participant = world->participants; participant != NULL;
        participant = participant->next)
-    active += __atomic_load_n(&participant->active, __ATOMIC_SEQ_CST);
+    active += luaW_active(participant);
   return active;
 }
 
+unsigned luaW_active (const LuaParticipation *participant) {
+  return (__atomic_load_n(&participant->thread->stack_gate.status,
+                           __ATOMIC_SEQ_CST) & LUA_GATE_ACTIVE) != 0;
+}
+
 void luaW_activate (lua_State *L) {
-  __atomic_fetch_add(&L->admission->active, 1, __ATOMIC_SEQ_CST);
+  unsigned previous = __atomic_fetch_or(
+    &L->admission->thread->stack_gate.status, LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
+  lua_assert((previous & (LUA_GATE_HELD | LUA_GATE_ACTIVE)) == LUA_GATE_HELD);
+  UNUSED(previous);
 }
 
 static void withdraw (lua_State *L) {
@@ -110,8 +118,9 @@ static void withdraw (lua_State *L) {
   ** when the owner cannot resume until a collection finishes. */
   L->root_waiting = 1;
   if (L->stack_peer != NULL) L->stack_peer->root_waiting = 1;
-  previous = __atomic_fetch_sub(&L->admission->active, 1, __ATOMIC_SEQ_CST);
-  lua_assert(previous != 0);
+  previous = __atomic_fetch_and(&L->admission->thread->stack_gate.status,
+                                ~LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
+  lua_assert(previous & LUA_GATE_ACTIVE);
   UNUSED(previous);
 }
 
@@ -134,7 +143,7 @@ void luaW_enter (lua_State *L) {
   /* Store/load ordering pairs with the collector's request/scan ordering.
   ** Either the scan observes this entry, or it observes the request before
   ** accessing managed data. No shared ownership word is changed here. */
-  luaW_activate(L);
+  lua_assert(luaW_active(L->admission));
   luaHS_quiescent(L);
   if (!__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST))
     { luaC_checksnapshot(L); return; }
@@ -165,13 +174,10 @@ int luaW_tryenter (lua_State *L) {
   return 1;
 }
 
-void luaW_leave (LuaWorld *world, LuaParticipation *participant) {
-  unsigned previous = __atomic_fetch_sub(&participant->active, 1,
-                                        __ATOMIC_SEQ_CST);
-  lua_assert(previous != 0);
-  UNUSED(previous);
-  /* No participant accesses after withdrawing: it may already be reclaimed. */
-  if (__atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST) ||
+void luaW_leave (LuaWorld *world, int queued) {
+  /* The releasing gate has already withdrawn. Its state and participation
+  ** record may be gone; notification uses only the retained VM directory. */
+  if (queued || __atomic_load_n(&world->stopped, __ATOMIC_SEQ_CST) ||
       __atomic_load_n(&world->storage_waiting, __ATOMIC_SEQ_CST)) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
@@ -199,7 +205,7 @@ void luaW_stop (lua_State *L) {
     for (participant = world->participants; participant != NULL;
          participant = participant->next)
       if (!participant->collector)
-        active += __atomic_load_n(&participant->active, __ATOMIC_SEQ_CST);
+        active += luaW_active(participant);
     if (active > G(L)->pacer.parallelism) G(L)->pacer.parallelism = active;
   }
   luaQ_wake(&world->changed, &world->waiters);
@@ -258,7 +264,7 @@ static void heapenter (lua_State *L, int collector) {
     if (world->heap_depth != 0 || world->stopped) {
       LuaHeapWaiter wait = {NULL, NULL, NULL, PTHREAD_COND_INITIALIZER, 0};
       lua_assert(L->world_depth == 0 &&
-        __atomic_load_n(&L->admission->active, __ATOMIC_SEQ_CST) != 0);
+        luaW_active(L->admission) != 0);
       L->native_depth++;
       L->heap_waiting++;
       wait.owner = luaX_token(L);
