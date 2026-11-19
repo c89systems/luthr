@@ -438,6 +438,11 @@ LUAI_FUNC void luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_readytrace (lua_State *L);
+/* Strong tables use bounded, validated reads under the admission storage epoch.
+** Return -1 for weak/borrowed ownership, 0 to defer, or 1 on completion. */
+LUAI_FUNC int luaC_scanstrong (lua_State *, LuaTraceWork *, Table *);
+LUAI_FUNC void luaC_traceedges (LuaTraceWork *, GCObject **, unsigned);
+LUAI_FUNC void luaC_finishstrong (LuaTraceWork *, GCObject *);
 /* Claims/publication hold world.mutex; scanning owns only the local batch. */
 LUAI_FUNC void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit);
 LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit);

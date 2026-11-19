@@ -292,13 +292,34 @@ target_compile_options(gc_tracing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_tracing_test PRIVATE luthr_static)
 target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaA_tryscan -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_stop
-  -Wl,--wrap=luaM_malloc_)
+  -Wl,--wrap=luaM_malloc_ -Wl,--wrap=luaC_scanstrong)
 foreach(case IN ITEMS array hash userdata metatable cclosure capture stack busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak weak_retry intern cache
     concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues)
   add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})
   set_tests_properties(gc_tracing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
 endforeach()
+
+luthr_test_program(gc_table_scan_test gc_table_scan_test.c)
+set_target_properties(gc_table_scan_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_table_scan_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_table_scan_test PRIVATE luthr_static)
+target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
+  -Wl,--wrap=luaC_scanstrong -Wl,--wrap=luaH_tracechunk -Wl,--wrap=luaC_traceedges
+  -Wl,--wrap=luaC_finishstrong -Wl,--undefined=luaC_scanstrong)
+foreach(collector IN ITEMS incremental generational)
+  foreach(case IN ITEMS array metatable relocate pause)
+    add_test(NAME gc_table_scan_${case}_${collector}
+      COMMAND gc_table_scan_test ${case}_${collector})
+    set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+  endforeach()
+endforeach()
+
+add_test(NAME gc_table_scan_remember_generational
+  COMMAND gc_table_scan_test remember_generational)
+set_tests_properties(gc_table_scan_remember_generational PROPERTIES
+  LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
 
 luthr_test_program(gc_sweeping_test gc_sweeping_test.c)
 set_target_properties(gc_sweeping_test PROPERTIES C_STANDARD 99)
@@ -374,7 +395,7 @@ target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_loc
   -Wl,--wrap=luaM_realloc_)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaAL_enter)
 foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache local_returns stack_retry marking_cache coalesced_gc handoff paired_handoff late waiting
-    totals construction weak_resize incremental generational page_growth page_cap page_isolation
+    totals construction weak_resize metatable_resize incremental generational page_growth page_cap page_isolation
     metadata_handoff metadata_spurious metadata_collect metadata_priority metadata_contention stopped_gc refill_recheck)
   add_test(NAME memory_publication_${case} COMMAND memory_publication_test ${case})
   set_tests_properties(memory_publication_${case}
@@ -995,7 +1016,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
-  gc_membership_test
+  gc_membership_test gc_table_scan_test
   gc_sweeping_test
   gc_epochs_test
   scheduler_test native_lifecycle_test

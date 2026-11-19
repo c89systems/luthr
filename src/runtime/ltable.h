@@ -153,5 +153,11 @@ LUAI_FUNC lua_Unsigned luaH_getn (lua_State *L, Table *t);
 LUAI_FUNC Node *luaH_mainposition (const Table *t, const TValue *key);
 #endif
 
+/* Collector snapshots borrow buffers under an admission storage epoch. Only
+** validated chunks may be followed; captured pointers can otherwise be bits
+** from a concurrently assigned numeric value. */
+LUAI_FUNC unsigned luaH_tracechunk (const Table *, unsigned, unsigned, int,
+                                    GCObject **);
+LUAI_FUNC int luaH_gcgetmode (Table *, TString *, TValue *);
 
 #endif

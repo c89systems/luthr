@@ -39,6 +39,7 @@ struct task {
   enum reason reason;
   int permit, native, pinned, finished, status, results, id;
   int worker, target;
+  int migration_target; /* forced test migration, not a carrier-affinity pin */
   unsigned parks, migrations, pinned_waits;
   unsigned pin_binds, pin_releases, pin_parks;
   int pin_worker;
@@ -166,18 +167,24 @@ static void park(struct task *task, enum reason reason) {
     task->pin_parks++;
     lock(task->pool);
     task->target = task->worker;
+    task->migration_target = 0;
     unlock(task->pool);
   } else if (task->pool->force_migrate &&
              (!task->pool->affinity_test ||
               (task->id == 2 && task->pin_releases != 0))) {
     lock(task->pool);
     if (task->pool->stop_waiting) {
-      if (task->id >= 2)
+      if (task->id >= 2) {
         task->target = task->worker == 2 ? 3 : 2;
-    } else if (!task->pool->awaiting)
+        task->migration_target = 1;
+      }
+    } else if (!task->pool->awaiting) {
       task->target = 1 - task->worker;
-    else if (task->id >= 2 && task->pool->parallel_arrivals == 2)
+      task->migration_target = 1;
+    } else if (task->id >= 2 && task->pool->parallel_arrivals == 2) {
       task->target = task->worker == 2 ? 3 : 2;
+      task->migration_target = 1;
+    }
     unlock(task->pool);
   }
   task->parks++;
@@ -287,6 +294,7 @@ static int pin_carrier(LuaExecution *execution) {
   lock(task->pool);
   task->pin_worker = task->worker;
   task->target = task->worker;
+  task->migration_target = 0;
   task->pin_binds++;
   unlock(task->pool);
   return 1;
@@ -298,6 +306,7 @@ static void unpin_carrier(LuaExecution *execution) {
   lock(task->pool);
   task->pin_releases++;
   task->target = -1;
+  task->migration_target = 0;
   unlock(task->pool);
 }
 static void poll(LuaExecution *execution, lua_State *state) {
@@ -407,6 +416,27 @@ static void task_entry(void *argument) {
   test_fiber_pause(&task->fiber);
   abort();
 }
+/* Forced migration is a test preference. A destination parked in foreign C
+ * cannot resume a GC driver which owns the pause that it is waiting for.
+ * Preserve actual pins and initial placement; let an idle carrier run an
+ * unpinned continuation when its artificial destination cannot make progress.
+ */
+static int eligible_worker(struct worker *worker, struct task *task) {
+  struct pool *pool = worker->pool;
+  unsigned i;
+  if (task->target < 0 || task->target == (int)(worker - pool->workers))
+    return 1;
+  if (!task->migration_target || task->fiber.execution.pin_depth != 0)
+    return 0;
+  for (i = 0; i < MAX_TASKS; i++) {
+    struct task *other = &pool->tasks[i];
+    if (other != task && other->worker == task->target &&
+        (other->pinned || (other->wait_pinned && other->waiter != NULL)))
+      return 1;
+  }
+  return 0;
+}
+
 static void *worker_entry(void *argument) {
   struct worker *worker = argument;
   struct pool *pool = worker->pool;
@@ -423,8 +453,7 @@ static void *worker_entry(void *argument) {
     while (!pool->stop && task == NULL) {
       struct task **link = &pool->ready, *previous = NULL;
       while (*link != NULL) {
-        if ((*link)->target < 0 ||
-            (*link)->target == (int)(worker - pool->workers)) {
+        if (eligible_worker(worker, *link)) {
           task = *link;
           *link = task->next;
           if (pool->ready_tail == task)

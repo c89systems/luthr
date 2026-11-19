@@ -1012,7 +1012,7 @@ static int resize_finalizer(lua_State *state) {
   return 0;
 }
 
-static void weak_resize(lua_State *state) {
+static void weak_resize(lua_State *state, int metatable) {
   lua_State *owner;
   Table *table;
   unsigned i;
@@ -1020,8 +1020,10 @@ static void weak_resize(lua_State *state) {
   owner = lua_newthread(state);
   lua_createtable(owner, 128, 0);
   lua_newtable(owner);
-  lua_pushliteral(owner, "v");
-  lua_setfield(owner, -2, "__mode");
+  if (!metatable) {
+    lua_pushliteral(owner, "v");
+    lua_setfield(owner, -2, "__mode");
+  }
   lua_setmetatable(owner, -2);
   for (i = 1; i <= 128; i += 127) {
     unsigned *value = lua_newuserdatauv(owner, sizeof(*value), 0);
@@ -1034,6 +1036,8 @@ static void weak_resize(lua_State *state) {
   }
   luaX_lockstate(owner);
   table = hvalue(s2v(owner->top.p - 1));
+  if (metatable)
+    table = table->metatable;
   resize_probe.owner = owner;
   resize_probe.collector = state;
   resize_probe.armed = 1;
@@ -1278,8 +1282,9 @@ int main(int argc, char **argv) {
     gate_handoff(state, strcmp(argv[1], "paired_handoff") == 0);
   else if (strcmp(argv[1], "late") == 0 || strcmp(argv[1], "waiting") == 0)
     late_admission(state, strcmp(argv[1], "late") == 0);
-  else if (strcmp(argv[1], "weak_resize") == 0)
-    weak_resize(state);
+  else if (strcmp(argv[1], "weak_resize") == 0 ||
+           strcmp(argv[1], "metatable_resize") == 0)
+    weak_resize(state, strcmp(argv[1], "metatable_resize") == 0);
   else {
     require(strcmp(argv[1], "incremental") == 0 ||
             strcmp(argv[1], "generational") == 0);

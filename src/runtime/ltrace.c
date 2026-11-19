@@ -217,7 +217,8 @@ static int weakdead (lua_State *L, GCObject *object) {
 void luaC_prepareweak (lua_State *L, Table *table) {
   unsigned cutoff = __atomic_load_n(&G(L)->trace_weakcutoff, __ATOMIC_ACQUIRE);
   unsigned pending, i;
-  if (cutoff == 0 || table->weak_epoch != G(L)->trace_epoch) return;
+  if (cutoff == 0 || __atomic_load_n(&table->weak_epoch, __ATOMIC_ACQUIRE) !=
+                       G(L)->trace_epoch) return;
   /* Tables discovered through finalization have not participated in the first
   ** weak-value decision. Their values must wait for resurrection's strong
   ** closure, which precedes the later key/value cutoff. */

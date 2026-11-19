@@ -368,6 +368,33 @@ static void markwork (LuaTraceWork *work, GCObject *object) {
   else queuework(&work->gray, object);
 }
 
+void luaC_traceedges (LuaTraceWork *work, GCObject **objects, unsigned count) {
+  unsigned i;
+  for (i = 0; i < count; i++) markwork(work, objects[i]);
+}
+
+/* Retain link ownership until both age consumption and the remembered-list
+** decision are committed. A writer either updates the age of our queued
+** owner, or claims a released link; it can never publish our private link. */
+void luaC_finishstrong (LuaTraceWork *work, GCObject *object) {
+  lu_byte marked = getmarked(object), changed;
+  int remember;
+  do {
+    unsigned age = marked & AGEBITS;
+    if (work->global->gckind == KGC_GENMINOR) {
+      if (age == G_TOUCHED0) age = G_TOUCHED1;
+      else if (age == G_TOUCHED1) age = G_TOUCHED2;
+      else if (age == G_TOUCHED2) age = G_OLD;
+    }
+    remember = work->global->gckind == KGC_GENMINOR &&
+               (age == G_TOUCHED1 || age == G_TOUCHED2);
+    changed = cast_byte((marked & ~AGEBITS) | age);
+    if (!remember) changed &= cast_byte(~bitmask(QUEUEDBIT));
+  } while (!__atomic_compare_exchange_n(&object->marked, &marked, changed, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+  if (remember) queuework(&work->grayagain, object);
+}
+
 #define tracevalue(w,v) \
   { if (iscollectable(v)) markwork(w, gcvalue(v)); }
 #define tracekey(w,n) \
@@ -661,7 +688,7 @@ static int getmode (global_State *g, Table *h) {
   const TValue *mode;
   int result;
   if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED) &&
-      h->weak_epoch == g->trace_epoch)
+      __atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == g->trace_epoch)
     return h->gcweak;
   mode = gfasttm(g, h->metatable, TM_MODE);
   if (mode == NULL || !ttisstring(mode))
@@ -677,7 +704,7 @@ static int getmode (global_State *g, Table *h) {
     h->weak_cleared = 0;
     h->weak_initial_cutoff = cast_byte(__atomic_load_n(&g->trace_weakcutoff,
                                                        __ATOMIC_RELAXED));
-    h->weak_epoch = g->trace_epoch;
+    __atomic_store_n(&h->weak_epoch, g->trace_epoch, __ATOMIC_RELEASE);
   }
   return result;
 }
@@ -828,6 +855,10 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     blacken(work, o);
     genlink(work, o);
     return 1;
+  }
+  if (o->tt == LUA_VTABLE && !luaW_iscollector(L)) {
+    int scanned = luaC_scanstrong(L, work, gco2t(o));
+    if (scanned >= 0) return scanned;
   }
   if (!luaW_iscollector(L) && !luaA_tryscan(L, o)) return 0;
   if (o->tt == LUA_VTABLE) {

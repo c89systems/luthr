@@ -242,7 +242,8 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
     luaC_prewriteptr(L, objectmeta(object), mt);
-    if (ttistable(object)) hvalue(object)->metatable = mt;
+    if (ttistable(object))
+      __atomic_store_n(&hvalue(object)->metatable, mt, __ATOMIC_RELEASE);
     else uvalue(object)->metatable = mt;
     if (mt) {
       luaC_objbarrier(L, gcvalue(object), mt);

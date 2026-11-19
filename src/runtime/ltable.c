@@ -408,7 +408,7 @@ static void freehash (lua_State *L, Table *t) {
 ** ==============================================================
 */
 
-static int insertkey (Table *t, const TValue *key, TValue *value);
+static int insertkey (lua_State *L, Table *t, const TValue *key, TValue *value);
 static void newcheckedkey (Table *t, const TValue *key, TValue *value);
 
 
@@ -688,7 +688,7 @@ static void reinsertOldSlice (Table *t, unsigned oldasize,
       TValue key, aux;
       setivalue(&key, l_castU2S(i) + 1);  /* make the key */
       farr2val(t, i, tag, &aux);  /* copy value into 'aux' */
-      insertkey(t, &key, &aux);  /* insert entry into the hash part */
+      insertkey(NULL, t, &key, &aux);  /* unpublished replacement image */
     }
   }
 }
@@ -914,7 +914,7 @@ static Node *getfreepos (Table *t) {
 ** its main position), new key goes to an empty position. Return 0 if
 ** could not insert key (could not find a free space).
 */
-static int insertkey (Table *t, const TValue *key, TValue *value) {
+static int insertkey (lua_State *L, Table *t, const TValue *key, TValue *value) {
   Node *mp = mainpositionTV(t, key);
   /* table cannot already contain the key */
   lua_assert(isabstkey(getgeneric(t, key, 0)));
@@ -926,6 +926,12 @@ static int insertkey (Table *t, const TValue *key, TValue *value) {
     lua_assert(!isdummy(t));
     othern = mainpositionfromnode(t, mp);
     if (othern != mp) {  /* is colliding node out of its main position? */
+      /* A streaming marker may already have visited the destination. Resize
+      ** shades its entire old image; an in-place relocation shades this pair. */
+      if (L != NULL && luaC_tracing(L)) {
+        if (keyiscollectable(mp)) luaC_traceobject(L, gckey(mp));
+        luaC_tracevalue(L, gval(mp));
+      }
       /* yes; move colliding node into free position */
       while (othern + gnext(othern) != mp)  /* find previous */
         othern += gnext(othern);
@@ -966,7 +972,7 @@ static void newcheckedkey (Table *t, const TValue *key, TValue *value) {
   if (i > 0)  /* is key in the array part? */
     obj2arr(t, i - 1, value);  /* set value in the array */
   else {
-    int done = insertkey(t, key, value);  /* insert key in the hash part */
+    int done = insertkey(NULL, t, key, value);  /* unpublished replacement */
     lua_assert(done);  /* it cannot fail */
     cast(void, done);  /* to avoid warnings */
   }
@@ -978,7 +984,7 @@ static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
   luaC_tracevalue(L, key);
   luaC_tracevalue(L, value);
   if (!ttisnil(value)) {  /* do not insert nil values */
-    int done = insertkey(t, key, value);
+    int done = insertkey(L, t, key, value);
     if (!done) {  /* could not find a free place? */
       rehash(L, t, key);  /* grow table */
       newcheckedkey(t, key, value);  /* insert key in grown table */
@@ -1130,10 +1136,17 @@ static void tracenodewrite (lua_State *L, const TValue *slot, TValue *val) {
   }
 }
 
+static void setnodevalue (lua_State *L, Node *node, TValue *value) {
+  setobj2t(L, gval(node), value);
+  /* Read-only markers never edit hash storage. Retire the key tag as part of
+  ** deletion, before an empty slot could retain a dangling collectable key. */
+  if (ttisnil(value) && keyiscollectable(node)) setdeadkey(node);
+}
+
 static int finishnodeset (lua_State *L, Table *t, const TValue *slot, TValue *val) {
   if (!ttisnil(slot)) {
     tracenodewrite(L, slot, val);
-    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);
+    setnodevalue(NULL, cast(Node*, slot), val);
     return HOK;  /* success */
   }
   else
@@ -1146,7 +1159,7 @@ static int rawfinishnodeset (lua_State *L, const TValue *slot, TValue *val) {
     return 0;  /* no slot with that key */
   else {
     tracenodewrite(L, slot, val);
-    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);
+    setnodevalue(NULL, cast(Node*, slot), val);
     return 1;  /* success */
   }
 }
@@ -1187,7 +1200,7 @@ static int rawpsetshortstr (lua_State *L, Table *t, TString *key, TValue *val) {
   const TValue *slot = luaH_Hgetshortstr(t, key);
   if (!ttisnil(slot)) {  /* key already has a value? (all too common) */
     tracenodewrite(L, slot, val);
-    setobj2t(((lua_State*)NULL), cast(TValue*, slot), val);  /* update it */
+    setnodevalue(NULL, cast(Node*, slot), val);  /* update it */
     return HOK;  /* done */
   }
   /* Else, either table has new-index metamethod, or it needs barrier,
@@ -1259,7 +1272,7 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
   }
   else if (hres > 0) {  /* regular Node? */
     tracenodewrite(L, gval(gnode(t, hres - HFIRSTNODE)), value);
-    setobj2t(L, gval(gnode(t, hres - HFIRSTNODE)), value);
+    setnodevalue(L, gnode(t, hres - HFIRSTNODE), value);
   }
   else {  /* array entry */
     hres = ~hres;  /* real index */
@@ -1435,7 +1448,8 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
 static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
   *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   return !(*sequence & 1) &&
-    !(luaC_tracing(L) && __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE));
+    !(L != NULL && luaC_tracing(L) &&
+      __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE));
 }
 
 static int sameversion (Table *table, uint64_t sequence) {
@@ -1481,6 +1495,39 @@ static int readshortstr (lua_State *L, Table *table, TString *key,
     }
   }
   return 0;
+}
+
+int luaH_gcgetmode (Table *table, TString *key, TValue *result) {
+  lu_byte tag;
+  if (!readshortstr(NULL, table, key, result, &tag)) return 0;
+  if (tagisempty(tag)) setnilvalue(result);
+  return 1;
+}
+
+/* These are raw pointer representations until the caller validates the table
+** sequence. Empty keys are retired by writers; scanning never edits storage. */
+unsigned luaH_tracechunk (const Table *view, unsigned first, unsigned count,
+                         int hash, GCObject **edges) {
+  unsigned i, found = 0;
+  for (i = first; i < first + count; i++) {
+    if (!hash) {
+      lu_byte tag = __atomic_load_n(getArrTag(view, i), __ATOMIC_ACQUIRE);
+      if (tag & BIT_ISCOLLECTABLE)
+        __atomic_load(&getArrVal(view, i)->gc, &edges[found++], __ATOMIC_ACQUIRE);
+    }
+    else {
+      const Node *node = gnode(view, i);
+      lu_byte tag = __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE);
+      if (!tagisempty(tag)) {
+        lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+        if (keytag & BIT_ISCOLLECTABLE)
+          __atomic_load(&node->u.key_val.gc, &edges[found++], __ATOMIC_ACQUIRE);
+        if (tag & BIT_ISCOLLECTABLE)
+          __atomic_load(&node->u.value_.gc, &edges[found++], __ATOMIC_ACQUIRE);
+      }
+    }
+  }
+  return found;
 }
 
 static int readinteger (lua_State *L, Table *table, lua_Integer key,

@@ -97,19 +97,8 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   return marked;
 }
 
-int __real_luaA_tryscan(lua_State *, GCObject *);
-int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
-  int acquired;
-  unsigned phase = luaC_tracephase(G(state));
-  if (retry_weak && !luaW_iscollector(state) && object->tt == LUA_VTABLE &&
-      (phase == TRACE_EPHEMERONS || phase == TRACE_VALUES ||
-       phase == TRACE_CLEAR) &&
-      weak_retries[phase] < 129) {
-    weak_retries[phase]++;
-    return 0;
-  }
-  acquired = __real_luaA_tryscan(state, object);
-  if (acquired && parallel_scanning != NULL && parallel_worker != 0 &&
+static void observescan(GCObject *object) {
+  if (parallel_scanning != NULL && parallel_worker != 0 &&
       object->tt == LUA_VTABLE) {
     struct parallel_scan *scan = parallel_scanning;
     require(pthread_mutex_lock(&scan->mutex) == 0);
@@ -125,7 +114,7 @@ int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
     }
     require(pthread_mutex_unlock(&scan->mutex) == 0);
   }
-  if (acquired && weak_marker != NULL && luaC_tracing(weak_marker)) {
+  if (weak_marker != NULL && luaC_tracing(weak_marker)) {
     if (object == weak_table) {
       if (iswhite(G(weak_marker), weak_key))
         weak_deferred_seen = 1;
@@ -139,7 +128,31 @@ int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
       weak_target_scanned++;
     }
   }
+}
+
+int __real_luaA_tryscan(lua_State *, GCObject *);
+int __wrap_luaA_tryscan(lua_State *state, GCObject *object) {
+  int acquired;
+  unsigned phase = luaC_tracephase(G(state));
+  if (retry_weak && !luaW_iscollector(state) && object->tt == LUA_VTABLE &&
+      (phase == TRACE_EPHEMERONS || phase == TRACE_VALUES ||
+       phase == TRACE_CLEAR) &&
+      weak_retries[phase] < 129) {
+    weak_retries[phase]++;
+    return 0;
+  }
+  acquired = __real_luaA_tryscan(state, object);
+  if (acquired)
+    observescan(object);
   return acquired;
+}
+
+int __real_luaC_scanstrong(lua_State *, LuaTraceWork *, Table *);
+int __wrap_luaC_scanstrong(lua_State *state, LuaTraceWork *work, Table *table) {
+  int result = __real_luaC_scanstrong(state, work, table);
+  if (result == 1)
+    observescan((GCObject *)table);
+  return result;
 }
 
 static void *backing(void *context, void *pointer, size_t old, size_t size) {
