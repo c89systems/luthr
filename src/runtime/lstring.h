@@ -56,6 +56,8 @@
 
 LUAI_FUNC unsigned luaS_hashlongstr (TString *ts);
 LUAI_FUNC void luaS_finishlongstr (TString *ts);
+LUAI_FUNC void luaS_copylongstr (lua_State *L, TString *ts, const char *src,
+                                 unsigned *work);
 LUAI_FUNC int luaS_eqstr (TString *a, TString *b);
 LUAI_FUNC void luaS_resize (lua_State *L, stringtable *table, int newsize);
 LUAI_FUNC void luaS_clearcache (global_State *g);

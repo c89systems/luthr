@@ -44,25 +44,26 @@ void luaL_rootarg (lua_State *L, int arg, LuaNativeRoot *root) {
   lua_unlock(L);
 }
 
-/* Conversion can allocate and release ownership. Recheck the slot and root
-** the actual string together before borrowing its immutable bytes. */
+/* Root strings in the argument slot under one scope. If conversion allocates
+** or releases ownership, inspect the slot again before borrowing bytes. */
 const char *luaL_rootstring (lua_State *L, int arg, LuaNativeRoot *root,
                              size_t *len) {
+  lua_assert(arg > 0);
   for (;;) {
-    const TValue *value;
-    luaL_checklstring(L, arg, NULL);
     lua_lock(L);
-    lua_assert(arg > 0);
-    value = s2v(L->ci->func.p + arg);
-    if (ttisstring(value)) {
-      const char *string;
-      luaR_pushroot(L, root);
-      luaR_setroot(L, root, value);
-      string = getlstr(tsvalue(value), *len);
-      lua_unlock(L);
-      return string;
+    if (arg < L->top.p - L->ci->func.p) {
+      const TValue *value = s2v(L->ci->func.p + arg);
+      if (ttisstring(value)) {
+        const char *string;
+        luaR_pushroot(L, root);
+        luaR_setroot(L, root, value);
+        string = getlstr(tsvalue(value), *len);
+        lua_unlock(L);
+        return string;
+      }
     }
     lua_unlock(L);
+    luaL_checklstring(L, arg, NULL);
   }
 }
 

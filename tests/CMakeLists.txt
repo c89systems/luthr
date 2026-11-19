@@ -775,7 +775,7 @@ target_compile_options(string_library_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(string_library_test PRIVATE luthr_static)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
-    foreach(case IN ITEMS semantics errors bindings snapshot oom)
+    foreach(case IN ITEMS semantics errors bindings snapshot oom slice)
       add_test(NAME string_library_${backend}_${case}_${gc}
         COMMAND string_library_test ${backend}_${case}_${gc})
       set_tests_properties(string_library_${backend}_${case}_${gc}

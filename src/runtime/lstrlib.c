@@ -69,10 +69,26 @@ static void addstring (lua_State *L, unsigned *work, luaL_Buffer *b,
 
 static void pushstring (lua_State *L, unsigned *work,
                         const char *src, size_t len) {
-  luaL_Buffer b;
-  luaL_buffinit(L, &b);
-  addstring(L, work, &b, src, len);
-  luaL_pushresult(&b);
+  if (len <= LUAI_MAXSHORTLEN) {
+    luaQ_workn(L, work, len);
+    lua_pushlstring(L, src, len);
+  }
+  else {
+    LuaNativeRoot result;
+    TString *ts;
+    lua_lock(L);
+    ts = luaS_createlngstrobj(L, len);
+    luaR_pushroot(L, &result);
+    setsvalue(L, &result.value, ts);
+    lua_unlock(L);
+    luaS_copylongstr(L, ts, src, work);
+    lua_lock(L);
+    setobj2s(L, L->top.p, &result.value);
+    api_incr_top(L);
+    luaC_checkGC(L);
+    luaR_poproot(L, &result);
+    lua_unlock(L);
+  }
 }
 
 static void addpadding (lua_State *L, unsigned *work, luaL_Buffer *b,

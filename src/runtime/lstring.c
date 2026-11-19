@@ -17,6 +17,7 @@
 #include "laccess.h"
 #include "ldebug.h"
 #include "ldo.h"
+#include "lexec.h"
 #include "lmem.h"
 #include "lobject.h"
 #include "lstate.h"
@@ -45,11 +46,15 @@ int luaS_eqstr (TString *a, TString *b) {
 }
 
 
-static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
-  unsigned int h = seed ^ cast_uint(l);
+static unsigned hashbytes (const char *str, size_t l, unsigned h) {
   for (; l > 0; l--)
     h ^= ((h<<5) + (h>>2) + cast_byte(str[l - 1]));
   return h;
+}
+
+
+static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
+  return hashbytes(str, l, seed ^ cast_uint(l));
 }
 
 
@@ -63,6 +68,26 @@ unsigned luaS_hashlongstr (TString *ts) {
 void luaS_finishlongstr (TString *ts) {
   lua_assert(ts->tt == LUA_VLNGSTR && ts->extra == 0);
   ts->hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->hash);
+  ts->extra = 1;
+}
+
+
+/* The caller keeps source and destination rooted across polls. Hash in the
+** same order as a normal long string and publish only after copying. */
+void luaS_copylongstr (lua_State *L, TString *ts, const char *src,
+                       unsigned *work) {
+  size_t remaining = ts->u.lnglen;
+  char *dest = getlngstr(ts);
+  unsigned hash = ts->hash ^ cast_uint(remaining);
+  lua_assert(ts->tt == LUA_VLNGSTR && ts->shrlen == LSTRREG && ts->extra == 0);
+  while (remaining != 0) {
+    size_t chunk = remaining < 1024u ? remaining : 1024u;
+    remaining -= chunk;
+    memcpy(dest + remaining, src + remaining, chunk);
+    hash = hashbytes(dest + remaining, chunk, hash);
+    luaQ_workn(L, work, chunk);
+  }
+  ts->hash = hash;
   ts->extra = 1;
 }
 
@@ -178,8 +203,10 @@ static TString *createstrobj (lua_State *L, size_t totalsize, lu_byte tag,
 
 
 TString *luaS_createlngstrobj (lua_State *L, size_t l) {
-  size_t totalsize = luaS_sizelngstr(l, LSTRREG);
-  TString *ts = createstrobj(L, totalsize, LUA_VLNGSTR, G(L)->seed);
+  TString *ts;
+  if (l_unlikely(l >= MAX_SIZE - sizeof(TString)))
+    luaM_toobig(L);
+  ts = createstrobj(L, luaS_sizelngstr(l, LSTRREG), LUA_VLNGSTR, G(L)->seed);
   ts->u.lnglen = l;
   ts->shrlen = LSTRREG;  /* signals that it is a regular long string */
   ts->contents = cast_charp(ts) + offsetof(TString, falloc);
@@ -259,10 +286,7 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
   if (l <= LUAI_MAXSHORTLEN)  /* short string? */
     return internshrstr(L, str, l);
   else {
-    TString *ts;
-    if (l_unlikely(l * sizeof(char) >= (MAX_SIZE - sizeof(TString))))
-      luaM_toobig(L);
-    ts = luaS_createlngstrobj(L, l);
+    TString *ts = luaS_createlngstrobj(L, l);
     memcpy(getlngstr(ts), str, l * sizeof(char));
     luaS_finishlongstr(ts);
     return ts;

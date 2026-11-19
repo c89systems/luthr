@@ -24,6 +24,8 @@ struct fixture {
   luthr_lua_runtime *runtime;
   const char *mode;
   size_t live;
+  size_t large_size;
+  unsigned large_requests;
   unsigned remaining, failures, finalized;
   int deny, armed, args;
   struct input inputs[2];
@@ -34,6 +36,8 @@ static void *allocate(void *context, void *old, size_t old_size, size_t size) {
   void *memory;
   if (old == NULL)
     old_size = 0;
+  if (test->large_size && size >= test->large_size && size > old_size)
+    test->large_requests++;
   if (size == 0) {
     test->live -= old_size;
     free(old);
@@ -276,6 +280,45 @@ static void oom(struct fixture *test) {
     lua_settop(state, 0);
   }
 }
+
+static void interrupt_slice(lua_State *state, void *context) {
+  struct fixture *test = context;
+  if (test->large_requests != 0) {
+    state->state_poll = NULL;
+    (void)luaL_error(state, "slice interrupted");
+  }
+}
+
+static void slice(struct fixture *test) {
+  lua_State *state = test->state;
+  size_t size;
+  const char *result;
+  execute(state, "text=string.rep('a\\0b\\255',32768)");
+  require(luaL_loadstring(state, "return string.sub(text,2,-2)") == LUA_OK);
+  test->large_size = 65536;
+  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+  test->large_size = 0;
+  require(test->large_requests == 1);
+  result = lua_tolstring(state, 1, &size);
+  require(result != NULL && size == 131070 && result[0] == '\0' &&
+          result[size - 1] == 'b');
+  lua_settop(state, 0);
+  require(luaL_loadstring(state, "return string.sub(text,2,-2)") == LUA_OK);
+  test->large_requests = 0;
+  test->large_size = 65536;
+  state->state_poll = interrupt_slice;
+  state->state_poll_context = test;
+  require(lua_pcall(state, 0, 1, 0) == LUA_ERRRUN);
+  state->state_poll = NULL;
+  state->state_poll_context = NULL;
+  test->large_size = 0;
+  result = lua_tostring(state, -1);
+  require(result != NULL && strstr(result, "slice interrupted") != NULL);
+  require(state->native_roots == NULL);
+  lua_settop(state, 0);
+  (void)lua_gc(state, LUA_GCCOLLECT);
+}
+
 static void *run(void *context) {
   struct fixture *test = context;
   lua_State *state;
@@ -311,6 +354,13 @@ static void *run(void *context) {
         "local s=string; local z=s.char(0); assert(s.len('a'..z..'b')==3); "
         "assert(s.sub('abcdef',-4,-2)=='cde' and s.sub('a',2)==''); "
         "assert(s.sub(123,0,99)=='123' and s.sub('abc',-99,-99)==''); "
+        "for _,n in ipairs({0,1,39,40,41,1023,1024,1025,2051}) do "
+        "local text=s.rep('a'..z..'b'..s.char(255),n//4)..s.rep('Z',n%4); "
+        "local copy=s.sub('['..text..']',2,-2); local keys={[copy]=true}; "
+        "assert(copy==text and keys[text]); "
+        "local data=s.pack('s4',text); local "
+        "value,nextpos=s.unpack('s4',data); "
+        "assert(value==text and keys[value] and nextpos==#data+1) end; "
         "assert(s.reverse('a'..z..'b')=='b'..z..'a'); "
         "assert(s.lower('AZ-'..z..'09')=='az-'..z..'09' and "
         "s.upper('az')=='AZ'); "
@@ -360,7 +410,8 @@ static void *run(void *context) {
   else if (strstr(test->mode, "errors") != NULL)
     execute(
         state,
-        "for _,f in ipairs({function() string.sub({},1) end,function() "
+        "for _,f in ipairs({function() string.sub({},1) end,"
+        "function() string.sub() end,function() "
         "string.char(256) end, "
         "function() string.char(-1) end,function() "
         "string.rep('aa',math.maxinteger) end, "
@@ -399,6 +450,8 @@ static void *run(void *context) {
                    "assert(other[k]==string[k]) end");
   else if (strstr(test->mode, "snapshot") != NULL)
     snapshot(test);
+  else if (strstr(test->mode, "slice") != NULL)
+    slice(test);
   else
     oom(test);
   require(state->native_roots == NULL && state->object_scopes == NULL);
