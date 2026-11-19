@@ -72,6 +72,12 @@ static int capture(void *state) {
   return 0;
 }
 static int reopen(lua_State *state) { return luaopen_string(state); }
+static int rebind(lua_State *state) {
+  lua_CFunction binding = lua_tocfunction(state, 1);
+  require(binding != NULL);
+  lua_pushcfunction(state, binding);
+  return 1;
+}
 static void execute(lua_State *state, const char *source) {
   int status = luaL_loadstring(state, source);
   if (status == LUA_OK)
@@ -354,6 +360,9 @@ static void *run(void *context) {
         "local s=string; local z=s.char(0); assert(s.len('a'..z..'b')==3); "
         "assert(s.sub('abcdef',-4,-2)=='cde' and s.sub('a',2)==''); "
         "assert(s.sub(123,0,99)=='123' and s.sub('abc',-99,-99)==''); "
+        "assert(s.sub('abc','2',nil)=='bc' and s.sub('abc',2.0)=='bc'); "
+        "assert(s.byte(123,nil,nil)==49 and s.byte('abc','-1')==99); "
+        "assert(s.sub('abc',math.mininteger,math.maxinteger)=='abc'); "
         "for _,n in ipairs({0,1,39,40,41,1023,1024,1025,2051}) do "
         "local text=s.rep('a'..z..'b'..s.char(255),n//4)..s.rep('Z',n%4); "
         "local copy=s.sub('['..text..']',2,-2); local keys={[copy]=true}; "
@@ -443,12 +452,26 @@ static void *run(void *context) {
         "function() string.unpack('I16',string.rep('\\255',16)) end}) do "
         "assert(not pcall(f)) end; "
         "assert(string.format('%s:%d','ok',12)=='ok:12')");
-  else if (strstr(test->mode, "bindings") != NULL)
+  else if (strstr(test->mode, "bindings") != NULL) {
+    lua_pushcfunction(state, rebind);
+    lua_setglobal(state, "rebind");
     execute(state, "local other=reopen(); for _,k in "
                    "ipairs({'byte','char','format','len','lower','rep','"
                    "reverse','sub','upper','pack','packsize','unpack'}) do "
-                   "assert(other[k]==string[k]) end");
-  else if (strstr(test->mode, "snapshot") != NULL)
+                   "assert(other[k]==string[k]) end; "
+                   "local sub,byte=rebind(other.sub),rebind(other.byte); "
+                   "assert(sub(123,'2')=='23' and byte('ab',nil)==97); "
+                   "local s=string.rep('ab',1025); "
+                   "assert(sub(s,2,-2)==string.sub(s,2,-2)); "
+                   "local values=table.pack(byte(s,2,1026)); "
+                   "assert(values.n==1025 and values[1]==98 and "
+                   "values[1024]==97 and values[1025]==98); "
+                   "local ok,err=pcall(sub,'abc',1.5); "
+                   "assert(not ok and err:find('no integer representation')); "
+                   "ok,err=pcall(byte,'abc',1,{}); "
+                   "assert(not ok and err:find('number expected')); "
+                   "assert(byte('b')==98)");
+  } else if (strstr(test->mode, "snapshot") != NULL)
     snapshot(test);
   else if (strstr(test->mode, "slice") != NULL)
     slice(test);

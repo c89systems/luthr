@@ -50,19 +50,11 @@ const char *luaL_rootstring (lua_State *L, int arg, LuaNativeRoot *root,
                              size_t *len) {
   lua_assert(arg > 0);
   for (;;) {
+    const char *string;
     lua_lock(L);
-    if (arg < L->top.p - L->ci->func.p) {
-      const TValue *value = s2v(L->ci->func.p + arg);
-      if (ttisstring(value)) {
-        const char *string;
-        luaR_pushroot(L, root);
-        luaR_setroot(L, root, value);
-        string = getlstr(tsvalue(value), *len);
-        lua_unlock(L);
-        return string;
-      }
-    }
+    string = luaL_tryrootstring(L, arg, root, len);
     lua_unlock(L);
+    if (string != NULL) return string;
     luaL_checklstring(L, arg, NULL);
   }
 }

@@ -67,17 +67,18 @@ static void addstring (lua_State *L, unsigned *work, luaL_Buffer *b,
   }
 }
 
-static void pushstring (lua_State *L, unsigned *work,
-                        const char *src, size_t len) {
+/* Caller owns the stack and roots src. Long copies may park and move it. */
+static void pushownedstring (lua_State *L, unsigned *work,
+                             const char *src, size_t len) {
   if (len <= LUAI_MAXSHORTLEN) {
-    luaQ_workn(L, work, len);
-    lua_pushlstring(L, src, len);
+    TString *ts = luaS_newlstr(L, src, len);
+    setsvalue2s(L, L->top.p, ts);
+    api_incr_top(L);
+    luaC_checkGC(L);
   }
   else {
     LuaNativeRoot result;
-    TString *ts;
-    lua_lock(L);
-    ts = luaS_createlngstrobj(L, len);
+    TString *ts = luaS_createlngstrobj(L, len);
     luaR_pushroot(L, &result);
     setsvalue(L, &result.value, ts);
     lua_unlock(L);
@@ -87,8 +88,15 @@ static void pushstring (lua_State *L, unsigned *work,
     api_incr_top(L);
     luaC_checkGC(L);
     luaR_poproot(L, &result);
-    lua_unlock(L);
   }
+}
+
+static void pushstring (lua_State *L, unsigned *work,
+                        const char *src, size_t len) {
+  if (len <= LUAI_MAXSHORTLEN) luaQ_workn(L, work, len);
+  lua_lock(L);
+  pushownedstring(L, work, src, len);
+  lua_unlock(L);
 }
 
 static void addpadding (lua_State *L, unsigned *work, luaL_Buffer *b,
@@ -147,13 +155,10 @@ static size_t posrelatI (lua_Integer pos, size_t len) {
 
 
 /*
-** Gets an optional ending string position from argument 'arg',
-** with default value 'def'.
-** Negative means back from end: clip result to [0, len]
+** Translate the ending position. Negative means back from end.
+** Clip the result to [0, len].
 */
-static size_t getendpos (lua_State *L, int arg, lua_Integer def,
-                         size_t len) {
-  lua_Integer pos = luaL_optinteger(L, arg, def);
+static size_t endpos (lua_Integer pos, size_t len) {
   if (pos > (lua_Integer)len)
     return len;
   else if (pos >= 0)
@@ -163,18 +168,56 @@ static size_t getendpos (lua_State *L, int arg, lua_Integer def,
   else return len + (size_t)pos + 1;
 }
 
+/* Read a position from the owned frame. Use the public checker to report
+** coercion errors after releasing the gate, allowing traceback callbacks. */
+static lua_Integer readposition (lua_State *L, int arg, int optional,
+                                 lua_Integer def) {
+  if (arg < L->top.p - L->ci->func.p) {
+    const TValue *value = s2v(L->ci->func.p + arg);
+    lua_Integer position;
+    if (optional && ttisnil(value)) return def;
+    luaC_tracevalue(L, value);
+    if (tointeger(value, &position)) return position;
+  }
+  else if (optional)
+    return def;
+  lua_unlock(L);
+  def = luaL_checkinteger(L, arg);
+  lua_lock(L);
+  return def;
+}
+
+/* Return the rooted source and decoded range with the stack still owned. */
+static const char *readrange (lua_State *L, LuaNativeRoot *root, int bytes,
+                              size_t *start, size_t *end) {
+  const char *source;
+  size_t len;
+  lua_Integer first, last;
+  lua_lock(L);
+  while ((source = luaL_tryrootstring(L, 1, root, &len)) == NULL) {
+    lua_unlock(L);
+    luaL_checklstring(L, 1, NULL);
+    lua_lock(L);
+  }
+  first = readposition(L, 2, bytes, 1);
+  last = readposition(L, 3, 1, bytes ? first : -1);
+  *start = posrelatI(first, len);
+  *end = endpos(last, len);
+  return source;
+}
 
 static int str_sub (lua_State *L) {
   LuaNativeRoot root;
   unsigned work = 0;
-  size_t l;
-  const char *s = luaL_rootstring(L, 1, &root, &l);
-  size_t start = posrelatI(luaL_checkinteger(L, 2), l);
-  size_t end = getendpos(L, 3, -1, l);
+  size_t start, end;
+  const char *source = readrange(L, &root, 0, &start, &end);
   if (start <= end)
-    pushstring(L, &work, s + start - 1, (end - start) + 1);
-  else lua_pushliteral(L, "");
-  return luaL_rootresult(L, &root, 1, 1);
+    pushownedstring(L, &work, source + start - 1, (end - start) + 1);
+  else
+    pushownedstring(L, &work, "", 0);
+  luaR_poproot(L, &root);
+  lua_unlock(L);
+  return 1;
 }
 
 
@@ -266,22 +309,37 @@ static int str_rep (lua_State *L) {
 static int str_byte (lua_State *L) {
   LuaNativeRoot root;
   unsigned work = 0;
-  size_t l;
-  const char *s = luaL_rootstring(L, 1, &root, &l);
-  lua_Integer pi = luaL_optinteger(L, 2, 1);
-  size_t posi = posrelatI(pi, l);
-  size_t pose = getendpos(L, 3, pi, l);
-  int n, i;
-  if (posi > pose) return luaL_rootresult(L, &root, 1, 0);
-  if (l_unlikely(pose - posi >= (size_t)INT_MAX))  /* arithmetic overflow? */
-    return luaL_error(L, "string slice too long");
-  n = (int)(pose -  posi) + 1;
-  luaL_checkstack(L, n, "string slice too long");
-  for (i=0; i<n; i++) {
-    lua_pushinteger(L, cast_uchar(s[posi + cast_uint(i) - 1]));
-    luaQ_work(L, &work);
+  size_t start, end;
+  const char *source = readrange(L, &root, 1, &start, &end);
+  int n = 0, i = 0;
+  if (start <= end) {
+    if (l_unlikely(end - start >= (size_t)INT_MAX)) {
+      lua_unlock(L);
+      return luaL_error(L, "string slice too long");
+    }
+    n = cast_int(end - start) + 1;
   }
-  return luaL_rootresult(L, &root, 1, n);
+  if (n > L->ci->top.p - L->top.p) {
+    lua_unlock(L);
+    luaL_checkstack(L, n, "string slice too long");
+    lua_lock(L);
+  }
+  while (i < n) {
+    int chunk = n - i < 1024 ? n - i : 1024;
+    int limit = i + chunk;
+    for (; i < limit; i++) {
+      setivalue(s2v(L->top.p), cast_uchar(source[start - 1 + cast_uint(i)]));
+      api_incr_top(L);
+    }
+    if (chunk == 1024) {
+      lua_unlock(L);
+      luaQ_workn(L, &work, 1024);
+      lua_lock(L);
+    }
+  }
+  luaR_poproot(L, &root);
+  lua_unlock(L);
+  return n;
 }
 
 

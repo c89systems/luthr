@@ -4,6 +4,21 @@
 
 #include "lroots.h"
 
+/* Caller owns the stack. A missing or non-string argument leaves root unused. */
+l_sinline const char *luaL_tryrootstring (lua_State *L, int arg,
+                                         LuaNativeRoot *root, size_t *len) {
+  lua_assert(arg > 0);
+  if (arg < L->top.p - L->ci->func.p) {
+    const TValue *value = s2v(L->ci->func.p + arg);
+    if (ttisstring(value)) {
+      luaR_pushroot(L, root);
+      luaR_setroot(L, root, value);
+      return getlstr(tsvalue(value), *len);
+    }
+  }
+  return NULL;
+}
+
 /* Positive argument indices only. Storage belongs to the current C activation;
 ** protected unwinding retires abandoned roots. Call outside state ownership.
 ** Normal completion removes the contiguous root array in reverse order. */
