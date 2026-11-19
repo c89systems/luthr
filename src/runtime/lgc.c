@@ -1220,11 +1220,11 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
 
 
 
-/* Idle stacks are borrowed under their own gate, then resized under metadata
-** ownership. Pin the target before a possible allocation wait: an emergency
+/* Check idle stacks under their own gate and acquire metadata ownership only
+** when storage can be returned. Pin the target before a possible wait: an emergency
 ** may otherwise reclaim a stack whose last ordinary reference disappeared.
 ** Running owners perform the same trim at their next VM safepoint. */
-static int trimstacks (lua_State *L) {
+static void trimstacks (lua_State *L) {
   global_State *g = G(L);
   LuaWorld *world = &g->world;
   LuaWorldScope scope;
@@ -1232,34 +1232,39 @@ static int trimstacks (lua_State *L) {
   uint64_t interrupted = g->trace_epoch;
   lu_byte stopem = g->gcstopem;
   if (g->gcemergency || L->object_scopes != NULL || luaW_scope(L).heap != 0)
-    return 1;
+    return;
   g->gcstopem = 0;
   scope = luaW_suspend(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   participant = world->participants;
   while (participant != NULL) {
     lua_State *thread = participant->thread;
-    int reservation = 0;
+    int reservation = 0, trim = 0;
     participant = participant->next;
     if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) ==
         g->trace_epoch)
       reservation = luaX_tryreserve(thread);
     if (reservation == 0) continue;
-    thread->native_depth++;
-    luaX_checksync(pthread_mutex_unlock(&world->mutex));
-    luaW_heapenter(L);  /* before any target pointer can become an offset */
-    if (g->trace_epoch == interrupted && !thread->heap_waiting &&
-        !thread->object_waiting && !thread->reclaiming &&
-        thread->trace_trimmed != thread->trace_snapshot) {
-      thread->trace_trimmed = thread->trace_snapshot;
-      thread->reclaiming = 1;
-      luaD_shrinkstack(thread);  /* metadata entry is recursive for this owner */
-      luaM_flushdebt(L, thread);
-      thread->reclaiming = 0;
+    if (!thread->heap_waiting && !thread->object_waiting &&
+        !thread->reclaiming && thread->trace_trimmed != thread->trace_snapshot) {
+      trim = luaD_cantrimstack(thread);
+      if (trim) thread->native_depth++;
+      else thread->trace_trimmed = thread->trace_snapshot;
     }
-    thread->native_depth--;
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    if (trim) {
+      luaW_heapenter(L);  /* before any target pointer can become an offset */
+      if (g->trace_epoch == interrupted) {
+        thread->trace_trimmed = thread->trace_snapshot;
+        thread->reclaiming = 1;
+        luaD_shrinkstack(thread);  /* recursive metadata ownership */
+        luaM_flushdebt(L, thread);
+        thread->reclaiming = 0;
+      }
+      thread->native_depth--;
+    }
     luaX_endreserve(thread, reservation);
-    luaW_heapleave(L);
+    if (trim) luaW_heapleave(L);
     luaX_pollrequests(L);
     luaQ_poll(L);
     luaX_checksync(pthread_mutex_lock(&world->mutex));
@@ -1268,7 +1273,6 @@ static int trimstacks (lua_State *L) {
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaW_restore(L, scope, L->native_depth);
   g->gcstopem = stopem;
-  return g->trace_epoch == interrupted;
 }
 
 

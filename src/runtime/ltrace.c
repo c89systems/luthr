@@ -176,6 +176,7 @@ void luaC_trimstack (lua_State *L) {
   if (L->trace_trimmed != L->trace_snapshot && L->world_depth == 0 &&
       L->object_scopes == NULL && !L->reclaiming && luaW_scope(L).heap == 0) {
     L->trace_trimmed = L->trace_snapshot;
+    if (!luaD_cantrimstack(L)) return;
     L->reclaiming = 1;
     luaD_shrinkstack(L);
     luaM_flushdebt(L, L);

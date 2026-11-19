@@ -1,5 +1,6 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
 #include <lstring.h>
@@ -20,6 +21,8 @@
 
 static lua_State *observed, *first_publisher, *second_publisher;
 static unsigned published, unrelated;
+static unsigned trim_calls;
+static int count_trims;
 
 void __real_luaM_flushdebt(lua_State *, lua_State *);
 void __wrap_luaM_flushdebt(lua_State *actor, lua_State *owner) {
@@ -32,6 +35,13 @@ void __wrap_luaM_flushdebt(lua_State *actor, lua_State *owner) {
       unrelated++;
   }
   __real_luaM_flushdebt(actor, owner);
+}
+
+void __real_luaD_shrinkstack(lua_State *L);
+void __wrap_luaD_shrinkstack(lua_State *L) {
+  if (count_trims)
+    trim_calls++;
+  __real_luaD_shrinkstack(L);
 }
 
 static void publish_batches(lua_State *L, int generational) {
@@ -111,6 +121,45 @@ static void invalidate_string_cache(lua_State *L, int generational) {
   lua_close(L);
 }
 
+static void trim_idle_stacks(lua_State *L, int generational) {
+  lua_State *large, *frames, *packed;
+  int packed_size;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 128, 0);
+  for (int i = 1; i <= 128; i++) {
+    lua_newthread(L);
+    lua_rawseti(L, 1, i);
+  }
+
+  large = lua_newthread(L);
+  lua_pushinteger(large, 42);
+  lua_lock(large);
+  require(luaD_reallocstack(large, 1024, 1));
+  lua_unlock(large);
+
+  frames = lua_newthread(L);
+  lua_lock(frames);
+  require(luaE_extendCI(frames, 1) != NULL && luaE_extendCI(frames, 1) != NULL);
+  lua_unlock(frames);
+  require(frames->nci == 2 && stacksize(frames) == BASIC_STACK_SIZE);
+
+  packed = lua_newthread(L);
+  require(lua_checkstack(packed, 80));
+  for (int i = 1; i <= 80; i++)
+    lua_pushinteger(packed, i);
+  packed_size = stacksize(packed);
+
+  count_trims = 1;
+  require(lua_gc(L, LUA_GCCOLLECT) == 0);
+  count_trims = 0;
+  require(trim_calls == 2);
+  require(stacksize(large) < 1024 && lua_tointeger(large, -1) == 42);
+  require(frames->nci == 1 && stacksize(frames) == BASIC_STACK_SIZE);
+  require(stacksize(packed) == packed_size && lua_tointeger(packed, -1) == 80);
+  lua_close(L);
+}
+
 enum { ACTORS = LUA_BARRIER_SHARDS * 2, ROWS = 32, OBJECTS = ACTORS * ROWS };
 struct producer {
   lua_State *state;
@@ -162,6 +211,11 @@ int main(int argc, char **argv) {
     free(objects);
     invalidate_string_cache(L,
                             strcmp(argv[1], "string_cache_generational") == 0);
+    return 0;
+  }
+  if (strncmp(argv[1], "trim_", 5) == 0) {
+    free(objects);
+    trim_idle_stacks(L, strcmp(argv[1], "trim_generational") == 0);
     return 0;
   }
   back = strcmp(argv[1], "remembered") == 0;

@@ -566,15 +566,34 @@ static int stackinuse (lua_State *L) {
 ** stacksize (equal to ERRORSTACKSIZE in this case), and so the stack
 ** will be reduced to a "regular" size.
 */
-void luaD_shrinkstack (lua_State *L) {
-  int inuse = stackinuse(L);
-  int max = (inuse > MAXSTACK / 3) ? MAXSTACK : inuse * 3;
+static int stacktrimsize (lua_State *L) {
+  int inuse, max;
+  int capacity = stacksize(L);
+  if (capacity <= (LUA_MINSTACK > MAXSTACK / 3 ? MAXSTACK : 3 * LUA_MINSTACK))
+    return 0;
+  inuse = stackinuse(L);
+  max = (inuse > MAXSTACK / 3) ? MAXSTACK : inuse * 3;
   /* if thread is currently not handling a stack overflow and its
      size is larger than maximum "reasonable" size, shrink it */
-  if (inuse <= MAXSTACK && stacksize(L) > max) {
-    int nsize = (inuse > MAXSTACK / 2) ? MAXSTACK : inuse * 2;
+  if (inuse <= MAXSTACK && capacity > max)
+    return (inuse > MAXSTACK / 2) ? MAXSTACK : inuse * 2;
+  return 0;
+}
+
+int luaD_cantrimstack (lua_State *L) {
+#if defined(HARDSTACKTESTS)
+  UNUSED(L);
+  return 1;  /* retain forced relocations in stack stress builds */
+#else
+  CallInfo *freeframe = L->ci->next;
+  return (freeframe != NULL && freeframe->next != NULL) || stacktrimsize(L) != 0;
+#endif
+}
+
+void luaD_shrinkstack (lua_State *L) {
+  int nsize = stacktrimsize(L);
+  if (nsize != 0)
     luaD_reallocstack(L, nsize, 0);  /* ok if that fails */
-  }
   else  /* don't change stack */
     condmovestack(L,(void)0,(void)0);  /* (change only for debugging) */
   luaE_shrinkCI(L);  /* shrink CI list */
