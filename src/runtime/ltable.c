@@ -1928,20 +1928,22 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
   return tag;
 }
 
+int luaH_tryget (lua_State *L, Table *t, const TValue *key, TValue *res,
+                 lu_byte *tag) {
+  if (luaA_localtable(L, t))
+    *tag = luaH_getowned(t, key, res);
+  else if (!(ttisshrstring(key) && readshortstr(G(L), L, t, tsvalue(key), res, tag)) &&
+           !(ttisinteger(key) && readinteger(L, t, ivalue(key), res, tag)) &&
+           !optimistic(L, t, key, res, tag))
+    return 0;
+  if (!tagisempty(*tag)) luaC_tracevalue(L, res);
+  return 1;
+}
+
 /* Complete mutator operations. Encoded slots never cross an unlock. */
 lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   lu_byte tag;
-  if (luaA_localtable(L, t)) {
-    tag = luaH_getowned(t, key, res);
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
-  if ((ttisshrstring(key) && readshortstr(G(L), L, t, tsvalue(key), res, &tag)) ||
-      (ttisinteger(key) && readinteger(L, t, ivalue(key), res, &tag)) ||
-      optimistic(L, t, key, res, &tag)) {
-    if (!tagisempty(tag)) luaC_tracevalue(L, res);
-    return tag;
-  }
+  if (luaH_tryget(L, t, key, res, &tag)) return tag;
   return getrooted(L, t, key, res);
 }
 

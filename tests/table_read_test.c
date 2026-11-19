@@ -27,6 +27,7 @@
 static __thread unsigned measuring, reading;
 static __thread pthread_mutex_t *unexpected_mutex;
 static __thread pthread_barrier_t *metatable_read;
+static __thread Table *index_table;
 static unsigned access_calls, mutex_calls;
 static void *watched;
 static unsigned returned;
@@ -68,6 +69,20 @@ void __wrap_luaA_metafield(lua_State *state, const TValue *object, TString *key,
   }
   __real_luaA_metafield(state, object, key, result, event);
 }
+
+lu_byte __real_luaA_index(lua_State *, Table *, const TValue *, TValue *,
+                          LuaNativeRoot *);
+lu_byte __wrap_luaA_index(lua_State *state, Table *table, const TValue *key,
+                          TValue *result, LuaNativeRoot *method) {
+  pthread_mutex_t *previous = unexpected_mutex;
+  lu_byte tag;
+  if (table == index_table)
+    unexpected_mutex = &G(state)->world.mutex;
+  tag = __real_luaA_index(state, table, key, result, method);
+  unexpected_mutex = previous;
+  return tag;
+}
+
 struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -274,6 +289,48 @@ static void primitive_replacement(lua_State *state, int generational) {
       lua_gc(state, LUA_GCCOLLECT);
   }
   require(pthread_join(reader, NULL) == 0);
+}
+
+struct index_reader {
+  lua_State *state;
+  Table *methods;
+};
+
+static void *read_index_hit(void *argument) {
+  const struct index_reader *reader = argument;
+  index_table = reader->methods;
+  require(lua_getfield(reader->state, 1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(reader->state, -1) == 42);
+  return NULL;
+}
+
+static void index_hit(lua_State *state) {
+  LuaObjectScope writer;
+  struct index_reader reader;
+  pthread_t thread;
+  lua_gc(state, LUA_GCSTOP);
+  lua_newtable(state); /* receiver */
+  lua_newtable(state); /* receiver metatable */
+  lua_newtable(state); /* methods */
+  lua_newtable(state); /* methods metatable */
+  lua_pushvalue(state, 4);
+  lua_setmetatable(state, 3);
+  lua_pushinteger(state, 42);
+  lua_setfield(state, 3, "answer");
+  lua_pushvalue(state, 3);
+  lua_setfield(state, 2, "__index");
+  lua_pushvalue(state, 2);
+  lua_setmetatable(state, 1);
+  reader.state = lua_newthread(state);
+  reader.methods = (Table *)lua_topointer(state, 3);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, reader.state, 1);
+  luaX_lockstate(state);
+  luaA_begin(state, gcvalue(s2v(state->stack.p + 4)), &writer);
+  require(pthread_create(&thread, NULL, read_index_hit, &reader) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  luaA_end(state, &writer);
+  luaX_unlockstate(state);
 }
 
 static void resume_epoch(lua_State *state) {
@@ -787,6 +844,8 @@ int main(int argc, char **argv) {
     primitive(state);
   else if (strcmp(argv[1], "primitive_reattach") == 0)
     primitive_reattach(state);
+  else if (strcmp(argv[1], "index_hit") == 0)
+    index_hit(state);
   else if (strncmp(argv[1], "primitive_", 10) == 0)
     primitive_replacement(state,
                           strcmp(argv[1], "primitive_generational") == 0);
