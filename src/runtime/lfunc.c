@@ -33,7 +33,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   CClosure *c = gco2ccl(o);
   luaA_initlock(&c->access);
   luaA_initsharing(L, c);
-  c->sequence = 0;
+  if (nupvals != 0) c->sequence = 0;
   c->managed = 0;
   c->managed_next = NULL;
   c->nupvalues = cast_byte(nupvals);
@@ -46,7 +46,7 @@ LClosure *luaF_newLclosure (lua_State *L, int nupvals) {
   LClosure *c = gco2lcl(o);
   luaA_initlock(&c->access);
   luaA_initsharing(L, c);
-  c->sequence = 0;
+  c->managed = 0;
   c->p = NULL;
   c->nupvalues = cast_byte(nupvals);
   while (nupvals--) c->upvals[nupvals] = NULL;

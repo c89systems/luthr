@@ -320,20 +320,7 @@ typedef struct GCObject {
   CommonHeader;
 } GCObject;
 
-/* Mutable objects share metadata offsets, so local operations do not dispatch
-** by object type merely to find their owner or publication sequence. */
-#define MutableHeader \
-  CommonHeader; uintptr_t sharing; uint64_t sequence
 #define LUA_OBJECT_SHARED cast(uintptr_t, 1)
-
-typedef struct LuaMutable {
-  MutableHeader;
-} LuaMutable;
-
-typedef struct LuaAccessible {
-  MutableHeader;
-  LuaObjectLock access;
-} LuaAccessible;
 
 
 /* Bit mark for collectable types */
@@ -518,32 +505,36 @@ typedef union UValue {
 ** memory area follows the end of this structure.
 */
 typedef struct Udata {
-  MutableHeader;
-  LuaObjectLock access;
+  CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
+  LuaObjectLock access;
   LuaObjectLock payload_access;  /* opaque native bytes, not collector edges */
   struct Table *metatable;
   GCObject *gclist;
+  uintptr_t sharing;
+  uint64_t sequence;  /* split user values only; absent when nuvalue is zero */
   UValue uv[1];  /* user values */
 } Udata;
 
 
 /*
 ** Header for userdata with no user values. Both forms have the same
-** collector prefix so their metatables can be traced under object ownership.
+** prefix through 'sharing'. The sole managed field is an atomic metatable
+** pointer, so this form needs no sequence for split user values.
 ** This structure here is used only to compute the correct size for
 ** this representation. (The 'bindata' field in its end ensures correct
 ** alignment for binary data following this header.)
 */
 typedef struct Udata0 {
-  MutableHeader;
-  LuaObjectLock access;
+  CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
+  LuaObjectLock access;
   LuaObjectLock payload_access;
   struct Table *metatable;
   GCObject *gclist;
+  uintptr_t sharing;
   union {LUAI_MAXALIGN;} bindata;
 } Udata0;
 
@@ -714,7 +705,10 @@ typedef struct Proto {
 ** Upvalues for Lua closures
 */
 typedef struct UpVal {
-  MutableHeader;
+  CommonHeader;
+  lu_byte mutex_ready;
+  uintptr_t sharing;
+  uint64_t sequence;
   GCObject *gclist;
   TValue value;  /* stable shared cell, including while its local is live */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
@@ -724,19 +718,19 @@ typedef struct UpVal {
   } open;
   pthread_mutex_t mutex;
   lua_State *owner;
-  int mutex_ready;
 } UpVal;
 
 
 
 #define ClosureHeader \
-	MutableHeader; LuaObjectLock access; lu_byte nupvalues; GCObject *gclist
+	CommonHeader; lu_byte nupvalues; lu_byte managed; GCObject *gclist; \
+        uintptr_t sharing; LuaObjectLock access
 
 typedef struct CClosure {
   ClosureHeader;
-  lu_byte managed;  /* immutable runtime-owned implementation/continuations */
   struct CClosure *managed_next;  /* canonical zero-capture runtime functions */
   lua_CFunction f;
+  uint64_t sequence;  /* split user values only; absent when nupvalues is zero */
   TValue upvalue[1];  /* list of upvalues */
 } CClosure;
 
@@ -813,11 +807,13 @@ typedef union Node {
 
 
 typedef struct Table {
-  MutableHeader;
-  LuaObjectLock access;
+  CommonHeader;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
   lu_byte lsizenode;  /* log2 of number of slots of 'node' array */
   unsigned int asize;  /* number of slots in 'array' array */
+  uintptr_t sharing;
+  uint64_t sequence;
+  LuaObjectLock access;
   Value *array;  /* array part */
   Node *node;
   struct Table *metatable;

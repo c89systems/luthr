@@ -16,14 +16,20 @@
 static LuaObjectLock *objectlock (GCObject *object) {
   lua_assert(object->tt == LUA_VTABLE || object->tt == LUA_VLCL ||
              object->tt == LUA_VCCL || object->tt == LUA_VUSERDATA);
-  return &cast(union GCUnion *, object)->accessible.access;
+  switch (object->tt) {
+    case LUA_VTABLE: return &gco2t(object)->access;
+    case LUA_VLCL: return &gco2lcl(object)->access;
+    case LUA_VCCL: return &gco2ccl(object)->access;
+    default: return &gco2u(object)->access;
+  }
 }
 
-static void version (GCObject *object, LuaObjectLock *lock) {
+l_sinline void version (GCObject *object, LuaObjectLock *lock) {
   if (object != NULL && lock == objectlock(object)) {
     uint64_t *sequence = luaA_sequence(object);
-    __atomic_store_n(sequence,
-      __atomic_load_n(sequence, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
+    if (sequence != NULL)
+      __atomic_store_n(sequence,
+        __atomic_load_n(sequence, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
   }
 }
 

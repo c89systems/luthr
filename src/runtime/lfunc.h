@@ -14,7 +14,8 @@ struct CallInfo;
 
 
 #define sizeCclosure(n)  \
-	(offsetof(CClosure, upvalue) + sizeof(TValue) * cast_uint(n))
+	((n) == 0 ? offsetof(CClosure, sequence) : \
+          offsetof(CClosure, upvalue) + sizeof(TValue) * cast_uint(n))
 
 #define sizeLclosure(n)  \
 	(offsetof(LClosure, upvals) + sizeof(UpVal *) * cast_uint(n))

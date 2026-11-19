@@ -94,7 +94,12 @@ static void *write_values(void *unused) {
   unsigned i;
   (void)unused;
   for (i = 0; i < 128; i++) {
-    if (probe.kind == 2)
+    if (probe.kind == 4) {
+      lua_createtable(L, 1, 0);
+      lua_pushinteger(L, i);
+      lua_rawseti(L, -2, 1);
+      require(lua_setmetatable(L, probe.index));
+    } else if (probe.kind == 2)
       lua_upvaluejoin(L, probe.index, 1, probe.index + 1 + (i & 1), 1);
     else {
       lua_pushinteger(L, i & 1 ? LUA_MAXINTEGER : LUA_MININTEGER);
@@ -110,7 +115,9 @@ static void *write_values(void *unused) {
     lua_createtable(L, 1, 0);
     lua_pushinteger(L, 42);
     lua_rawseti(L, -2, 1);
-    if (probe.kind == 0)
+    if (probe.kind == 4)
+      require(lua_setmetatable(L, probe.index));
+    else if (probe.kind == 0)
       require(lua_setiuservalue(L, probe.index, 1));
     else
       require(lua_setupvalue(L, probe.index, 1) != NULL);
@@ -136,6 +143,7 @@ int main(int argc, char **argv) {
   lua_State *L = luaL_newstate(), *other;
   pthread_t marker, writer;
   struct timespec deadline;
+  unsigned i;
   int shared;
   require(argc == 2 && L != NULL);
   lua_gc(L, strstr(argv[1], "generational") ? LUA_GCGEN : LUA_GCINC);
@@ -144,7 +152,12 @@ int main(int argc, char **argv) {
   shared = strstr(argv[1], "shared") != NULL;
   probe.marker = lua_newthread(L);
   other = lua_newthread(L);
-  if (strncmp(argv[1], "userdata", 8) == 0) {
+  if (strncmp(argv[1], "userdata0", 9) == 0) {
+    probe.kind = 4;
+    memset(lua_newuserdatauv(L, 48, 0), 0x5a, 48);
+    lua_newtable(L);
+    require(lua_setmetatable(L, 3));
+  } else if (strncmp(argv[1], "userdata", 8) == 0) {
     probe.kind = 0;
     lua_newuserdatauv(L, 1, 1);
     lua_newtable(L);
@@ -201,7 +214,12 @@ int main(int argc, char **argv) {
   require(pthread_join(marker, NULL) == 0);
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCCOLLECT);
-  if (probe.kind == 0)
+  if (probe.kind == 4) {
+    const unsigned char *payload = lua_touserdata(probe.writer, probe.index);
+    for (i = 0; i < 48; i++)
+      require(payload[i] == 0x5a);
+    require(lua_getmetatable(probe.writer, probe.index));
+  } else if (probe.kind == 0)
     require(lua_getiuservalue(probe.writer, probe.index, 1) == LUA_TTABLE);
   else
     require(lua_getupvalue(probe.writer, probe.index, 1) != NULL);

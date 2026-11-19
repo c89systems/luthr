@@ -438,9 +438,11 @@ static void closure_construction(int thread_build) {
   lua_lock(L);
   luaC_tracebatch(L, 256);
   require(!G(L)->world.stopped &&
-          isgray(thread_build ? obj2gco(builder.child)
-                              : obj2gco(builder.closure)) &&
+          (thread_build ? isgray(obj2gco(builder.child))
+                        : isblack(G(L), builder.closure)) &&
           isblack(G(L), independent));
+  /* Atomic closure pointers can be marked even while capture allocation is
+   * paused. The later inserted cell must still be marked before termination. */
   lua_unlock(L);
   require(pthread_mutex_lock(&builder.mutex) == 0);
   builder.release = 1;

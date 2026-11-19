@@ -586,10 +586,6 @@ typedef struct global_State {
 */
 union GCUnion {
   GCObject gc;  /* common header */
-  LuaMutable mutable_header;
-  LuaAccessible accessible;
-  CClosure cclosure;
-  LClosure lclosure;
   struct TString ts;
   struct Udata u;
   union Closure cl;

@@ -25,7 +25,8 @@ int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
   do {
     GCObject *edges[33];
     unsigned slots = size - first, count;
-    uint64_t sequence = __atomic_load_n(version, __ATOMIC_ACQUIRE);
+    uint64_t sequence = version != NULL
+      ? __atomic_load_n(version, __ATOMIC_ACQUIRE) : 0;
     if (sequence & 1) {
       if (access != NULL && __atomic_load_n(&access->owner, __ATOMIC_ACQUIRE) ==
                             luaX_token(L)) return -1;
@@ -33,7 +34,11 @@ int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
     }
     if (slots > 32) slots = 32;
     count = luaC_objectchunk(object, first, slots, edges);
-    if (__atomic_load_n(version, __ATOMIC_ACQUIRE) != sequence) return 0;
+    /* A pointer-only payload can be scanned while its vector changes: each
+    ** loaded pointer is valid and the hybrid barriers retain both old and new
+    ** referents. Split TValue bits still require sequence validation. */
+    if (version != NULL &&
+        __atomic_load_n(version, __ATOMIC_ACQUIRE) != sequence) return 0;
     luaC_traceedges(work, edges, count);
     first += slots;
     if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST)) return 0;

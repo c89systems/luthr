@@ -335,7 +335,7 @@ target_link_options(gc_object_scan_test PRIVATE -Wl,--wrap=luaC_objectchunk
   -Wl,--wrap=luaA_tryscan -Wl,--wrap=pthread_mutex_trylock
   -Wl,--undefined=luaC_objectchunk)
 foreach(collector IN ITEMS incremental generational)
-  foreach(kind IN ITEMS userdata cclosure lclosure capture)
+  foreach(kind IN ITEMS userdata userdata0 cclosure lclosure capture)
     foreach(sharing IN ITEMS private shared)
       add_test(NAME gc_object_scan_${kind}_${sharing}_${collector}
         COMMAND gc_object_scan_test ${kind}_${sharing}_${collector})
@@ -354,6 +354,19 @@ foreach(collector IN ITEMS incremental generational)
     add_test(NAME object_sharing_${route}_${collector}
       COMMAND object_sharing_test ${route}_${collector})
     set_tests_properties(object_sharing_${route}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+  endforeach()
+endforeach()
+
+luthr_test_program(object_layout_test object_layout_test.c)
+set_target_properties(object_layout_test PROPERTIES C_STANDARD 99)
+target_compile_options(object_layout_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(object_layout_test PRIVATE luthr_static)
+foreach(collector IN ITEMS incremental generational)
+  foreach(kind IN ITEMS closure capture cell managed userdata userdata_values)
+    add_test(NAME object_layout_${kind}_${collector}
+      COMMAND object_layout_test ${kind} ${collector})
+    set_tests_properties(object_layout_${kind}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
   endforeach()
 endforeach()
@@ -1075,7 +1088,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
-  gc_membership_test gc_table_scan_test gc_object_scan_test object_sharing_test sharing_roots_test pipe_publication_test
+  gc_membership_test gc_table_scan_test gc_object_scan_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test
   gc_sweeping_test
   gc_epochs_test
   scheduler_test native_lifecycle_test

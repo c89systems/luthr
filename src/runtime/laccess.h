@@ -22,14 +22,24 @@ typedef struct LuaObjectScope {
 #define luaA_initsharing(L,o) ((o)->sharing = cast(uintptr_t, (L)))
 l_sinline uintptr_t *luaA_sharing (GCObject *object) {
   switch (object->tt) {
-    case LUA_VTABLE: case LUA_VLCL: case LUA_VCCL:
-    case LUA_VUSERDATA: case LUA_VUPVAL:
-      return &cast(union GCUnion *, object)->mutable_header.sharing;
+    case LUA_VTABLE: return &gco2t(object)->sharing;
+    case LUA_VLCL: return &gco2lcl(object)->sharing;
+    case LUA_VCCL: return &gco2ccl(object)->sharing;
+    case LUA_VUSERDATA: return &gco2u(object)->sharing;
+    case LUA_VUPVAL: return &gco2upv(object)->sharing;
     default: return NULL;
   }
 }
 l_sinline uint64_t *luaA_sequence (GCObject *object) {
-  return &cast(union GCUnion *, object)->mutable_header.sequence;
+  switch (object->tt) {
+    case LUA_VTABLE: return &gco2t(object)->sequence;
+    case LUA_VUPVAL: return &gco2upv(object)->sequence;
+    case LUA_VCCL:
+      return gco2ccl(object)->nupvalues ? &gco2ccl(object)->sequence : NULL;
+    case LUA_VUSERDATA:
+      return gco2u(object)->nuvalue ? &gco2u(object)->sequence : NULL;
+    default: return NULL;  /* individually atomic pointer fields */
+  }
 }
 l_sinline int luaA_localtable (lua_State *L, Table *table) {
   if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) != cast(uintptr_t, L))
@@ -41,15 +51,15 @@ l_sinline int luaA_localtable (lua_State *L, Table *table) {
 }
 l_sinline int luaA_local (lua_State *L, GCObject *object) {
   if (object->tt == LUA_VTABLE) return luaA_localtable(L, gco2t(object));
-  return __atomic_load_n(&cast(union GCUnion *, object)->mutable_header.sharing,
-                          __ATOMIC_ACQUIRE) == cast(uintptr_t, L);
+  return __atomic_load_n(luaA_sharing(object), __ATOMIC_ACQUIRE) ==
+         cast(uintptr_t, L);
 }
 LUAI_FUNC void luaA_share (lua_State *L, GCObject *object);
 LUAI_FUNC void luaA_sharevalue (lua_State *L, const TValue *value);
 LUAI_FUNC void luaA_publish (lua_State *L, GCObject *owner,
                             const TValue *value);
-/* Atomic components are validated by the owner's sequence before GC follows
-** their pointer representations. The caller owns the mutation scope. */
+/* Split values are validated by the owner's sequence before GC follows their
+** pointer representations. The caller owns the mutation scope. */
 #define luaA_store(L,to,from) setobj2t(L,to,from)
 
 LUAI_FUNC void luaA_begin (lua_State *L, GCObject *object, LuaObjectScope *scope);
