@@ -1,3 +1,4 @@
+#include <laccess.h>
 #include <lapi.h>
 #include <lauxlib.h>
 #include <ldo.h>
@@ -23,6 +24,15 @@ static lua_State *observed, *first_publisher, *second_publisher;
 static unsigned published, unrelated;
 static unsigned trim_calls;
 static int count_trims;
+static __thread int reject_string_locks;
+
+void __real_luaA_beginlock(lua_State *, LuaObjectLock *, LuaObjectScope *);
+void __wrap_luaA_beginlock(lua_State *L, LuaObjectLock *lock,
+                           LuaObjectScope *scope) {
+  require(!reject_string_locks ||
+          (uintptr_t)lock - (uintptr_t)G(L)->strt >= sizeof(G(L)->strt));
+  __real_luaA_beginlock(L, lock, scope);
+}
 
 void __real_luaM_flushdebt(lua_State *, lua_State *);
 void __wrap_luaM_flushdebt(lua_State *actor, lua_State *owner) {
@@ -121,6 +131,85 @@ static void invalidate_string_cache(lua_State *L, int generational) {
   lua_close(L);
 }
 
+static void byte_strings(lua_State *L, int generational) {
+  char source[UCHAR_MAX + 1][2];
+  const char *identity[UCHAR_MAX + 1], *empty;
+  lua_State *owner;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_newtable(L);
+  owner = lua_newthread(L);
+  reject_string_locks = 1;
+  empty = lua_pushlstring(L, NULL, 0);
+  lua_pop(L, 1);
+  for (int i = 0; i <= UCHAR_MAX; i++) {
+    source[i][0] = (char)i;
+    source[i][1] = '\0';
+    identity[i] = lua_pushlstring(L, source[i], 1);
+    lua_pop(L, 1);
+    lua_pushexternalstring(L, source[i], 1, NULL, NULL);
+    lua_pushinteger(L, i);
+    lua_rawset(L, 1);
+  }
+  reject_string_locks = 0;
+  lua_gc(L, LUA_GCCOLLECT);
+  reject_string_locks = 1;
+  require(lua_pushstring(owner, "") == empty);
+  for (int i = 0; i <= UCHAR_MAX; i++) {
+    require(lua_pushlstring(owner, source[i], 1) == identity[i]);
+    lua_pop(owner, 1);
+    if (i != 0) {
+      require(lua_pushstring(owner, source[i]) == identity[i]);
+      lua_pop(owner, 1);
+    }
+    require(lua_pushlstring(L, source[i], 1) == identity[i]);
+    require(lua_rawget(L, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == i);
+    lua_pop(L, 1);
+  }
+  reject_string_locks = 0;
+  lua_close(L);
+}
+
+struct startup_allocator {
+  size_t requests, fail_at, live;
+};
+
+static void *startup_alloc(void *argument, void *old, size_t old_size,
+                           size_t size) {
+  struct startup_allocator *test = argument;
+  void *memory;
+  if (size == 0) {
+    test->live -= old_size;
+    free(old);
+    return NULL;
+  }
+  if (++test->requests >= test->fail_at)
+    return NULL;
+  if (old == NULL)
+    old_size = 0;
+  memory = realloc(old, size);
+  if (memory != NULL)
+    test->live = test->live - old_size + size;
+  return memory;
+}
+
+static void startup_strings(void) {
+  struct startup_allocator test = {0, SIZE_MAX, 0};
+  lua_State *state = lua_newstate(startup_alloc, &test, 42);
+  size_t requests;
+  require(state != NULL);
+  requests = test.requests;
+  lua_close(state);
+  require(test.live == 0);
+  for (size_t fail = 1; fail <= requests; fail++) {
+    test = (struct startup_allocator){0, fail, 0};
+    state = lua_newstate(startup_alloc, &test, 42);
+    if (state != NULL)
+      lua_close(state);
+    require(test.live == 0);
+  }
+}
+
 static void trim_idle_stacks(lua_State *L, int generational) {
   lua_State *large, *frames, *packed;
   int packed_size;
@@ -211,6 +300,17 @@ int main(int argc, char **argv) {
     free(objects);
     invalidate_string_cache(L,
                             strcmp(argv[1], "string_cache_generational") == 0);
+    return 0;
+  }
+  if (strncmp(argv[1], "byte_strings_", 13) == 0) {
+    free(objects);
+    byte_strings(L, strcmp(argv[1], "byte_strings_generational") == 0);
+    return 0;
+  }
+  if (strcmp(argv[1], "string_startup") == 0) {
+    free(objects);
+    lua_close(L);
+    startup_strings();
     return 0;
   }
   if (strncmp(argv[1], "trim_", 5) == 0) {

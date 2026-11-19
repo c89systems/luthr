@@ -292,9 +292,11 @@ luthr_test_program(gc_directory_test gc_directory_test.c)
 set_target_properties(gc_directory_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_directory_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_directory_test PRIVATE luthr_static)
-target_link_options(gc_directory_test PRIVATE -Wl,--wrap=luaM_flushdebt -Wl,--wrap=luaD_shrinkstack)
+target_link_options(gc_directory_test PRIVATE -Wl,--wrap=luaM_flushdebt -Wl,--wrap=luaD_shrinkstack
+  -Wl,--wrap=luaA_beginlock)
 foreach(case IN ITEMS forward remembered publish_incremental publish_generational
-    string_cache_incremental string_cache_generational trim_incremental trim_generational)
+    string_cache_incremental string_cache_generational byte_strings_incremental
+    byte_strings_generational string_startup trim_incremental trim_generational)
   add_test(NAME gc_directory_${case} COMMAND gc_directory_test ${case})
   set_tests_properties(gc_directory_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)

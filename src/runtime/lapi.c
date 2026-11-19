@@ -799,14 +799,13 @@ LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
 
 
 /*
-** Pushes on the stack a string with given length. Avoid using 's' when
-** 'len' == 0 (as 's' can be NULL in that case), due to later use of
-** 'memcmp' and 'memcpy'.
+** Pushes on the stack a string with given length. The canonical empty
+** string is selected without reading 's' when 'len' is zero.
 */
 LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
   TString *ts;
   lua_lock(L);
-  ts = (len == 0) ? luaS_new(L, "") : luaS_newlstr(L, s, len);
+  ts = luaS_newlstr(L, s, len);
   setsvalue2s(L, L->top.p, ts);
   api_incr_top(L);
   luaC_checkGC(L);

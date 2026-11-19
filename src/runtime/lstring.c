@@ -150,28 +150,6 @@ void luaS_clearcache (global_State *g) {
 }
 
 
-/*
-** Initialize the string table and the string cache
-*/
-void luaS_init (lua_State *L) {
-  global_State *g = G(L);
-  int i;
-  for (i = 0; i < LUA_STRING_SHARDS; i++) {
-    stringtable *tb = &g->strt[i];
-    tb->hash = luaM_newvector(L, LUA_STRING_INITIAL_BUCKETS, TString*);
-    tablerehash(tb->hash, 0, LUA_STRING_INITIAL_BUCKETS);
-    tb->size = LUA_STRING_INITIAL_BUCKETS;
-  }
-  /* pre-create memory-error message */
-  g->memerrmsg = luaS_newliteral(L, MEMERRMSG);
-  luaC_fix(L, obj2gco(g->memerrmsg));  /* it should never be collected */
-  g->stoperrmsg = luaS_newliteral(L, "task stopped");
-  luaC_fix(L, obj2gco(g->stoperrmsg));
-  g->limiterrmsg = luaS_newliteral(L, "Lua instruction limit exceeded");
-  luaC_fix(L, obj2gco(g->limiterrmsg));
-}
-
-
 size_t luaS_sizelngstr (size_t len, int kind) {
   switch (kind) {
     case LSTRREG:  /* regular long string */
@@ -199,6 +177,53 @@ static TString *createstrobj (lua_State *L, size_t totalsize, lu_byte tag,
   ts->hash = h;
   ts->extra = 0;
   return ts;
+}
+
+
+static void copyshrstr (TString *ts, const char *str, size_t len) {
+  ts->shrlen = cast(ls_byte, len);
+  memcpy(getshrstr(ts), str, len);
+  getshrstr(ts)[len] = '\0';
+}
+
+
+/* These values are part of global_State and never enter the GC lists. */
+static void initfixedstr (TString *ts, const char *str, size_t len,
+                           unsigned seed) {
+  ts->tt = LUA_VSHRSTR;
+  setmarked(obj2gco(ts), bitmask(QUEUEDBIT) | G_OLD);
+  ts->next = NULL;
+  ts->extra = 0;
+  ts->hash = luaS_hash(str, len, seed);
+  ts->u.hnext = NULL;
+  copyshrstr(ts, str, len);
+}
+
+
+/*
+** Initialize the dynamic intern table and the immutable byte strings.
+*/
+void luaS_init (lua_State *L) {
+  global_State *g = G(L);
+  int i;
+  for (i = 0; i < LUA_STRING_SHARDS; i++) {
+    stringtable *tb = &g->strt[i];
+    tb->hash = luaM_newvector(L, LUA_STRING_INITIAL_BUCKETS, TString*);
+    tablerehash(tb->hash, 0, LUA_STRING_INITIAL_BUCKETS);
+    tb->size = LUA_STRING_INITIAL_BUCKETS;
+  }
+  /* pre-create memory-error message */
+  g->memerrmsg = luaS_newliteral(L, MEMERRMSG);
+  luaC_fix(L, obj2gco(g->memerrmsg));  /* it should never be collected */
+  g->stoperrmsg = luaS_newliteral(L, "task stopped");
+  luaC_fix(L, obj2gco(g->stoperrmsg));
+  g->limiterrmsg = luaS_newliteral(L, "Lua instruction limit exceeded");
+  luaC_fix(L, obj2gco(g->limiterrmsg));
+  initfixedstr(&g->empty_string, "", 0, g->seed);
+  for (i = 0; i <= UCHAR_MAX; i++) {
+    char byte = cast_char(i);
+    initfixedstr(&g->byte_strings[i], &byte, 1, g->seed);
+  }
 }
 
 
@@ -242,10 +267,14 @@ static void growstrtab (lua_State *L, stringtable *tb) {
 static TString *internshrstr (lua_State *L, const char *str, size_t l) {
   TString *ts;
   global_State *g = G(L);
-  unsigned int h = luaS_hash(str, l, g->seed);
-  stringtable *tb = stringtableof(g, h);
+  unsigned int h;
+  stringtable *tb;
   TString **list;
   LuaObjectScope access;
+  if (l == 0) return &g->empty_string;
+  if (l == 1) return &g->byte_strings[cast_byte(*str)];
+  h = luaS_hash(str, l, g->seed);
+  tb = stringtableof(g, h);
   luaA_beginlock(L, &tb->access, &access);
   list = &tb->hash[stringbucket(h, tb->size)];
   lua_assert(str != NULL);  /* otherwise 'memcmp'/'memcpy' are undefined */
@@ -265,9 +294,7 @@ static TString *internshrstr (lua_State *L, const char *str, size_t l) {
     growstrtab(L, tb);
   }
   ts = createstrobj(L, sizestrshr(l), LUA_VSHRSTR, h);
-  ts->shrlen = cast(ls_byte, l);
-  getshrstr(ts)[l] = '\0';  /* ending 0 */
-  memcpy(getshrstr(ts), str, l * sizeof(char));
+  copyshrstr(ts, str, l);
   /* Allocation may rendezvous with collection. Revalidate the bucket after
   ** that boundary; no pointer into an old bucket array crosses the wait. */
   list = &tb->hash[stringbucket(h, tb->size)];

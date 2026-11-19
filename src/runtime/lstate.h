@@ -579,6 +579,8 @@ typedef struct global_State {
   GCObject *new_finalizers, *new_finalizers_tail;
   uint64_t strcache_epoch;
   uint64_t metatable_sequence[LUA_NUMTYPES];  /* primitive metatable publication */
+  TString empty_string;
+  TString byte_strings[UCHAR_MAX + 1];  /* immutable storage owned by the VM */
 } global_State;
 
 
