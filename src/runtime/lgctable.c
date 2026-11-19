@@ -96,7 +96,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   if (!scanpart(L, work, table, &view, view.asize, 0) ||
       (!isdummy(&view) &&
        !scanpart(L, work, table, &view, sizenode(&view), 1))) return 0;
-  work->marked += cast(l_mem, luaH_size(&view));
+  work->marked += cast(l_mem, luaH_size(table, &view));
   luaC_finishstrong(work, obj2gco(table));
   return 1;
 }
@@ -105,6 +105,6 @@ int luaC_tablesize (Table *table, l_mem *bytes) {
   Table view, *metatable;
   uint64_t sequence;
   if (!snapshot(table, &view, &metatable, &sequence)) return 0;
-  *bytes = cast(l_mem, luaH_size(&view));
+  *bytes = cast(l_mem, luaH_size(table, &view));
   return 1;
 }

@@ -314,9 +314,8 @@ static void freestack (lua_State *owner, lua_State *L) {
 static void init_registry (lua_State *L, global_State *g) {
   /* create registry */
   TValue aux;
-  Table *registry = luaH_new(L);
+  Table *registry = luaH_new(L, LUA_RIDX_LAST, 0);
   sethvalue(L, &g->l_registry, registry);
-  luaH_resize(L, registry, LUA_RIDX_LAST, 0);
   /* registry[1] = false */
   setbfvalue(&aux);
   luaH_setint(L, registry, 1, &aux);
@@ -324,7 +323,7 @@ static void init_registry (lua_State *L, global_State *g) {
   setthvalue(L, &aux, L);
   luaH_setint(L, registry, LUA_RIDX_MAINTHREAD, &aux);
   /* registry[LUA_RIDX_GLOBALS] = new table (table of globals) */
-  sethvalue(L, &aux, luaH_new(L));
+  sethvalue(L, &aux, luaH_new(L, 0, 0));
   luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux);
   luaA_share(L, obj2gco(registry));
 }
@@ -659,10 +658,6 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->managed_hook = NULL;
   g->callbacks = NULL;
   g->pipe_meta = NULL;
-  for (i = 0; i < LUA_MANAGED_SHARDS; i++) {
-    g->managed_functions[i] = NULL;
-    luaA_initlock(&g->managed_access[i]);
-  }
   luaA_initlock(&g->registry_access);
   luaA_initlock(&g->warning_access);
   luaA_initlock(&g->panic_access);

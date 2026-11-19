@@ -799,9 +799,12 @@ l_sinline CallInfo *prepCallInfo (lua_State *L, StkId func, unsigned status,
 }
 
 
-/*
-** precall for C functions
-*/
+l_sinline int managedCfunction (const TValue *function) {
+  return checktag(function, LUA_VMCF) ||
+         (ttisCclosure(function) && clCvalue(function)->managed);
+}
+
+/* precall for C functions */
 l_sinline int precallC (lua_State *L, StkId func, unsigned status,
                                             lua_CFunction f) {
   int n;  /* number of returns */
@@ -809,7 +812,7 @@ l_sinline int precallC (lua_State *L, StkId func, unsigned status,
   LuaCallScope call;
   CallInfo *ci;
   ptrdiff_t function = savestack(L, func);
-  int managed = ttisCclosure(s2v(func)) && clCvalue(s2v(func))->managed;
+  int managed = managedCfunction(s2v(func));
   luaQ_begincall(L, managed, &call);
   func = restorestack(L, function);
   checkstackp(L, LUA_MINSTACK, func);  /* ensure minimum stack size */
@@ -843,7 +846,7 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
   switch (ttypetag(s2v(func))) {
     case LUA_VCCL:  /* C closure */
       return precallC(L, func, status, clCvalue(s2v(func))->f);
-    case LUA_VLCF:  /* light C function */
+    case LUA_VLCF: case LUA_VMCF:  /* light C function */
       return precallC(L, func, status, fvalue(s2v(func)));
     case LUA_VLCL: {  /* Lua function */
       Proto *p = clLvalue(s2v(func))->p;
@@ -892,7 +895,7 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
     case LUA_VCCL:  /* C closure */
       precallC(L, func, status, clCvalue(s2v(func))->f);
       return NULL;
-    case LUA_VLCF:  /* light C function */
+    case LUA_VLCF: case LUA_VMCF:  /* light C function */
       precallC(L, func, status, fvalue(s2v(func)));
       return NULL;
     case LUA_VLCL: {  /* Lua function */
@@ -1022,8 +1025,7 @@ static void finishCcall (lua_State *L, CallInfo *ci) {
     LuaWorldScope depth;
     LuaCallScope call;
     TStatus status = LUA_YIELD;  /* default if there were no errors */
-    int managed = ttisCclosure(s2v(ci->func.p)) &&
-                  clCvalue(s2v(ci->func.p))->managed;
+    int managed = managedCfunction(s2v(ci->func.p));
     lua_KFunction kf = ci->u.c.k;  /* continuation function */
     /* must have a continuation and must be able to call it */
     lua_assert(kf != NULL && yieldable(L));
@@ -1119,8 +1121,7 @@ static void resume (lua_State *L, void *ud) {
       if (ci->u.c.k != NULL) {  /* does it have a continuation function? */
         LuaWorldScope depth;
         LuaCallScope call;
-        int managed = ttisCclosure(s2v(ci->func.p)) &&
-                      clCvalue(s2v(ci->func.p))->managed;
+        int managed = managedCfunction(s2v(ci->func.p));
         luaQ_begincall(L, managed, &call);
         depth = luaQ_entercall(L, &call);
         n = (*ci->u.c.k)(L, LUA_YIELD, ci->u.c.ctx); /* call continuation */
@@ -1335,7 +1336,7 @@ static void f_parser (lua_State *L, void *ud) {
   luaD_checknativestack(L);
   luaD_checkstack(L, 2);
   luaR_pushroot(L, &anchor_root);
-  anchor = luaH_new(L);
+  anchor = luaH_new(L, 0, 0);
   sethvalue(L, &anchor_root.value, anchor);
   c = zgetc(p->z);  /* read first character */
   if (c == LUA_SIGNATURE[0]) {

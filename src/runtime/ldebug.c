@@ -283,7 +283,7 @@ static void collectvalidlines (lua_State *L, Closure *f) {
   else {
     const Proto *p = f->l.p;
     int currentline = p->linedefined;
-    Table *t = luaH_new(L);  /* new table to store active lines */
+    Table *t = luaH_new(L, 0, 0);  /* new table to store active lines */
     sethvalue2s(L, L->top.p, t);  /* push it on stack */
     api_incr_top(L);
     if (p->lineinfo != NULL) {  /* proto with debug information? */

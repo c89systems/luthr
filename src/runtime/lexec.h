@@ -19,7 +19,7 @@ typedef struct LuaApiRegion {
   struct LuaApiRegion *previous;
   lua_State *state;
 } LuaApiRegion;
-#define LUA_ALLOC_BINS 6
+#define LUA_ALLOC_BINS 8
 #define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)  /* ordinary storage and call frames */
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */

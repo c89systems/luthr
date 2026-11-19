@@ -820,7 +820,7 @@ static void open_func (LexState *ls, FuncState *fs, BlockCnt *bl) {
   f->source = ls->source;
   luaC_objbarrier(L, f, f->source);
   f->maxstacksize = 2;  /* registers 0/1 are always valid */
-  fs->kcache = luaH_new(L);  /* create table for function */
+  fs->kcache = luaH_new(L, 0, 0);  /* create table for function */
   luaD_anchorobj(L, ls->h, obj2gco(fs->kcache));  /* anchor it */
   enterblock(fs, bl, 0);
 }

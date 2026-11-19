@@ -116,7 +116,7 @@ l_mem luaC_objsize (GCObject *o) {
   lu_mem res;
   switch (o->tt) {
     case LUA_VTABLE: {
-      res = luaH_size(gco2t(o));
+      res = luaH_size(gco2t(o), gco2t(o));
       break;
     }
     case LUA_VLCL: {
@@ -408,7 +408,6 @@ void luaC_finishstrong (LuaTraceWork *work, GCObject *object) {
 */
 static void markmt (global_State *g) {
   int i;
-  CClosure *function;
   LuaCoroutineScope *scope;
   LuaTaskRoot *task;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
@@ -419,10 +418,6 @@ static void markmt (global_State *g) {
     markobject(g, scope->target);
   }
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-  for (i = 0; i < LUA_MANAGED_SHARDS; i++)
-    for (function = g->managed_functions[i]; function != NULL;
-         function = function->managed_next)
-      markobject(g, function);
   markobjectN(g, g->pipe_meta);
   for (i=0; i < LUA_NUMTYPES; i++)
     markobjectN(g, g->mt[i]);

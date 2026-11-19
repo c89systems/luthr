@@ -670,10 +670,12 @@ typedef struct Proto {
 #define LUA_VLCL	makevariant(LUA_TFUNCTION, 0)  /* Lua closure */
 #define LUA_VLCF	makevariant(LUA_TFUNCTION, 1)  /* light C function */
 #define LUA_VCCL	makevariant(LUA_TFUNCTION, 2)  /* C closure */
+#define LUA_VMCF	makevariant(LUA_TFUNCTION, 3)  /* managed light C function */
 
 #define ttisfunction(o)		checktype(o, LUA_TFUNCTION)
 #define ttisLclosure(o)		checktag((o), ctb(LUA_VLCL))
-#define ttislcf(o)		checktag((o), LUA_VLCF)
+#define tagislcf(t)		((t) == LUA_VLCF || (t) == LUA_VMCF)
+#define ttislcf(o)		tagislcf(rawtt(o))
 #define ttisCclosure(o)		checktag((o), ctb(LUA_VCCL))
 #define ttisclosure(o)         (ttisLclosure(o) || ttisCclosure(o))
 
@@ -696,6 +698,9 @@ typedef struct Proto {
 
 #define setfvalue(obj,x) \
   { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VLCF); }
+
+#define setmcfvalue(obj,x) \
+  { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VMCF); }
 
 #define setclCvalue(L,obj,x) \
   { TValue *io = (obj); CClosure *x_ = (x); \
@@ -730,9 +735,8 @@ typedef struct UpVal {
 
 typedef struct CClosure {
   ClosureHeader;
-  struct CClosure *managed_next;  /* canonical zero-capture runtime functions */
   lua_CFunction f;
-  uint64_t sequence;  /* split user values only; absent when nupvalues is zero */
+  uint64_t sequence;  /* split upvalues */
   TValue upvalue[1];  /* list of upvalues */
 } CClosure;
 
@@ -826,6 +830,7 @@ typedef struct Table {
   lu_byte weak_cleared;
   lu_byte weak_initial_cutoff;
   lu_byte writers_seen;  /* element writers since the last layout admission */
+  lu_byte inline_bytes;  /* immutable tail allocation, retained across resize */
 } Table;
 
 

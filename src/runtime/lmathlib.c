@@ -569,8 +569,7 @@ static RanState *random_enter (lua_State *L, LuaObjectScope *access) {
   Udata *owner;
   RanState *state;
   lua_lock(L);
-  if (!ttisCclosure(s2v(L->ci->func.p)) ||
-      clCvalue(s2v(L->ci->func.p))->nupvalues == 0) {
+  if (!ttisCclosure(s2v(L->ci->func.p))) {
     lua_unlock(L);
     luaL_error(L, "invalid random generator state");
     return NULL;

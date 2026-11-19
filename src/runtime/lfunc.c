@@ -31,11 +31,11 @@
 CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VCCL, sizeCclosure(nupvals));
   CClosure *c = gco2ccl(o);
+  lua_assert(nupvals > 0);
   luaA_initlock(&c->access);
   luaA_initsharing(L, c);
-  if (nupvals != 0) c->sequence = 0;
+  c->sequence = 0;
   c->managed = 0;
-  c->managed_next = NULL;
   c->nupvalues = cast_byte(nupvals);
   return c;
 }

@@ -192,7 +192,8 @@ static void *writer(void *argument) {
   return NULL;
 }
 
-static void retirement(lua_State *state, int pressure, unsigned readers) {
+static void retirement(lua_State *state, int pressure, unsigned readers,
+                       int inline_storage) {
   struct fixture test;
   lua_State *states[2];
   pthread_t threads[2], worker;
@@ -205,7 +206,9 @@ static void retirement(lua_State *state, int pressure, unsigned readers) {
   require(pthread_mutex_init(&test.mutex, NULL) == 0);
   require(pthread_cond_init(&test.changed, NULL) == 0);
   lua_gc(state, LUA_GCSTOP);
-  lua_createtable(state, 0, 2);
+  /* Keep the same two-node hash. Reserving array space forces independent
+   * backing buffers for the retirement and pressure cases. */
+  lua_createtable(state, inline_storage ? 0 : 8, 2);
   memset(key, 'a', sizeof(key));
   lua_pushlstring(state, key, sizeof(key));
   luaX_lockstate(state);
@@ -254,7 +257,8 @@ static void retirement(lua_State *state, int pressure, unsigned readers) {
   setivalue(&value, 84);
   luaH_set(state, table, &name, &value);
   luaHS_reclaim(state, LUAHS_ASSIST);
-  require(G(state)->world.storage_bytes != 0 || state->storage_bytes != 0);
+  require((G(state)->world.storage_bytes == 0 && state->storage_bytes == 0) ==
+          inline_storage);
   require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
   luaX_unlockstate(state);
   if (pressure) {
@@ -278,7 +282,7 @@ static void retirement(lua_State *state, int pressure, unsigned readers) {
     require(pthread_join(worker, NULL) == 0);
   luaX_lockstate(state);
   luaHS_reclaim(state, LUAHS_DRAIN);
-  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == !inline_storage);
   require(G(state)->world.storage_bytes == 0);
   luaX_unlockstate(state);
   watched = NULL;
@@ -307,12 +311,12 @@ static int fail_resize(lua_State *state) {
   luaX_unlockstate(state);
   return 0;
 }
-static void failure(lua_State *state, int hash) {
+static void failure(lua_State *state, int hash, int inline_storage) {
   struct allocator allocator;
   allocator.original = lua_getallocf(state, &allocator.context);
   allocator.deny = 0;
   lua_setallocf(state, allocate, &allocator);
-  lua_newtable(state);
+  lua_createtable(state, inline_storage ? 3 : 0, inline_storage ? 1 : 0);
   lua_pushinteger(state, 42);
   lua_rawseti(state, 1, 1);
   lua_pushinteger(state, 84);
@@ -631,15 +635,20 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "batching") == 0)
     batching(state);
   else if (strcmp(argv[1], "overlap") == 0)
-    retirement(state, 0, 2);
+    retirement(state, 0, 2, 0);
+  else if (strcmp(argv[1], "inline_overlap") == 0)
+    retirement(state, 0, 2, 1);
   else if (strcmp(argv[1], "retirement") == 0)
-    retirement(state, 0, 1);
+    retirement(state, 0, 1, 0);
   else if (strcmp(argv[1], "pressure") == 0)
-    retirement(state, 1, 1);
+    retirement(state, 1, 1, 0);
   else {
     require(strcmp(argv[1], "failure") == 0 ||
-            strcmp(argv[1], "hash_failure") == 0);
-    failure(state, strcmp(argv[1], "hash_failure") == 0);
+            strcmp(argv[1], "hash_failure") == 0 ||
+            strcmp(argv[1], "inline_array_failure") == 0 ||
+            strcmp(argv[1], "inline_hash_failure") == 0);
+    failure(state, strstr(argv[1], "hash") != NULL,
+            strncmp(argv[1], "inline_", 7) == 0);
   }
   lua_close(state);
   return 0;

@@ -643,9 +643,35 @@ static void marking_edges(void) {
   lua_close(L);
 }
 
+static int identity(lua_State *L) { return lua_gettop(L); }
+
+static void managed_function(int generational) {
+  lua_State *L = luaL_newstate();
+  unsigned before;
+  require(L != NULL);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  luaQ_pushmanaged(L, identity, 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_lock(L);
+  luaE_setdebt(G(L), 0);
+  lua_unlock(L);
+  before = stops;
+  luaQ_pushmanaged(L, identity, 0);
+  require(stops == before);
+  require(lua_rawequal(L, 1, 2));
+  lua_pushinteger(L, 42);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 42);
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   l_mem basic, overdue;
   require(argc == 2);
+  if (strncmp(argv[1], "managed_function_", 17) == 0) {
+    managed_function(strcmp(argv[1], "managed_function_generational") == 0);
+    return 0;
+  }
   if (strcmp(argv[1], "marking_edges") == 0) {
     marking_edges();
     return 0;

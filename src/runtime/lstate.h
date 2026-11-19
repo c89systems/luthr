@@ -180,7 +180,6 @@ typedef struct stringtable {
 
 #define LUA_STRING_SHARDS 32
 #define LUA_STRING_INITIAL_BUCKETS 4
-#define LUA_MANAGED_SHARDS 32
 
 
 /*
@@ -495,8 +494,6 @@ typedef struct global_State {
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */
-  CClosure *managed_functions[LUA_MANAGED_SHARDS];
-  LuaObjectLock managed_access[LUA_MANAGED_SHARDS];
   LuaObjectLock metatable_access[LUA_NUMTYPES];
   LuaObjectLock registry_access;
   LuaObjectLock warning_access;

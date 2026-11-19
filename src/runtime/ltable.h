@@ -144,11 +144,11 @@ LUAI_FUNC void luaH_setint (lua_State *L, Table *t, lua_Integer key,
 LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value);
 
-LUAI_FUNC Table *luaH_new (lua_State *L);
+LUAI_FUNC Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize);
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);
-LUAI_FUNC lu_mem luaH_size (Table *t);
+LUAI_FUNC lu_mem luaH_size (const Table *owner, Table *layout);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);

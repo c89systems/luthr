@@ -227,18 +227,18 @@ int luaT_callorderiTM (lua_State *L, const TValue *p1, int v2,
 */
 static void createvarargtab (lua_State *L, StkId f, int n) {
   int i;
+  ptrdiff_t args = savestack(L, f);
   TValue key, value;
-  Table *t = luaH_new(L);
+  Table *t = luaH_new(L, cast_uint(n), 1);
   sethvalue(L, s2v(L->top.p), t);
   L->top.p++;
-  luaH_resize(L, t, cast_uint(n), 1);
   setsvalue(L, &key, luaS_new(L, "n"));  /* key is "n" */
   setivalue(&value, n);  /* value is n */
   /* No need to anchor the key: Due to the resize, the next operation
      cannot trigger a garbage collection */
   luaH_set(L, t, &key, &value);  /* t.n = n */
   for (i = 0; i < n; i++)
-    luaH_setint(L, t, i + 1, s2v(f + i));
+    luaH_setint(L, t, i + 1, s2v(restorestack(L, args) + i));
   luaC_checkGC(L);
 }
 

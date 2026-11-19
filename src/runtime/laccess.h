@@ -34,8 +34,7 @@ l_sinline uint64_t *luaA_sequence (GCObject *object) {
   switch (object->tt) {
     case LUA_VTABLE: return &gco2t(object)->sequence;
     case LUA_VUPVAL: return &gco2upv(object)->sequence;
-    case LUA_VCCL:
-      return gco2ccl(object)->nupvalues ? &gco2ccl(object)->sequence : NULL;
+    case LUA_VCCL: return &gco2ccl(object)->sequence;
     case LUA_VUSERDATA:
       return gco2u(object)->nuvalue ? &gco2u(object)->sequence : NULL;
     default: return NULL;  /* individually atomic pointer fields */

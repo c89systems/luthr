@@ -306,7 +306,7 @@ int luaU_dump (lua_State *L, const Proto *f, lua_Writer w, void *data,
   luaR_pushroot(L, &D.roots[0]);
   setgcovalue(L, &D.roots[0].value, obj2gco(f));
   luaR_pushroot(L, &D.roots[1]);
-  D.h = luaH_new(L);  /* aux. table to keep strings already dumped */
+  D.h = luaH_new(L, 0, 0);  /* aux. table to keep strings already dumped */
   sethvalue(L, &D.roots[1].value, D.h);
   D.L = L;
   D.writer = w;

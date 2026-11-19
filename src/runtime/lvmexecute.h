@@ -189,25 +189,12 @@
         vmbreak;
       }
       vmcase(OP_NEWTABLE) {
-        StkId ra = readRA(i);
-        unsigned b = cast_uint(GETARG_vB(i));  /* log2(hash size) + 1 */
-        unsigned c = cast_uint(GETARG_vC(i));  /* array size */
-        Table *t;
-        if (b > 0)
-          b = 1u << (b - 1);  /* hash size is 2^(b - 1) */
-        if (TESTARG_k(i)) {  /* non-zero extra argument? */
-          lua_assert(GETARG_Ax(*pc) != 0);
-          /* add it to array size */
-          c += cast_uint(GETARG_Ax(*pc)) * (MAXARG_vC + 1);
-        }
-        pc++;  /* skip extra argument */
+        Instruction extra = *pc++;
+        readRA(i);  /* materialize a captured destination before allocation */
         savepc(ci);
-        L->top.p = ra + 1;  /* correct top in case of emergency GC */
-        t = luaH_new(L);  /* memory allocation */
-        sethvalue2s(L, ra, t);
-        if (b != 0 || c != 0)
-          luaH_resize(L, t, c, b);  /* idem */
-        checkGC(L, ra + 1);
+        createtable(L, ci, i, extra);
+        updatebase(ci);
+        updatetrap(ci);
         vmbreak;
       }
       vmcase(OP_SELF) {

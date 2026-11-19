@@ -753,7 +753,8 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
   luaX_valueenter(L);
   o = index2read(L, idx, &snapshot);
   switch (ttypetag(o)) {
-    case LUA_VLCF: result = cast_voidp(cast_sizet(fvalue(o))); break;
+    case LUA_VLCF: case LUA_VMCF:
+      result = cast_voidp(cast_sizet(fvalue(o))); break;
     case LUA_VUSERDATA: case LUA_VLIGHTUSERDATA:
       result = touserdata(o); break;
     default: {
@@ -871,16 +872,17 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 
 
 static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
-  int allocating = n != 0 || managed;
-  if (allocating) lua_lock(L);
-  else luaX_valueenter(L);
-  if (!allocating) {
-    setfvalue(s2v(L->top.p), fn);
+  if (n == 0) {
+    luaX_valueenter(L);
+    if (managed) { setmcfvalue(s2v(L->top.p), fn); }
+    else { setfvalue(s2v(L->top.p), fn); }
     api_incr_top(L);
+    luaX_valueleave(L);
   }
   else {
     int i;
     CClosure *cl;
+    lua_lock(L);
     api_checkpop(L, n);
     api_check(L, n <= MAXUPVAL, "upvalue index too large");
     cl = luaF_newCclosure(L, n);
@@ -894,9 +896,8 @@ static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
     setclCvalue(L, s2v(L->top.p), cl);
     api_incr_top(L);
     luaC_checkGC(L);
+    lua_unlock(L);
   }
-  if (allocating) lua_unlock(L);
-  else luaX_valueleave(L);
 }
 
 LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
@@ -904,32 +905,7 @@ LUA_API void lua_pushcclosure (lua_State *L, lua_CFunction fn, int n) {
 }
 
 void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
-  if (n != 0)
-    pushcclosure(L, fn, n, 1);
-  else {
-    CClosure *function;
-    LuaObjectScope access;
-    unsigned bucket = point2uint(fn) % LUA_MANAGED_SHARDS;
-    lua_lock(L);
-    luaA_beginlock(L, &G(L)->managed_access[bucket], &access);
-    for (function = G(L)->managed_functions[bucket]; function != NULL;
-         function = function->managed_next) {
-      if (function->f == fn) break;
-    }
-    if (function == NULL) {
-      function = luaF_newCclosure(L, 0);
-      function->f = fn;
-      function->managed = 1;
-      function->managed_next = G(L)->managed_functions[bucket];
-      luaA_share(L, obj2gco(function));
-      G(L)->managed_functions[bucket] = function;
-    }
-    setclCvalue(L, s2v(L->top.p), function);
-    api_incr_top(L);
-    luaA_end(L, &access);
-    luaC_checkGC(L);
-    lua_unlock(L);
-  }
+  pushcclosure(L, fn, n, 1);
 }
 
 
@@ -1192,11 +1168,10 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
 LUA_API void lua_createtable (lua_State *L, int narray, int nrec) {
   Table *t;
   lua_lock(L);
-  t = luaH_new(L);
+  t = luaH_new(L, narray > 0 ? cast_uint(narray) : 0,
+                  nrec > 0 ? cast_uint(nrec) : 0);
   sethvalue2s(L, L->top.p, t);
   api_incr_top(L);
-  if (narray > 0 || nrec > 0)
-    luaH_resize(L, t, cast_uint(narray), cast_uint(nrec));
   luaC_checkGC(L);
   lua_unlock(L);
 }
@@ -1931,7 +1906,7 @@ LUA_API void *lua_upvalueid (lua_State *L, int fidx, int n) {
         result = &f->upvalue[n - 1];
       break;
     }
-    case LUA_VLCF:
+    case LUA_VLCF: case LUA_VMCF:
       break;  /* light C functions have no upvalues */
     default: {
       api_check(L, 0, "function expected");

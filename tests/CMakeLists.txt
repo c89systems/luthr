@@ -178,6 +178,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_
   -Wl,--wrap=luaA_metafield)
 foreach(case IN ITEMS fast batching overlap retirement pressure failure hash_failure resume
+    inline_overlap inline_array_failure inline_hash_failure
     mixed_incremental mixed_generational writes_incremental writes_generational
     write_error_incremental write_error_generational retained_incremental retained_generational)
   add_test(NAME table_read_${case} COMMAND table_read_test ${case})
@@ -203,6 +204,7 @@ target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
   -Wl,--wrap=luaC_sweepbatch -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
+    managed_function_incremental managed_function_generational
     sweep_pressure sweep_poll_pressure sweep_credit cohort_promotion marking_edges born_black_incremental born_black_generational
     borrowed_incremental borrowed_generational bounded_incremental
     bounded_generational idle_incremental idle_generational
@@ -461,7 +463,7 @@ set_target_properties(object_layout_test PROPERTIES C_STANDARD 99)
 target_compile_options(object_layout_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(object_layout_test PRIVATE luthr_static)
 foreach(collector IN ITEMS incremental generational)
-  foreach(kind IN ITEMS closure capture cell managed userdata userdata_values)
+  foreach(kind IN ITEMS closure capture cell managed userdata userdata_values table_lua table_api)
     add_test(NAME object_layout_${kind}_${collector}
       COMMAND object_layout_test ${kind} ${collector})
     set_tests_properties(object_layout_${kind}_${collector} PROPERTIES

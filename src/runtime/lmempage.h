@@ -4,6 +4,7 @@
 
 #include "lua.h"
 #include "llimits.h"
+#include "lexec.h"
 #include <stdint.h>
 
 struct global_State;
@@ -74,7 +75,25 @@ LUAI_FUNC void luaMC_join (struct LuaAllocationCache *cache);
 #define LUA_ALLOC_PAGE_HEADER \
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
     * sizeof(LuaAllocBlock))
-#define luaMP_binbytes(bin) (cast_sizet(16) << (bin))
+#define LUA_ALLOC_MAX 512
+
+l_sinline size_t luaMP_binbytes (unsigned bin) {
+  static const unsigned short sizes[LUA_ALLOC_BINS] =
+    {16, 32, 64, 128, 160, 192, 256, LUA_ALLOC_MAX};
+  lua_assert(bin < LUA_ALLOC_BINS);
+  return sizes[bin];
+}
+
+/* Class lookup in 16-byte units. 160 and 192 keep a small table and its
+** initial storage together without rounding the combined object to 256. */
+l_sinline unsigned luaMP_sizeclass (size_t bytes) {
+  static const unsigned char bins[LUA_ALLOC_MAX / 16 + 1] = {
+    0, 0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+  };
+  lua_assert(bytes <= LUA_ALLOC_MAX);
+  return bins[(bytes + 15) / 16];
+}
 #define luaMP_retired(b) (((b)->block.page & 1u) != 0)
 #define luaMP_page(b) \
   cast(LuaAllocPage *, (b)->block.page & ~cast(uintptr_t, 1))

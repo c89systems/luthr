@@ -29,7 +29,7 @@ static struct {
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
 
-static void observe(int sweep) {
+static void observe(lua_State *L, int sweep) {
   LuaExecution *execution = luaQ_current();
   struct timespec deadline;
   int worker = execution != NULL && execution->task == NULL;
@@ -50,7 +50,10 @@ static void observe(int sweep) {
         require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
       probe.workers--;
     }
-  } else if (execution == NULL && probe.armed == 1) {
+  } else if (execution == NULL && probe.armed == 1 &&
+             (probe.entered || luaC_workerready(G(L)))) {
+    /* The driver may hold every ready root in its first batch. Let that
+     * batch publish its children before waiting for another scanner. */
     require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
     deadline.tv_sec += 10;
     while (!probe.entered)
@@ -64,12 +67,12 @@ static void observe(int sweep) {
 
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
-  observe(0);
+  observe(L, 0);
   __real_luaC_scantrace(L, work, limit);
 }
 void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __wrap_luaC_scansweep(lua_State *L, LuaSweepWork *work) {
-  observe(1);
+  observe(L, 1);
   __real_luaC_scansweep(L, work);
 }
 

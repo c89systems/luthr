@@ -311,10 +311,15 @@ static void unpin_carrier(LuaExecution *execution) {
 }
 static void poll(LuaExecution *execution, lua_State *state) {
   struct task *task = execution->context;
+  TValue *callee = s2v(state->ci->func.p);
+  lua_CFunction function = NULL;
   long carrier = syscall(SYS_gettid);
   int helper = -1, index, collect = 0;
-  if (!isLua(state->ci) && ttisCclosure(s2v(state->ci->func.p))) {
-    lua_CFunction function = clCvalue(s2v(state->ci->func.p))->f;
+  if (ttislcf(callee))
+    function = fvalue(callee);
+  else if (ttisCclosure(callee))
+    function = clCvalue(callee)->f;
+  if (function != NULL) {
     for (index = 0; index < task->pool->helper_count; ++index)
       if (function == task->pool->helper_work[index]) {
         helper = index;

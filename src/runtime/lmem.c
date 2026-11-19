@@ -798,21 +798,19 @@ void *luaM_alloccontrol (lua_State *L, size_t size) {
 
 static void *allocateblock (lua_State *L, size_t size, int tag,
                             unsigned poolbase) {
-  unsigned bin;
-  for (bin = 0; bin < LUA_ALLOC_BINS; bin++) {
-    if (size <= luaMP_binbytes(bin)) {
-      unsigned pool = bin + poolbase;
-      LuaAllocPage *page = allocationcache(L)->pages[pool];
-      LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
-      if (block == NULL) {
-        page = refill(L, bin, pool);
-        if (page == NULL) return NULL;
-        block = takeblock(page);
-        lua_assert(block != NULL);
-      }
-      account(L, -cast(l_mem, size));
-      return block + 1;
+  if (size <= LUA_ALLOC_MAX) {
+    unsigned bin = luaMP_sizeclass(size);
+    unsigned pool = bin + poolbase;
+    LuaAllocPage *page = allocationcache(L)->pages[pool];
+    LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
+    if (block == NULL) {
+      page = refill(L, bin, pool);
+      if (page == NULL) return NULL;
+      block = takeblock(page);
+      lua_assert(block != NULL);
     }
+    account(L, -cast(l_mem, size));
+    return block + 1;
   }
   return allocatebacking(L, size, tag);
 }

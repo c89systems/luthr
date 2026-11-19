@@ -666,9 +666,9 @@ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
            an external string  */
         return luaS_eqstr(tsvalue(t1), tsvalue(t2));
       }
+      case LUA_VLCF: case LUA_VMCF:
+        return ttislcf(t2) && fvalue(t1) == fvalue(t2);
       default:
-        /* only numbers (integer/float) and strings (long/short) can have
-           equal values with different variants */
         return 0;
     }
   }
@@ -695,7 +695,7 @@ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
         else if (L == NULL) return 0;
         return equalmethod(L, t1, t2);
       }
-      case LUA_VLCF:
+      case LUA_VLCF: case LUA_VMCF:
         return (fvalue(t1) == fvalue(t2));
       default:  /* functions and threads */
         return (gcvalue(t1) == gcvalue(t2));
@@ -1405,6 +1405,25 @@ l_sinline StkId directregister (StkId base, int reg) {
 	  luaC_condGC(L, (void)0, (void)0); \
 	  luaX_pollrequests(L); updatebase(ci); updatetrap(ci); }
 
+/* Allocation can park and relocate registers. Keep this operation out of
+** both dispatch loops, with the destination recoverable from the saved top. */
+static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
+                                                 Instruction i, Instruction extra) {
+  unsigned hash = cast_uint(GETARG_vB(i));
+  unsigned array = cast_uint(GETARG_vC(i));
+  Table *table;
+  if (hash != 0) hash = 1u << (hash - 1);  /* log2(hash size) + 1 */
+  if (TESTARG_k(i)) {
+    lua_assert(GETARG_Ax(extra) != 0);
+    array += cast_uint(GETARG_Ax(extra)) * (MAXARG_vC + 1);
+  }
+  L->top.p = ci->func.p + 2 + GETARG_A(i);
+  table = luaH_new(L, array, hash);
+  sethvalue2s(L, L->top.p - 1, table);
+  luaC_condGC(L, (void)0, (void)0);
+  luaX_pollrequests(L);
+}
+
 
 /* Open cells are ordered by descending stack level. Captures in callers do
 ** not require register synchronization in an uncaptured executing frame. */
@@ -1531,6 +1550,10 @@ static unsigned executecaptured (lua_State *L, Instruction i,
 }
 
 
+#if LUA_USE_JUMPTABLE && defined(__GNUC__) && !defined(__clang__)
+/* Keep the computed-goto dispatch sites distinct under GCC. */
+__attribute__((optimize("no-gcse")))
+#endif
 void luaV_execute (lua_State *L, CallInfo *ci) {
   LClosure *cl;
   TValue *k;

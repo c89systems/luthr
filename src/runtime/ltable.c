@@ -215,7 +215,7 @@ static Node *mainpositionTV (const Table *t, const TValue *key) {
       void *p = pvalue(key);
       return hashpointer(t, p);
     }
-    case LUA_VLCF: {
+    case LUA_VLCF: case LUA_VMCF: {
       lua_CFunction f = fvalue(key);
       return hashpointer(t, f);
     }
@@ -259,6 +259,8 @@ static int equalkey (const TValue *k1, const Node *n2, int deadok) {
       /* an external string can be equal to a short-string key */
       return luaS_eqstr(tsvalue(k1), keystrval(n2));
     }
+    else if (tagislcf(keytt(n2)) && ttislcf(k1))
+      return fvalue(k1) == fvalueraw(keyval(n2));
     else if (deadok && keyisdead(n2) && iscollectable(k1)) {
       /* a collectable value can be equal to a dead key */
       return gcvalue(k1) == gcvalueraw(keyval(n2));
@@ -276,7 +278,7 @@ static int equalkey (const TValue *k1, const Node *n2, int deadok) {
         return luai_numeq(fltvalue(k1), fltvalueraw(keyval(n2)));
       case LUA_VLIGHTUSERDATA:
         return pvalue(k1) == pvalueraw(keyval(n2));
-      case LUA_VLCF:
+      case LUA_VLCF: case LUA_VMCF:
         return fvalue(k1) == fvalueraw(keyval(n2));
       case ctb(LUA_VLNGSTR):
         return luaS_eqstr(tsvalue(k1), keystrval(n2));
@@ -393,13 +395,19 @@ static size_t sizehash (Table *t) {
   return cast_sizet(sizenode(t)) * sizeof(Node) + extraLastfree(t);
 }
 
+static char *hashbase (Table *t) {
+  return cast_charp(t->node) - extraLastfree(t);
+}
+
+/* A displaced inline image stays allocated with its owner. Existing readers
+** can validate their layout sequence even after the owner resizes. */
+static int separate (const Table *owner, const void *base) {
+  return cast(uintptr_t, base) - cast(uintptr_t, owner + 1) >= owner->inline_bytes;
+}
 
 static void freehash (lua_State *L, Table *t) {
-  if (!isdummy(t)) {
-    /* get pointer to the beginning of Node array */
-    char *arr = cast_charp(t->node) - extraLastfree(t);
-    luaM_freemem(L, arr, sizehash(t));
-  }
+  if (!isdummy(t) && separate(t, hashbase(t)))
+    luaM_freemem(L, hashbase(t), sizehash(t));
 }
 
 
@@ -554,26 +562,18 @@ static size_t concretesize (unsigned int size) {
 
 
 /*
-** Resize the array part of a table. If new size is equal to the old,
-** do nothing. Else, if new size is zero, free the old array. (It must
-** be present, as the sizes are different.) Otherwise, allocate a new
-** array, move the common elements to new proper position, and then
-** frees the old array.
+** Prepare a replacement array, leaving the old image readable until the
+** layout commits. A resize to zero requires no backing allocation.
 ** We could reallocate the array, but we still would need to move the
 ** elements to their new position, so the copy implicit in realloc is a
 ** waste. Moreover, most allocators will move the array anyway when the
 ** new size is double the old one (the most common case).
 */
-static Value *resizearray (lua_State *L , Table *t,
-                               unsigned oldasize,
-                               unsigned newasize, int keepold) {
+static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
+                           unsigned newasize) {
   if (oldasize == newasize)
     return t->array;  /* nothing to be done */
-  else if (newasize == 0) {  /* erasing array? */
-    Value *op = t->array - oldasize;  /* original array's real address */
-    if (!keepold) luaM_freemem(L, op, concretesize(oldasize));
-    return NULL;
-  }
+  else if (newasize == 0) return NULL;
   else {
     size_t newasizeb = concretesize(newasize);
     Value *np = cast(Value *,
@@ -589,7 +589,6 @@ static Value *resizearray (lua_State *L , Table *t,
       size_t tomoveb = (oldasize < newasize) ? oldasizeb : newasizeb;
       lua_assert(tomoveb > 0);
       memcpy(np - tomove, op - tomove, tomoveb);
-      if (!keepold) luaM_freemem(L, op - oldasize, oldasizeb);
     }
     return np;
   }
@@ -603,7 +602,7 @@ static Value *resizearray (lua_State *L , Table *t,
 ** comparison ensures that the shift in the second one does not
 ** overflow.
 */
-static int setnodevector (lua_State *L, Table *t, int lsize) {
+static void initnodes (Table *t, char *storage, int lsize) {
   if (lsize < 0) {  /* no elements to hash part? */
     __atomic_store_n(&t->node, cast(Node *, dummynode), __ATOMIC_RELEASE);
     __atomic_store_n(&t->lsizenode, 0, __ATOMIC_RELEASE);
@@ -612,19 +611,10 @@ static int setnodevector (lua_State *L, Table *t, int lsize) {
   else {
     int i;
     unsigned size = twoto(lsize);
-    if (lsize < LIMFORLAST) {  /* no 'lastfree' field? */
-      Node *nodes = luaM_realloc_(L, NULL, 0, size * sizeof(Node));
-      if (nodes == NULL) return 0;
-      __atomic_store_n(&t->node,
-        nodes, __ATOMIC_RELEASE);
-    }
-    else {
-      size_t bsize = size * sizeof(Node) + sizeof(Limbox);
-      char *node = luaM_realloc_(L, NULL, 0, bsize);
-      if (node == NULL) return 0;
-      __atomic_store_n(&t->node, cast(Node *, node + sizeof(Limbox)), __ATOMIC_RELEASE);
+    size_t offset = lsize >= LIMFORLAST ? sizeof(Limbox) : 0;
+    __atomic_store_n(&t->node, cast(Node *, storage + offset), __ATOMIC_RELEASE);
+    if (offset != 0)
       getlastfree(t) = gnode(t, size);  /* all positions are free */
-    }
     __atomic_store_n(&t->lsizenode, cast_byte(lsize), __ATOMIC_RELEASE);
     setnodummy(t);
     for (i = 0; i < cast_int(size); i++) {
@@ -634,6 +624,21 @@ static int setnodevector (lua_State *L, Table *t, int lsize) {
       setempty(gval(n));
     }
   }
+}
+
+static size_t nodebytes (int lsize) {
+  if (lsize < 0) return 0;
+  return cast_sizet(twoto(lsize)) * sizeof(Node) +
+         (lsize >= LIMFORLAST ? sizeof(Limbox) : 0);
+}
+
+static int setnodevector (lua_State *L, Table *t, int lsize) {
+  char *storage = NULL;
+  if (lsize >= 0) {
+    storage = luaM_realloc_(L, NULL, 0, nodebytes(lsize));
+    if (storage == NULL) return 0;
+  }
+  initnodes(t, storage, lsize);
   return 1;
 }
 
@@ -727,6 +732,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   unsigned oldasize;
   Value *newarray;
   Value *oldarray = t->array;
+  void *retired_array, *retired_nodes;
   LuaTableRetirement *retirement = NULL;
   int lsize = nhsize == 0 ? -1 : luaO_ceillog2(nhsize);
   luaHS_reclaim(L, LUAHS_ASSIST);
@@ -738,13 +744,17 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     luaG_runerror(L, "table overflow");
   /* create new hash part with appropriate size into 'newt' */
   newt.flags = 0;
+  newt.inline_bytes = 0;
   newt.array = t->array;
   newt.asize = oldasize;
   newt.node = NULL;
   luaR_pushroot(L, &image);
   image.table_view = &newt;
   luaC_traceview(L, &newt);
-  if ((oldasize != newasize && oldasize != 0) || !isdummy(t))
+  retired_array = oldasize != newasize && oldasize != 0 &&
+                  separate(t, oldarray - oldasize) ? oldarray - oldasize : NULL;
+  retired_nodes = !isdummy(t) && separate(t, hashbase(t)) ? hashbase(t) : NULL;
+  if (retired_array != NULL || retired_nodes != NULL)
     retirement = luaM_new(L, LuaTableRetirement);
   /* Once the descriptor exists, allocations report failure without throwing:
   ** every error releases it and leaves the original image installed. */
@@ -760,7 +770,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     exchangehashpart(t, &newt);  /* restore old hash (in case of errors) */
   }
   /* allocate new array */
-  newarray = resizearray(L, t, oldasize, newasize, 1);
+  newarray = resizearray(L, t, oldasize, newasize);
   newt.array = NULL;
   newt.asize = 0;
   if (l_unlikely(newarray == NULL && newasize > 0)) {  /* allocation failed? */
@@ -779,11 +789,9 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
   if (retirement != NULL) {
-    retirement->array = oldasize != newasize && oldasize != 0
-      ? oldarray - oldasize : NULL;
+    retirement->array = retired_array;
     retirement->array_bytes = retirement->array != NULL ? concretesize(oldasize) : 0;
-    retirement->nodes = !isdummy(&newt)
-      ? cast_charp(newt.node) - extraLastfree(&newt) : NULL;
+    retirement->nodes = retired_nodes;
     retirement->node_bytes = retirement->nodes != NULL ? sizehash(&newt) : 0;
     luaHS_publish(L, retirement);
   }
@@ -839,9 +847,32 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
 */
 
 
-Table *luaH_new (lua_State *L) {
-  GCObject *o = luaC_newobj(L, LUA_VTABLE, sizeof(Table));
-  Table *t = gco2t(o);
+enum { INLINE_TABLE_LIMIT = 192 };
+_Static_assert(sizeof(Table) <= INLINE_TABLE_LIMIT &&
+               INLINE_TABLE_LIMIT <= UCHAR_MAX, "inline table size");
+_Static_assert(sizeof(Table) % _Alignof(Value) == 0 &&
+               sizeof(Table) % _Alignof(Node) == 0 &&
+               sizeof(Value) % _Alignof(Node) == 0, "inline table alignment");
+
+Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
+  const size_t limit = INLINE_TABLE_LIMIT - sizeof(Table);
+  size_t bytes = 0, arraybytes = 0;
+  int lsize = -1;
+  GCObject *o;
+  Table *t;
+  /* A small empty layout can be fully initialized before another execution
+  ** can see it. Its construction needs neither a layout lock nor retirement. */
+  if (asize <= limit / (sizeof(Value) + 1) && hsize <= limit / sizeof(Node)) {
+    size_t hashbytes;
+    lsize = hsize != 0 ? luaO_ceillog2(hsize) : -1;
+    hashbytes = nodebytes(lsize);
+    arraybytes = concretesize(asize);
+    if (hashbytes != 0)
+      arraybytes = (arraybytes + sizeof(Value) - 1) & ~(sizeof(Value) - 1);
+    if (arraybytes + hashbytes <= limit) bytes = arraybytes + hashbytes;
+  }
+  o = luaC_newobj(L, LUA_VTABLE, sizeof(Table) + bytes);
+  t = gco2t(o);
   luaA_initlock(&t->access);
   luaA_initsharing(L, t);
   t->sequence = 0;
@@ -852,17 +883,36 @@ Table *luaH_new (lua_State *L) {
   t->weak_cleared = 0;
   t->weak_initial_cutoff = 0;
   t->writers_seen = 0;
+  t->inline_bytes = cast_byte(bytes);
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
   t->asize = 0;
-  setnodevector(L, t, -1);
+  if (bytes != 0) {
+    char *storage = cast_charp(t + 1);
+    if (asize != 0) {
+      t->array = cast(Value *, storage) + asize;
+      t->asize = asize;
+      *lenhint(t) = asize / 2u;
+      memset(getArrTag(t, 0), LUA_VEMPTY, asize);
+    }
+    initnodes(t, storage + arraybytes, lsize);
+  }
+  else {
+    initnodes(t, NULL, -1);
+    if (asize != 0 || hsize != 0) {
+      /* luaH_resize roots its receiver across larger backing allocations. */
+      luaH_resize(L, t, asize, hsize);
+    }
+  }
   return t;
 }
 
 
-lu_mem luaH_size (Table *t) {
-  lu_mem sz = cast(lu_mem, sizeof(Table)) + concretesize(t->asize);
-  if (!isdummy(t))
+lu_mem luaH_size (const Table *owner, Table *t) {
+  lu_mem sz = cast(lu_mem, sizeof(Table) + owner->inline_bytes);
+  if (t->asize != 0 && separate(owner, t->array - t->asize))
+    sz += concretesize(t->asize);
+  if (!isdummy(t) && separate(owner, hashbase(t)))
     sz += sizehash(t);
   return sz;
 }
@@ -872,18 +922,19 @@ lu_mem luaH_size (Table *t) {
 ** Frees a table.
 */
 void luaH_retire (lua_State *L, Table *t) {
-  if (!isdummy(t))
-    luaM_retire_(L, cast_charp(t->node) - extraLastfree(t), sizehash(t));
-  if (t->asize != 0)
+  if (!isdummy(t) && separate(t, hashbase(t)))
+    luaM_retire_(L, hashbase(t), sizehash(t));
+  if (t->asize != 0 && separate(t, t->array - t->asize))
     luaM_retire_(L, t->array - t->asize, concretesize(t->asize));
-  luaM_retire_(L, t, sizeof(*t));
+  luaM_retire_(L, t, sizeof(*t) + t->inline_bytes);
 }
 
 void luaH_free (lua_State *L, Table *t) {
   lua_assert(t->access.depth == 0);
   freehash(L, t);
-  resizearray(L, t, t->asize, 0, 0);
-  luaM_free(L, t);
+  if (t->asize != 0 && separate(t, t->array - t->asize))
+    luaM_freemem(L, t->array - t->asize, concretesize(t->asize));
+  luaM_freemem(L, t, sizeof(*t) + t->inline_bytes);
 }
 
 
