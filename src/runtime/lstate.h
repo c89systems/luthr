@@ -684,6 +684,12 @@ l_sinline void *luaX_token (lua_State *L) {
 l_sinline int luaX_isowner (lua_State *L, const LuaOwner *owner) {
   return __atomic_load_n(&owner->token, __ATOMIC_ACQUIRE) == luaX_token(L);
 }
+
+l_sinline int luaW_ownsheap (lua_State *L) {
+  void *owner = __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE);
+  return owner != NULL && owner == luaX_token(L);
+}
+
 LUAI_FUNC void luaE_nativestackerror (lua_State *L, uintptr_t position);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);

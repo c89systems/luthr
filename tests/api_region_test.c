@@ -1,4 +1,5 @@
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lexec.h>
 #include <lstate.h>
 #include <lualib.h>
@@ -53,6 +54,41 @@ static void check_api(lua_State *state, int foreign) {
 static int owned(lua_State *state) {
   check_api(state, 0);
   return 0;
+}
+
+static int owned_without_metadata(lua_State *state) {
+  LuaWorldScope scope = luaW_scope(state);
+  require(scope.heap == 0 && scope.collection == 0);
+  check_api(state, 0);
+  lua_pushinteger(state, 42);
+  return 1;
+}
+
+static void metadata(lua_State *state) {
+  unsigned stops;
+  for (stops = 0; stops <= 2; stops += 2) {
+    LuaWorldScope restored;
+    luaQ_pushmanaged(state, owned_without_metadata, 0);
+    luaX_lockstate(state);
+    luaW_heapenter(state);
+    luaW_heapenter(state);
+    if (stops != 0) {
+      luaW_stop(state);
+      luaW_stop(state);
+    }
+    luaD_call(state, state->top.p - 1, 1);
+    restored = luaW_scope(state);
+    require(restored.heap == 2 && restored.collection == stops);
+    if (stops != 0) {
+      luaW_start(state);
+      luaW_start(state);
+    }
+    luaW_heapleave(state);
+    luaW_heapleave(state);
+    luaX_unlockstate(state);
+    require(lua_tointeger(state, -1) == 42);
+    lua_pop(state, 1);
+  }
 }
 
 static int foreign(lua_State *state) {
@@ -124,6 +160,13 @@ int main(int argc, char **argv) {
   luaL_openlibs(state);
   if (strstr(argv[1], "generational") != NULL)
     lua_gc(state, LUA_GCGEN);
+  if (strncmp(argv[1], "metadata_", 9) == 0) {
+    metadata(state);
+    require(checks == 2 && state->native_depth == 0);
+    require(luaE_getnativestackcontext()->api_region == NULL);
+    lua_close(state);
+    return 0;
+  }
   if (strncmp(argv[1], "managed_", 8) == 0) {
     function = owned;
     source = "probe(); probe(); collectgarbage('collect'); probe()";

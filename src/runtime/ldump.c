@@ -16,6 +16,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "lcall.h"
 #include "ldo.h"
 #include "lgc.h"
 #include "lobject.h"
@@ -55,13 +56,11 @@ typedef struct {
 */
 static void dumpBlock (DumpState *D, const void *b, size_t size) {
   if (D->status == 0) {  /* do not write anything after an error */
-    LuaWorldScope depth;
     LuaCallScope call;
     luaQ_begincall(D->L, D->managed, &call);
-    depth = luaQ_entercall(D->L, &call);
+    luaQ_entercall(D->L, &call);
     D->status = (*D->writer)(D->L, b, size, D->data);
-    luaQ_leavecall(D->L, &call, depth);
-    luaQ_endcall(D->L, &call);
+    luaQ_leavecall(D->L, &call);
     D->offset += size;
   }
 }

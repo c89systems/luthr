@@ -15,6 +15,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "lcall.h"
 #include "llimits.h"
 #include "lmem.h"
 #include "lstate.h"
@@ -25,13 +26,11 @@ int luaZ_fill (ZIO *z) {
   size_t size;
   lua_State *L = z->L;
   const char *buff;
-  LuaWorldScope depth;
   LuaCallScope call;
   luaQ_begincall(L, z->managed, &call);
-  depth = luaQ_entercall(L, &call);
+  luaQ_entercall(L, &call);
   buff = z->reader(L, z->data, &size);
-  luaQ_leavecall(L, &call, depth);
-  luaQ_endcall(L, &call);
+  luaQ_leavecall(L, &call);
   if (buff == NULL || size == 0) {
     z->n = 0; z->p = NULL;
     return EOZ;

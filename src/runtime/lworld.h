@@ -38,12 +38,6 @@ typedef struct LuaWorld {
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
 } LuaWorld;
 
-typedef struct LuaWorldScope {
-  unsigned collection;
-  unsigned heap;
-  LuaApiRegion *api_region;  /* detached activation, restored only on attach */
-} LuaWorldScope;
-
 LUAI_FUNC int luaW_init (struct global_State *g);
 LUAI_FUNC void luaW_destroy (struct global_State *g);
 LUAI_FUNC void luaW_register (lua_State *L);

@@ -428,7 +428,7 @@ void luaW_heapleave (lua_State *L) {
 
 static unsigned heapdepth (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  return luaX_isowner(L, &world->heap_owner) ? world->heap_depth : 0;
+  return luaW_ownsheap(L) ? world->heap_depth : 0;
 }
 
 void luaW_waitcollector (lua_State *L) {
@@ -469,11 +469,13 @@ LuaWorldScope luaW_scope (lua_State *L) {
 
 LuaWorldScope luaW_suspend (lua_State *L) {
   LuaWorldScope scope = luaW_scope(L);
+  unsigned remaining = scope.heap;
   if (scope.collection != 0) {
     L->world_depth = 1;
     luaW_start(L);
   }
-  restoreheap(L, 0);
+  while (remaining-- != 0)
+    luaW_heapleave(L);
   return scope;
 }
 

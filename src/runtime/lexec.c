@@ -102,59 +102,6 @@ void luaQ_endnative (lua_State *L, LuaExecution *execution) {
   }
 }
 
-void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
-  LuaExecution *execution = luaX_execution(L);
-  scope->execution = execution;
-  scope->managed = managed;
-  if (!managed) luaQ_beginnative(L, execution);
-  else if (execution != NULL) {
-    scope->previous = execution->trusted;
-    scope->native_depth = execution->native_depth;
-    execution->trusted = scope;
-  }
-}
-
-void luaQ_endcall (lua_State *L, LuaCallScope *scope) {
-  if (!scope->managed) luaQ_endnative(L, scope->execution);
-  else if (scope->execution != NULL) {
-    lua_assert(scope->execution == luaX_execution(L) &&
-               scope->execution->trusted == scope);
-    scope->execution->trusted = scope->previous;
-  }
-}
-
-LuaWorldScope luaQ_entercall (lua_State *L, LuaCallScope *scope) {
-  LuaWorldScope world;
-  NativeStackContext *context;
-  if (!scope->managed) return luaW_detach(L);
-#if defined(LUAI_ASSERT)
-  {
-    LuaObjectScope *object;
-    for (object = L->object_scopes; object != NULL; object = object->previous)
-      lua_assert(!object->held);
-  }
-#endif
-  L->native_depth++;
-  world = luaW_suspend(L);  /* callbacks cannot inherit global ownership */
-  context = luaX_context(L);
-  scope->api.previous = context->api_region;
-  scope->api.state = L;
-  context->api_region = &scope->api;
-  return world;
-}
-
-void luaQ_leavecall (lua_State *L, LuaCallScope *scope, LuaWorldScope world) {
-  if (!scope->managed) luaW_attach(L, world);
-  else {
-    NativeStackContext *context = luaX_context(L);
-    lua_assert(context->api_region == &scope->api &&
-               L->native_depth != 0);
-    context->api_region = scope->api.previous;
-    luaW_restore(L, world, L->native_depth);
-    L->native_depth--;
-  }
-}
-
 void luaQ_restorenative (LuaExecution *execution, lua_State *L, unsigned depth) {
   if (execution != NULL) {
     unsigned previous = execution->native_depth;

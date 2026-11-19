@@ -150,7 +150,8 @@ endforeach()
 
 foreach(case IN ITEMS managed_incremental managed_generational foreign_incremental
     foreign_generational nested_incremental nested_generational yield_incremental yield_generational
-    handoff_incremental handoff_generational collection_incremental collection_generational)
+    handoff_incremental handoff_generational collection_incremental collection_generational
+    metadata_incremental metadata_generational)
   add_test(NAME api_region_${case} COMMAND api_region_test ${case})
   set_tests_properties(api_region_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

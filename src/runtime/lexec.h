@@ -11,7 +11,6 @@
 struct lua_longjmp;
 struct LuaWaiter;
 struct LuaTaskRoot;
-struct LuaWorldScope;
 
 /* An attached runtime C activation owns its state across API calls. The
 ** record lives on the logical execution's retained C stack. */
@@ -19,6 +18,12 @@ typedef struct LuaApiRegion {
   struct LuaApiRegion *previous;
   lua_State *state;
 } LuaApiRegion;
+
+typedef struct LuaWorldScope {
+  unsigned collection;
+  unsigned heap;
+  LuaApiRegion *api_region;  /* detached activation, restored only on attach */
+} LuaWorldScope;
 #define LUA_ALLOC_BINS 8
 #define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)  /* ordinary storage and call frames */
 typedef struct LuaAllocationCache {
@@ -41,6 +46,7 @@ typedef struct LuaCallScope {
   unsigned native_depth;
   int managed;
   LuaApiRegion api;
+  LuaWorldScope world;
 } LuaCallScope;
 
 typedef struct LuaExecution {
@@ -128,11 +134,6 @@ LUAI_FUNC void luaQ_leavemanaged (LuaExecution *execution);
 ** its bound execution or the ambient driver; L may be NULL at that boundary. */
 LUAI_FUNC void luaQ_beginnative (lua_State *L, LuaExecution *execution);
 LUAI_FUNC void luaQ_endnative (lua_State *L, LuaExecution *execution);
-LUAI_FUNC void luaQ_begincall (lua_State *, int managed, LuaCallScope *);
-LUAI_FUNC void luaQ_endcall (lua_State *, LuaCallScope *);
-LUAI_FUNC struct LuaWorldScope luaQ_entercall (lua_State *, LuaCallScope *);
-LUAI_FUNC void luaQ_leavecall (lua_State *, LuaCallScope *,
-                              struct LuaWorldScope);
 LUAI_FUNC void luaQ_restorenative (LuaExecution *execution, lua_State *L,
                                   unsigned depth);
 LUAI_FUNC void luaQ_poll (lua_State *L);
