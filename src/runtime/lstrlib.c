@@ -28,6 +28,7 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lauxowned.h"
+#include "lbuiltin.h"
 #include "ldo.h"
 #include "lexec.h"
 #include "lfunc.h"
@@ -168,6 +169,40 @@ static size_t endpos (lua_Integer pos, size_t len) {
   else return len + (size_t)pos + 1;
 }
 
+int luaB_leafrange (lua_State *L, StkId func, int nargs, int bytes,
+                    TValue *result) {
+  const char *source;
+  size_t len, start, end;
+  lua_Integer first = 1, last;
+  if (nargs < 1 || !ttisstring(s2v(func + 1)))
+    return -1;
+  if (nargs >= 2 && !ttisnil(s2v(func + 2))) {
+    if (!ttisinteger(s2v(func + 2))) return -1;
+    first = ivalue(s2v(func + 2));
+  }
+  else if (!bytes)
+    return -1;
+  last = bytes ? first : -1;
+  if (nargs >= 3 && !ttisnil(s2v(func + 3))) {
+    if (!ttisinteger(s2v(func + 3))) return -1;
+    last = ivalue(s2v(func + 3));
+  }
+  source = getlstr(tsvalue(s2v(func + 1)), len);
+  start = posrelatI(first, len);
+  end = endpos(last, len);
+  if (start < end) return -1;
+  if (bytes) {
+    if (start > end) return 0;
+    setivalue(result, cast_uchar(source[start - 1]));
+  }
+  else {
+    TString *ts = start > end ? &G(L)->empty_string
+                              : &G(L)->byte_strings[cast_uchar(source[start - 1])];
+    setsvalue(L, result, ts);
+  }
+  return 1;
+}
+
 /* Read a position from the owned frame. Use the public checker to report
 ** coercion errors after releasing the gate, allowing traceback callbacks. */
 static lua_Integer readposition (lua_State *L, int arg, int optional,
@@ -206,7 +241,7 @@ static const char *readrange (lua_State *L, LuaNativeRoot *root, int bytes,
   return source;
 }
 
-static int str_sub (lua_State *L) {
+int luaB_strsub (lua_State *L) {
   LuaNativeRoot root;
   unsigned work = 0;
   size_t start, end;
@@ -306,7 +341,7 @@ static int str_rep (lua_State *L) {
 }
 
 
-static int str_byte (lua_State *L) {
+int luaB_strbyte (lua_State *L) {
   LuaNativeRoot root;
   unsigned work = 0;
   size_t start, end;
@@ -2244,7 +2279,7 @@ static int str_unpack (lua_State *L) {
 
 
 static const luaL_Reg strlib[] = {
-  {"byte", str_byte},
+  {"byte", luaB_strbyte},
   {"char", str_char},
   {"dump", str_dump},
   {"find", str_find},
@@ -2256,7 +2291,7 @@ static const luaL_Reg strlib[] = {
   {"match", str_match},
   {"rep", str_rep},
   {"reverse", str_reverse},
-  {"sub", str_sub},
+  {"sub", luaB_strsub},
   {"upper", str_upper},
   {"pack", str_pack},
   {"packsize", str_packsize},

@@ -275,7 +275,7 @@ static int equalkey (const TValue *k1, const Node *n2, int deadok) {
         return luai_numeq(fltvalue(k1), fltvalueraw(keyval(n2)));
       case LUA_VLIGHTUSERDATA:
         return pvalue(k1) == pvalueraw(keyval(n2));
-      case LUA_VLCF: case LUA_VMCF:
+      case LUA_VLCF: case LUA_VMCF: case LUA_VBCF:
         return fvalue(k1) == fvalueraw(keyval(n2));
       case ctb(LUA_VLNGSTR):
         return luaS_eqstr(tsvalue(k1), keystrval(n2));

@@ -252,7 +252,9 @@ static void create_tasks(struct fixture *test) {
             "if xcatching then while true do xpcall(function() while true do "
             "end "
             "end,handler) end end; "
-            "local n=0; while true do n=n+1 end end") == LUA_OK);
+            "local n=0; if leaf then local abs=math.abs; "
+            "while true do n=abs(-n-1) end end; "
+            "while true do n=n+1 end end") == LUA_OK);
     lua_pushvalue(state, -2);
     require(lua_pcall(state, 1, 1, 0) == LUA_OK);
   }
@@ -491,6 +493,8 @@ static void *run(void *context) {
   lua_setglobal(state, "catching");
   lua_pushboolean(state, strstr(test->mode, "xpcall") != NULL);
   lua_setglobal(state, "xcatching");
+  lua_pushboolean(state, strstr(test->mode, "leaf") != NULL);
+  lua_setglobal(state, "leaf");
   lua_pushboolean(state, strstr(test->mode, "cleanup_error") != NULL);
   lua_setglobal(state, "cleanup_fail");
   execute(state, "pending='--'..string.rep(' ',8192)..'\\nreturn 42'; "

@@ -18,6 +18,7 @@
 
 #include "lapi.h"
 #include "laccess.h"
+#include "lbuiltin.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -873,7 +874,7 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
   if (n == 0) {
     luaX_valueenter(L);
-    if (managed) { setmcfvalue(s2v(L->top.p), fn); }
+    if (managed) { setmcfvalue(s2v(L->top.p), fn, luaB_isleaf(fn)); }
     else { setfvalue(s2v(L->top.p), fn); }
     api_incr_top(L);
     luaX_valueleave(L);

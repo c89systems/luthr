@@ -17,6 +17,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "lbuiltin.h"
 #include "lcall.h"
 #include "laccess.h"
 #include "lroots.h"
@@ -818,7 +819,7 @@ l_sinline CallInfo *prepCallInfo (lua_State *L, StkId func, unsigned status,
 
 
 l_sinline int managedCfunction (const TValue *function) {
-  return checktag(function, LUA_VMCF) ||
+  return ttypetag(function) == LUA_VMCF ||
          (ttisCclosure(function) && clCvalue(function)->managed);
 }
 
@@ -847,6 +848,45 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   return n;
 }
 
+/* An eligible builtin finishes in its caller's frame. Hooks, captured
+** results, coercions and allocating calls need the regular C activation. */
+static int __attribute__((noinline)) precallbuiltin (lua_State *L, StkId func,
+                                                     unsigned status) {
+  lua_CFunction f = fvalue(s2v(func));
+  int wanted = get_nresults(status);
+  int nargs, n;
+  TValue value;
+  lua_assert(luaB_isleaf(f));
+  if (!isLua(L->ci) || wanted > 1 || gethookmask(L) ||
+      (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
+    return precallC(L, func, status, f, 1);
+  nargs = cast_int(L->top.p - func) - 1;
+  if (f == luaB_mathabs) {
+    if (nargs < 1 || !ttisinteger(s2v(func + 1)))
+      return precallC(L, func, status, f, 1);
+    setivalue(&value, luaB_absinteger(ivalue(s2v(func + 1))));
+    n = 1;
+  }
+  else
+    n = luaB_leafrange(L, func, nargs, f == luaB_strbyte, &value);
+  if (n < 0 || l_unlikely(gethookmask(L)))
+    return precallC(L, func, status, f, 1);
+  if (wanted == LUA_MULTRET) wanted = n;
+  if (wanted != 0) {
+    if (n != 0) { setobj2s(L, func, &value); }
+    else { setnilvalue2s(func); }
+  }
+  L->top.p = func + wanted;
+  luaTK_checkstop(L);
+  luaCP_checklimit(L);
+  return n;
+}
+
+l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
+  if (checktag(s2v(func), LUA_VBCF))
+    return precallbuiltin(L, func, status);
+  return precallC(L, func, status, fvalue(s2v(func)), 1);
+}
 
 /*
 ** Prepare a function for a tail call, building its call info on top
@@ -865,8 +905,10 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
       CClosure *closure = clCvalue(s2v(func));
       return precallC(L, func, status, closure->f, closure->managed);
     }
-    case LUA_VLCF: case LUA_VMCF:  /* light C function */
-      return precallC(L, func, status, fvalue(s2v(func)), tag == LUA_VMCF);
+    case LUA_VLCF:
+      return precallC(L, func, status, fvalue(s2v(func)), 0);
+    case LUA_VMCF:
+      return precallmanaged(L, func, status);
     case LUA_VLCL: {  /* Lua function */
       Proto *p = clLvalue(s2v(func))->p;
       int fsize = p->maxstacksize;  /* frame size */
@@ -918,8 +960,11 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
       precallC(L, func, status, closure->f, closure->managed);
       return NULL;
     }
-    case LUA_VLCF: case LUA_VMCF:  /* light C function */
-      precallC(L, func, status, fvalue(s2v(func)), tag == LUA_VMCF);
+    case LUA_VLCF:
+      precallC(L, func, status, fvalue(s2v(func)), 0);
+      return NULL;
+    case LUA_VMCF:
+      precallmanaged(L, func, status);
       return NULL;
     case LUA_VLCL: {  /* Lua function */
       CallInfo *ci;

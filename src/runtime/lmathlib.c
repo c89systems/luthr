@@ -23,6 +23,7 @@
 #include "llimits.h"
 #include "lapi.h"
 #include "laccess.h"
+#include "lbuiltin.h"
 #include "lexec.h"
 
 
@@ -30,11 +31,9 @@
 #define PI	(l_mathop(3.141592653589793238462643383279502884))
 
 
-static int math_abs (lua_State *L) {
+int luaB_mathabs (lua_State *L) {
   if (lua_isinteger(L, 1)) {
-    lua_Integer n = lua_tointeger(L, 1);
-    if (n < 0) n = (lua_Integer)(0u - (lua_Unsigned)n);
-    lua_pushinteger(L, n);
+    lua_pushinteger(L, luaB_absinteger(lua_tointeger(L, 1)));
   }
   else
     lua_pushnumber(L, l_mathop(fabs)(luaL_checknumber(L, 1)));
@@ -781,7 +780,7 @@ static int math_log10 (lua_State *L) {
 
 
 static const luaL_Reg mathlib[] = {
-  {"abs",   math_abs},
+  {"abs",   luaB_mathabs},
   {"acos",  math_acos},
   {"asin",  math_asin},
   {"atan",  math_atan},

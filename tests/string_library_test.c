@@ -455,22 +455,58 @@ static void *run(void *context) {
   else if (strstr(test->mode, "bindings") != NULL) {
     lua_pushcfunction(state, rebind);
     lua_setglobal(state, "rebind");
-    execute(state, "local other=reopen(); for _,k in "
-                   "ipairs({'byte','char','format','len','lower','rep','"
-                   "reverse','sub','upper','pack','packsize','unpack'}) do "
-                   "assert(other[k]==string[k]) end; "
-                   "local sub,byte=rebind(other.sub),rebind(other.byte); "
-                   "assert(sub(123,'2')=='23' and byte('ab',nil)==97); "
-                   "local s=string.rep('ab',1025); "
-                   "assert(sub(s,2,-2)==string.sub(s,2,-2)); "
-                   "local values=table.pack(byte(s,2,1026)); "
-                   "assert(values.n==1025 and values[1]==98 and "
-                   "values[1024]==97 and values[1025]==98); "
-                   "local ok,err=pcall(sub,'abc',1.5); "
-                   "assert(not ok and err:find('no integer representation')); "
-                   "ok,err=pcall(byte,'abc',1,{}); "
-                   "assert(not ok and err:find('number expected')); "
-                   "assert(byte('b')==98)");
+    execute(state,
+            "local other=reopen(); for _,k in "
+            "ipairs({'byte','char','format','len','lower','rep','"
+            "reverse','sub','upper','pack','packsize','unpack'}) do "
+            "assert(other[k]==string[k]) end; "
+            "local sub,byte=rebind(other.sub),rebind(other.byte); "
+            "local abs=rebind(math.abs); "
+            "assert(sub==other.sub and byte==other.byte and abs==math.abs); "
+            "local keys={[other.sub]=1,[byte]=2,[math.abs]=3}; "
+            "assert(keys[sub]==1 and keys[other.byte]==2 and keys[abs]==3); "
+            "keys[abs]=4; assert(keys[math.abs]==4 and keys[other.sub]==1); "
+            "assert(sub(123,'2')=='23' and byte('ab',nil)==97); "
+            "local s=string.rep('ab',1025); "
+            "assert(sub(s,2,-2)==string.sub(s,2,-2)); "
+            "local values=table.pack(byte(s,2,1026)); "
+            "assert(values.n==1025 and values[1]==98 and "
+            "values[1024]==97 and values[1025]==98); "
+            "local ok,err=pcall(sub,'abc',1.5); "
+            "assert(not ok and err:find('no integer representation')); "
+            "ok,err=pcall(byte,'abc',1,{}); "
+            "assert(not ok and err:find('number expected')); "
+            "assert(byte('b')==98)");
+  } else if (strstr(test->mode, "leaf") != NULL) {
+    execute(state,
+            "local sub,byte,abs=string.sub,string.byte,math.abs; "
+            "local function tail(f,...) return f(...) end; "
+            "local a,b=byte('ab',1,2); assert(a==97 and b==98); "
+            "local n=(byte('',1)); assert(n==nil); "
+            "assert(select('#',byte('',1))==0 and "
+            "select('#',tail(byte,'',1))==0); "
+            "assert(sub('a\\0b',2,2)=='\\0' and byte('a\\0b',2)==0); "
+            "assert(tail(sub,'abc',-1)=='c' and tail(byte,'abc',nil,nil)==97); "
+            "assert(sub('abc',math.maxinteger)=='' and "
+            "sub('abc',math.mininteger,math.mininteger)==''); "
+            "assert(sub('abc','2',2.0)=='b' and sub(123,2,2)=='2'); "
+            "assert(not pcall(function() sub('a') end)); "
+            "local value=abs(-8); local function capture() return value end; "
+            "value=abs(-9); assert(capture()==9); "
+            "assert(tail(abs,math.mininteger)==math.mininteger and "
+            "math.type(abs(-7.0))=='float' and abs('-3')==3)");
+    if (!facade)
+      execute(state,
+              "local sub,byte,abs=string.sub,string.byte,math.abs; "
+              "local calls,returns=0,0; "
+              "debug.sethook(function(e) "
+              "local f=debug.getinfo(2,'f').func; "
+              "if f==sub or f==byte or f==abs then "
+              "if e=='call' then calls=calls+1 else returns=returns+1 end end "
+              "end,'cr'); "
+              "local s,k,m=sub('aaa',1,1),byte('b'),abs(-3); "
+              "debug.sethook(); "
+              "assert(s=='a' and k==98 and m==3 and calls==3 and returns==3)");
   } else if (strstr(test->mode, "snapshot") != NULL)
     snapshot(test);
   else if (strstr(test->mode, "slice") != NULL)

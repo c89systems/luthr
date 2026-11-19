@@ -45,6 +45,7 @@ typedef struct LuaObjectLock {
 ** bits 0-3: actual tag (a LUA_T* constant)
 ** bits 4-5: variant bits
 ** bit 6: whether value is collectable
+** bit 7: eligible for a direct call (managed light C functions only)
 */
 
 /* add variant bits to a type */
@@ -667,10 +668,11 @@ typedef struct Proto {
 #define LUA_VLCF	makevariant(LUA_TFUNCTION, 1)  /* light C function */
 #define LUA_VCCL	makevariant(LUA_TFUNCTION, 2)  /* C closure */
 #define LUA_VMCF	makevariant(LUA_TFUNCTION, 3)  /* managed light C function */
+#define LUA_VBCF	(LUA_VMCF | (1 << 7))  /* managed builtin with a leaf call */
 
 #define ttisfunction(o)		checktype(o, LUA_TFUNCTION)
 #define ttisLclosure(o)		checktag((o), ctb(LUA_VLCL))
-#define tagislcf(t)		((t) == LUA_VLCF || (t) == LUA_VMCF)
+#define tagislcf(t)		((t) == LUA_VLCF || (t) == LUA_VMCF || (t) == LUA_VBCF)
 #define ttislcf(o)		tagislcf(rawtt(o))
 #define ttisCclosure(o)		checktag((o), ctb(LUA_VCCL))
 #define ttisclosure(o)         (ttisLclosure(o) || ttisCclosure(o))
@@ -695,8 +697,8 @@ typedef struct Proto {
 #define setfvalue(obj,x) \
   { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VLCF); }
 
-#define setmcfvalue(obj,x) \
-  { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VMCF); }
+#define setmcfvalue(obj,x,leaf) \
+  { TValue *io=(obj); val_(io).f=(x); settt_(io, (leaf) ? LUA_VBCF : LUA_VMCF); }
 
 #define setclCvalue(L,obj,x) \
   { TValue *io = (obj); CClosure *x_ = (x); \
