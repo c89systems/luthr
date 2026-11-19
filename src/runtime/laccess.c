@@ -439,7 +439,7 @@ int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
   if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
     luaA_sharevalue(L, key);
     luaA_sharevalue(L, value);
-    if (luaH_tryset(L, table, key, value, 0)) return 1;
+    if (luaH_setshared(L, table, key, value, 0)) return 1;
   }
   /* Only a missing key with a metatable needs paired ownership. Recheck
   ** after the ordered pair is acquired: either object may have changed. */

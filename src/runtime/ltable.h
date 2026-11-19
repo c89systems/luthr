@@ -134,6 +134,7 @@ LUAI_FUNC int luaH_assignowned (lua_State *L, Table *t, const TValue *key,
 /* Complete only a private, non-allocating write. Failure leaves the operation
 ** for ordinary rooted access; no encoded storage location escapes. */
 LUAI_FUNC int luaH_tryset (lua_State *, Table *, const TValue *, TValue *, int);
+LUAI_FUNC int luaH_setshared (lua_State *, Table *, const TValue *, TValue *, int);
 
 /* Borrowed lookup: requires object ownership or collector quiescence. */
 LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);

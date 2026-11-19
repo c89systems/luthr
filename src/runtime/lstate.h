@@ -470,6 +470,8 @@ typedef struct LuaBarrierQueue {
 typedef struct LuaTableWriter {
   Table *owner;
   uint64_t sequence;
+  uintptr_t slot;  /* representation only; never followed as a GC root */
+  unsigned waiting;
 } LuaTableWriter;
 
 typedef struct global_State {

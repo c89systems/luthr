@@ -373,6 +373,36 @@ foreach(collector IN ITEMS incremental generational)
   endforeach()
 endforeach()
 
+luthr_test_program(table_contention_test table_contention_test.c)
+set_target_properties(table_contention_test PROPERTIES C_STANDARD 99)
+target_compile_options(table_contention_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(table_contention_test PRIVATE luthr_static)
+target_link_options(table_contention_test PRIVATE -Wl,--wrap=luaH_elementstore
+  -Wl,--wrap=luaQ_wait -Wl,--wrap=luaH_waitwriters)
+foreach(collector IN ITEMS incremental generational)
+  foreach(kind IN ITEMS array hash array_graph hash_graph)
+    foreach(route IN ITEMS raw vm read vm_read vm_missing)
+      add_test(NAME table_contention_${kind}_${route}_${collector}
+        COMMAND table_contention_test ${collector} ${kind} ${route})
+      set_tests_properties(table_contention_${kind}_${route}_${collector} PROPERTIES
+        LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
+
+luthr_test_program(table_layout_wait_test table_layout_wait_test.c)
+set_target_properties(table_layout_wait_test PROPERTIES C_STANDARD 99)
+target_compile_options(table_layout_wait_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(table_layout_wait_test PRIVATE luthr_static)
+target_link_options(table_layout_wait_test PRIVATE -Wl,--wrap=luaA_begin
+  -Wl,--wrap=luaH_elementstore -Wl,--wrap=luaQ_wait)
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME table_layout_wait_${collector}
+    COMMAND table_layout_wait_test ${collector})
+  set_tests_properties(table_layout_wait_${collector} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthr_test_program(object_layout_test object_layout_test.c)
 set_target_properties(object_layout_test PROPERTIES C_STANDARD 99)
 target_compile_options(object_layout_test PRIVATE -Wall -Wextra -Werror)
@@ -1103,7 +1133,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
-  gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test
+  gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test
   gc_sweeping_test
   gc_epochs_test
   scheduler_test native_lifecycle_test

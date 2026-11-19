@@ -1292,24 +1292,25 @@ static int published (const TValue *value) {
   return (__atomic_load_n(sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) != 0;
 }
 
-/* Look up storage without modifying keys, links or layout. Admission retains
-** old buffers; validate their header and key bits before using a candidate. */
-/* Keep the shared snapshot's frame out of ordinary private assignments. */
-static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, const TValue *key,
-                       TValue *value, int raw) {
+typedef struct LuaTableSlot {
+  Value *payload;
+  lu_byte *tag;
+  Node *node;
+  uint64_t sequence;
+} LuaTableSlot;
+
+/* No storage pointer from this snapshot survives a wait. Admission retains
+** old buffers; validate header and key bits before comparing candidates. */
+static int locateslot (Table *table, const TValue *key, LuaTableSlot *slot) {
   Table view;
   TValue normalized;
-  Value *payload = NULL;
-  lu_byte *tag = NULL;
-  LuaTableWriter *writer;
   Node *node = NULL;
-  uint64_t layout;
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   unsigned k, steps;
-  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
-      !published(key) || !published(value) || !luaH_strongaccess(L, table))
-    return 0;
-  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   if (layout & 1) return 0;
+  slot->payload = NULL;
+  slot->node = NULL;
+  slot->sequence = layout;
   view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
@@ -1326,8 +1327,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, cons
   }
   k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
   if (k != 0) {
-    payload = getArrVal(&view, k - 1);
-    tag = getArrTag(&view, k - 1);
+    slot->payload = getArrVal(&view, k - 1);
+    slot->tag = getArrTag(&view, k - 1);
   }
   else {
     node = mainpositionTV(&view, key);
@@ -1339,8 +1340,9 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, cons
       snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
       if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
       if (equalkey(key, &snapshot, 0)) {
-        payload = &node->u.value_;
-        tag = &node->u.tt_;
+        slot->payload = &node->u.value_;
+        slot->tag = &node->u.tt_;
+        slot->node = node;
         break;
       }
       if (snapshot.u.next == 0) return 0;
@@ -1348,13 +1350,32 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, cons
       if (next < 0 || cast(size_t, next) >= sizenode(&view)) return 0;
       node = view.node + next;
     }
-    if (payload == NULL) return 0;
+    if (slot->payload == NULL) return 0;
   }
-  writer = luaH_claimwriter(L, table, payload, layout);
-  if (writer == NULL) return 0;
+  return 1;
+}
+
+/* Keep the shared snapshot's frame out of ordinary private assignments. */
+static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
+                       const TValue *key, TValue *value, int raw,
+                       LuaTableWriter **busy) {
+  LuaTableSlot slot;
+  LuaTableWriter *writer;
+  Node *node;
+  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
+      !published(key) || !published(value) || !luaH_strongaccess(L, table) ||
+      !locateslot(table, key, &slot)) return 0;
+  node = slot.node;
+  writer = luaH_claimwriter(L, table, slot.payload, slot.sequence);
+  if (writer == NULL) {
+    LuaTableWriter *row = luaH_writer(G(L), slot.payload);
+    if (busy != NULL &&
+        __atomic_load_n(&row->owner, __ATOMIC_SEQ_CST) == table) *busy = row;
+    return 0;
+  }
   /* Key retirement is a layout operation. A missing value may also invoke
   ** __newindex; resolve that under ordinary ordered metatable ownership. */
-  if ((!raw && tagisempty(*tag) && table->metatable != NULL) ||
+  if ((!raw && tagisempty(*slot.tag) && table->metatable != NULL) ||
       (node != NULL && ttisnil(value) && keyiscollectable(node))) {
     luaH_releasewriter(L, table, writer);
     return 0;
@@ -1362,8 +1383,20 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table, cons
   luaC_tracevalue(L, key);
   if (node != NULL && luaC_tracing(L) && keyiscollectable(node))
     luaC_traceobject(L, gckey(node));
-  luaH_elementstore(L, table, payload, tag, value);
-  if (node != NULL) invalidateTMcache(table);
+  luaH_elementstore(L, table, slot.payload, slot.tag, value);
+  if (node != NULL && keyisshrstr(node)) {
+    TString *name = keystrval(node);  /* normalized key, including external strings */
+    if (name->shrlen >= 4 && getstr(name)[0] == '_' && getstr(name)[1] == '_') {
+      unsigned tm;
+      for (tm = 0; tm <= TM_EQ; tm++) {
+        if (name == G(L)->tmname[tm]) {
+          __atomic_fetch_and(&table->flags, cast_byte(~(1u << tm)),
+                              __ATOMIC_RELAXED);
+          break;
+        }
+      }
+    }
+  }
   luaH_releasewriter(L, table, writer);
   return 1;
 }
@@ -1377,7 +1410,7 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
   uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
   int hres, done = 1;
   if (sharing & LUA_OBJECT_SHARED)
-    return sharedset(L, t, key, value, raw);
+    return sharedset(L, t, key, value, raw, NULL);
   if (sharing != cast(uintptr_t, L) || !luaH_strongaccess(L, t)) return 0;
   sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
   if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
@@ -1404,6 +1437,24 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
   ** the rooted fallback will publish the operation's single committed image. */
   __atomic_store_n(&t->sequence, sequence + (done ? 2 : 0), __ATOMIC_RELEASE);
   return done;
+}
+
+/* The receiver and arguments are rooted and already published. Each retry
+** discards its old storage view before a possible wait or stack relocation. */
+int luaH_setshared (lua_State *L, Table *table, const TValue *key,
+                     TValue *value, int raw) {
+  for (;;) {
+    LuaTableWriter *busy = NULL;
+    uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+    if (luaH_waitlayout(L, table)) continue;
+    if (sharedset(L, table, key, value, raw, &busy)) return 1;
+    if (busy != NULL) luaH_waitwriters(L, table, busy);
+    else {
+      if (luaH_waitlayout(L, table)) continue;
+      if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence)
+        return 0;
+    }
+  }
 }
 
 /* The ordinary no-metatable insertion needs no second ownership or lookup. */
@@ -1648,7 +1699,9 @@ unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, un
     lu_byte valuetag;
     if (writer != NULL) {
       sequence = __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE);
-      if (sequence & 1) return UINT_MAX;
+      if ((sequence & 1) &&
+          __atomic_load_n(&writer->slot, __ATOMIC_ACQUIRE) == cast(uintptr_t, payload))
+        return UINT_MAX;
     }
     /* GC needs raw edges, not numeric payloads or complete mutator values.
     ** They remain representations until both row and layout are validated. */
@@ -1757,10 +1810,74 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
   return 0;
 }
 
+/* Keep roots and parking out of private read frames. A caller's result may
+** name a Lua register, so rebase it after waits which can relocate the stack. */
+static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
+                                      const TValue *key, TValue *result) {
+  LuaNativeRoot rooted_key, owner, value;
+  LuaObjectScope scope;
+  uintptr_t address = cast(uintptr_t, result);
+  uintptr_t base = cast(uintptr_t, L->stack.p);
+  uintptr_t limit = cast(uintptr_t, L->stack_last.p + EXTRA_STACK);
+  ptrdiff_t offset = address >= base && address < limit
+    ? cast(ptrdiff_t, address - base) : -1;
+  unsigned retries;
+  lu_byte tag;
+  luaR_pushroot(L, &rooted_key);
+  luaR_setroot(L, &rooted_key, key);
+  luaR_pushroot(L, &owner);
+  sethvalue(L, &owner.value, table);
+  luaC_tracepointer(L, table);
+  luaR_pushroot(L, &value);
+  for (retries = 0; retries < 8; retries++) {
+    LuaTableSlot slot;
+    LuaTableWriter *writer;
+    TValue snapshot;
+    if (!luaH_strongaccess(L, table)) break;
+    if (luaH_waitlayout(L, table)) continue;
+    if (optimistic(L, table, &rooted_key.value, &snapshot, &tag)) {
+      if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
+      goto done;
+    }
+    if (!locateslot(table, &rooted_key.value, &slot)) {
+      if (__atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST) == luaX_token(L))
+        break;
+      continue;
+    }
+    writer = luaH_claimwriter(L, table, slot.payload, slot.sequence);
+    if (writer != NULL) {
+      /* A failed optimistic read needs the element guard, not ownership of
+      ** every element. Root the stable value before releasing that guard. */
+      __atomic_load(slot.payload, &snapshot.value_, __ATOMIC_ACQUIRE);
+      snapshot.tt_ = __atomic_load_n(slot.tag, __ATOMIC_ACQUIRE);
+      tag = slot.node != NULL ? finishnodeget(&snapshot, &snapshot)
+                             : rawtt(&snapshot);
+      if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
+      luaH_releasewriter(L, table, writer);
+      goto done;
+    }
+    writer = luaH_writer(G(L), slot.payload);
+    if (__atomic_load_n(&writer->owner, __ATOMIC_SEQ_CST) == table)
+      luaH_waitwriters(L, table, writer);
+  }
+  luaA_begin(L, obj2gco(table), &scope);
+  tag = luaH_getowned(table, &rooted_key.value, &value.value);
+  if (!tagisempty(tag)) luaC_tracevalue(L, &value.value);
+  luaA_end(L, &scope);
+ done:
+  if (!tagisempty(tag)) {
+    luaC_tracevalue(L, &value.value);
+    if (offset >= 0) result = s2v(restorestack(L, offset));
+    setobj(L, result, &value.value);
+  }
+  luaR_poproot(L, &value);
+  luaR_poproot(L, &owner);
+  luaR_poproot(L, &rooted_key);
+  return tag;
+}
+
 /* Complete mutator operations. Encoded slots never cross an unlock. */
 lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
-  LuaNativeRoot rooted_key;
-  LuaObjectScope scope;
   lu_byte tag;
   if (luaA_localtable(L, t)) {
     tag = luaH_getowned(t, key, res);
@@ -1773,18 +1890,10 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
     return tag;
   }
-  luaR_pushroot(L, &rooted_key);
-  luaR_setroot(L, &rooted_key, key);
-  luaA_begin(L, obj2gco(t), &scope);
-  tag = luaH_getowned(t, &rooted_key.value, res);
-  if (!tagisempty(tag)) luaC_tracevalue(L, res);
-  luaA_end(L, &scope);
-  luaR_poproot(L, &rooted_key);
-  return tag;
+  return getrooted(L, t, key, res);
 }
 
 lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
-  LuaObjectScope scope;
   lu_byte tag;
   TValue index;
   if (luaA_localtable(L, t)) {
@@ -1797,16 +1906,10 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
     return tag;
   }
-  luaA_begin(L, obj2gco(t), &scope);
-  tag = rawgetint(t, key, res);
-  if (!tagisempty(tag)) luaC_tracevalue(L, res);
-  luaA_end(L, &scope);
-  return tag;
+  return getrooted(L, t, &index, res);
 }
 
 lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
-  LuaNativeRoot rooted_key;
-  LuaObjectScope scope;
   lu_byte tag;
   TValue index;
   if (luaA_localtable(L, t)) {
@@ -1820,14 +1923,7 @@ lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
     return tag;
   }
-  luaR_pushroot(L, &rooted_key);
-  setsvalue(L, &rooted_key.value, key);
-  luaA_begin(L, obj2gco(t), &scope);
-  tag = rawgetstr(t, key, res);
-  if (!tagisempty(tag)) luaC_tracevalue(L, res);
-  luaA_end(L, &scope);
-  luaR_poproot(L, &rooted_key);
-  return tag;
+  return getrooted(L, t, &index, res);
 }
 
 lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res) {
@@ -1848,7 +1944,7 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
     luaA_sharevalue(L, &rooted_key.value);
     luaA_sharevalue(L, &rooted_value.value);
-    if (luaH_tryset(L, t, &rooted_key.value, &rooted_value.value, 1)) goto done;
+    if (luaH_setshared(L, t, &rooted_key.value, &rooted_value.value, 1)) goto done;
   }
   luaA_begin(L, obj2gco(t), &scope);
   luaH_assignowned(L, t, &rooted_key.value, &rooted_value.value, 1);
@@ -1872,7 +1968,7 @@ void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   luaC_tracepointer(L, t);
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
     luaA_sharevalue(L, &rooted_value.value);
-    if (luaH_tryset(L, t, &index, &rooted_value.value, 1)) goto done;
+    if (luaH_setshared(L, t, &index, &rooted_value.value, 1)) goto done;
   }
   luaA_begin(L, obj2gco(t), &scope);
   rawsetint(L, t, key, &rooted_value.value);

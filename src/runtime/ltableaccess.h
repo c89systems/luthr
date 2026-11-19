@@ -15,7 +15,12 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
                               const lu_byte *tag, TValue *value) {
   LuaTableWriter *writer = luaH_writer(g, payload);
   uint64_t before = __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE);
-  if (before & 1) return 0;
+  /* A directory collision serializes writers, but need not stop a reader of
+  ** a different element. The final version check also validates this identity
+  ** if the directory row is released and reused during the snapshot. */
+  if ((before & 1) &&
+      __atomic_load_n(&writer->slot, __ATOMIC_ACQUIRE) == cast(uintptr_t, payload))
+    return 0;
   __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
   value->tt_ = __atomic_load_n(tag, __ATOMIC_ACQUIRE);
   return __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE) == before;
@@ -31,6 +36,9 @@ l_sinline int luaH_strongaccess (lua_State *L, Table *table) {
 LUAI_FUNC LuaTableWriter *luaH_claimwriter (lua_State *, Table *, Value *, uint64_t);
 LUAI_FUNC void luaH_releasewriter (lua_State *, Table *, LuaTableWriter *);
 LUAI_FUNC int luaH_quiescewriters (lua_State *, Table *, int);
+/* Inputs remain rooted; NULL drains all rows, otherwise wait for one row. */
+LUAI_FUNC void luaH_waitwriters (lua_State *, Table *, LuaTableWriter *);
+LUAI_FUNC int luaH_waitlayout (lua_State *, Table *);
 LUAI_FUNC void luaH_elementstore (lua_State *, Table *, Value *, lu_byte *,
                                  const TValue *);
 #endif

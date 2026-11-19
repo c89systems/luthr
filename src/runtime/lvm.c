@@ -376,7 +376,7 @@ static void settable (lua_State *L, const TValue *t, TValue *key,
     if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
       luaA_sharevalue(L, &rooted_key.value);
       luaA_sharevalue(L, &value.value);
-      if (luaH_tryset(L, table, &rooted_key.value, &value.value, 0)) goto complete;
+      if (luaH_setshared(L, table, &rooted_key.value, &value.value, 0)) goto complete;
     }
     luaA_begin(L, obj2gco(table), &object);
     handled = luaH_assignowned(L, table, &rooted_key.value, &value.value, 0);
