@@ -152,7 +152,8 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 ** The two major stamp bits rotate between three nonzero values. Zero belongs
 ** to fixed objects. Minor marking has its own parity, so old objects need not
 ** be touched by young collections. Queue ownership is independent of either
-** stamp and of generational age. No live-object whitening sweep is needed.
+** stamp and of generational age. Clearing QUEUEDBIT releases the intrusive
+** link to the next claimant. Claim that link with an acquire RMW.
 */
 #define MAJOR0BIT	3
 #define MAJOR1BIT	4
@@ -174,7 +175,9 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 
 #define tofinalize(x)	testbit(getmarked(x), FINALIZEDBIT)
 
-#define nw2black(x) resetbit((x)->marked, QUEUEDBIT)
+#define nw2black(x) \
+  ((void)__atomic_fetch_and(&(x)->marked, cast_byte(~bitmask(QUEUEDBIT)), \
+                            __ATOMIC_RELEASE))
 #define luaC_newmark(g) ((g)->new_mark)
 
 

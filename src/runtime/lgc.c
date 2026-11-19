@@ -223,7 +223,7 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
       claimed = cast_byte((marked & ~AGEBITS) | touched |
                           bitmask(QUEUEDBIT));
     } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
-                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+                                          __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
     /* A queued owner already owns its link, including private scan/sweep
     ** batches. Only a fresh claim publishes another remembered root. */
     if (!testbit(marked, QUEUEDBIT))
@@ -323,7 +323,7 @@ static int claimmark (global_State *g, GCObject *o) {
     if (!luaC_unmarked(g, marked)) return 0;
     claimed = cast_byte(luaC_stamp(g, marked) | bitmask(QUEUEDBIT));
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
   return 1;
 }
 
@@ -394,7 +394,7 @@ void luaC_finishstrong (LuaTraceWork *work, GCObject *object) {
     changed = cast_byte((marked & ~AGEBITS) | age);
     if (!remember) changed &= cast_byte(~bitmask(QUEUEDBIT));
   } while (!__atomic_compare_exchange_n(&object->marked, &marked, changed, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
   if (remember) queuework(&work->grayagain, object);
 }
 
@@ -1579,7 +1579,7 @@ static unsigned markold (global_State *g, unsigned limit) {
         changed = cast_byte((marked & ~AGEBITS) | age |
                              bitmask(QUEUEDBIT));
         if (__atomic_compare_exchange_n(&p->marked, &marked, changed, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
           if (!testbit(marked, QUEUEDBIT)) luaC_linktrace(g, p);
           break;
         }
@@ -1673,7 +1673,7 @@ int luaC_sweepgray (GCObject *o) {
     changed = keep ? marked : cast_byte(marked & ~bitmask(QUEUEDBIT));
     if (changed == marked) break;
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
   return keep;
 }
 

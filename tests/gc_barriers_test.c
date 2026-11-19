@@ -3,6 +3,7 @@
 #include <lgc.h>
 #include <lstate.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -81,6 +82,58 @@ static void repeated(lua_State *L) {
 static int closure(lua_State *L) {
   (void)L;
   return 0;
+}
+
+struct link_handoff {
+  lua_State *writer;
+  GCObject *owner;
+  GCObject *young;
+};
+
+static void *remember_after_scan(void *context) {
+  struct link_handoff *handoff = context;
+  lua_lock(handoff->writer);
+  /* Synchronization must come from claiming the link after this relaxed
+   * observation. A test-side signal would hide the missing handoff. */
+  while (isgray(handoff->owner))
+    sched_yield();
+  luaC_syncbarrier(handoff->writer, handoff->owner, handoff->young);
+  lua_unlock(handoff->writer);
+  return NULL;
+}
+
+static void link_handoff(lua_State *L, int sweeping) {
+  struct link_handoff handoff;
+  LuaTraceWork work = {0};
+  pthread_t worker;
+  lua_pushnil(L);
+  lua_pushcclosure(L, closure, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  handoff.owner = object(L, 1);
+  handoff.writer = lua_newthread(L);
+  lua_newtable(L);
+  handoff.young = object(L, 3);
+  work.global = G(L);
+  require(G(L)->gckind == KGC_GENMINOR && !luaC_tracing(L));
+  require(isold(handoff.owner) && !isold(handoff.young) &&
+          !isgray(handoff.owner));
+  lua_lock(L);
+  setage(handoff.owner, sweeping ? G_OLD : G_TOUCHED2);
+  *luaC_graylink(handoff.owner) = NULL;
+  l_setbit(handoff.owner->marked, QUEUEDBIT);
+  require(pthread_create(&worker, NULL, remember_after_scan, &handoff) == 0);
+  require(*luaC_graylink(handoff.owner) == NULL);
+  if (sweeping)
+    require(!luaC_sweepgray(handoff.owner));
+  else
+    luaC_finishstrong(&work, handoff.owner);
+  require(pthread_join(worker, NULL) == 0);
+  require(isgray(handoff.owner) && getage(handoff.owner) == G_TOUCHED1);
+  luaW_stop(L);
+  require(G(L)->grayagain == handoff.owner);
+  luaW_start(L);
+  lua_unlock(L);
+  lua_gc(L, LUA_GCCOLLECT);
 }
 
 static void forward(lua_State *L) {
@@ -300,6 +353,9 @@ int main(int argc, char **argv) {
     parallel(L, strcmp(argv[1], "parallel_gc") == 0);
   else if (strcmp(argv[1], "targets") == 0)
     targets(L);
+  else if (strcmp(argv[1], "trace_handoff") == 0 ||
+           strcmp(argv[1], "sweep_handoff") == 0)
+    link_handoff(L, strcmp(argv[1], "sweep_handoff") == 0);
   else {
     require(strcmp(argv[1], "collisions") == 0 ||
             strcmp(argv[1], "reset") == 0);

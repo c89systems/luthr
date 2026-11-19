@@ -551,6 +551,11 @@ set_target_properties(gc_barriers_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_barriers_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_barriers_test PRIVATE luthr_static)
 target_link_options(gc_barriers_test PRIVATE -Wl,--wrap=luaW_stop)
+foreach(case IN ITEMS trace_handoff sweep_handoff)
+  add_test(NAME gc_barriers_${case} COMMAND gc_barriers_test ${case} generational)
+  set_tests_properties(gc_barriers_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
+endforeach()
 foreach(collector IN ITEMS incremental generational)
   foreach(case IN ITEMS repeated forward mixed collisions reset parallel parallel_gc targets)
     add_test(NAME gc_barriers_${case}_${collector}
