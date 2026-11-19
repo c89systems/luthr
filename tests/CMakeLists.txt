@@ -291,7 +291,9 @@ luthr_test_program(gc_directory_test gc_directory_test.c)
 set_target_properties(gc_directory_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_directory_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_directory_test PRIVATE luthr_static)
-foreach(case IN ITEMS forward remembered)
+target_link_options(gc_directory_test PRIVATE -Wl,--wrap=luaM_flushdebt)
+foreach(case IN ITEMS forward remembered publish_incremental publish_generational
+    string_cache_incremental string_cache_generational)
   add_test(NAME gc_directory_${case} COMMAND gc_directory_test ${case})
   set_tests_properties(gc_directory_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
@@ -538,7 +540,7 @@ target_link_options(finalizer_work_test PRIVATE -Wl,--wrap=luaC_claimtrace
   -Wl,--wrap=luaC_tracebatch)
 foreach(case IN ITEMS discovery_incremental discovery_generational
     pending_incremental pending_generational promote_incremental promote_generational
-    overlap_incremental overlap_pending_incremental)
+    overlap_incremental overlap_pending_incremental order_incremental order_generational)
   add_test(NAME finalizer_work_${case} COMMAND finalizer_work_test ${case})
   set_tests_properties(finalizer_work_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
@@ -1056,9 +1058,9 @@ target_link_libraries(synchronization_failure_test PRIVATE luthr_static)
 target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
-foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition pool_mutex pool_condition thread_no_resources
-    closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex facade_world_mutex
-    facade_pool_mutex)
+foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition publisher_mutex pool_mutex pool_condition
+    thread_no_resources closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex
+    facade_world_mutex facade_pool_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)
 endforeach()

@@ -44,10 +44,12 @@ typedef struct LuaWorldScope {
   LuaApiRegion *api_region;  /* detached activation, restored only on attach */
 } LuaWorldScope;
 
-LUAI_FUNC int luaW_init (LuaWorld *world);
-LUAI_FUNC void luaW_destroy (LuaWorld *world);
+LUAI_FUNC int luaW_init (struct global_State *g);
+LUAI_FUNC void luaW_destroy (struct global_State *g);
 LUAI_FUNC void luaW_register (lua_State *L);
 LUAI_FUNC void luaW_unregister (lua_State *L);
+/* Enroll the owner of a nonempty allocation or table-retirement batch. */
+LUAI_FUNC void luaW_trackpublisher (lua_State *L);
 /* Caller holds world.mutex or has exclusive/quiescent VM ownership. */
 LUAI_FUNC unsigned luaW_activecount (LuaWorld *world);
 /* Admission records are local to a coroutine, not managed execution permits.

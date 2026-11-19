@@ -353,7 +353,6 @@ static void f_luaopen (lua_State *L, void *ud) {
 ** any memory (to avoid errors)
 */
 static void preinit_thread (lua_State *L, global_State *g) {
-  int i, j;
   G(L) = g;
   L->stack.p = NULL;
   L->ci = NULL;
@@ -381,13 +380,12 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->new_objects = L->new_objects_tail = NULL;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
-  L->new_finalizers = L->new_finalizers_tail = NULL;
+  L->publish_next = NULL;
+  L->publish_previous = NULL;
   memset(&L->allocation, 0, sizeof(L->allocation));
   L->allocation.global = g;
   L->allocation.thread = L;
-  for (i = 0; i < STRCACHE_N; i++)
-    for (j = 0; j < STRCACHE_M; j++)
-      L->strcache[i][j] = NULL;
+  L->strcache_epoch = 0;
   L->participation.next = NULL;
   L->participation.previous = NULL;
   L->participation.thread = L;
@@ -465,7 +463,7 @@ static void close_state (lua_State *L, int owns_gate) {
   }
   luaX_destroygate(&L->stack_gate);
   luaW_unregister(L);
-  luaW_destroy(&g->world);
+  luaW_destroy(g);
   luaAL_destroy(&g->allocator);
   (*g->allocator.function)(g->allocator.context, g, sizeof(global_State), 0);
 }
@@ -621,16 +619,17 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->major_mark = bitmask(MAJOR0BIT);
   g->minor_mark = g->markminor = 0;
   g->new_mark = g->major_mark;
+  g->strcache_epoch = 1;
   L->marked = luaC_newmark(g);
   preinit_thread(L, g);
-  if (luaW_init(&g->world) != 0) {
+  if (luaW_init(g) != 0) {
     luaX_destroygate(&L->stack_gate);
     luaAL_destroy(&g->allocator);
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
   if (luaM_initpools(L) != 0) {
-    luaW_destroy(&g->world);
+    luaW_destroy(g);
     luaX_destroygate(&L->stack_gate);
     luaAL_destroy(&g->allocator);
     (*f)(ud, g, sizeof(global_State), 0);
@@ -671,6 +670,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->gcstopem = 0;
   g->gcemergency = 0;
   g->finobj = g->tobefnz = g->fixedgc = NULL;
+  g->new_finalizers = g->new_finalizers_tail = NULL;
   g->tobefnz_tail = &g->tobefnz;
   g->firstold1 = g->survival = g->old1 = g->reallyold = NULL;
   g->finobjsur = g->finobjold1 = NULL;

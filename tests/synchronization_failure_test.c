@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "lstate.h"
+
 static int fail_mutex;
 static int fail_condition;
 static int failures;
@@ -106,7 +108,7 @@ static int facade_case(const char *name) {
   else if (strcmp(name, "facade_world_mutex") == 0)
     fail_mutex = 4;
   else if (strcmp(name, "facade_pool_mutex") == 0)
-    fail_mutex = 5;
+    fail_mutex = 5 + LUA_PUBLISH_SHARDS;
   else
     return 1;
   failed = luthr_lua_runtime_new_with_allocator(&runtime, &config) !=
@@ -129,16 +131,21 @@ static int run_case(const char *name) {
   int failed = 0;
   int world_case = strncmp(name, "world_", 6) == 0;
   int allocator_case = strncmp(name, "allocator_", 10) == 0;
+  int publisher_case = strcmp(name, "publisher_mutex") == 0;
   int pool_case = strncmp(name, "pool_", 5) == 0;
-  int main_case = pool_case || world_case || allocator_case;
+  int main_case = pool_case || world_case || allocator_case || publisher_case;
   int thread_case = strcmp(name, "thread_no_resources") == 0;
   int condition_case = strstr(name, "condition") != NULL;
   if (strncmp(name, "facade_", 7) == 0)
     return facade_case(name);
   if (main_case) {
     int position = allocator_case ? 1 : world_case ? 2 : 3;
-    fail_mutex = condition_case ? 0 : position;
-    fail_condition = condition_case ? position : 0;
+    if (condition_case)
+      fail_condition = position;
+    else if (publisher_case)
+      fail_mutex = 2 + LUA_PUBLISH_SHARDS;
+    else
+      fail_mutex = position + (pool_case ? LUA_PUBLISH_SHARDS : 0);
   }
   state = lua_newstate(allocate, NULL, 0);
   if (main_case) {

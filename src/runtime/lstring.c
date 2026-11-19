@@ -111,20 +111,17 @@ void luaS_resize (lua_State *L, stringtable *tb, int nsize) {
 
 
 /*
-** Clear API string cache. (Entries cannot be empty, so fill them with
-** a non-collectable string.)
+** Invalidate the weak API caches before sweeping. Only the next owner
+** needs to clear a coroutine's entries before it can dereference them.
 */
 void luaS_clearcache (global_State *g) {
-  int i, j;
-  LuaParticipation *participant;
-  for (participant = g->world.participants; participant != NULL;
-       participant = participant->next)
-    for (i = 0; i < STRCACHE_N; i++)
-      for (j = 0; j < STRCACHE_M; j++) {
-        TString **entry = &participant->thread->strcache[i][j];
-        if (*entry != NULL && iswhite(g, *entry))
-          *entry = g->memerrmsg;
-      }
+  if (l_unlikely(++g->strcache_epoch == 0)) {
+    LuaParticipation *participant;
+    g->strcache_epoch = 1;
+    for (participant = g->world.participants; participant != NULL;
+         participant = participant->next)
+      participant->thread->strcache_epoch = 0;
+  }
 }
 
 
@@ -280,10 +277,15 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
 ** check hits.
 */
 TString *luaS_new (lua_State *L, const char *str) {
+  uint64_t epoch = G(L)->strcache_epoch;
   unsigned int i = point2uint(str) % STRCACHE_N;  /* hash */
   int j;
   TString **p = L->strcache[i];
   TString *result;
+  if (l_unlikely(L->strcache_epoch != epoch)) {
+    memset(L->strcache, 0, sizeof(L->strcache));
+    L->strcache_epoch = epoch;
+  }
   for (j = 0; j < STRCACHE_M; j++) {
     if (p[j] != NULL && strcmp(str, getstr(p[j])) == 0) { /* hit? */
       result = p[j];

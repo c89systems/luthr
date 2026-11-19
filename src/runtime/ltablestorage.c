@@ -32,7 +32,10 @@ void luaHS_publish (lua_State *L, LuaTableRetirement *block) {
   }
   block->bytes = sizeof(*block) + block->array_bytes + block->node_bytes;
   block->next = L->storage_retired;
-  if (L->storage_tail == NULL) L->storage_tail = block;
+  if (L->storage_tail == NULL) {
+    luaW_trackpublisher(L);
+    L->storage_tail = block;
+  }
   L->storage_retired = block;
   L->storage_bytes += block->bytes;
 }
@@ -64,18 +67,8 @@ static void flush (lua_State *L, int wake) {
   if (wake) notify(world);
 }
 
-void luaHS_publishstopped (lua_State *L) {
-  LuaWorld *world = &G(L)->world;
-  LuaParticipation *participant;
-  /* The caller holds world.mutex after every mutator has withdrawn. Publish
-  ** parked owners' small batches before certifying this grace period, so an
-  ** emergency collection can recover them without waiting for their return. */
-  /* Late entrants may already have tentative atomic admissions, but cannot
-  ** touch managed state until the stopped flag is cleared. */
-  lua_assert(world->stopped && luaW_iscollector(L));
-  for (participant = world->participants; participant != NULL;
-       participant = participant->next)
-    flush(participant->thread, 0);
+void luaHS_publishpending (lua_State *L) {
+  flush(L, 0);
 }
 
 static void notify (LuaWorld *world) {

@@ -19,8 +19,8 @@ typedef struct LuaTableRetirement {
 ** construction frees it; successful construction publishes it after the last
 ** use of the replaced buffers. New buffers carry no retirement overhead. */
 LUAI_FUNC void luaHS_publish (lua_State *L, LuaTableRetirement *retirement);
-/* Collector rendezvous, with world.mutex held and all mutators withdrawn. */
-LUAI_FUNC void luaHS_publishstopped (lua_State *L);
+/* Publish one owner's remaining retirement batch during quiescence. */
+LUAI_FUNC void luaHS_publishpending (lua_State *L);
 
 /* No optimistic storage borrow survives these execution boundaries. */
 LUAI_FUNC void luaHS_quiescent (lua_State *L);

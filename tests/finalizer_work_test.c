@@ -138,12 +138,50 @@ static void *collect(void *argument) {
   return NULL;
 }
 
+static lua_Integer expected_order;
+
+static int ordered_finalizer(lua_State *L) {
+  require(lua_getfield(L, 1, "id") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == expected_order);
+  expected_order--;
+  return 0;
+}
+
+static void finalize_across_coroutines(lua_State *L, int generational) {
+  lua_State *owners[2];
+  int i;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  owners[0] = lua_newthread(L);
+  owners[1] = lua_newthread(L);
+  expected_order = 4;
+  for (i = 1; i <= 4; i++) {
+    lua_State *owner = owners[i % 2];
+    lua_newtable(owner);
+    lua_pushinteger(owner, i);
+    lua_setfield(owner, -2, "id");
+    lua_newtable(owner);
+    lua_pushcfunction(owner, ordered_finalizer);
+    lua_setfield(owner, -2, "__gc");
+    require(lua_setmetatable(owner, -2));
+    lua_pop(owner, 1);
+  }
+  lua_gc(L, LUA_GCCOLLECT);
+  require(expected_order == 0);
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   struct fixture test = {0};
   lua_State *state = luaL_newstate(), *worker;
   pthread_t collector, older;
   unsigned before, i;
   require(state != NULL && argc == 2);
+  if (strncmp(argv[1], "order_", 6) == 0) {
+    finalize_across_coroutines(state,
+                               strcmp(argv[1], "order_generational") == 0);
+    return 0;
+  }
   test.phase = strstr(argv[1], "pending") ? TRACE_PENDING : TRACE_FINALIZERS;
   test.generational = strstr(argv[1], "generational") != NULL;
   test.overlap = strstr(argv[1], "overlap") != NULL;

@@ -283,7 +283,10 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   }
   else {
     (cast(LuaAllocBlock *, p) - 1)->block.link.object = L->new_objects;
-    if (L->new_objects == NULL) L->new_objects_tail = o;
+    if (L->new_objects == NULL) {
+      luaW_trackpublisher(L);
+      L->new_objects_tail = o;
+    }
     L->new_objects = o;
   }
   return o;
@@ -1440,36 +1443,57 @@ static void registerfinalizer (lua_State *L, GCObject *o) {
     g->finobj = o;
   }
   else {
-    o->next = L->new_finalizers;
-    if (L->new_finalizers == NULL) L->new_finalizers_tail = o;
-    L->new_finalizers = o;
+    pthread_mutex_t *mutex = &g->publishers[0].mutex;
+    luaX_checksync(pthread_mutex_lock(mutex));
+    o->next = g->new_finalizers;
+    if (g->new_finalizers == NULL) g->new_finalizers_tail = o;
+    g->new_finalizers = o;
+    luaX_checksync(pthread_mutex_unlock(mutex));
   }
 }
 
 void luaC_publish (lua_State *L) {
-  LuaParticipation *participant;
   global_State *g = G(L);
-  for (participant = g->world.participants; participant != NULL;
-       participant = participant->next) {
-    lua_State *thread = participant->thread;
-    luaM_flushdebt(L, thread);
-    if (thread->new_objects != NULL) {
-      luaC_allocnext(thread->new_objects_tail) = g->allgc;
-      if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
-        g->sweep_plan.append = luaC_alloclink(thread->new_objects_tail);
-      g->allgc = thread->new_objects;
-      thread->new_objects = thread->new_objects_tail = NULL;
+  int shard;
+  lua_assert(!completestate(g) || luaW_iscollector(L));
+  luaM_publishdebt(L);
+  /* Only batch producers have outstanding lists. Withdrawal has already
+  ** charged the other owners' local debt. */
+  for (shard = 0; shard < LUA_PUBLISH_SHARDS; shard++) {
+    lua_State *thread = g->publishers[shard].head;
+    g->publishers[shard].head = NULL;
+    while (thread != NULL) {
+      lua_State *next = thread->publish_next;
+      luaM_flushdebt(L, thread);
+      if (thread->new_objects != NULL) {
+        luaC_allocnext(thread->new_objects_tail) = g->allgc;
+        if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
+          g->sweep_plan.append = luaC_alloclink(thread->new_objects_tail);
+        g->allgc = thread->new_objects;
+        thread->new_objects = thread->new_objects_tail = NULL;
+      }
+      luaHS_publishpending(thread);
+      __atomic_store_n(&thread->publish_previous, NULL, __ATOMIC_RELAXED);
+      thread->publish_next = NULL;
+      thread = next;
     }
   }
-  for (participant = g->world.participants; participant != NULL;
-       participant = participant->next) {
-    lua_State *thread = participant->thread;
-    if (thread->new_finalizers != NULL) {
-      thread->new_finalizers_tail->next = g->finobj;
-      g->finobj = thread->new_finalizers;
-      thread->new_finalizers = thread->new_finalizers_tail = NULL;
+  if (g->new_finalizers != NULL) {
+    g->new_finalizers_tail->next = g->finobj;
+    g->finobj = g->new_finalizers;
+    g->new_finalizers = g->new_finalizers_tail = NULL;
+  }
+#if defined(LUAI_ASSERT)
+  {
+    LuaParticipation *participant;
+    for (participant = g->world.participants; participant != NULL;
+         participant = participant->next) {
+      lua_State *owner = participant->thread;
+      lua_assert(owner->new_objects == NULL && owner->storage_retired == NULL &&
+                 owner->allocation_debt == 0 && owner->reclaim_credit == 0);
     }
   }
+#endif
 }
 
 void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {

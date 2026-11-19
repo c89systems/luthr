@@ -400,10 +400,11 @@ struct lua_State {
   GCObject *new_objects_tail;
   l_mem allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
-  GCObject *new_finalizers;
-  GCObject *new_finalizers_tail;
+  struct lua_State *publish_next;
+  struct lua_State **publish_previous;  /* atomic membership, shard owns links */
   TString *strcache[STRCACHE_N][STRCACHE_M];
   LuaAllocationCache allocation;
+  uint64_t strcache_epoch;  /* zero until an owner initializes the cache */
 };
 
 
@@ -472,6 +473,12 @@ typedef struct LuaTableWriter {
   uintptr_t slot;  /* representation only; never followed as a GC root */
   unsigned waiting;
 } LuaTableWriter;
+
+#define LUA_PUBLISH_SHARDS 8
+typedef struct LuaPublishShard {
+  pthread_mutex_t mutex;
+  lua_State *head;
+} LuaPublishShard;
 
 typedef struct global_State {
   LuaWorld world;
@@ -568,6 +575,9 @@ typedef struct global_State {
   lua_WarnFunction warnf;  /* warning function */
   void *ud_warn;         /* auxiliary data to 'warnf' */
   LX mainth;  /* main thread of this state */
+  LuaPublishShard publishers[LUA_PUBLISH_SHARDS];
+  GCObject *new_finalizers, *new_finalizers_tail;
+  uint64_t strcache_epoch;
 } global_State;
 
 

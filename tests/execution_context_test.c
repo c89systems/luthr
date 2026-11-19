@@ -239,6 +239,8 @@ static void publication(lua_State *state) {
   luaX_lockstate(state);
   luaW_stop(state);
   debt = __atomic_load_n(&G(state)->GCdebt, __ATOMIC_RELAXED);
+  /* Model an unpublished producer record before the late entrant binds. */
+  luaW_trackpublisher(other);
   other->allocation_debt = 1234;
   require(!other->root_waiting);
   require(pthread_create(&entrant, NULL, publication_entry, other) == 0);

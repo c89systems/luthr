@@ -24,8 +24,9 @@ typedef struct LuaHeapWaiter {
   int collector;
 } LuaHeapWaiter;
 
-int luaW_init (LuaWorld *world) {
-  int status;
+int luaW_init (global_State *g) {
+  LuaWorld *world = &g->world;
+  int status, i;
   world->stopped = 0;
   world->entry_waiting = 0;
   world->heap_depth = 0;
@@ -48,10 +49,23 @@ int luaW_init (LuaWorld *world) {
     luaX_checksync(pthread_mutex_destroy(&world->mutex));
     return status;
   }
+  for (i = 0; i < LUA_PUBLISH_SHARDS; i++) {
+    g->publishers[i].head = NULL;
+    status = pthread_mutex_init(&g->publishers[i].mutex, NULL);
+    if (status != 0) {
+      while (i-- > 0)
+        luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
+      luaX_checksync(pthread_cond_destroy(&world->changed));
+      luaX_checksync(pthread_mutex_destroy(&world->mutex));
+      return status;
+    }
+  }
   return 0;
 }
 
-void luaW_destroy (LuaWorld *world) {
+void luaW_destroy (global_State *g) {
+  LuaWorld *world = &g->world;
+  int i;
   lua_assert(!world->stopped && world->entry_waiting == 0 &&
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
@@ -59,6 +73,10 @@ void luaW_destroy (LuaWorld *world) {
              world->storage_bytes == 0 && world->storage_busy == 0 &&
              world->storage_workers == 0 &&
              world->storage_retired == NULL && world->storage_pending == NULL);
+  for (i = 0; i < LUA_PUBLISH_SHARDS; i++) {
+    lua_assert(g->publishers[i].head == NULL);
+    luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
+  }
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
 }
@@ -76,9 +94,31 @@ void luaW_register (lua_State *L) {
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
+static LuaPublishShard *publishershard (lua_State *L) {
+  uintptr_t address = cast(uintptr_t, L);
+  return &G(L)->publishers[(address >> 8) & (LUA_PUBLISH_SHARDS - 1)];
+}
+
+static void unlinkpublisher (lua_State *L) {
+  LuaPublishShard *shard;
+  lua_State **previous;
+  if (__atomic_load_n(&L->publish_previous, __ATOMIC_RELAXED) == NULL) return;
+  shard = publishershard(L);
+  luaX_checksync(pthread_mutex_lock(&shard->mutex));
+  previous = __atomic_load_n(&L->publish_previous, __ATOMIC_RELAXED);
+  lua_assert(previous != NULL && L->new_objects == NULL &&
+             L->storage_retired == NULL);
+  *previous = L->publish_next;
+  if (L->publish_next != NULL)
+    __atomic_store_n(&L->publish_next->publish_previous, previous, __ATOMIC_RELAXED);
+  __atomic_store_n(&L->publish_previous, NULL, __ATOMIC_RELAXED);
+  luaX_checksync(pthread_mutex_unlock(&shard->mutex));
+}
+
 void luaW_unregister (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
+  unlinkpublisher(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(luaW_active(participant) == 0);
   if (participant->previous != NULL) {
@@ -88,6 +128,20 @@ void luaW_unregister (lua_State *L) {
     participant->previous = NULL;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void luaW_trackpublisher (lua_State *L) {
+  LuaPublishShard *shard;
+  if (__atomic_load_n(&L->publish_previous, __ATOMIC_RELAXED) != NULL) return;
+  shard = publishershard(L);
+  luaX_checksync(pthread_mutex_lock(&shard->mutex));
+  L->publish_next = shard->head;
+  if (L->publish_next != NULL)
+    __atomic_store_n(&L->publish_next->publish_previous, &L->publish_next,
+                     __ATOMIC_RELAXED);
+  __atomic_store_n(&L->publish_previous, &shard->head, __ATOMIC_RELAXED);
+  shard->head = L;
+  luaX_checksync(pthread_mutex_unlock(&shard->mutex));
 }
 
 unsigned luaW_activecount (LuaWorld *world) {
@@ -232,12 +286,13 @@ void luaW_stop (lua_State *L) {
   luaW_deactivate(L);
   while (luaW_activecount(world) != 0)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  luaHS_publishstopped(L);
-  __atomic_store_n(&world->storage_grace,
-    __atomic_load_n(&world->storage_epoch, __ATOMIC_SEQ_CST), __ATOMIC_RELEASE);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaC_publish(L);
+  /* Publication drains the parked owners' retirement batches. Tentative
+  ** entries cannot touch these buffers until the world resumes. */
+  __atomic_store_n(&world->storage_grace,
+    __atomic_load_n(&world->storage_epoch, __ATOMIC_SEQ_CST), __ATOMIC_RELEASE);
   luaC_drainbarriers(L);
 }
 
