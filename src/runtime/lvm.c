@@ -295,8 +295,18 @@ static int floatforloop (lua_State *L, StkId ra) {
 static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
                           StkId val, unsigned upvalue) {
   LuaNativeRoot object, rooted_key, method;
+  TValue firstmethod;
   lu_byte tag;
-  int loop;
+  int loop, knownmethod = !ttistable(t) && !ttisfulluserdata(t) &&
+      luaA_readtypefield(L, ttype(t), G(L)->tmname[TM_INDEX], &firstmethod);
+  /* A primitive's table-valued __index often resolves without a safepoint.
+  ** Keep its validated snapshot for the rooted path if lookup must continue. */
+  if (knownmethod && ttistable(&firstmethod)) {
+    luaC_tracevalue(L, &firstmethod);
+    if (luaH_tryget(L, hvalue(&firstmethod), key, s2v(val), &tag) &&
+        tag != LUA_VABSTKEY)
+      return tag;
+  }
   luaR_pushroot(L, &object);
   luaR_setroot(L, &object, t);
   luaR_pushroot(L, &rooted_key);
@@ -310,7 +320,12 @@ static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
         goto done;
     }
     else {
-      luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
+      if (knownmethod) {
+        luaR_setroot(L, &method, &firstmethod);
+        knownmethod = 0;
+      }
+      else
+        luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
       if (ttisnil(&method.value)) {
         if (loop == 0 && upvalue != 0)
           luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");

@@ -85,6 +85,10 @@ LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
 LUAI_FUNC void luaA_metafield (lua_State *L, const TValue *object, TString *key,
                               LuaNativeRoot *result, int event);
+/* Snapshot a primitive type's metafield without parking. The caller shades
+** the result before use and roots it before any safepoint. */
+LUAI_FUNC int luaA_readtypefield (lua_State *L, int type, TString *key,
+                                  TValue *result);
 LUAI_FUNC void luaA_tabletm (lua_State *L, Table *mt, TMS event,
                             LuaNativeRoot *result);
 /* Keys and assigned values must remain rooted across ownership waits. */

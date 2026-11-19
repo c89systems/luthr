@@ -370,8 +370,7 @@ void luaA_tabletm (lua_State *L, Table *mt, TMS event, LuaNativeRoot *result) {
 /* Managed admission retains the metatable and its buffers through this
 ** nonparking lookup. Validate the type slot as well as the table snapshot:
 ** a detached metatable can be modified before it is installed again. */
-static int readtypemetafield (lua_State *L, int type, TString *key,
-                              LuaNativeRoot *result) {
+int luaA_readtypefield (lua_State *L, int type, TString *key, TValue *result) {
   global_State *g = G(L);
   uint64_t sequence =
     __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE);
@@ -383,7 +382,7 @@ static int readtypemetafield (lua_State *L, int type, TString *key,
   else if (!luaH_readshortstr(g, L, mt, key, &value)) return 0;
   if (__atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE) != sequence)
     return 0;
-  luaR_setroot(L, result, &value);
+  setobj(L, result, &value);
   return 1;
 }
 
@@ -392,7 +391,13 @@ void luaA_metafield (lua_State *L, const TValue *object, TString *key,
   LuaNativeRoot owner, metatable, rooted_key;
   LuaObjectScope first, second;
   int perobject = ttistable(object) || ttisfulluserdata(object);
-  if (!perobject && readtypemetafield(L, ttype(object), key, result)) return;
+  if (!perobject) {
+    TValue value;
+    if (luaA_readtypefield(L, ttype(object), key, &value)) {
+      luaR_setroot(L, result, &value);
+      return;
+    }
+  }
   luaR_pushroot(L, &owner);
   luaR_setroot(L, &owner, object);
   luaR_pushroot(L, &metatable);

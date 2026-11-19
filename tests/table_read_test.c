@@ -251,13 +251,34 @@ static void primitive_reattach(lua_State *state) {
   require(pthread_barrier_destroy(&test.barrier) == 0);
 }
 
-static void set_string_method(lua_State *state, const char *value) {
+static Table *set_string_method(lua_State *state, const char *value) {
+  Table *methods;
   lua_newtable(state);
   lua_newtable(state);
+  methods = (Table *)lua_topointer(state, -1);
   lua_pushstring(state, value);
   lua_setfield(state, -2, "label");
   lua_setfield(state, -2, "__index");
   lua_setmetatable(state, 1);
+  return methods;
+}
+
+static void primitive_index(lua_State *state) {
+  lua_pushliteral(state, "subject");
+  finished_index = set_string_method(state, "resolved");
+  require(lua_getfield(state, 1, "label") == LUA_TSTRING);
+  require(strcmp(lua_tostring(state, -1), "resolved") == 0);
+  require(lua_getfield(state, 1, "missing") == LUA_TNIL);
+  lua_pop(state, 2);
+  require(luaL_loadstring(
+              state, "local s,k=...; return s.label,s[k],s.missing") == LUA_OK);
+  lua_pushvalue(state, 1);
+  lua_pushliteral(state, "label");
+  require(lua_pcall(state, 2, 3, 0) == LUA_OK);
+  require(strcmp(lua_tostring(state, -3), "resolved") == 0);
+  require(strcmp(lua_tostring(state, -2), "resolved") == 0);
+  require(lua_isnil(state, -1));
+  finished_index = NULL;
 }
 
 static void *primitive_method_reader(void *argument) {
@@ -620,6 +641,7 @@ struct mixed {
   lua_State *writer, *readers[2];
   const void *marker;
   unsigned done;
+  char collision[32], absent[32];
 };
 struct mixed_reader {
   struct mixed *test;
@@ -700,10 +722,25 @@ static void *mixed_reader(void *argument) {
        i++) {
     lua_getfield(state, 1, "value");
     check_value(state, test->marker);
+    require(lua_getfield(state, 1, test->collision) == LUA_TNUMBER);
+    require(lua_tointeger(state, -1) == 42);
+    lua_pop(state, 1);
+    require(lua_getfield(state, 1, test->absent) == LUA_TNIL);
+    lua_pop(state, 1);
     lua_rawgeti(state, 1, 1);
     check_value(state, test->marker);
   }
   return NULL;
+}
+
+static unsigned short_bucket(lua_State *state, const char *name) {
+  unsigned bucket;
+  lua_pushstring(state, name);
+  luaX_lockstate(state);
+  bucket = tsvalue(s2v(state->top.p - 1))->hash & 63;
+  luaX_unlockstate(state);
+  lua_pop(state, 1);
+  return bucket;
 }
 
 static void mixed(lua_State *state, int generational) {
@@ -711,13 +748,28 @@ static void mixed(lua_State *state, int generational) {
   struct mixed_reader readers[2];
   pthread_t threads[3];
   char value[80];
-  unsigned i;
+  unsigned i, bucket;
   memset(&test, 0, sizeof(test));
   if (generational)
     lua_gc(state, LUA_GCGEN);
   lua_newtable(state);
   lua_pushinteger(state, LUA_MAXINTEGER);
   lua_setfield(state, 1, "value");
+  /* Exercise both a collision-chain hit and a miss while both capacities
+   * are in use. These keys share a bucket at either two or 64 nodes. */
+  bucket = short_bucket(state, "value");
+  for (i = 0;; i++) {
+    snprintf(test.collision, sizeof(test.collision), "collision-%u", i);
+    if (short_bucket(state, test.collision) == bucket)
+      break;
+  }
+  for (++i;; i++) {
+    snprintf(test.absent, sizeof(test.absent), "collision-%u", i);
+    if (short_bucket(state, test.absent) == bucket)
+      break;
+  }
+  lua_pushinteger(state, 42);
+  lua_setfield(state, 1, test.collision);
   lua_pushinteger(state, LUA_MININTEGER);
   lua_rawseti(state, 1, 1);
   memset(value, 'z', sizeof(value));
@@ -916,6 +968,8 @@ int main(int argc, char **argv) {
     primitive(state);
   else if (strcmp(argv[1], "primitive_reattach") == 0)
     primitive_reattach(state);
+  else if (strcmp(argv[1], "primitive_index") == 0)
+    primitive_index(state);
   else if (strcmp(argv[1], "index_hit") == 0)
     index_hit(state);
   else if (strcmp(argv[1], "index_miss") == 0)

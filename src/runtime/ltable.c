@@ -63,7 +63,7 @@ typedef union {
   char padding[offsetof(Limbox_aux, follows_pNode)];
 } Limbox;
 
-#define haslastfree(t)     ((t)->lsizenode >= LIMFORLAST)
+#define haslastfree(t)     ((t)->node->u.lsize >= LIMFORLAST)
 #define getlastfree(t)     ((cast(Limbox *, (t)->node) - 1)->lastfree)
 
 
@@ -123,17 +123,14 @@ typedef union {
 #define hashpointer(t,p)	hashmod(t, point2uint(p))
 
 
-#define dummynode		(&dummynode_)
-
 /*
 ** Common hash part for tables with empty hash parts. That allows all
 ** tables to have a hash part, avoiding an extra check ("is there a hash
 ** part?") when indexing. Its sole node has an empty value and a key
 ** (DEADKEY, NULL) that is different from any valid TValue.
 */
-static const Node dummynode_ = {
-  {{NULL}, LUA_VEMPTY,  /* value's value and type */
-   LUA_TDEADKEY, 0, {NULL}}  /* key type, next, and key value */
+const Node luaH_dummynode = {
+  .u = { .tt_ = LUA_VEMPTY, .key_tt = LUA_TDEADKEY }
 };
 
 
@@ -603,27 +600,26 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
 ** overflow.
 */
 static void initnodes (Table *t, char *storage, int lsize) {
+  Node *base;
   if (lsize < 0) {  /* no elements to hash part? */
-    __atomic_store_n(&t->node, cast(Node *, dummynode), __ATOMIC_RELEASE);
-    __atomic_store_n(&t->lsizenode, 0, __ATOMIC_RELEASE);
-    setdummy(t);  /* signal that it is using dummy node */
+    base = cast(Node *, &luaH_dummynode);
   }
   else {
     int i;
     unsigned size = twoto(lsize);
     size_t offset = lsize >= LIMFORLAST ? sizeof(Limbox) : 0;
-    __atomic_store_n(&t->node, cast(Node *, storage + offset), __ATOMIC_RELEASE);
+    base = cast(Node *, storage + offset);
+    base->u.lsize = cast_byte(lsize);
     if (offset != 0)
-      getlastfree(t) = gnode(t, size);  /* all positions are free */
-    __atomic_store_n(&t->lsizenode, cast_byte(lsize), __ATOMIC_RELEASE);
-    setnodummy(t);
+      cast(Limbox *, storage)->lastfree = base + size;
     for (i = 0; i < cast_int(size); i++) {
-      Node *n = gnode(t, i);
+      Node *n = base + i;
       setnext(n, 0);
       setnilkey(n);
       setempty(gval(n));
     }
   }
+  __atomic_store_n(&t->node, base, __ATOMIC_RELEASE);
 }
 
 static size_t nodebytes (int lsize) {
@@ -663,21 +659,13 @@ static void reinserthash (lua_State *L, Table *ot, Table *t) {
 
 
 /*
-** Exchange the hash part of 't1' and 't2'. (In 'flags', only the dummy
-** bit must be exchanged:  The metamethod bits do not change during a
-** resize, so the "real" table can keep their values.)
+** Exchange hash images. Each allocation carries its capacity, and the
+** pointer identifies the dummy image. Metamethod flags belong to the table.
 */
 static void exchangehashpart (Table *t1, Table *t2) {
-  lu_byte lsizenode = t1->lsizenode;
   Node *node = t1->node;
-  int bitdummy1 = gettableflags(t1) & BITDUMMY;
-  __atomic_store_n(&t1->lsizenode, t2->lsizenode, __ATOMIC_RELEASE);
   __atomic_store_n(&t1->node, t2->node, __ATOMIC_RELEASE);
-  settableflags(t1, cast_byte((gettableflags(t1) & NOTBITDUMMY) |
-                             (gettableflags(t2) & BITDUMMY)));
-  __atomic_store_n(&t2->lsizenode, lsizenode, __ATOMIC_RELEASE);
   __atomic_store_n(&t2->node, node, __ATOMIC_RELEASE);
-  settableflags(t2, cast_byte((gettableflags(t2) & NOTBITDUMMY) | bitdummy1));
 }
 
 
@@ -1365,8 +1353,6 @@ static int locateslot (Table *table, const TValue *key, LuaTableSlot *slot) {
   view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  view.lsizenode = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
-  view.flags = gettableflags(table);
   if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
   if (ttisnil(key)) return 0;
   if (ttisfloat(key)) {
@@ -1688,25 +1674,23 @@ static int sameversion (Table *table, uint64_t sequence) {
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence;
 }
 
-/* Typed views copy only the storage needed by this operation. Keys in this
-** path are compared as pointer representations, never dereferenced before
-** validation; even a mismatched concurrent tag/payload is harmless. */
+/* Admission retains the hash image and its immutable capacity. Before
+** validating the layout, follow only bounded links and compare raw key bits.
+** Read each mutable component with acquire ordering so that observing a
+** structural write also observes its preceding odd sequence. */
 static int readshortstr (global_State *g, Table *table, TString *key,
                          TValue *result, lu_byte *tag, uint64_t sequence) {
-  Node *base, *node;
-  unsigned lsize, size, steps;
-  base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  lsize = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
-  if (!sameversion(table, sequence)) return 0;
-  size = twoto(lsize);
-  node = base + lmod(key->hash, size);
+  Node *base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  unsigned size = twoto(base->u.lsize);
+  unsigned index = lmod(key->hash, size), steps;
   for (steps = 0; steps < size; steps++) {
+    const Node *node = base + index;
     Value candidate;
+    int next;
     lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
     if (keytag == ctb(LUA_VSHRSTR)) {
       TValue value;
       __atomic_load(&node->u.key_val, &candidate, __ATOMIC_ACQUIRE);
-      if (!sameversion(table, sequence)) return 0;
       if (memcmp(&candidate, &key, sizeof(key)) == 0) {
         if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value) ||
             !sameversion(table, sequence)) return 0;
@@ -1714,15 +1698,14 @@ static int readshortstr (global_State *g, Table *table, TString *key,
         return 1;
       }
     }
-    {
-      int next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
-      ptrdiff_t index;
+    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (next == 0) {
       if (!sameversion(table, sequence)) return 0;
-      if (next == 0) { *tag = LUA_VABSTKEY; return 1; }
-      index = node - base + next;
-      if (index < 0 || cast(size_t, index) >= size) return 0;
-      node = base + index;
+      *tag = LUA_VABSTKEY;
+      return 1;
     }
+    index += cast_uint(next);
+    if (index >= size || !sameversion(table, sequence)) return 0;
   }
   return 0;
 }
@@ -1803,8 +1786,6 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
   view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  view.lsizenode = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
-  view.flags = gettableflags(table);
   if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
     return 0;
   if (ttisnil(key)) { *tag = LUA_VABSTKEY; return 1; }

@@ -786,6 +786,7 @@ typedef union Node {
   struct NodeKey {
     TValuefields;  /* fields for value */
     lu_byte key_tt;  /* key type */
+    lu_byte lsize;  /* immutable log2 of capacity, used in the first node only */
     int next;  /* for chaining */
     Value key_val;  /* key value */
   } u;
@@ -811,7 +812,6 @@ typedef union Node {
 typedef struct Table {
   CommonHeader;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
-  lu_byte lsizenode;  /* log2 of number of slots of 'node' array */
   unsigned int asize;  /* number of slots in 'array' array */
   uintptr_t sharing;
   uint64_t sequence;
@@ -871,7 +871,7 @@ typedef struct Table {
 
 
 #define twoto(x)	(1u<<(x))
-#define sizenode(t)	(twoto((t)->lsizenode))
+#define sizenode(t)	(twoto((t)->node->u.lsize))
 
 
 /* size of buffer for 'luaO_utf8esc' function */

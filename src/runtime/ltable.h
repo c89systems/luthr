@@ -29,17 +29,8 @@
     else settableflags(t, gettableflags(t) & cast_byte(~maskflags)); }
 
 
-/*
-** Bit BITDUMMY set in 'flags' means the table is using the dummy node
-** for its hash part.
-*/
-
-#define BITDUMMY		(1 << 6)
-#define NOTBITDUMMY		cast_byte(~BITDUMMY)
-#define isdummy(t)		(gettableflags(t) & BITDUMMY)
-
-#define setnodummy(t) __atomic_fetch_and(&(t)->flags, NOTBITDUMMY, __ATOMIC_RELEASE)
-#define setdummy(t) __atomic_fetch_or(&(t)->flags, BITDUMMY, __ATOMIC_RELEASE)
+LUAI_DDEC(const Node luaH_dummynode;)
+#define isdummy(t)		((t)->node == &luaH_dummynode)
 
 
 

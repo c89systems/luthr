@@ -19,8 +19,6 @@ static int snapshot (Table *table, Table *view, Table **metatable,
   view->array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   view->asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   view->node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  view->lsizenode = __atomic_load_n(&table->lsizenode, __ATOMIC_ACQUIRE);
-  view->flags = gettableflags(table);
   *metatable = __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE);
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == *sequence;
 }
