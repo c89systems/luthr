@@ -33,6 +33,12 @@ LUAI_FUNC int luaX_tryworker (lua_State *L);
 ** physical state gates themselves remain strictly nonrecursive. */
 LUAI_FUNC void luaX_apienter (lua_State *L);
 LUAI_FUNC void luaX_apileave (lua_State *L);
+/* Value-only API transactions retain the same ownership, participation and
+** snapshot handshake. They cannot allocate or call Lua; a closing stack
+** operation upgrades before invoking its first user callback. */
+LUAI_FUNC void luaX_valueenter (lua_State *L);
+LUAI_FUNC void luaX_valueleave (lua_State *L);
+LUAI_FUNC void luaX_valuecall (lua_State *L);
 /* Nonblocking collector reservation. 0 means busy, 1 is a new reservation,
 ** and 2 means this execution already owns the target. The collector remains
 ** admitted on its own state throughout a reservation. */

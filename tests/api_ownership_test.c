@@ -38,6 +38,8 @@ static struct fixture *active_fixture;
 
 void __real_luaX_apienter(lua_State *state);
 void __real_luaX_apileave(lua_State *state);
+void __real_luaX_valueenter(lua_State *state);
+void __real_luaX_valueleave(lua_State *state);
 void __real_luaX_pollrequests(lua_State *state);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
 
@@ -76,20 +78,35 @@ static void collect_at_boundary(struct fixture *fixture) {
     abort();
 }
 
-void __wrap_luaX_apienter(lua_State *state) {
+static void entry_boundary(lua_State *state) {
   struct fixture *fixture = active_fixture;
   if (fixture != NULL && !fixture->vm_case && fixture->armed &&
       fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);
-  __real_luaX_apienter(state);
 }
 
-void __wrap_luaX_apileave(lua_State *state) {
+static void leave_boundary(lua_State *state) {
   struct fixture *fixture = active_fixture;
-  __real_luaX_apileave(state);
   if (fixture != NULL && !fixture->vm_case && fixture->armed &&
       !fixture->entry_case && state == fixture->worker)
     collect_at_boundary(fixture);
+}
+
+void __wrap_luaX_apienter(lua_State *state) {
+  entry_boundary(state);
+  __real_luaX_apienter(state);
+}
+void __wrap_luaX_apileave(lua_State *state) {
+  __real_luaX_apileave(state);
+  leave_boundary(state);
+}
+void __wrap_luaX_valueenter(lua_State *state) {
+  entry_boundary(state);
+  __real_luaX_valueenter(state);
+}
+void __wrap_luaX_valueleave(lua_State *state) {
+  __real_luaX_valueleave(state);
+  leave_boundary(state);
 }
 
 void __wrap_luaX_pollrequests(lua_State *state) {

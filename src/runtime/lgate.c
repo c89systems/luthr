@@ -128,7 +128,7 @@ void luaX_endreserve (lua_State *target, int reservation) {
 }
 
 static void lockstate (lua_State *L, LuaThreadContext *thread,
-                       NativeStackContext *context) {
+                       NativeStackContext *context, int values) {
   LuaExecution *execution = context->execution;
   LuaThreadContext *host = execution == NULL ? thread : NULL;
   void *token = execution != NULL ? cast(void *, execution)
@@ -136,26 +136,34 @@ static void lockstate (lua_State *L, LuaThreadContext *thread,
   luaQ_entermanaged(L, execution);
   reserve(L, context, host, token);
   luaW_enter(L);
-  luaCP_apply(L);
-  if (L->errorJmp == NULL && execution != NULL)
-    luaE_refreshnativestack(L);
+  if (!values) {
+    luaCP_apply(L);
+    if (L->errorJmp == NULL && execution != NULL)
+      luaE_refreshnativestack(L);
+  }
 }
 
 void luaX_lockstate (lua_State *L) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
-  lockstate(L, thread, context);
+  lockstate(L, thread, context, 0);
 }
 
-static void unlockstate (lua_State *L, void *token) {
+static void unlockstate (lua_State *L, void *token, int values) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
   LuaExecution *execution = luaX_execution(L);
-  if (!L->reclaiming && L->storage_retired != NULL) luaHS_reclaim(L, LUAHS_WITHDRAW);
-  if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
-    luaC_reclaim(L);
-  luaM_publishdebt(L);
+  /* Pure value operations cannot create reclamation work. Work inherited
+  ** from a collector snapshot remains serviceable by the ordinary workers
+  ** and the next allocating/calling API, instead of extending every read. */
+  if (!values) {
+    if (!L->reclaiming && L->storage_retired != NULL) luaHS_reclaim(L, LUAHS_WITHDRAW);
+    if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
+      luaC_reclaim(L);
+  }
+  if (!values || L->allocation_debt != 0 || L->reclaim_credit != 0)
+    luaM_publishdebt(L);
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
@@ -174,7 +182,7 @@ static void unlockstate (lua_State *L, void *token) {
 }
 
 void luaX_unlockstate (lua_State *L) {
-  unlockstate(L, luaQ_ownertoken());
+  unlockstate(L, luaQ_ownertoken(), 0);
 }
 
 int luaX_tryworker (lua_State *L) {
@@ -202,23 +210,38 @@ static int attachedapi (lua_State *L, NativeStackContext *context) {
   return 1;
 }
 
-void luaX_apienter (lua_State *L) {
+static void apienter (lua_State *L, int values) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
-  if (!attachedapi(L, context)) lockstate(L, thread, context);
+  if (!attachedapi(L, context)) lockstate(L, thread, context, values);
   else luaX_pollrequests(L);
 }
 
-void luaX_apileave (lua_State *L) {
+static void apileave (lua_State *L, int values) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
   if (!attachedapi(L, context)) {
     void *token = context->execution != NULL ? cast(void *, context->execution)
                                             : cast(void *, &thread->native);
-    unlockstate(L, token);
+    unlockstate(L, token, values);
   }
+}
+
+void luaX_apienter (lua_State *L) { apienter(L, 0); }
+
+void luaX_apileave (lua_State *L) { apileave(L, 0); }
+
+void luaX_valueenter (lua_State *L) { apienter(L, 1); }
+
+void luaX_valueleave (lua_State *L) { apileave(L, 1); }
+
+void luaX_valuecall (lua_State *L) {
+  if (attachedapi(L, luaX_context(L))) return;
+  luaCP_apply(L);
+  if (L->errorJmp == NULL && luaX_execution(L) != NULL)
+    luaE_refreshnativestack(L);
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation
