@@ -32,6 +32,8 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VCCL, sizeCclosure(nupvals));
   CClosure *c = gco2ccl(o);
   luaA_initlock(&c->access);
+  luaA_initsharing(L, c);
+  c->sequence = 0;
   c->managed = 0;
   c->managed_next = NULL;
   c->nupvalues = cast_byte(nupvals);
@@ -43,6 +45,8 @@ LClosure *luaF_newLclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VLCL, sizeLclosure(nupvals));
   LClosure *c = gco2lcl(o);
   luaA_initlock(&c->access);
+  luaA_initsharing(L, c);
+  c->sequence = 0;
   c->p = NULL;
   c->nupvalues = cast_byte(nupvals);
   while (nupvals--) c->upvals[nupvals] = NULL;
@@ -58,6 +62,7 @@ static UpVal *newupvalobject (lua_State *L) {
   uv->mutex_ready = 0;
   uv->level = 0;
   uv->sequence = 0;
+  luaA_initsharing(L, uv);
   uv->value.value_.gc = NULL;
   setnilvalue(&uv->value);
   if (pthread_mutex_init(&uv->mutex, NULL) != 0)
@@ -76,7 +81,9 @@ void luaF_initupvals (lua_State *L, LClosure *cl) {
   for (i = 0; i < cl->nupvalues; i++) {
     lua_assert(cl->upvals[i] == NULL);
     UpVal *uv = newupvalobject(L);
-    cl->upvals[i] = uv;
+    if (__atomic_load_n(&cl->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)
+      luaA_share(L, obj2gco(uv));
+    __atomic_store_n(&cl->upvals[i], uv, __ATOMIC_RELEASE);
     luaC_objbarrier(L, cl, uv);
   }
   luaA_end(L, &scope);
@@ -86,7 +93,7 @@ void luaF_setproto (lua_State *L, LClosure *cl, Proto *proto) {
   LuaObjectScope scope;
   luaA_begin(L, obj2gco(cl), &scope);
   luaC_prewriteptr(L, cl->p, proto);
-  cl->p = proto;
+  __atomic_store_n(&cl->p, proto, __ATOMIC_RELEASE);
   luaC_objbarrier(L, cl, proto);
   luaA_end(L, &scope);
 }
@@ -117,9 +124,13 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
 ** so a matching even sequence proves a complete snapshot. No safepoint occurs
 ** until validation and root publication finish. Continuous writers get bounded
 ** retries followed by the cell mutex; no arbitrary Lua code runs under it. */
-static void loadupval (UpVal *uv, TValue *value) {
+static void loadupval (lua_State *L, UpVal *uv, TValue *value) {
   TValue snapshot;
   unsigned attempt;
+  if (__atomic_load_n(&uv->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L)) {
+    *value = uv->value;
+    return;
+  }
   for (attempt = 0; attempt < 8; attempt++) {
     uint64_t before = __atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE);
     if (before & 1) continue;
@@ -137,29 +148,37 @@ static void loadupval (UpVal *uv, TValue *value) {
 
 void luaF_readupval (lua_State *L, UpVal *uv, LuaNativeRoot *value) {
   UNUSED(L);
-  loadupval(uv, &value->value);
+  loadupval(L, uv, &value->value);
   luaC_tracevalue(L, &value->value);
   value->table_view = NULL;
 }
 
+static void storeupval (lua_State *L, UpVal *uv, const TValue *value) {
+  uint64_t sequence;
+  luaC_prewrite(L, &uv->value, value);
+  sequence = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
+  lua_assert((sequence & 1) == 0);
+  __atomic_store_n(&uv->sequence, sequence + 1, __ATOMIC_RELEASE);
+  luaA_store(L, &uv->value, value);
+  __atomic_store_n(&uv->sequence, sequence + 2, __ATOMIC_RELEASE);
+  luaC_barrier(L, uv, value);
+}
+
 void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   LuaNativeRoot transfer, upvalue_root;
-  uint64_t sequence;
+  if (__atomic_load_n(&uv->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L)) {
+    /* No allocation, wait, callback or safepoint can expose a partial store. */
+    storeupval(L, uv, value);
+    return;
+  }
   luaR_pushroot(L, &transfer);
   luaR_setroot(L, &transfer, value);
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
+  luaA_sharevalue(L, &transfer.value);
   luaX_checksync(pthread_mutex_lock(&uv->mutex));
-  luaC_prewrite(L, &uv->value, &transfer.value);
-  sequence = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
-  lua_assert((sequence & 1) == 0);
-  __atomic_store_n(&uv->sequence, sequence + 1, __ATOMIC_RELEASE);
-  __atomic_store(&uv->value.value_, &transfer.value.value_, __ATOMIC_RELEASE);
-  __atomic_store_n(&uv->value.tt_, transfer.value.tt_, __ATOMIC_RELEASE);
-  __atomic_store_n(&uv->sequence, sequence + 2, __ATOMIC_RELEASE);
+  storeupval(L, uv, &transfer.value);
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
-  /* This mutator drains the deferred barrier before collection can proceed. */
-  luaC_barrier(L, uv, &transfer.value);
   luaR_poproot(L, &upvalue_root);
   luaR_poproot(L, &transfer);
 }
@@ -171,7 +190,7 @@ void luaF_loadrange (lua_State *L, StkId first, int count) {
   for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
     if (uv->level < from) break;
     if (uv->level < to) {
-      loadupval(uv, s2v(restorestack(L, uv->level)));
+      loadupval(L, uv, s2v(restorestack(L, uv->level)));
     }
   }
 }
@@ -182,7 +201,7 @@ StkId luaF_loadlocal (lua_State *L, StkId slot) {
   for (uv = L->openupval; uv != NULL && uv->level >= level;
        uv = uv->open.next) {
     if (uv->level == level) {
-      loadupval(uv, s2v(slot));
+      loadupval(L, uv, s2v(slot));
       break;
     }
   }
@@ -221,6 +240,10 @@ void luaF_getcapture (lua_State *L, LClosure *closure, int n,
 void luaF_readcapture (lua_State *L, LClosure *closure, int n,
                        LuaNativeRoot *value) {
   LuaNativeRoot capture;
+  if (__atomic_load_n(&closure->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L)) {
+    luaF_readupval(L, closure->upvals[n], value);
+    return;
+  }
   luaR_pushroot(L, &capture);
   luaF_getcapture(L, closure, n, &capture);
   luaF_readupval(L, gco2upv(gcvalue(&capture.value)), value);
@@ -230,6 +253,10 @@ void luaF_readcapture (lua_State *L, LClosure *closure, int n,
 void luaF_writecapture (lua_State *L, LClosure *closure, int n,
                         const TValue *value) {
   LuaNativeRoot transfer, capture;
+  if (__atomic_load_n(&closure->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L)) {
+    luaF_writeupval(L, closure->upvals[n], value);
+    return;
+  }
   luaR_pushroot(L, &transfer);
   luaR_setroot(L, &transfer, value);
   luaR_pushroot(L, &capture);
@@ -253,6 +280,8 @@ void luaF_joincaptures (lua_State *L, LClosure *to, int target,
   if (pair)
     luaA_begin(L, obj2gco(targetfirst ? from : to), &second);
   lua_assert(to->upvals[target] != NULL && from->upvals[source] != NULL);
+  if (__atomic_load_n(&to->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)
+    luaA_share(L, obj2gco(from->upvals[source]));
   luaC_prewriteptr(L, to->upvals[target], from->upvals[source]);
   __atomic_store_n(&to->upvals[target],
     __atomic_load_n(&from->upvals[source], __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);

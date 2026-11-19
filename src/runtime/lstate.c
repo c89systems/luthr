@@ -326,6 +326,7 @@ static void init_registry (lua_State *L, global_State *g) {
   /* registry[LUA_RIDX_GLOBALS] = new table (table of globals) */
   sethvalue(L, &aux, luaH_new(L));
   luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux);
+  luaA_share(L, obj2gco(registry));
 }
 
 
@@ -362,6 +363,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthr_stack_limit = 0;
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
+  L->sharing_roots = NULL;
   L->policy = NULL;
   L->trace_snapshot = 0;
   L->trace_trimmed = 0;

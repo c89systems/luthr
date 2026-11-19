@@ -24,7 +24,9 @@
 #define gettableflags(t) __atomic_load_n(&(t)->flags, __ATOMIC_ACQUIRE)
 #define settableflags(t,f) __atomic_store_n(&(t)->flags, (f), __ATOMIC_RELEASE)
 #define invalidateTMcache(t) \
-  __atomic_fetch_and(&(t)->flags, cast_byte(~maskflags), __ATOMIC_RELAXED)
+  { if (__atomic_load_n(&(t)->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) \
+      __atomic_fetch_and(&(t)->flags, cast_byte(~maskflags), __ATOMIC_RELAXED); \
+    else settableflags(t, gettableflags(t) & cast_byte(~maskflags)); }
 
 
 /*
@@ -129,6 +131,9 @@ LUAI_FUNC lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res);
 ** Encoded storage locations never leave this operation. */
 LUAI_FUNC int luaH_assignowned (lua_State *L, Table *t, const TValue *key,
                                TValue *value, int raw);
+/* Complete only a private, non-allocating write. Failure leaves the operation
+** for ordinary rooted access; no encoded storage location escapes. */
+LUAI_FUNC int luaH_tryset (lua_State *, Table *, const TValue *, TValue *, int);
 
 /* Borrowed lookup: requires object ownership or collector quiescence. */
 LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);

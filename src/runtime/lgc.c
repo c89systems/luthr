@@ -684,13 +684,8 @@ static void traversestrongtable (LuaTraceWork *work, Table *h) {
 /*
 ** (result & 1) iff weak values; (result & 2) iff weak keys.
 */
-static int getmode (global_State *g, Table *h) {
-  const TValue *mode;
+static int cachemode (global_State *g, Table *h, const TValue *mode) {
   int result;
-  if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED) &&
-      __atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == g->trace_epoch)
-    return h->gcweak;
-  mode = gfasttm(g, h->metatable, TM_MODE);
   if (mode == NULL || !ttisstring(mode))
     result = 0;  /* ignore non-string modes */
   else {
@@ -707,6 +702,32 @@ static int getmode (global_State *g, Table *h) {
     __atomic_store_n(&h->weak_epoch, g->trace_epoch, __ATOMIC_RELEASE);
   }
   return result;
+}
+
+static int getmode (global_State *g, Table *h) {
+  if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED) &&
+      __atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == g->trace_epoch)
+    return h->gcweak;
+  return cachemode(g, h, gfasttm(g, h->metatable, TM_MODE));
+}
+
+/* The table owner freezes its mode; its metatable only needs a validated read.
+** Collectors must not claim an otherwise private, strong metatable. */
+static int preparemode (lua_State *L, Table *h) {
+  TValue mode;
+  Table *meta = h->metatable;
+  if (__atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == G(L)->trace_epoch)
+    return 1;
+  if (meta == NULL) setnilvalue(&mode);
+  else if (!luaH_gcgetmode(meta, G(L)->tmname[TM_MODE], &mode)) {
+    if (__atomic_load_n(&meta->access.owner, __ATOMIC_ACQUIRE) != luaX_token(L))
+      return 0;
+    /* A nested collection borrows this execution's stable partial image. */
+    getmode(G(L), h);
+    return 1;
+  }
+  cachemode(G(L), h, &mode);
+  return 1;
 }
 
 
@@ -733,6 +754,45 @@ static l_mem traversetable (LuaTraceWork *work, Table *h) {
   return cast(l_mem, 1 + 2*sizenode(h) + h->asize);
 }
 
+
+static void capturevalue (const TValue *value, GCObject **edges, unsigned *n) {
+  lu_byte tag = __atomic_load_n(&value->tt_, __ATOMIC_ACQUIRE);
+  if (tag & BIT_ISCOLLECTABLE)
+    __atomic_load(&value->value_.gc, &edges[(*n)++], __ATOMIC_ACQUIRE);
+}
+
+/* Raw pointer representations only. Following them belongs after validation. */
+unsigned luaC_objectchunk (GCObject *object, unsigned first, unsigned count,
+                           GCObject **edges) {
+  unsigned i, n = 0;
+  if (object->tt == LUA_VLCL) {
+    LClosure *closure = gco2lcl(object);
+    if (first == 0) {
+      Proto *proto = __atomic_load_n(&closure->p, __ATOMIC_ACQUIRE);
+      if (proto != NULL) edges[n++] = cast(GCObject *, proto);
+    }
+    for (i = first; i < first + count; i++) {
+      UpVal *cell = __atomic_load_n(&closure->upvals[i], __ATOMIC_ACQUIRE);
+      if (cell != NULL) edges[n++] = cast(GCObject *, cell);
+    }
+  }
+  else if (object->tt == LUA_VCCL) {
+    CClosure *closure = gco2ccl(object);
+    for (i = first; i < first + count; i++)
+      capturevalue(&closure->upvalue[i], edges, &n);
+  }
+  else if (object->tt == LUA_VUSERDATA) {
+    Udata *userdata = gco2u(object);
+    if (first == 0) {
+      Table *meta = __atomic_load_n(&userdata->metatable, __ATOMIC_ACQUIRE);
+      if (meta != NULL) edges[n++] = cast(GCObject *, meta);
+    }
+    for (i = first; i < first + count; i++)
+      capturevalue(&userdata->uv[i].uv, edges, &n);
+  }
+  else capturevalue(&gco2upv(object)->value, edges, &n);
+  return n;
+}
 
 static l_mem traverseudata (LuaTraceWork *work, Udata *u) {
   int i;
@@ -795,6 +855,14 @@ static l_mem traverseLclosure (LuaTraceWork *work, LClosure *cl) {
 
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   global_State *g = G(L);
+  uintptr_t *sharing = luaA_sharing(o);
+  if (sharing != NULL) {
+    uintptr_t state = __atomic_load_n(sharing, __ATOMIC_ACQUIRE);
+    GCObject *next = cast(GCObject *, state & ~LUA_OBJECT_SHARED);
+    /* An unpublished promotion list is a temporary heap graph. Trace its
+    ** links concurrently instead of walking it under root-phase ownership. */
+    if ((state & LUA_OBJECT_SHARED) && next != NULL) markwork(work, next);
+  }
   if (o->tt == LUA_VTHREAD) {
     lua_State *thread = gco2th(o);
     if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) !=
@@ -837,20 +905,15 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     else if (builder != NULL) luaX_endreserve(builder, reservation);
     return 1;
   }
+  if (!luaW_iscollector(L) && (o->tt == LUA_VUPVAL || o->tt == LUA_VLCL ||
+      o->tt == LUA_VCCL || o->tt == LUA_VUSERDATA)) {
+    int scanned = luaC_scanvalues(L, work, o);
+    if (scanned >= 0) return scanned;
+  }
   if (o->tt == LUA_VUPVAL) {
     UpVal *upvalue = gco2upv(o);
-    if (upvalue->mutex_ready && !luaW_iscollector(L)) {
-      int status = pthread_mutex_trylock(&upvalue->mutex);
-      if (status == EBUSY) return 0;
-      luaX_checksync(status);
-      tracevalue(work, &upvalue->value);
-      work->marked += sizeof(UpVal);
-      blacken(work, o);
-      genlink(work, o);
-      luaX_checksync(pthread_mutex_unlock(&upvalue->mutex));
-      return 1;
-    }
-    else tracevalue(work, &upvalue->value);
+    lua_assert(luaW_iscollector(L));
+    tracevalue(work, &upvalue->value);
     work->marked += sizeof(UpVal);
     blacken(work, o);
     genlink(work, o);
@@ -863,16 +926,13 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   if (!luaW_iscollector(L) && !luaA_tryscan(L, o)) return 0;
   if (o->tt == LUA_VTABLE) {
     Table *table = gco2t(o);
-    Table *metatable = table->metatable;
-    int pair = metatable != NULL && metatable != table;
-    if (pair && !luaW_iscollector(L) && !luaA_tryscan(L, obj2gco(metatable))) {
+    if (!luaW_iscollector(L) && !preparemode(L, table)) {
       luaA_endscan(L, o);
       return 0;
     }
     work->marked += luaC_objsize(o);
     blacken(work, o);
     traversetable(work, table);
-    if (pair && !luaW_iscollector(L)) luaA_endscan(L, obj2gco(metatable));
   }
   else {
     work->marked += luaC_objsize(o);
@@ -1228,7 +1288,7 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   global_State *g = G(L);
   lu_byte marked, changed;
   l_mem bytes = 0;
-  int locked = 0, watching = 0;
+  int watching = 0;
   if (isdead(g, o)) {
     int retired = luaC_tryretire(L, o);
     if (retired != SWEEP_LIVE) return retired;
@@ -1237,14 +1297,14 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   marked = getmarked(o);
   if (kind == SWEEP_YOUNG && (marked & AGEBITS) == G_SURVIVAL) {
     if (o->tt == LUA_VTABLE && !luaW_iscollector(L)) {
-      if (!luaA_tryscan(L, o)) return SWEEP_RETRY;
-      locked = 1;
+      if (!luaC_tablesize(gco2t(o), &bytes)) return SWEEP_RETRY;
     }
     /* A root or builder can keep changing its storage after its snapshot.
     ** Promotion accounting uses that cycle's stable scanned size. */
     if (o->tt == LUA_VTHREAD) bytes = cast(l_mem, gco2th(o)->trace_bytes);
     else if (o->tt == LUA_VPROTO) bytes = cast(l_mem, gco2p(o)->trace_bytes);
-    else bytes = luaC_objsize(o);
+    else if (o->tt != LUA_VTABLE || luaW_iscollector(L))
+      bytes = luaC_objsize(o);
   }
   do {
     unsigned age = marked & AGEBITS;
@@ -1260,7 +1320,6 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
     if (changed == marked) break;
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-  if (locked) luaA_endscan(L, o);
   if (kind == SWEEP_YOUNG && (changed & AGEBITS) == G_OLD1) {
     /* A builder born black can promote before its first size snapshot. Its
     ** next-cycle scan is mandatory even when its accounted size is zero. */
@@ -1431,6 +1490,7 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
       ttisnil(&method.value) ||         /* or has no finalizer... */
       (g->gcstp & GCSTPCLS))                   /* or closing state? */
     goto done;  /* nothing to be done */
+  luaA_share(L, o);
   registerfinalizer(L, o);
  done:
   luaR_poproot(L, &method);

@@ -842,6 +842,7 @@ Table *luaH_new (lua_State *L) {
   GCObject *o = luaC_newobj(L, LUA_VTABLE, sizeof(Table));
   Table *t = gco2t(o);
   luaA_initlock(&t->access);
+  luaA_initsharing(L, t);
   t->sequence = 0;
   t->metatable = NULL;
   t->weak_epoch = 0;
@@ -1282,10 +1283,49 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
 }
 
 
+/* The current gate is the private graph's only mutator. With no allocation,
+** wait or callback, its live operands need no additional native root records.
+** The collector only reads strong storage and validates our sequence. */
+int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
+                 int raw) {
+  uint64_t sequence;
+  int hres, done = 1;
+  if (!luaA_localtable(L, t)) return 0;
+  sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
+  if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
+  __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
+  hres = rawpset(L, t, key, value);
+  if (hres != HOK) {
+    if ((!raw && t->metatable != NULL) ||
+        (hres == HNOTFOUND &&
+         (ttisnil(key) || ttisfloat(key) || isextstr(key)))) done = 0;
+    else if (hres == HNOTFOUND) {
+      luaC_tracevalue(L, value);
+      if (!ttisnil(value)) {
+        done = insertkey(L, t, key, value);
+        if (done) luaC_barrierback(L, obj2gco(t), key);
+      }
+    }
+    else rawfinishset(L, t, key, value, hres);  /* existing array/hash storage */
+  }
+  if (done) {
+    invalidateTMcache(t);
+    luaC_barrierback(L, obj2gco(t), value);
+  }
+  /* Failure has not changed any key, value or image. Restore that version;
+  ** the rooted fallback will publish the operation's single committed image. */
+  __atomic_store_n(&t->sequence, sequence + (done ? 2 : 0), __ATOMIC_RELEASE);
+  return done;
+}
+
 /* The ordinary no-metatable insertion needs no second ownership or lookup. */
 int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
                        int raw) {
   int hres;
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
+    luaA_sharevalue(L, key);
+    luaA_sharevalue(L, value);
+  }
   invalidateTMcache(t);
   hres = rawpset(L, t, key, value);
   if (hres != HOK) {
@@ -1304,6 +1344,8 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
 */
 static void rawsetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   unsigned ik = ikeyinarray(t, key);
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)
+    luaA_sharevalue(L, value);
   if (ik > 0) {
     tracearraywrite(L, t, ik - 1, value);
     obj2arr(t, ik - 1, value);
@@ -1626,6 +1668,11 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   LuaNativeRoot rooted_key;
   LuaObjectScope scope;
   lu_byte tag;
+  if (luaA_localtable(L, t)) {
+    tag = luaH_getowned(t, key, res);
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   if ((ttisshrstring(key) && readshortstr(L, t, tsvalue(key), res, &tag)) ||
       (ttisinteger(key) && readinteger(L, t, ivalue(key), res, &tag)) ||
       optimistic(L, t, key, res, &tag)) {
@@ -1646,6 +1693,11 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   LuaObjectScope scope;
   lu_byte tag;
   TValue index;
+  if (luaA_localtable(L, t)) {
+    tag = rawgetint(t, key, res);
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   setivalue(&index, key);
   if (readinteger(L, t, key, res, &tag) || optimistic(L, t, &index, res, &tag)) {
     if (!tagisempty(tag)) luaC_tracevalue(L, res);
@@ -1663,6 +1715,11 @@ lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   LuaObjectScope scope;
   lu_byte tag;
   TValue index;
+  if (luaA_localtable(L, t)) {
+    tag = rawgetstr(t, key, res);
+    if (!tagisempty(tag)) luaC_tracevalue(L, res);
+    return tag;
+  }
   setsvalue(L, &index, key);
   if ((strisshr(key) && readshortstr(L, t, key, res, &tag)) ||
       optimistic(L, t, &index, res, &tag)) {
@@ -1686,6 +1743,7 @@ lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res) {
 void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
   LuaNativeRoot rooted_key, rooted_value;
   LuaObjectScope scope;
+  if (luaH_tryset(L, t, key, value, 1)) return;
   luaR_pushroot(L, &rooted_key);
   luaR_setroot(L, &rooted_key, key);
   luaR_pushroot(L, &rooted_value);
@@ -1700,6 +1758,9 @@ void luaH_set (lua_State *L, Table *t, const TValue *key, TValue *value) {
 void luaH_setint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   LuaNativeRoot rooted_value;
   LuaObjectScope scope;
+  TValue index;
+  setivalue(&index, key);
+  if (luaH_tryset(L, t, &index, value, 1)) return;
   luaR_pushroot(L, &rooted_value);
   luaR_setroot(L, &rooted_value, value);
   luaA_begin(L, obj2gco(t), &scope);

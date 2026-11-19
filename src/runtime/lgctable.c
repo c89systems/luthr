@@ -93,3 +93,11 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   luaC_finishstrong(work, obj2gco(table));
   return 1;
 }
+
+int luaC_tablesize (Table *table, l_mem *bytes) {
+  Table view, *metatable;
+  uint64_t sequence;
+  if (!snapshot(table, &view, &metatable, &sequence)) return 0;
+  *bytes = cast(l_mem, luaH_size(&view));
+  return 1;
+}

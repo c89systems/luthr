@@ -320,6 +320,21 @@ typedef struct GCObject {
   CommonHeader;
 } GCObject;
 
+/* Mutable objects share metadata offsets, so local operations do not dispatch
+** by object type merely to find their owner or publication sequence. */
+#define MutableHeader \
+  CommonHeader; uintptr_t sharing; uint64_t sequence
+#define LUA_OBJECT_SHARED cast(uintptr_t, 1)
+
+typedef struct LuaMutable {
+  MutableHeader;
+} LuaMutable;
+
+typedef struct LuaAccessible {
+  MutableHeader;
+  LuaObjectLock access;
+} LuaAccessible;
+
 
 /* Bit mark for collectable types */
 #define BIT_ISCOLLECTABLE	(1 << 6)
@@ -503,10 +518,10 @@ typedef union UValue {
 ** memory area follows the end of this structure.
 */
 typedef struct Udata {
-  CommonHeader;
+  MutableHeader;
+  LuaObjectLock access;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
-  LuaObjectLock access;
   LuaObjectLock payload_access;  /* opaque native bytes, not collector edges */
   struct Table *metatable;
   GCObject *gclist;
@@ -522,10 +537,10 @@ typedef struct Udata {
 ** alignment for binary data following this header.)
 */
 typedef struct Udata0 {
-  CommonHeader;
+  MutableHeader;
+  LuaObjectLock access;
   unsigned short nuvalue;  /* number of user values */
   size_t len;  /* number of bytes */
-  LuaObjectLock access;
   LuaObjectLock payload_access;
   struct Table *metatable;
   GCObject *gclist;
@@ -699,10 +714,9 @@ typedef struct Proto {
 ** Upvalues for Lua closures
 */
 typedef struct UpVal {
-  CommonHeader;
+  MutableHeader;
   GCObject *gclist;
   TValue value;  /* stable shared cell, including while its local is live */
-  uint64_t sequence;  /* even published value; odd during a writer's stores */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
   struct {
     struct UpVal *next;
@@ -716,14 +730,13 @@ typedef struct UpVal {
 
 
 #define ClosureHeader \
-	CommonHeader; lu_byte nupvalues; GCObject *gclist
+	MutableHeader; LuaObjectLock access; lu_byte nupvalues; GCObject *gclist
 
 typedef struct CClosure {
   ClosureHeader;
   lu_byte managed;  /* immutable runtime-owned implementation/continuations */
   struct CClosure *managed_next;  /* canonical zero-capture runtime functions */
   lua_CFunction f;
-  LuaObjectLock access;
   TValue upvalue[1];  /* list of upvalues */
 } CClosure;
 
@@ -731,7 +744,6 @@ typedef struct CClosure {
 typedef struct LClosure {
   ClosureHeader;
   struct Proto *p;
-  LuaObjectLock access;
   UpVal *upvals[1];  /* list of upvalues */
 } LClosure;
 
@@ -801,7 +813,8 @@ typedef union Node {
 
 
 typedef struct Table {
-  CommonHeader;
+  MutableHeader;
+  LuaObjectLock access;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
   lu_byte lsizenode;  /* log2 of number of slots of 'node' array */
   unsigned int asize;  /* number of slots in 'array' array */
@@ -809,8 +822,6 @@ typedef struct Table {
   Node *node;
   struct Table *metatable;
   GCObject *gclist;
-  LuaObjectLock access;
-  uint64_t sequence;  /* even published contents; odd during exclusive access */
   uint64_t weak_epoch;
   GCObject *weaknext;  /* retry ownership, independent of the weak lists */
   lu_byte gcweak;  /* weakness selected for this collection cycle */

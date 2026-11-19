@@ -351,6 +351,7 @@ static void settable (lua_State *L, const TValue *t, TValue *key,
   Table *table = ttistable(t) ? hvalue(t) : NULL;
   TValue other = {0};
   int loop, source = -1;
+  if (table != NULL && luaH_tryset(L, table, key, val, 0)) return;
   /* Retain diagnostic identity, not a stack pointer that an ownership wait
   ** can invalidate. Type information still comes from the rooted snapshot. */
   if (table == NULL) setobj(L, &other, t);
@@ -890,14 +891,15 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
   setclLvalue(L, &closure.value, ncl);
   luaA_begin(L, obj2gco(ncl), &construction);
   luaC_tracepointer(L, p);
-  ncl->p = p;
+  __atomic_store_n(&ncl->p, p, __ATOMIC_RELEASE);
   luaC_objbarrier(L, ncl, p);
   for (i = 0; i < nup; i++) {  /* fill in its upvalues */
     if (uv[i].instack)  /* upvalue refers to local variable? */
-      ncl->upvals[i] = luaF_findupval(L, restorestack(L, base_offset) + uv[i].idx);
+      __atomic_store_n(&ncl->upvals[i],
+        luaF_findupval(L, restorestack(L, base_offset) + uv[i].idx), __ATOMIC_RELEASE);
     else {  /* snapshot the enclosing capture before publishing the child */
       luaF_getcapture(L, enclosing, uv[i].idx, &capture);
-      ncl->upvals[i] = gco2upv(gcvalue(&capture.value));
+      __atomic_store_n(&ncl->upvals[i], gco2upv(gcvalue(&capture.value)), __ATOMIC_RELEASE);
     }
     luaC_objbarrier(L, ncl, ncl->upvals[i]);
   }

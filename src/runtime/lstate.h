@@ -320,6 +320,12 @@ typedef struct LuaNativeRoot {
   const Table *table_view;  /* borrowed resize image, strongly traced until pop */
 } LuaNativeRoot;
 
+typedef struct LuaSharingRoots {
+  struct LuaSharingRoots *previous;
+  GCObject *pending;
+  GCObject *current;
+} LuaSharingRoots;
+
 
 /*
 ** 'per thread' state
@@ -353,6 +359,7 @@ struct lua_State {
   uintptr_t luthr_stack_limit;
   NativeStackContext *luthr_stack_context;
   LuaNativeRoot *native_roots;
+  LuaSharingRoots *sharing_roots;  /* promotion can outlive a marking epoch */
   struct LuaCallback *callback_owner;
   unsigned callback_active;
   struct LuaCoroutineScope *operation;  /* world mutex protects operation metadata */
@@ -579,6 +586,10 @@ typedef struct global_State {
 */
 union GCUnion {
   GCObject gc;  /* common header */
+  LuaMutable mutable_header;
+  LuaAccessible accessible;
+  CClosure cclosure;
+  LClosure lclosure;
   struct TString ts;
   struct Udata u;
   union Closure cl;

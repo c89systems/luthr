@@ -1,0 +1,44 @@
+/* Validated, read-only mutable object marking. See lua.h for license. */
+#define LUA_CORE
+#include "lprefix.h"
+#include "laccess.h"
+#include "lgc.h"
+
+
+int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
+  unsigned first = 0, size;
+  uint64_t *version = luaA_sequence(object);
+  LuaObjectLock *access = NULL;
+  if (object->tt == LUA_VLCL) {
+    size = gco2lcl(object)->nupvalues;
+    access = &gco2lcl(object)->access;
+  }
+  else if (object->tt == LUA_VCCL) {
+    size = gco2ccl(object)->nupvalues;
+    access = &gco2ccl(object)->access;
+  }
+  else if (object->tt == LUA_VUSERDATA) {
+    size = gco2u(object)->nuvalue;
+    access = &gco2u(object)->access;
+  }
+  else size = 1;
+  do {
+    GCObject *edges[33];
+    unsigned slots = size - first, count;
+    uint64_t sequence = __atomic_load_n(version, __ATOMIC_ACQUIRE);
+    if (sequence & 1) {
+      if (access != NULL && __atomic_load_n(&access->owner, __ATOMIC_ACQUIRE) ==
+                            luaX_token(L)) return -1;
+      return 0;
+    }
+    if (slots > 32) slots = 32;
+    count = luaC_objectchunk(object, first, slots, edges);
+    if (__atomic_load_n(version, __ATOMIC_ACQUIRE) != sequence) return 0;
+    luaC_traceedges(work, edges, count);
+    first += slots;
+    if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST)) return 0;
+  } while (first < size);
+  work->marked += luaC_objsize(object);
+  luaC_finishstrong(work, object);
+  return 1;
+}

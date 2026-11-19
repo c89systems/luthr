@@ -25,7 +25,7 @@ static struct {
   lua_State *marker, *writer;
   Table *table;
   GCObject *child;
-  int armed, entered, release, written, relocate, pause, pause_release,
+  int index, armed, entered, release, written, relocate, pause, pause_release,
       remember;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -136,7 +136,7 @@ static void *write_values(void *unused) {
   } else if (probe.relocate) {
     lua_pushvalue(L, 2);
     lua_pushinteger(L, 123);
-    lua_rawset(L, 1);
+    lua_rawset(L, probe.index);
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
   } else {
     /* Change GC tags to full-width scalar bits and force a replacement image
@@ -144,17 +144,17 @@ static void *write_values(void *unused) {
      */
     for (i = 1; i <= 256; i++) {
       lua_pushinteger(L, i & 1 ? LUA_MAXINTEGER : LUA_MININTEGER);
-      lua_rawseti(L, 1, i);
+      lua_rawseti(L, probe.index, i);
     }
     for (i = 0; i < 128; i++) {
       lua_pushfstring(L, "new-%d", (int)i);
       lua_pushinteger(L, i);
-      lua_rawset(L, 1);
+      lua_rawset(L, probe.index);
     }
     lua_newtable(L);
     lua_pushinteger(L, 42);
     lua_rawseti(L, -2, 1);
-    lua_rawseti(L, 1, 1);
+    lua_rawseti(L, probe.index, 1);
   }
   require(pthread_mutex_lock(&probe.mutex) == 0);
   probe.written = 1;
@@ -178,7 +178,7 @@ int main(int argc, char **argv) {
   pthread_t marker, writer;
   struct timespec deadline;
   unsigned i;
-  require(argc == 2 && L != NULL);
+  require((argc == 2 || argc == 3) && L != NULL);
   lua_gc(L, strstr(argv[1], "generational") ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCSTOP);
@@ -219,7 +219,12 @@ int main(int argc, char **argv) {
     }
   }
   lua_pushvalue(L, 3);
-  lua_xmove(L, probe.writer, 1);
+  probe.index = argc == 3 ? 3 : 1;
+  if (argc == 3) {
+    probe.writer = L;
+    lua_pop(L, 1);
+  } else
+    lua_xmove(L, probe.writer, 1);
   if (probe.relocate) {
     key(L, 63);
     lua_xmove(L, probe.writer, 1);
@@ -287,7 +292,7 @@ int main(int argc, char **argv) {
     lua_gc(L, LUA_GCCOLLECT);
   }
   if (!probe.relocate) {
-    require(lua_rawgeti(probe.writer, 1, 1) == LUA_TTABLE);
+    require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);
     require(lua_tointeger(probe.writer, -1) == 42);
   } else

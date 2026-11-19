@@ -312,6 +312,8 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   u->len = s;
   luaA_initlock(&u->access);
   luaA_initlock(&u->payload_access);
+  luaA_initsharing(L, u);
+  u->sequence = 0;
   u->nuvalue = nuvalue;
   u->metatable = NULL;
   u->gclist = NULL;

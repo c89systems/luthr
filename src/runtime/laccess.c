@@ -14,22 +14,35 @@
 #include "ltm.h"
 
 static LuaObjectLock *objectlock (GCObject *object) {
-  if (object->tt == LUA_VTABLE)
-    return &gco2t(object)->access;
-  if (object->tt == LUA_VLCL)
-    return &gco2lcl(object)->access;
-  if (object->tt == LUA_VCCL)
-    return &gco2ccl(object)->access;
-  lua_assert(object->tt == LUA_VUSERDATA);
-  return &gco2u(object)->access;
+  lua_assert(object->tt == LUA_VTABLE || object->tt == LUA_VLCL ||
+             object->tt == LUA_VCCL || object->tt == LUA_VUSERDATA);
+  return &cast(union GCUnion *, object)->accessible.access;
 }
 
-static void version (GCObject *object) {
-  if (object != NULL && object->tt == LUA_VTABLE) {
-    Table *table = gco2t(object);
-    __atomic_store_n(&table->sequence,
-      __atomic_load_n(&table->sequence, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
+static void version (GCObject *object, LuaObjectLock *lock) {
+  if (object != NULL && lock == objectlock(object)) {
+    uint64_t *sequence = luaA_sequence(object);
+    __atomic_store_n(sequence,
+      __atomic_load_n(sequence, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
   }
+}
+
+static int tryaccess (lua_State *, LuaObjectLock *, GCObject *);
+
+static int mutatoraccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
+  if (object != NULL && lock == objectlock(object) && luaA_local(L, object)) {
+    void *token = luaX_token(L);
+    void *owner = __atomic_load_n(&lock->owner, __ATOMIC_RELAXED);
+    lua_assert(owner == NULL || owner == token);
+    if (owner == token) lock->depth++;
+    else {
+      __atomic_store_n(&lock->owner, token, __ATOMIC_RELEASE);
+      lock->depth = 1;
+      version(object, lock);
+    }
+    return 1;
+  }
+  return tryaccess(L, lock, object);
 }
 
 static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
@@ -44,7 +57,7 @@ static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
           token, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
     lua_assert(lock->depth == 0);
     lock->depth = 1;
-    version(object);
+    version(object, lock);
     return 1;
   }
   return 0;
@@ -59,7 +72,7 @@ void luaA_endscan (lua_State *L, GCObject *object) {
   lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
              luaX_token(L) && lock->depth != 0);
   if (--lock->depth == 0) {
-    version(object);
+    version(object, lock);
     __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
     /* A scanner never parks with ownership. Existing mutator waiters need
     ** the same notification handshake as an ordinary scoped release. */
@@ -90,7 +103,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
       scope->saved_top = savestack(L, L->top.p);
       L->top.p = L->ci->top.p;  /* publish all registers before a possible wait */
     }
-    if (!tryaccess(L, lock, object)) {
+    if (!mutatoraccess(L, lock, object)) {
       luaX_checksync(pthread_mutex_lock(&world->mutex));
       __atomic_fetch_add(&lock->waiting, 1, __ATOMIC_SEQ_CST);
       if (world->stopped || !tryaccess(L, lock, object)) {
@@ -156,7 +169,14 @@ static void releasescope (lua_State *L, LuaObjectScope *scope) {
       __atomic_load_n(&scope->lock->owner, __ATOMIC_RELAXED) == luaX_token(L));
     scope->held = 0;
     if (--scope->lock->depth == 0) {
-      version(iscollectable(&scope->root.value) ? gcvalue(&scope->root.value) : NULL);
+      GCObject *object = iscollectable(&scope->root.value)
+        ? gcvalue(&scope->root.value) : NULL;
+      version(object, scope->lock);
+      if (object != NULL && scope->lock == objectlock(object) &&
+          luaA_local(L, object)) {
+        __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_RELEASE);
+        return;
+      }
       /* Order release/observer checks against the waiter's observer increment
       ** and predicate recheck: either it sees unowned or this side wakes it. */
       __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_SEQ_CST);
@@ -241,10 +261,11 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
+    if (mt != NULL) luaA_publish(L, owner, &rooted_mt.value);
     luaC_prewriteptr(L, objectmeta(object), mt);
     if (ttistable(object))
       __atomic_store_n(&hvalue(object)->metatable, mt, __ATOMIC_RELEASE);
-    else uvalue(object)->metatable = mt;
+    else __atomic_store_n(&uvalue(object)->metatable, mt, __ATOMIC_RELEASE);
     if (mt) {
       luaC_objbarrier(L, gcvalue(object), mt);
       luaC_checkfinalizer(L, gcvalue(object), mt);
@@ -256,6 +277,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int type = ttype(object);
     LuaObjectScope access;
     luaA_beginlock(L, &G(L)->metatable_access[type], &access);
+    if (mt != NULL) luaA_share(L, obj2gco(mt));
     luaC_prewriteptr(L, G(L)->mt[type], mt);
     G(L)->mt[type] = mt;
     luaA_end(L, &access);

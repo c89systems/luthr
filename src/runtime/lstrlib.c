@@ -1092,13 +1092,13 @@ static int gmatch (lua_State *L) {
   gm->pattern = tsvalue(&roots[1].value);
   gm->source_len = ls; gm->pattern_len = lp;
   gm->next = init; gm->last = 0; gm->matched = 0; gm->version = 0;
-  setobj(L, &owner->uv[0].uv, &roots[0].value);
-  setobj(L, &owner->uv[1].uv, &roots[1].value);
+  luaA_store(L, &owner->uv[0].uv, &roots[0].value);
+  luaA_store(L, &owner->uv[1].uv, &roots[1].value);
   function = luaF_newCclosure(L, 3);
   function->f = gmatch_aux;
   function->managed = 1;
   for (index = 0; index < 3; ++index)
-    setobj(L, &function->upvalue[index], &roots[index].value);
+    luaA_store(L, &function->upvalue[index], &roots[index].value);
   L->top.p = L->ci->func.p + 1;
   setclCvalue(L, s2v(L->top.p), function);
   api_incr_top(L);

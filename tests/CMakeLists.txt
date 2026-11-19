@@ -314,12 +314,71 @@ foreach(collector IN ITEMS incremental generational)
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
   endforeach()
+  foreach(case IN ITEMS array metatable)
+    add_test(NAME gc_table_scan_private_${case}_${collector}
+      COMMAND gc_table_scan_test ${case}_${collector} private)
+    set_tests_properties(gc_table_scan_private_${case}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+  endforeach()
 endforeach()
 
 add_test(NAME gc_table_scan_remember_generational
   COMMAND gc_table_scan_test remember_generational)
 set_tests_properties(gc_table_scan_remember_generational PROPERTIES
   LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+
+luthr_test_program(gc_object_scan_test gc_object_scan_test.c)
+set_target_properties(gc_object_scan_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_object_scan_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_object_scan_test PRIVATE luthr_static)
+target_link_options(gc_object_scan_test PRIVATE -Wl,--wrap=luaC_objectchunk
+  -Wl,--wrap=luaA_tryscan -Wl,--wrap=pthread_mutex_trylock
+  -Wl,--undefined=luaC_objectchunk)
+foreach(collector IN ITEMS incremental generational)
+  foreach(kind IN ITEMS userdata cclosure lclosure capture)
+    foreach(sharing IN ITEMS private shared)
+      add_test(NAME gc_object_scan_${kind}_${sharing}_${collector}
+        COMMAND gc_object_scan_test ${kind}_${sharing}_${collector})
+      set_tests_properties(gc_object_scan_${kind}_${sharing}_${collector}
+        PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+    endforeach()
+  endforeach()
+endforeach()
+
+luthr_test_program(object_sharing_test object_sharing_test.c)
+set_target_properties(object_sharing_test PROPERTIES C_STANDARD 99)
+target_compile_options(object_sharing_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(object_sharing_test PRIVATE luthr_static)
+foreach(collector IN ITEMS incremental generational)
+  foreach(route IN ITEMS xmove global cclosure uservalue metatable callback finalizer)
+    add_test(NAME object_sharing_${route}_${collector}
+      COMMAND object_sharing_test ${route}_${collector})
+    set_tests_properties(object_sharing_${route}_${collector} PROPERTIES
+      LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+  endforeach()
+endforeach()
+
+luthr_test_program(sharing_roots_test sharing_roots_test.c)
+set_target_properties(sharing_roots_test PROPERTIES C_STANDARD 99)
+target_compile_options(sharing_roots_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(sharing_roots_test PRIVATE luthr_static)
+target_link_options(sharing_roots_test PRIVATE -Wl,--wrap=luaA_end)
+foreach(collector IN ITEMS incremental generational minor)
+  add_test(NAME sharing_roots_${collector} COMMAND sharing_roots_test ${collector})
+  set_tests_properties(sharing_roots_${collector} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
+
+luthr_test_program(pipe_publication_test pipe_publication_test.c)
+set_target_properties(pipe_publication_test PROPERTIES C_STANDARD 99)
+target_compile_options(pipe_publication_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(pipe_publication_test PRIVATE luthr_static)
+target_link_options(pipe_publication_test PRIVATE -Wl,--wrap=luaS_newudata)
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME pipe_publication_${collector} COMMAND pipe_publication_test ${collector})
+  set_tests_properties(pipe_publication_${collector} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
 
 luthr_test_program(gc_sweeping_test gc_sweeping_test.c)
 set_target_properties(gc_sweeping_test PROPERTIES C_STANDARD 99)
@@ -1016,7 +1075,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
-  gc_membership_test gc_table_scan_test
+  gc_membership_test gc_table_scan_test gc_object_scan_test object_sharing_test sharing_roots_test pipe_publication_test
   gc_sweeping_test
   gc_epochs_test
   scheduler_test native_lifecycle_test

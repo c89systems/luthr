@@ -116,6 +116,9 @@ static void check_allocator(lua_State *state, struct fixture *fixture) {
 }
 
 static int work(lua_State *state) {
+  /* Force the configured backend to run; a small userdata can reuse an
+   * existing page without invoking either replacement allocator. */
+  enum { allocation_bytes = 4096 };
   struct fixture *fixture = lua_touserdata(state, lua_upvalueindex(1));
   int role = (int)lua_tointeger(state, 1);
   unsigned i;
@@ -131,7 +134,7 @@ static int work(lua_State *state) {
       lua_setwarnf(state, warn_b, &fixture->warnings[1]);
       lua_setallocf(state, allocate_b, &fixture->allocators[1]);
       for (i = 0; i < 300; ++i) {
-        (void)lua_newuserdatauv(state, 48, 0);
+        (void)lua_newuserdatauv(state, allocation_bytes, 0);
         lua_pop(state, 1);
       }
       (void)lua_gc(state, LUA_GCCOLLECT);
@@ -151,7 +154,7 @@ static int work(lua_State *state) {
       } else
         lua_warning(state, "paired configuration", 0);
       check_allocator(state, fixture);
-      (void)lua_newuserdatauv(state, 48, 0);
+      (void)lua_newuserdatauv(state, allocation_bytes, 0);
       lua_pop(state, 1);
       if (i % 30 == 0)
         (void)lua_gc(state, LUA_GCCOLLECT);
@@ -252,8 +255,20 @@ int main(int argc, char **argv) {
       fixture.allocators[0].calls == 0 || fixture.allocators[1].calls == 0;
   failed |= fixture.warnings[0].calls + fixture.warnings[1].calls !=
             (fixture.blocked ? 2U : 300U);
+  if (failed)
+    fprintf(stderr,
+            "callback pairs: allocators=%u/%u warnings=%u/%u "
+            "actor0=%d/%d/%d actor1=%d/%d/%d\n",
+            fixture.allocators[0].calls, fixture.allocators[1].calls,
+            fixture.warnings[0].calls, fixture.warnings[1].calls,
+            fixture.actors[0].status, fixture.actors[0].results,
+            fixture.actors[0].polled, fixture.actors[1].status,
+            fixture.actors[1].results, fixture.actors[1].polled);
   lua_close(main_state);
   failed |= fixture.live_bytes != 0;
+  if (fixture.live_bytes != 0)
+    fprintf(stderr, "callback allocator retained %zu bytes\n",
+            fixture.live_bytes);
   check(pthread_barrier_destroy(&fixture.managed));
   check(pthread_cond_destroy(&fixture.changed));
   check(pthread_mutex_destroy(&fixture.mutex));

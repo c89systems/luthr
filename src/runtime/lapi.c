@@ -126,8 +126,9 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
     luaA_begin(L, obj2gco(closure), &scope);
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
+    luaA_publish(L, obj2gco(closure), value);
     luaC_prewrite(L, target, value);
-    setobj(L, target, value);
+    luaA_store(L, target, value);
     luaC_barrier(L, closure, value);
     luaA_end(L, &scope);
   }
@@ -137,7 +138,10 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
       luaA_beginlock(L, &G(L)->registry_access, &access);
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
-    if (idx == LUA_REGISTRYINDEX) luaC_prewrite(L, target, value);
+    if (idx == LUA_REGISTRYINDEX) {
+      luaA_sharevalue(L, value);
+      luaC_prewrite(L, target, value);
+    }
     setobj(L, target, value);
     /* The collector revisits the registry before completing collection. */
     if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
@@ -159,7 +163,7 @@ static int stringindex (lua_State *L, int idx, LuaNativeRoot *value) {
     if (cvt2str(&value->value)) {
       luaO_tostring(L, &value->value);
       luaC_prewrite(L, target, &value->value);
-      setobj(L, target, &value->value);
+      luaA_store(L, target, &value->value);
       luaC_barrier(L, closure, &value->value);
       converted = 1;
     }
@@ -226,12 +230,15 @@ LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
   luaX_lockpair(from, to);
   api_checkpop(from, n);
   api_check(from, to->ci->top.p - to->top.p >= n, "stack overflow");
-  from->top.p -= n;
   for (i = 0; i < n; i++) {
-    luaC_tracevalue(to, s2v(from->top.p + i));
-    setobjs2s(to, to->top.p, from->top.p + i);
+    /* Promotion can wait for a weak cutoff. Retain every source stack root
+    ** and recompute its address after that admission boundary. */
+    luaA_sharevalue(from, s2v(from->top.p - n + i));
+    luaC_tracevalue(to, s2v(from->top.p - n + i));
+    setobjs2s(to, to->top.p, from->top.p - n + i);
     to->top.p++;  /* stack already checked by previous 'api_check' */
   }
+  from->top.p -= n;
   luaX_unlockpair(from, to);
 }
 
@@ -861,7 +868,7 @@ static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
     cl->f = fn;
     cl->managed = cast_byte(managed);
     for (i = 0; i < n; i++) {
-      setobj2n(L, &cl->upvalue[i], s2v(L->top.p - n + i));
+      luaA_store(L, &cl->upvalue[i], s2v(L->top.p - n + i));
       luaC_tracevalue(L, &cl->upvalue[i]);
     }
     L->top.p -= n;
@@ -894,6 +901,7 @@ void luaQ_pushmanaged (lua_State *L, lua_CFunction fn, int n) {
       function->f = fn;
       function->managed = 1;
       function->managed_next = G(L)->managed_functions[bucket];
+      luaA_share(L, obj2gco(function));
       G(L)->managed_functions[bucket] = function;
     }
     setclCvalue(L, s2v(L->top.p), function);
@@ -1361,8 +1369,9 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
   if (!(cast_uint(n) - 1u < cast_uint(uvalue(o)->nuvalue)))
     res = 0;  /* 'n' not in [1, uvalue(o)->nuvalue] */
   else {
+    luaA_publish(L, gcvalue(o), s2v(L->top.p - 1));
     luaC_prewrite(L, &uvalue(o)->uv[n - 1].uv, s2v(L->top.p - 1));
-    setobj(L, &uvalue(o)->uv[n - 1].uv, s2v(L->top.p - 1));
+    luaA_store(L, &uvalue(o)->uv[n - 1].uv, s2v(L->top.p - 1));
     luaC_barrierback(L, gcvalue(o), s2v(L->top.p - 1));
     res = 1;
   }
@@ -1851,8 +1860,9 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
     else {
       LuaObjectScope scope;
       luaA_begin(L, owner, &scope);
+      luaA_publish(L, owner, s2v(L->top.p - 1));
       luaC_prewrite(L, val, s2v(L->top.p - 1));
-      setobj(L, val, s2v(L->top.p - 1));
+      luaA_store(L, val, s2v(L->top.p - 1));
       luaC_barrier(L, owner, val);
       luaA_end(L, &scope);
     }

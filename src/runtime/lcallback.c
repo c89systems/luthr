@@ -45,6 +45,7 @@ int luaCB_init (lua_State *L, LuaCallback *callback, unsigned limit) {
     return LUA_ERRMEM;
   }
   callback->limit = limit == 0 ? 1 : limit;
+  luaA_sharevalue(L, s2v(L->top.p - 1));
   setobj(L, &callback->function, s2v(L->top.p - 1));
   top = savestack(L, L->top.p);
   status = luaD_pcall(L, createthread, callback, top, 0);

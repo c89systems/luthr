@@ -75,7 +75,7 @@ static void discard (lua_State *L, Access *access) {
   unsigned i;
   for (i = 0; i < access->pipe->capacity; ++i) {
     luaC_tracevalue(L, &access->owner->uv[i].uv);
-    setnilvalue(&access->owner->uv[i].uv);
+    __atomic_store_n(&access->owner->uv[i].uv.tt_, LUA_VNIL, __ATOMIC_RELEASE);
   }
   access->pipe->head = access->pipe->count = 0;
   access->pipe->bytes = 0;
@@ -138,7 +138,7 @@ static int sendchunk (lua_State *L) {
       unsigned slot = (pipe->head + pipe->count) % pipe->capacity;
       lua_assert(ttisstring(chunk) && tsslen(tsvalue(chunk)) == size);
       luaC_prewrite(L, &owner->uv[slot].uv, chunk);
-      setobj(L, &owner->uv[slot].uv, chunk);
+      luaA_store(L, &owner->uv[slot].uv, chunk);
       luaC_barrier(L, owner, chunk);
       pipe->count++;
       pipe->bytes += size;
@@ -187,7 +187,7 @@ static int receivechunk (lua_State *L) {
       setobj2s(L, L->top.p, chunk);
       api_incr_top(L);
       luaC_tracevalue(L, chunk);
-      setnilvalue(chunk);
+      __atomic_store_n(&chunk->tt_, LUA_VNIL, __ATOMIC_RELEASE);
       pipe->head = (pipe->head + 1) % pipe->capacity;
       pipe->count--;
       pipe->bytes -= size;
@@ -278,6 +278,7 @@ static void metatable (lua_State *L) {
   lua_pushliteral(L, "luthr.chunk_pipe"); lua_setfield(L, -2, "__name");
   lua_pushboolean(L, 0); lua_setfield(L, -2, "__metatable");
   lua_lock(L);
+  luaA_share(L, obj2gco(hvalue(s2v(L->top.p - 1))));
   shared = NULL;
   if (!__atomic_compare_exchange_n(&G(L)->pipe_meta, &shared,
         hvalue(s2v(L->top.p - 1)), 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))

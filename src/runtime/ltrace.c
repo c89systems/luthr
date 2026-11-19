@@ -103,6 +103,7 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
   uint64_t epoch = G(L)->trace_epoch;
   StkId slot;
   LuaNativeRoot *root;
+  LuaSharingRoots *sharing;
   UpVal *upvalue;
   Proto *proto;
   if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
@@ -126,6 +127,15 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
   for (root = thread->native_roots; root != NULL; root = root->previous) {
     luaC_tracevalue(L, &root->value);
     if (root->table_view != NULL) luaC_traceview(L, root->table_view);
+  }
+  /* A weak edge can disappear while a promoter waits for object ownership.
+  ** Shading once only covers the current cohort. Keep the whole private work
+  ** list rooted in every later epoch while its gate owner remains parked.
+  ** The header links are traced as ordinary edges, keeping root work bounded. */
+  for (sharing = thread->sharing_roots; sharing != NULL;
+       sharing = sharing->previous) {
+    if (sharing->current != NULL) luaC_traceobject(L, sharing->current);
+    if (sharing->pending != NULL) luaC_traceobject(L, sharing->pending);
   }
   for (upvalue = thread->openupval; upvalue != NULL; upvalue = upvalue->open.next)
     luaC_traceobject(L, obj2gco(upvalue));
