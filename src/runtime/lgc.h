@@ -45,6 +45,7 @@ static inline GCObject **luaC_graylink (GCObject *o) {
 typedef struct LuaGCFrame {
   struct LuaGCFrame *previous;
   global_State *global;
+  lua_State *reclaimer;  /* stable owner of this batch's destruction queue */
   GCObject *retired, *retired_tail;
   l_mem retired_bytes;
   int batch;
@@ -59,7 +60,15 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
   __atomic_load_n(&(g)->trace_plan.phase, __ATOMIC_ACQUIRE)
 #define luaC_tracepending(g) \
   (__atomic_load_n(&(g)->trace_ready, __ATOMIC_ACQUIRE) || \
-   __atomic_load_n(&(g)->trace_barriers, __ATOMIC_ACQUIRE))
+   __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
+
+/* Idle workers consume payloads only. Reservation retries and phase changes
+** remain with ordinary collector drivers; neither is runnable idle work. */
+#define luaC_workerready(g) \
+  ((__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && \
+    (__atomic_load_n(&(g)->trace_workers, __ATOMIC_ACQUIRE) || \
+     __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))) || \
+   __atomic_load_n(&(g)->sweep_workers, __ATOMIC_ACQUIRE))
 
 /* A batch owns its payloads until it publishes every list and counter. It
 ** must not yield or park while these private references are outstanding. */
@@ -381,6 +390,7 @@ enum { SWEEP_RETRY, SWEEP_LIVE, SWEEP_RETIRED, SWEEP_WATCH };
   __atomic_load_n(&G(L)->sweep_plan.active, __ATOMIC_ACQUIRE)
 LUAI_FUNC void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked);
 LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit);
+LUAI_FUNC lu_mem luaC_sweeppayload (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_scansweep (lua_State *L, LuaSweepWork *work);
 LUAI_FUNC void luaC_waitsweep (lua_State *L);
 LUAI_FUNC void luaC_pollsweep (lua_State *L);
@@ -398,6 +408,9 @@ LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
 LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
 /* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
+LUAI_FUNC void luaC_publishbarrier (lua_State *, GCObject *, int back);
+/* World metadata owns shared work-list publication. */
+LUAI_FUNC void luaC_linktrace (global_State *, GCObject *);
 /* Private work-list inspection; caller owns quiescent collection. */
 LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
 /* A hybrid deletion/insertion barrier shades before mutation. No allocator,
@@ -424,6 +437,7 @@ LUAI_FUNC void luaC_traceview (lua_State *L, const Table *view);
 LUAI_FUNC void luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
+LUAI_FUNC void luaC_readytrace (lua_State *L);
 /* Claims/publication hold world.mutex; scanning owns only the local batch. */
 LUAI_FUNC void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit);
 LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit);

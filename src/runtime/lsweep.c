@@ -8,6 +8,7 @@
 
 #include <string.h>
 #include "lgc.h"
+#include "lscheduler.h"
 
 void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   global_State *g = G(L);
@@ -44,6 +45,9 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   }
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
   __atomic_store_n(&plan->active, 1, __ATOMIC_RELEASE);
+  /* The mark driver can still need to restore its enclosing scope. Admit
+  ** sweep helpers only when a sweep driver has entered its payload phase. */
+  __atomic_store_n(&g->sweep_workers, 0, __ATOMIC_RELEASE);
 }
 
 /* world.mutex protects claims and short list publication. A batch remains
@@ -110,6 +114,9 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
     take(work, &plan->gray[plan->gray_index], NULL, NULL, limit, 1);
   }
   if (work->count != 0) plan->busy++;
+  __atomic_store_n(&g->sweep_workers,
+    plan->phase == SWEEP_OBJECTS && plan->next != plan->limit,
+    __ATOMIC_RELEASE);
 }
 
 static void publish (lua_State *L, LuaSweepWork *work) {
@@ -173,19 +180,22 @@ static void finish (lua_State *L) {
   luaW_start(L);
 }
 
-lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {
+static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
   LuaSweepWork work = {0};
   LuaGCFrame frame;
   LuaWorld *world = &G(L)->world;
   int done;
+  unsigned previous;
   if (!luaC_sweeping(L) || limit == 0) return 0;
   luaC_entergc(L, &frame);
   frame.batch = 1;
   if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
+  previous = __atomic_load_n(&G(L)->sweep_workers, __ATOMIC_RELAXED);
   claim(L, &work, limit);
   done = G(L)->sweep_plan.phase == SWEEP_DONE;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (!previous && luaC_workerready(G(L))) luaSC_notifygc(G(L));
   if (work.count != 0) {
     luaC_scansweep(L, &work);
     frame.batch = 0;
@@ -197,7 +207,16 @@ lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
   frame.batch = 0;
-  if (done) finish(L);
+  if (done && advance) finish(L);
   luaC_leavegc(L, &frame);
   return cast(lu_mem, work.count) * sizeof(GCObject);
+}
+
+lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {
+  return sweepbatch(L, limit, 1);
+}
+
+/* Background capacity never runs finalizers or changes collector phases. */
+lu_mem luaC_sweeppayload (lua_State *L, unsigned limit) {
+  return sweepbatch(L, limit, 0);
 }

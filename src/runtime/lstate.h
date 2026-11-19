@@ -374,8 +374,6 @@ struct lua_State {
   unsigned object_waiting;
   unsigned root_waiting;  /* stack parked; protected by world.mutex */
   struct LuaObjectScope *object_scopes;
-  GCObject *barrier_forward;  /* atomic; uniquely claimed untraced objects */
-  GCObject *barrier_back;  /* atomic; uniquely claimed dirty owners */
   uint64_t trace_snapshot;  /* release-published root snapshot epoch */
   uint64_t trace_trimmed;
   lu_mem trace_bytes;
@@ -455,6 +453,12 @@ typedef struct LuaSweepPlan {
   unsigned active, busy, kind, region, phase, gray_index, finishing, promoted;
 } LuaSweepPlan;
 
+#define LUA_BARRIER_SHARDS 16
+typedef struct LuaBarrierQueue {
+  GCObject *forward, *back;  /* atomic MPSC heads; claims own intrusive links */
+  char padding[64 - 2 * sizeof(GCObject *)];
+} LuaBarrierQueue;
+
 typedef struct global_State {
   LuaWorld world;
   struct LuaScheduler *scheduler;
@@ -499,7 +503,10 @@ typedef struct global_State {
   uint64_t trace_epoch;
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
   unsigned trace_ready;  /* atomic queued-work hint, independent of busy claims */
-  unsigned trace_barriers;  /* atomic: producer queues may contain new work */
+  unsigned barrier_ready;  /* atomic directory of nonempty barrier shards */
+  LuaBarrierQueue barriers[LUA_BARRIER_SHARDS];
+  unsigned trace_workers;  /* atomic: payloads excluding failed reservations */
+  unsigned sweep_workers;  /* atomic: ordinary ranges in an admitted sweep */
   uint64_t trace_changes;  /* atomic monotonic shading progress */
   GCObject *trace_deferred;
   LuaTracePlan trace_plan;
@@ -656,6 +663,8 @@ LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC TStatus luaE_resetthread (lua_State *L, TStatus status);
+/* State ownership and a protected allocation boundary are required. */
+LUAI_FUNC lua_State *luaE_newthread (lua_State *L, int collector);
 
 
 #endif

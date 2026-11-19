@@ -4,9 +4,11 @@
 #include <inttypes.h>
 #include <lgc.h>
 #include <lmem.h>
+#include <lscheduler.h>
 #include <lstate.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 enum { REASON_OTHER, REASON_GC, REASON_BARRIER };
@@ -22,6 +24,12 @@ static lua_State *host;
 static GcProbe *host_probe;
 static unsigned scanners;
 static unsigned sweepers;
+static __thread GcProbe *worker_probe;
+static GcProbe worker_total;
+static pthread_mutex_t workers_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t workers_changed = PTHREAD_COND_INITIALIZER;
+static unsigned worker_observers;
+static int worker_sampling;
 
 /* Each node lives on the waiting invocation's native/fiber stack. The probe's
  * short mutex lets wake observers inspect it from any runtime source file or
@@ -46,8 +54,9 @@ static uint64_t now(void) {
 static GcProbe *probe(lua_State *L) {
   /* Ownership already exists here. The public context getter would reenter
    * the stack gate. Only this executable installs these invocation contexts. */
-  GcProbe *result =
-      L == host ? host_probe : luthr_policy_get_context(L->policy);
+  GcProbe *result = worker_probe != NULL ? worker_probe
+                    : L == host          ? host_probe
+                                         : luthr_policy_get_context(L->policy);
   return result != NULL && result->enabled ? result : NULL;
 }
 
@@ -74,6 +83,58 @@ void gc_probe_add(GcProbe *total, const GcProbe *record) {
     total->name = record->name;
   GC_PROBE_MAXIMA(GC_PROBE_MAX)
 #undef GC_PROBE_MAX
+}
+
+void gc_probe_begin_workers(void) {
+  luaX_checksync(pthread_mutex_lock(&workers_mutex));
+  if (worker_observers != 0 || worker_sampling)
+    abort();
+  memset(&worker_total, 0, sizeof(worker_total));
+  worker_sampling = 1;
+  luaX_checksync(pthread_mutex_unlock(&workers_mutex));
+}
+
+void gc_probe_end_workers(GcProbe *total) {
+  luaX_checksync(pthread_mutex_lock(&workers_mutex));
+  worker_sampling = 0;
+  while (worker_observers != 0)
+    luaX_checksync(pthread_cond_wait(&workers_changed, &workers_mutex));
+  gc_probe_add(total, &worker_total);
+  luaX_checksync(pthread_mutex_unlock(&workers_mutex));
+}
+
+void __real_luaSC_collectidle(LuaCarrier *, LuaExecutionSlot *);
+void __wrap_luaSC_collectidle(LuaCarrier *carrier, LuaExecutionSlot *slot) {
+  GcProbe record = {0};
+  uint64_t started;
+  luaX_checksync(pthread_mutex_lock(&workers_mutex));
+  if (!worker_sampling) {
+    luaX_checksync(pthread_mutex_unlock(&workers_mutex));
+    __real_luaSC_collectidle(carrier, slot);
+    return;
+  }
+  worker_observers++;
+  luaX_checksync(pthread_mutex_unlock(&workers_mutex));
+  record.enabled = 1;
+  record.gc_depth = 1;
+  worker_probe = &record;
+  started = now();
+  __real_luaSC_collectidle(carrier, slot);
+  record.worker_ns = now() - started;
+  worker_probe = NULL;
+  record.worker_calls = record.collector_calls = 1;
+  if (record.trace_calls != 0 || record.sweep_calls != 0) {
+    record.collector_running_calls = 1;
+    record.collector_body_ns += record.worker_ns - record.coordination_ns;
+  } else {
+    record.worker_empty_calls = 1;
+    record.collector_disabled_ns += record.worker_ns - record.coordination_ns;
+  }
+  luaX_checksync(pthread_mutex_lock(&workers_mutex));
+  gc_probe_add(&worker_total, &record);
+  if (--worker_observers == 0)
+    luaX_checksync(pthread_cond_broadcast(&workers_changed));
+  luaX_checksync(pthread_mutex_unlock(&workers_mutex));
 }
 
 void gc_probe_emit(const GcProbe *record) {
@@ -363,17 +424,18 @@ void __wrap_luaC_drainbarriers(lua_State *L) {
   GcProbe *record = probe(L);
   uint64_t started;
   if (record != NULL) {
-    LuaParticipation *participant;
+    unsigned shard,
+        ready = __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE);
     started = now();
-    for (participant = G(L)->world.participants; participant != NULL;
-         participant = participant->next) {
+    for (shard = 0; shard < LUA_BARRIER_SHARDS; shard++) {
+      LuaBarrierQueue *queue = &G(L)->barriers[shard];
       GCObject *object;
-      for (object = __atomic_load_n(&participant->thread->barrier_forward,
-                                    __ATOMIC_ACQUIRE);
+      if (!(ready & (1u << shard)))
+        continue;
+      for (object = __atomic_load_n(&queue->forward, __ATOMIC_ACQUIRE);
            object != NULL; object = luaC_barriernext(object))
         record->barrier_records++;
-      for (object = __atomic_load_n(&participant->thread->barrier_back,
-                                    __ATOMIC_ACQUIRE);
+      for (object = __atomic_load_n(&queue->back, __ATOMIC_ACQUIRE);
            object != NULL; object = luaC_barriernext(object)) {
         record->barrier_records++;
         record->back_records++;
@@ -464,6 +526,7 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   if (record != NULL) {
     uint64_t elapsed = now() - started;
     record->trace_calls++;
+    record->worker_trace_calls += record == worker_probe;
     record->trace_ns += elapsed;
     record->trace_work_bytes += marked;
     record->trace_zero_progress_batches += marked == 0;
@@ -566,6 +629,19 @@ lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
   lu_mem worked = __real_luaC_sweepbatch(L, limit);
   if (record != NULL) {
     record->sweep_calls++;
+    record->sweep_ns += now() - started;
+  }
+  return worked;
+}
+
+lu_mem __real_luaC_sweeppayload(lua_State *, unsigned);
+lu_mem __wrap_luaC_sweeppayload(lua_State *L, unsigned limit) {
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  lu_mem worked = __real_luaC_sweeppayload(L, limit);
+  if (record != NULL) {
+    record->sweep_calls++;
+    record->worker_sweep_calls++;
     record->sweep_ns += now() - started;
   }
   return worked;

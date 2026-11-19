@@ -232,6 +232,30 @@ foreach(case IN ITEMS defer_incremental defer_generational publish_incremental p
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
 
+luthr_test_program(gc_scheduler_test gc_scheduler_test.c)
+set_target_properties(gc_scheduler_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_scheduler_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_scheduler_test PRIVATE luthr_static)
+target_link_options(gc_scheduler_test PRIVATE -Wl,--wrap=luaC_scantrace
+  -Wl,--wrap=luaC_scansweep)
+foreach(case IN ITEMS mark_incremental mark_generational sweep_incremental sweep_generational admission
+    mark_pause_incremental mark_pause_generational sweep_pause_incremental sweep_pause_generational
+    single_incremental single_generational stopped_incremental)
+  add_test(NAME gc_scheduler_${case} COMMAND gc_scheduler_test ${case})
+  set_tests_properties(gc_scheduler_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
+
+luthr_test_program(gc_directory_test gc_directory_test.c)
+set_target_properties(gc_directory_test PROPERTIES C_STANDARD 99)
+target_compile_options(gc_directory_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gc_directory_test PRIVATE luthr_static)
+foreach(case IN ITEMS forward remembered)
+  add_test(NAME gc_directory_${case} COMMAND gc_directory_test ${case})
+  set_tests_properties(gc_directory_${case} PROPERTIES
+    LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 luthr_test_program(gc_requests_test gc_requests_test.c)
 set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
@@ -970,7 +994,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test execution_context_test api_region_test table_read_test memory_publication_test
   allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
-  gc_barriers_test gc_availability_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
+  gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test
   gc_sweeping_test
   gc_epochs_test

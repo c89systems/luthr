@@ -1566,11 +1566,15 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
   switch (what) {
     case LUA_GCSTOP: {
       g->gcstp = GCSTPUSR;  /* stopped by the user */
+      __atomic_store_n(&g->sweep_workers, 0, __ATOMIC_RELEASE);
       break;
     }
     case LUA_GCRESTART: {
       luaE_setdebt(g, 0);
       g->gcstp = 0;  /* (other bits must be zero here) */
+      __atomic_store_n(&g->sweep_workers, luaC_sweeping(L) &&
+        g->sweep_plan.phase == SWEEP_OBJECTS &&
+        g->sweep_plan.next != g->sweep_plan.limit, __ATOMIC_RELEASE);
       break;
     }
     case LUA_GCCOLLECT: {

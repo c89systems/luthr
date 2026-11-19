@@ -12,7 +12,8 @@
   X(collector_calls) X(collector_running_calls) \
   X(collector_body_ns) X(collector_disabled_ns) \
   X(coordination_ns) X(stop_request_ns) X(resume_ns) \
-  X(stopped_ns) X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
+  X(stopped_ns) X(worker_calls) X(worker_empty_calls) X(worker_ns) X(worker_trace_calls) X(worker_sweep_calls) \
+  X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
   X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
   X(trace_zero_progress_batches) X(trace_retry_tables) X(trace_retry_threads) \
   X(trace_empty_assist) X(trace_empty_poll) X(trace_empty_step) X(trace_empty_full) \
@@ -54,6 +55,8 @@ typedef struct GcProbe {
 void gc_probe_bind(lua_State *, GcProbe *);
 void gc_probe_add(GcProbe *, const GcProbe *);
 void gc_probe_emit(const GcProbe *);
+void gc_probe_begin_workers(void);
+void gc_probe_end_workers(GcProbe *);
 /* Called by the serialized backing allocator while its state is admitted. */
 void gc_probe_allocation(uint64_t live);
 #endif

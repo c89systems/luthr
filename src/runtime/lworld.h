@@ -14,6 +14,7 @@ typedef struct LuaParticipation {
   struct LuaParticipation **previous;
   lua_State *thread;
   unsigned active;  /* atomic; overlapping gate retirement/admission is allowed */
+  unsigned collector;  /* immutable system role; does not expand mutator pacing */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
 } LuaParticipation;
 
@@ -56,6 +57,7 @@ LUAI_FUNC void luaW_activate (lua_State *L);
 LUAI_FUNC void luaW_resume (lua_State *L);
 LUAI_FUNC void luaW_deactivate (lua_State *L);
 LUAI_FUNC void luaW_enter (lua_State *L);
+LUAI_FUNC int luaW_tryenter (lua_State *L);
 /* Cached before releasing stack ownership; never dereference its former owner
 ** after this call withdraws the last participation reference. */
 LUAI_FUNC void luaW_leave (LuaWorld *world, LuaParticipation *participant);

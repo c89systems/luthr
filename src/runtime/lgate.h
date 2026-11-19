@@ -26,6 +26,9 @@ LUAI_FUNC int luaX_initgate (LuaStackGate *gate);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);
+/* A rooted system worker must never park while borrowing managed capacity.
+** No Lua/native activation or policy is entered by this payload-only scope. */
+LUAI_FUNC int luaX_tryworker (lua_State *L);
 /* Public/private API entry can borrow an attached runtime C activation;
 ** physical state gates themselves remain strictly nonrecursive. */
 LUAI_FUNC void luaX_apienter (lua_State *L);

@@ -115,7 +115,7 @@ void luaC_publishretired (lua_State *L, LuaGCFrame *frame) {
     frame->retired_bytes = 0;
   }
   if (frame->retired == NULL) return;
-  publishgarbage(L, frame->retired, frame->retired_tail);
+  publishgarbage(frame->reclaimer, frame->retired, frame->retired_tail);
   frame->retired = frame->retired_tail = NULL;
 }
 

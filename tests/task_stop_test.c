@@ -146,7 +146,11 @@ static int finalize(lua_State *state) {
 }
 static void poll(LuaExecution *execution, lua_State *state) {
   struct fixture *test = execution->context;
-  if (test->armed) {
+  /* Collection can poll while the resource's constructor is still running.
+   * Request cancellation only after Lua has registered the close variable. */
+  if (test->armed && test->started != 0 &&
+      (strstr(test->mode, "parser") == NULL ||
+       (!isLua(state->ci) && state->native_roots != NULL))) {
     LuaWorldScope scope;
     if (strstr(test->mode, "parser")) {
       require(!isLua(state->ci) && state->native_roots != NULL);
@@ -233,12 +237,13 @@ static void create_tasks(struct fixture *test) {
     require(
         luaL_loadstring(
             state,
-            "local token=...; return function() mark_started(); "
-            "if completing then return 42 end; "
+            "local token=...; return function() "
+            "if completing then mark_started(); return 42 end; "
             "local resource <close> =setmetatable({}, {__close=function() "
             "cleanup(token); "
             "local n=0; for i=1,4000 do n=n+i end; cleaned_loop=n; "
             "if cleanup_fail then error('cleanup expected') end end}); "
+            "mark_started(); "
             "if yielding then coroutine.yield(token) end; "
             "if native then block() end; "
             "if parsing then local f=load(pending); assert(f); return f() end; "

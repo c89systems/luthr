@@ -126,9 +126,6 @@ void luaC_advancetrace (lua_State *L) {
     }
   }
   if (luaC_tracing(L))
-    __atomic_store_n(&g->trace_ready,
-      g->gray != NULL || g->trace_deferred != NULL ||
-      plan->next != NULL || plan->deferred != NULL ||
-      plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL, __ATOMIC_RELEASE);
+    luaC_readytrace(L);
   luaW_start(L);
 }

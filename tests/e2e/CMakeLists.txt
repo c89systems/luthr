@@ -125,7 +125,7 @@ foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter lu
     luaC_step luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
     luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector
     luaC_tracebatch luaC_scantrace luaC_assisttrace luaC_polltrace luaC_snapshot luaC_checksnapshot luaC_finishtrace
-    luaC_sweepbatch luaC_scansweep luaC_pollsweep luaC_assistsweep luaQ_wake)
+    luaC_sweepbatch luaC_sweeppayload luaSC_collectidle luaC_scansweep luaC_pollsweep luaC_assistsweep luaQ_wake)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
   target_link_options(gc_handoff_probe_test PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()

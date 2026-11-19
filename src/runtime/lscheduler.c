@@ -5,6 +5,7 @@
 #include "lapi.h"
 #include "ldo.h"
 #include "lmem.h"
+#include "lgc.h"
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 enum { SC_READY, SC_RESOURCE, SC_DONE };
 
 static void wakework (LuaScheduler *s, int all);
+static void wakecollectors (LuaScheduler *s);
 
 /* Remove a selected sleeper before signalling it, so later submissions choose
 ** another carrier even if this one has not yet reacquired the engine mutex. */
@@ -203,7 +205,8 @@ static void releaseslot (LuaScheduledTask *task) {
   ** observes this return, or this observer check sees demand and signals under
   ** the scheduler mutex. A return with no demand needs no global transaction. */
   __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
-  if (slotdemand(task->scheduler)) {
+  if (slotdemand(task->scheduler) ||
+      (task->scheduler->config.slots > 1 && luaC_workerready(task->scheduler->global))) {
     lock(task->scheduler);
     notify(task->scheduler);
     wakework(task->scheduler, 0);
@@ -398,14 +401,41 @@ static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
 static void wakework (LuaScheduler *s, int all) {
   LuaCarrier **link;
   if (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 ||
-      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
+      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) {
+    wakecollectors(s);
+    return;
+  }
   for (link = &s->idle; *link != NULL;) {
     if (haswork(s, *link)) {
       wakecarrier(link);
-      if (!all) return;
+      if (!all) break;
     }
     else link = &(*link)->idle_next;
   }
+  wakecollectors(s);
+}
+
+static void wakecollectors (LuaScheduler *s) {
+  unsigned i, available = 0;
+  if (s->config.slots == 1 || s->idle == NULL || s->stopping ||
+      !luaC_workerready(s->global) ||
+      __atomic_load_n(&s->global->world.stopped, __ATOMIC_SEQ_CST) ||
+      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
+  for (i = 0; i < s->config.slots; i++)
+    available += __atomic_load_n(&s->slots[i].owner, __ATOMIC_ACQUIRE) == NULL;
+  if (available > s->config.slots - 1 - s->gc_active)
+    available = s->config.slots - 1 - s->gc_active;
+  while (available-- != 0 && s->idle != NULL) wakecarrier(&s->idle);
+}
+
+void luaSC_notifygc (global_State *g) {
+  LuaScheduler *s = __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE);
+  if (s == NULL || !__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE) ||
+      s->config.slots == 1 || !luaC_workerready(g) ||
+      __atomic_load_n(&g->world.stopped, __ATOMIC_SEQ_CST)) return;
+  lock(s);
+  wakecollectors(s);
+  unlock(s);
 }
 
 static void requesthandoff (LuaExecution *execution, lua_State *L) {
@@ -569,14 +599,38 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
   return NULL;
 }
 
+/* Only an otherwise idle carrier borrows managed capacity. These payload
+** batches cannot allocate, park, invoke foreign code or run finalizers. The
+** normal driver retains phase completion and destruction, including its
+** native callback and full-collection completion contracts. */
+static LuaExecutionSlot *dispatchcollector (LuaCarrier *carrier) {
+  LuaScheduler *s = carrier->scheduler;
+  unsigned i;
+  if (s->gc_active == s->config.slots - 1 || !luaC_workerready(s->global) ||
+      __atomic_load_n(&s->global->world.stopped, __ATOMIC_SEQ_CST) ||
+      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return NULL;
+  for (i = 0; i < s->config.slots; i++) {
+    LuaExecutionSlot *slot = &s->slots[(carrier->cursor + i) % s->config.slots];
+    void *expected = NULL;
+    if (__atomic_compare_exchange_n(&slot->owner, &expected,
+          &slot->collector_execution, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      s->gc_active++;
+      return slot;
+    }
+  }
+  return NULL;
+}
+
 static void *carrierentry (void *argument) {
   LuaCarrier *carrier = argument;
   LuaScheduler *s = carrier->scheduler;
   for (;;) {
     LuaScheduledTask *task = dispatch(carrier, 0);
+    LuaExecutionSlot *collector = NULL;
     if (task == NULL) {
       lock(s);
-      while (!s->stopping && (task = dispatch(carrier, 1)) == NULL) {
+      while (!s->stopping && (task = dispatch(carrier, 1)) == NULL &&
+             (collector = dispatchcollector(carrier)) == NULL) {
         lua_assert(!carrier->sleeping && carrier->idle_next == NULL);
         carrier->idle_next = s->idle;
         s->idle = carrier;
@@ -587,6 +641,17 @@ static void *carrierentry (void *argument) {
       }
       if (s->stopping) { unlock(s); return NULL; }
       unlock(s);
+    }
+    if (collector != NULL) {
+      luaSC_collectidle(carrier, collector);
+      __atomic_store_n(&collector->owner, NULL, __ATOMIC_SEQ_CST);
+      lock(s);
+      lua_assert(s->gc_active != 0);
+      s->gc_active--;
+      notify(s);
+      wakework(s, 1);
+      unlock(s);
+      continue;
     }
     if (task->carrier != NULL && task->carrier != carrier) task->migrations++;
     task->carrier = carrier;
@@ -614,10 +679,36 @@ static void *carrierentry (void *argument) {
   }
 }
 
+static void initcollectors (lua_State *L, void *argument) {
+  LuaScheduler *s = argument;
+  unsigned i;
+  if (s->config.slots == 1) return;  /* payload helpers need a concurrent driver */
+  luaD_checkstack(L, 1);
+  for (i = 0; i < s->config.slots; i++) {
+    lua_State *worker = luaE_newthread(L, 1);
+    s->slots[i].collector = worker;
+    L->top.p--;
+  }
+}
+
+static void freecollectors (LuaScheduler *s) {
+  unsigned i;
+  for (i = 0; i < s->config.slots; i++) {
+    lua_State *worker = s->slots[i].collector;
+    if (worker != NULL) {
+      lua_assert(worker->native_depth == 1);
+      worker->native_depth--;
+      s->slots[i].collector = NULL;
+    }
+  }
+}
+
 static void freeengine (lua_State *L, LuaScheduler *s) {
   unsigned i;
   lua_lock(L);
   luaW_stop(L);
+  __atomic_store_n(&s->ready, 0, __ATOMIC_RELEASE);
+  freecollectors(s);
   for (i = 0; i < s->config.slots; i++) {
     LuaAllocationCache **link = &G(L)->slot_caches;
     luaM_releasecache(L, &s->slots[i].allocation);
@@ -707,7 +798,13 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
       }
     }
   }
+  if (status == 0) {
+    ptrdiff_t top = savestack(L, L->top.p);
+    if (luaD_rawrunprotected(L, initcollectors, s) != LUA_OK) status = ENOMEM;
+    L->top.p = restorestack(L, top);
+  }
   if (status != 0) {
+    if (initialized != 0) freecollectors(s);
     while (initialized_carriers != 0)
       luaX_checksync(pthread_cond_destroy(&s->carriers[--initialized_carriers].changed));
     while (initialized != 0)
@@ -754,7 +851,8 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
     freeengine(L, s);
     return status;
   }
-  s->ready = 1;
+  __atomic_store_n(&s->ready, 1, __ATOMIC_RELEASE);
+  luaSC_notifygc(G(L));
   return 0;
 }
 
@@ -969,6 +1067,5 @@ int luaSC_destroy (lua_State *L, LuaScheduler *s) {
   for (i = 0; i < s->created; i++)
     luaX_checksync(pthread_join(s->carriers[i].thread, NULL));
   freeengine(L, s);
-  s->ready = 0;
   return 0;
 }

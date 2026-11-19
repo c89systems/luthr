@@ -49,6 +49,7 @@ file(MAKE_DIRECTORY "${output_dir}")
 set(metrics wall_ns cpu_ns execution_cpu_ns execution_wall_ns
   cleanup_cpu_ns cleanup_wall_ns lua_peak_bytes lua_retained_bytes threads)
 set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
+  worker_calls worker_empty_calls worker_ns worker_trace_calls worker_sweep_calls
   collector_running_calls collector_body_ns collector_disabled_ns coordination_ns
   stop_request_ns resume_ns heap_entries heap_gc_entries heap_contended_entries
   stopped_ns trace_calls trace_ns trace_scan_ns trace_work_bytes trace_assist_calls trace_poll_calls trace_cycles

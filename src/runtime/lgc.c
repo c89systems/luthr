@@ -90,7 +90,6 @@ static void waitcollection (lua_State *L);
 static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
 static l_mem livebytes (global_State *g);
-static void linktrace (global_State *g, GCObject *object);
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object);
 static void starttrace (lua_State *L, unsigned finish);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
@@ -197,30 +196,6 @@ static int iscleared (LuaTraceWork *work, const GCObject *o) {
 }
 
 
-/* A successful colour claim owns the object's trace link. Strings are leaves
-** with no gclist; their header link is otherwise unused while collectable. */
-static GCObject **barrierlink (GCObject *o) {
-  if (novariant(o->tt) == LUA_TSTRING) return &o->next;
-  return luaC_graylink(o);
-}
-
-GCObject *luaC_barriernext (GCObject *o) {
-  return *barrierlink(o);
-}
-
-static void publishbarrier (global_State *g, GCObject **queue, GCObject *o) {
-  GCObject **link;
-  GCObject *head = __atomic_load_n(queue, __ATOMIC_RELAXED);
-  lua_assert(o != obj2gco(mainthread(g)));
-  link = barrierlink(o);
-  do {
-    *link = head;
-  } while (!__atomic_compare_exchange_n(queue, &head, o, 0,
-                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-  if (__atomic_load_n(&g->trace_active, __ATOMIC_ACQUIRE))
-    __atomic_store_n(&g->trace_barriers, 1, __ATOMIC_RELEASE);
-}
-
 /* Mark work can be produced by any execution. Claiming a white object is
 ** monotonic during tracing; a producer never reads mutable object payloads.
 ** Its participation covers the claim-to-publication gap at termination. */
@@ -228,38 +203,7 @@ void luaC_traceobject (lua_State *L, GCObject *o) {
   if (!luaC_tracing(L)) return;
   if (!claimmark(G(L), o)) return;
   __atomic_fetch_add(&G(L)->trace_changes, 1, __ATOMIC_RELAXED);
-  publishbarrier(G(L), &L->barrier_forward, o);
-}
-
-static void drainthreadbarriers (lua_State *L, lua_State *thread) {
-  global_State *g = G(L);
-  GCObject *o = __atomic_exchange_n(&thread->barrier_back, NULL, __ATOMIC_ACQUIRE);
-  while (o != NULL) {
-    GCObject *next = luaC_barriernext(o);
-    lua_assert(isgray(o));
-    GCObject **queue = luaC_tracing(L) ? &g->gray : &g->grayagain;
-    *luaC_graylink(o) = *queue;
-    *queue = o;
-    o = next;
-  }
-  o = __atomic_exchange_n(&thread->barrier_forward, NULL, __ATOMIC_ACQUIRE);
-  while (o != NULL) {
-    GCObject *next = luaC_barriernext(o);
-    lua_assert(isgray(o));
-    linktrace(g, o);
-    o = next;
-  }
-}
-
-void luaC_drainbarriers (lua_State *L) {
-  LuaParticipation *participant;
-  /* Clear before draining. A producer publishes its link before setting this
-  ** hint: either this pass sees that link, or its later hint remains set.
-  ** Payload readiness cannot overwrite work published on another producer. */
-  __atomic_exchange_n(&G(L)->trace_barriers, 0, __ATOMIC_ACQ_REL);
-  for (participant = G(L)->world.participants; participant != NULL;
-       participant = participant->next)
-    drainthreadbarriers(L, participant->thread);
+  luaC_publishbarrier(L, o, 0);
 }
 
 /* Marking shades new edges and the owner's age claims its remembered link.
@@ -283,7 +227,7 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
     /* A queued owner already owns its link, including private scan/sweep
     ** batches. Only a fresh claim publishes another remembered root. */
     if (!testbit(marked, QUEUEDBIT))
-      publishbarrier(g, &L->barrier_back, o);
+      luaC_publishbarrier(L, o, 1);
     return;
   }
 }
@@ -384,13 +328,13 @@ static void reallymarkobject (global_State *g, GCObject *o) {
   if (claimmark(g, o)) {
     if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED))
       __atomic_fetch_add(&g->trace_changes, 1, __ATOMIC_RELAXED);
-    linktrace(g, o);
+    luaC_linktrace(g, o);
   }
 }
 
 /* Shared root/barrier publication owns world.mutex or quiescence. Strings
 ** are immutable leaves; all other payloads are queued for a scanner. */
-static void linktrace (global_State *g, GCObject *o) {
+void luaC_linktrace (global_State *g, GCObject *o) {
   if (novariant(o->tt) == LUA_TSTRING) {
     g->GCmarked += luaC_objsize(o);
     nw2black(o);
@@ -490,7 +434,8 @@ static void starttrace (lua_State *L, unsigned finish) {
   g->trace_weakcutoff = 0;
   g->trace_changes = 0;
   g->trace_ready = 0;
-  g->trace_barriers = 0;
+  lua_assert(__atomic_load_n(&g->barrier_ready, __ATOMIC_RELAXED) == 0);
+  __atomic_store_n(&g->trace_workers, 0, __ATOMIC_RELAXED);
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.old = g->trace_plan.old_limit = NULL;
@@ -993,14 +938,16 @@ static GCObject *takeweak (GCObject **head, GCObject **tail) {
 /* Claims/publication serialize list ownership, never payload scanning. A batch
 ** stays participating until its discoveries are published; stopping the world
 ** therefore also joins all scanners before a phase can change. */
-static void readytrace (lua_State *L) {
+void luaC_readytrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
+  unsigned ready = g->gray != NULL || plan->next != NULL ||
+    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL;
+  __atomic_store_n(&g->trace_workers, ready, __ATOMIC_RELEASE);
   __atomic_store_n(&g->trace_ready,
     g->gray != NULL || g->trace_deferred != NULL ||
     plan->next != NULL || plan->deferred != NULL ||
-    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL ||
-    __atomic_load_n(&L->barrier_forward, __ATOMIC_ACQUIRE) != NULL,
+    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL,
     __ATOMIC_RELEASE);
 }
 
@@ -1073,7 +1020,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     if (plan->old == NULL)
       __atomic_store_n(&plan->phase,
         plan->pending != NULL ? TRACE_PENDING : TRACE_MARK, __ATOMIC_RELEASE);
-    readytrace(L);
+    luaC_readytrace(L);
     return;
   }
   else if (plan->phase == TRACE_PENDING)
@@ -1109,7 +1056,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   }
   if (work->count != 0)
     __atomic_fetch_add(&g->trace_busy, 1, __ATOMIC_RELAXED);
-  readytrace(L);
+  luaC_readytrace(L);
 }
 
 void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
@@ -1170,7 +1117,7 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   ** with the work rather than contending on one cache line per object. */
   __atomic_fetch_add(&g->trace_changes, work->claims, __ATOMIC_RELAXED);
   __atomic_fetch_sub(&g->trace_busy, 1, __ATOMIC_RELEASE);
-  readytrace(L);
+  luaC_readytrace(L);
 }
 
 /* }====================================================== */
@@ -1523,7 +1470,7 @@ static unsigned markold (global_State *g, unsigned limit) {
                              bitmask(QUEUEDBIT));
         if (__atomic_compare_exchange_n(&p->marked, &marked, changed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-          if (!testbit(marked, QUEUEDBIT)) linktrace(g, p);
+          if (!testbit(marked, QUEUEDBIT)) luaC_linktrace(g, p);
           break;
         }
       }

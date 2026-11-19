@@ -274,6 +274,7 @@ int main(int argc, char **argv) {
       memset(&jobs[i].probe, 0, sizeof(jobs[i].probe));
       jobs[i].probe.enabled = 1;
     }
+    gc_probe_begin_workers();
 #endif
     cpu_start = now(CLOCK_PROCESS_CPUTIME_ID);
     released = now(CLOCK_MONOTONIC);
@@ -352,6 +353,7 @@ int main(int argc, char **argv) {
     execution_cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
 #ifdef LUTHR_BENCH_GC_PROBE
     host_probe.enabled = 0;
+    gc_probe_end_workers(&total);
     for (unsigned i = 0; i < tasks; ++i) {
       jobs[i].probe.enabled = 0;
     }

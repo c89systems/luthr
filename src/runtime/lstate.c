@@ -363,7 +363,6 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->luthr_stack_context = NULL;
   L->native_roots = NULL;
   L->policy = NULL;
-  L->barrier_forward = L->barrier_back = NULL;
   L->trace_snapshot = 0;
   L->trace_trimmed = 0;
   L->trace_bytes = 0;
@@ -392,6 +391,7 @@ static int preinit_thread (lua_State *L, global_State *g) {
   L->participation.previous = NULL;
   L->participation.thread = L;
   L->participation.active = 0;
+  L->participation.collector = 0;
   L->participation.storage_epoch = 0;
   L->admission = &L->participation;
   L->callback_owner = NULL;
@@ -474,21 +474,24 @@ static void close_state (lua_State *L, int owns_gate) {
 static void buildthread (lua_State *L, void *context) {
   lua_State *thread = cast(lua_State *, context);
   luaW_register(thread);
-  luaCP_bind(thread, L->policy);
-  lua_sethook(thread, gethook(L), gethookmask(L), getbasehookcount(L));
+  if (thread->participation.collector)
+    lua_sethook(thread, NULL, 0, 0);
+  else {
+    luaCP_bind(thread, L->policy);
+    lua_sethook(thread, gethook(L), gethookmask(L), getbasehookcount(L));
+  }
   memcpy(lua_getextraspace(thread), lua_getextraspace(mainthread(G(L))),
          LUA_EXTRASPACE);
   luai_userstatethread(L, thread);
   stack_init(thread, L);
 }
 
-LUA_API lua_State *lua_newthread (lua_State *L) {
+lua_State *luaE_newthread (lua_State *L, int collector) {
   global_State *g = G(L);
   GCObject *o;
   lua_State *L1;
   int reservation;
   TStatus status;
-  lua_lock(L);
   luaC_checkGC(L);
   /* create new thread */
   o = luaC_newobjdt(L, LUA_TTHREAD, sizeof(LX), offsetof(LX, l));
@@ -504,11 +507,24 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
   ** which would prevent collection while its allocator is waiting. */
   reservation = luaX_tryreserve(L1);
   lua_assert(reservation == 1);
+  /* Establish the system role and its lifetime pin before registration or
+  ** stack allocation can expose this context to a concurrent scanner. */
+  L1->participation.collector = collector;
+  if (collector) L1->native_depth++;
   status = luaD_rawrunprotected(L, buildthread, L1);
+  if (status != LUA_OK && collector) L1->native_depth--;
   luaX_endreserve(L1, reservation);
   if (status != LUA_OK) luaD_throw(L, status);
-  lua_unlock(L);
   return L1;
+}
+
+
+LUA_API lua_State *lua_newthread (lua_State *L) {
+  lua_State *thread;
+  lua_lock(L);
+  thread = luaE_newthread(L, 0);
+  lua_unlock(L);
+  return thread;
 }
 
 
@@ -682,7 +698,10 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->trace_interrupt = 0;
   g->trace_changes = 0;
   g->trace_ready = 0;
-  g->trace_barriers = 0;
+  g->barrier_ready = 0;
+  memset(g->barriers, 0, sizeof(g->barriers));
+  g->trace_workers = 0;
+  g->sweep_workers = 0;
   g->trace_deferred = NULL;
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g, PAUSE, LUAI_GCPAUSE);

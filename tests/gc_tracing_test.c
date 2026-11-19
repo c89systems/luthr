@@ -222,7 +222,7 @@ static void drain(lua_State *L) {
   lua_lock(L);
   for (rounds = 0; rounds < 10000; rounds++) {
     luaC_tracebatch(L, 64);
-    if (G(L)->gray == NULL && L->barrier_forward == NULL)
+    if (G(L)->gray == NULL && G(L)->barrier_ready == 0)
       break;
   }
   require(rounds < 10000);

@@ -13,6 +13,7 @@
 #include "lstate.h"
 #include "ltable.h"
 #include "lvm.h"
+#include "lscheduler.h"
 
 LuaGCFrame *luaC_gcframe (void) {
   LuaExecution *execution = luaQ_current();
@@ -38,6 +39,8 @@ int luaC_ingc (lua_State *L) {
 void luaC_entergc (lua_State *L, LuaGCFrame *frame) {
   frame->previous = luaC_gcframe();
   frame->global = G(L);
+  frame->reclaimer = frame->previous != NULL &&
+      frame->previous->global == G(L) ? frame->previous->reclaimer : L;
   frame->retired = frame->retired_tail = NULL;
   frame->retired_bytes = 0;
   frame->batch = 0;
@@ -173,19 +176,27 @@ void luaC_trimstack (lua_State *L) {
 lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   global_State *g = G(L);
   LuaTraceWork work = {0};
+  unsigned previous;
+  int notify;
   if (!luaC_tracing(L) || limit == 0) return 0;
   if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);
   luaC_claimtrace(L, &work, limit);
+  notify = !previous && luaC_workerready(g);
   if (work.count == 0) luaP_work(G(L), work.scanned);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  if (notify) luaSC_notifygc(g);
   if (work.count == 0) return work.scanned;
   luaC_scantrace(L, &work, limit);
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);
   luaC_publishtrace(L, &work);
+  notify = !previous && luaC_workerready(g);
   luaP_work(G(L), cast(lu_mem, work.marked) + work.scanned);
   luaQ_wake(&g->world.changed, &g->world.waiters);
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  if (notify) luaSC_notifygc(g);
   return cast(lu_mem, work.marked) + work.scanned;
 }
 

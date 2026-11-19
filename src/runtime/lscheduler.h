@@ -25,6 +25,8 @@ struct LuaExecutionSlot {
   LuaScheduledTask *head, *tail;
   unsigned count;
   LuaAllocationCache allocation;
+  lua_State *collector;  /* pinned until carriers have joined */
+  LuaExecution collector_execution;  /* bounded, non-parking payload work */
 };
 
 struct LuaScheduledTask {
@@ -49,6 +51,7 @@ struct LuaCarrier {
   LuaScheduler *scheduler;
   pthread_t thread;
   LuaContext context;
+  NativeStackContext collector_context;  /* this carrier's OS stack bounds */
   LuaScheduledTask *reserved;  /* atomic; unrelated work must not enter C here */
   pthread_cond_t changed;
   LuaCarrier *idle_next;  /* scheduler mutex; unselected sleepers only */
@@ -78,6 +81,7 @@ struct LuaScheduler {
   unsigned callbacks_active, callbacks_peak;
   unsigned submitted, outstanding, native, native_peak;
   unsigned created, next_home;
+  unsigned gc_active;  /* scheduler mutex; leave capacity for a phase driver */
   int closed, stopping, ready;
   void (*completed)(void *);
   void *completion_context;
@@ -106,5 +110,8 @@ LUAI_FUNC int luaSC_callback (LuaScheduler *, LuaCallback *,
   void (*)(lua_State *, void *), void *, char *, size_t, LuaCallbackOutcome *);
 /* Requires collected outcomes and no concurrent host calls. */
 LUAI_FUNC int luaSC_destroy (lua_State *, LuaScheduler *);
+/* An admitted mutator, world.mutex, or quiescence retains the engine. */
+LUAI_FUNC void luaSC_notifygc (global_State *);
+LUAI_FUNC void luaSC_collectidle (LuaCarrier *, LuaExecutionSlot *);
 
 #endif

@@ -14,6 +14,7 @@
 #include "lmem.h"
 #include "ltablestorage.h"
 #include "lworld.h"
+#include "lscheduler.h"
 
 typedef struct LuaHeapWaiter {
   struct LuaHeapWaiter *next;
@@ -150,6 +151,20 @@ void luaW_enter (lua_State *L) {
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
+int luaW_tryenter (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (world->stopped) {
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    return 0;
+  }
+  luaW_activate(L);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaHS_quiescent(L);
+  luaC_checksnapshot(L);
+  return 1;
+}
+
 void luaW_leave (LuaWorld *world, LuaParticipation *participant) {
   unsigned previous = __atomic_fetch_sub(&participant->active, 1,
                                         __ATOMIC_SEQ_CST);
@@ -179,7 +194,12 @@ void luaW_stop (lua_State *L) {
   __atomic_store_n(&world->collector.token, luaX_token(L), __ATOMIC_RELEASE);
   __atomic_store_n(&world->stopped, 1, __ATOMIC_SEQ_CST);
   {
-    unsigned active = luaW_activecount(world);
+    LuaParticipation *participant;
+    unsigned active = 0;
+    for (participant = world->participants; participant != NULL;
+         participant = participant->next)
+      if (!participant->collector)
+        active += __atomic_load_n(&participant->active, __ATOMIC_SEQ_CST);
     if (active > G(L)->pacer.parallelism) G(L)->pacer.parallelism = active;
   }
   luaQ_wake(&world->changed, &world->waiters);
@@ -208,6 +228,7 @@ void luaW_start (lua_State *L) {
   __atomic_store_n(&world->stopped, 0, __ATOMIC_SEQ_CST);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaSC_notifygc(G(L));
   luaC_checksnapshot(L);
   luaW_heapleave(L);
 }

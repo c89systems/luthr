@@ -15,6 +15,7 @@
 #include "lstate.h"
 #include "ltask.h"
 #include "ltablestorage.h"
+#include "lscheduler.h"
 
 void luaX_checksync (int status) {
   if (status != 0) {
@@ -155,6 +156,9 @@ static void unlockstate (lua_State *L, void *token) {
   if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
     luaC_reclaim(L);
   luaM_publishdebt(L);
+  if (L->object_scopes == NULL &&
+      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
+    luaSC_notifygc(G(L));
   lua_assert(participant == &L->participation);  /* paired operations retire together */
   /* Runtime stack descriptors can be temporary callback storage. Ordinary
   ** embedding callers retain lazy per-thread discovery at their VM boundary. */
@@ -171,6 +175,21 @@ static void unlockstate (lua_State *L, void *token) {
 
 void luaX_unlockstate (lua_State *L) {
   unlockstate(L, luaQ_ownertoken());
+}
+
+int luaX_tryworker (lua_State *L) {
+  LuaExecution *execution = luaQ_current();
+  int reservation;
+  lua_assert(L->participation.collector && execution != NULL &&
+             execution->managed_depth == 0 && execution->task == NULL);
+  luaQ_entermanaged(L, execution);
+  reservation = luaX_tryreserve(L);
+  if (reservation == 1) {
+    if (luaW_tryenter(L)) return 1;
+    luaX_endreserve(L, reservation);
+  }
+  luaQ_leavemanaged(execution);
+  return 0;
 }
 
 static int attachedapi (lua_State *L, NativeStackContext *context) {
@@ -278,6 +297,9 @@ l_uint32 luaX_parentcalls (lua_State *from) {
 }
 
 void luaX_pollrequests (lua_State *L) {
+  if (L->object_scopes == NULL &&
+      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
+    luaSC_notifygc(G(L));
   if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
       __atomic_load_n(&L->stack_gate.waiting, __ATOMIC_ACQUIRE) != 0) {
     /* A real request publishes roots and hands off ownership. The successful
