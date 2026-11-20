@@ -1588,7 +1588,7 @@ static unsigned executecaptured (lua_State *L, Instruction i,
 
 #if LUA_USE_JUMPTABLE && defined(__GNUC__) && !defined(__clang__)
 /* Keep the computed-goto dispatch sites distinct under GCC. */
-__attribute__((optimize("no-gcse")))
+__attribute__((optimize("no-gcse", "no-crossjumping")))
 #endif
 void luaV_execute (lua_State *L, CallInfo *ci) {
   LClosure *cl;
