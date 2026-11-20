@@ -64,10 +64,11 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
 
 /* Idle workers consume payloads only. Reservation retries and phase changes
 ** remain with ordinary collector drivers; neither is runnable idle work. */
+#define luaC_markready(g) \
+  (__atomic_load_n(&(g)->trace_workers, __ATOMIC_ACQUIRE) || \
+   __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
 #define luaC_workerready(g) \
-  ((__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && \
-    (__atomic_load_n(&(g)->trace_workers, __ATOMIC_ACQUIRE) || \
-     __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))) || \
+  ((__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && luaC_markready(g)) || \
    __atomic_load_n(&(g)->sweep_workers, __ATOMIC_ACQUIRE))
 
 /* A batch owns its payloads until it publishes every list and counter. It

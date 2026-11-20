@@ -90,7 +90,8 @@ LUAI_FUNC void luaW_collectenter (lua_State *L);
 LUAI_FUNC int luaW_trycollectenter (lua_State *L);
 LUAI_FUNC void luaW_heapleave (lua_State *L);
 /* Caller owns world.mutex, retains native depth and borrows no shared work. */
-LUAI_FUNC void luaW_waitcollector (lua_State *L);
+enum { LUA_WAIT_RECLAIM, LUA_WAIT_PHASE };
+LUAI_FUNC void luaW_waitcollector (lua_State *L, int reason);
 LUAI_FUNC LuaWorldScope luaW_scope (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);

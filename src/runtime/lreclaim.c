@@ -313,7 +313,7 @@ void luaC_reclaim (lua_State *L) {
           luaX_checksync(pthread_mutex_unlock(&world->mutex));
           break;
         }
-        luaW_waitcollector(L);
+        luaW_waitcollector(L, LUA_WAIT_RECLAIM);
         luaX_checksync(pthread_mutex_unlock(&world->mutex));
         continue;
       }

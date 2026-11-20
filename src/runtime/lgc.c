@@ -520,7 +520,7 @@ static void endtrace (lua_State *L) {
   __atomic_store_n(&g->trace_active, 0, __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  luaQ_wake(&world->changed, &world->waiters);
+  luaQ_wake(&g->phase_changed, &g->phase_waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -2148,8 +2148,9 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
         int boundary;
         luaX_checksync(pthread_mutex_lock(&g->world.mutex));
         if (luaC_tracing(L) && g->trace_epoch == epoch &&
-            __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE))
-          luaW_waitcollector(L);
+            __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) &&
+            !luaC_markready(g))
+          luaW_waitcollector(L, LUA_WAIT_PHASE);
         boundary = luaC_tracing(L) && g->trace_epoch == epoch &&
           !luaC_tracepending(g) &&
           __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) == 0;
@@ -2202,8 +2203,8 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete) {
       if (done == 0) {
         luaX_checksync(pthread_mutex_lock(&g->world.mutex));
         if (luaC_sweeping(L) && g->sweep_plan.epoch == epoch &&
-            g->sweep_plan.busy != 0)
-          luaW_waitcollector(L);
+            g->sweep_plan.busy != 0 && !luaC_sweepready(g))
+          luaW_waitcollector(L, LUA_WAIT_PHASE);
         luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
       }
     }

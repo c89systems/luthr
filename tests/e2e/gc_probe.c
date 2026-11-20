@@ -211,7 +211,7 @@ void __real_luaC_assisttrace(lua_State *);
 void __real_luaC_polltrace(lua_State *);
 void __real_luaC_snapshot(lua_State *, lua_State *);
 void __real_luaC_checksnapshot(lua_State *);
-void __real_luaW_waitcollector(lua_State *);
+void __real_luaW_waitcollector(lua_State *, int);
 void __real_luaM_reclaimpages(lua_State *);
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
@@ -718,13 +718,13 @@ void __wrap_luaC_snapshot(lua_State *L, lua_State *thread) {
 }
 void __wrap_luaC_checksnapshot(lua_State *L) { snapshot(L, NULL); }
 
-void __wrap_luaW_waitcollector(lua_State *L) {
+void __wrap_luaW_waitcollector(lua_State *L, int reason) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
   int tracing = luaC_tracing(L);
   if (record != NULL)
     coordination_begin(record);
-  __real_luaW_waitcollector(L);
+  __real_luaW_waitcollector(L, reason);
   if (record != NULL) {
     coordination_end(record);
     if (tracing) {

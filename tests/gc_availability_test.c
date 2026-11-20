@@ -16,12 +16,12 @@
   } while (0)
 
 static __thread unsigned batches, phase_entries;
-static __thread int pause_scan;
+static __thread int pause_scan, observe_wait;
 static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  int entered, release;
-} scanner = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0};
+  int entered, release, waiting;
+} scanner = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0};
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
   if (pause_scan) {
@@ -46,18 +46,30 @@ int __wrap_luaW_trycollectenter(lua_State *L) {
   return __real_luaW_trycollectenter(L);
 }
 
+void __real_luaW_waitcollector(lua_State *, int);
+void __wrap_luaW_waitcollector(lua_State *L, int reason) {
+  if (observe_wait && reason == LUA_WAIT_PHASE) {
+    require(pthread_mutex_lock(&scanner.mutex) == 0);
+    scanner.waiting = 1;
+    require(pthread_cond_broadcast(&scanner.changed) == 0);
+    require(pthread_mutex_unlock(&scanner.mutex) == 0);
+  }
+  __real_luaW_waitcollector(L, reason);
+}
+
 struct request {
   lua_State *state;
   GCObject *published;
   unsigned batches, phase_entries;
   lu_mem debt;
-  int pressure, resume, pause;
+  int pressure, resume, pause, observe_wait;
 };
 
 static void *assist(void *argument) {
   struct request *r = argument;
   unsigned i;
   pause_scan = r->pause;
+  observe_wait = r->observe_wait;
   lua_lock(r->state);
   r->state->assist_epoch = G(r->state)->world.work_epoch;
   if (!r->resume)
@@ -75,6 +87,21 @@ static void *assist(void *argument) {
   return NULL;
 }
 
+static void check_phase_wait(lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  LuaWaiter *waiter;
+  require(pthread_mutex_lock(&scanner.mutex) == 0);
+  while (!scanner.waiting)
+    require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
+  require(pthread_mutex_unlock(&scanner.mutex) == 0);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  waiter = G(L)->phase_waiters;
+  require(waiter != NULL);
+  luaQ_wake(&world->changed, &world->waiters);
+  require(G(L)->phase_waiters == waiter && G(L)->trace_busy == 1);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   struct request r = {0};
@@ -82,10 +109,11 @@ int main(int argc, char **argv) {
   pthread_t worker;
   unsigned length = 0, slices = 0;
   GCObject *late;
-  int publish, remote, busy;
+  int publish, remote, busy, parked;
   require(argc == 2 && L != NULL);
   remote = strncmp(argv[1], "remote_", 7) == 0;
-  busy = strncmp(argv[1], "busy_", 5) == 0;
+  parked = strncmp(argv[1], "parked_", 7) == 0;
+  busy = parked || strncmp(argv[1], "busy_", 5) == 0;
   publish = busy || remote || strncmp(argv[1], "publish_", 8) == 0;
   r.pressure = strncmp(argv[1], "pressure_", 9) == 0;
   lua_gc(L, strstr(argv[1], "generational") != NULL ? LUA_GCGEN : LUA_GCINC);
@@ -134,15 +162,30 @@ int main(int argc, char **argv) {
     luaW_heapleave(L);
     /* This batch is owned by a scanner, not available to another helper. The
      * phase permit is free; the observer still owes no empty batch or pause. */
+    if (parked) {
+      __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
+      other.pressure = other.observe_wait = 1;
+    }
     require(pthread_create(&observer, NULL, assist, &other) == 0);
-    require(pthread_join(observer, NULL) == 0);
-    require(other.batches == 0 && other.phase_entries == 0 &&
-            other.debt == LUA_GC_ASSIST_BYTES);
-    luaW_heapenter(L);
+    if (parked)
+      check_phase_wait(L);
+    else {
+      require(pthread_join(observer, NULL) == 0);
+      require(other.batches == 0 && other.phase_entries == 0 &&
+              other.debt == LUA_GC_ASSIST_BYTES);
+      luaW_heapenter(L);
+    }
     require(pthread_mutex_lock(&scanner.mutex) == 0);
     scanner.release = 1;
     require(pthread_cond_broadcast(&scanner.changed) == 0);
     require(pthread_mutex_unlock(&scanner.mutex) == 0);
+    if (parked) {
+      lua_unlock(L);
+      require(pthread_join(observer, NULL) == 0);
+      require(pthread_join(worker, NULL) == 0);
+      require(!luaC_tracing(L) && G(L)->phase_waiters == NULL);
+      goto intact;
+    }
   }
   if (r.pressure) {
     require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
@@ -172,6 +215,7 @@ int main(int argc, char **argv) {
     require(pthread_join(worker, NULL) == 0);
     require(!luaC_tracing(L) && r.phase_entries != 0);
   }
+intact:
   lua_gc(L, LUA_GCCOLLECT);
   lua_pushvalue(L, 1);
   while (lua_istable(L, -1)) {

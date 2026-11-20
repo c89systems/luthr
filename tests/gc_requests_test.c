@@ -133,6 +133,7 @@ static void phase_request(lua_State *L, int generational) {
 }
 
 static void boundary_handoff(lua_State *L, const char *kind) {
+  LuaWorld *world = &G(L)->world;
   struct request helpers[2] = {{0}};
   pthread_t workers[2];
   unsigned i, length = 0;
@@ -164,16 +165,18 @@ static void boundary_handoff(lua_State *L, const char *kind) {
   luaW_heapenter(L);
   for (i = 0; i < 2; i++)
     require(pthread_create(&workers[i], NULL, request, &helpers[i]) == 0);
-  require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
+  require(pthread_mutex_lock(&world->mutex) == 0);
   /* The caller retains metadata and active stack participation. A table
    * sweep must finish before it releases either, while tracing needs both. */
-  while (sweeping ? luaC_sweeping(L)
-                  : !helpers[0].state->heap_waiting ||
-                        !helpers[1].state->heap_waiting)
-    luaQ_wait(L, &G(L)->world.mutex, &G(L)->world.changed,
-              &G(L)->world.waiters);
-  require(!luaW_stopped(&G(L)->world));
-  require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
+  if (sweeping) {
+    while (luaC_sweeping(L))
+      luaQ_wait(L, &world->mutex, &G(L)->phase_changed, &G(L)->phase_waiters);
+  } else {
+    while (!helpers[0].state->heap_waiting || !helpers[1].state->heap_waiting)
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  }
+  require(!luaW_stopped(world));
+  require(pthread_mutex_unlock(&world->mutex) == 0);
   luaW_heapleave(L);
   lua_unlock(L);
   for (i = 0; i < 2; i++)

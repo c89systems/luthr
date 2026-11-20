@@ -272,10 +272,11 @@ target_compile_options(gc_availability_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_availability_test PRIVATE luthr_static)
 target_link_options(gc_availability_test PRIVATE -Wl,--wrap=luaC_tracebatch
   -Wl,--wrap=luaC_scantrace
+  -Wl,--wrap=luaW_waitcollector
   -Wl,--wrap=luaW_trycollectenter)
 foreach(case IN ITEMS defer_incremental defer_generational publish_incremental publish_generational
     remote_incremental remote_generational
-    busy_incremental busy_generational
+    busy_incremental busy_generational parked_incremental parked_generational
     pressure_incremental pressure_generational)
   add_test(NAME gc_availability_${case} COMMAND gc_availability_test ${case})
   set_tests_properties(gc_availability_${case} PROPERTIES

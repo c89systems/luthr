@@ -581,6 +581,8 @@ typedef struct global_State {
   uint64_t metatable_sequence[LUA_NUMTYPES];  /* primitive metatable publication */
   TString empty_string;
   TString byte_strings[UCHAR_MAX + 1];  /* immutable storage owned by the VM */
+  pthread_cond_t phase_changed;
+  LuaWaiter *phase_waiters;  /* world.mutex, shared trace and sweep readiness */
 } global_State;
 
 

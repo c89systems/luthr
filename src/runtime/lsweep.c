@@ -194,7 +194,8 @@ static void publish (lua_State *L, LuaSweepWork *work) {
   plan->addedold += work->addedold;
   lua_assert(plan->busy != 0);
   plan->busy--;
-  luaQ_wake(&g->world.changed, &g->world.waiters);
+  if (plan->busy == 0 || work->retry != NULL)
+    luaQ_wake(&g->phase_changed, &g->phase_waiters);
 }
 
 /* All claims have published before the sweep reaches DONE. Mutators' new
@@ -211,7 +212,7 @@ static void publishfinish (lua_State *L) {
   }
   luaC_endsweep(L);
   __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
-  luaQ_wake(&g->world.changed, &g->world.waiters);
+  luaQ_wake(&g->phase_changed, &g->phase_waiters);
 }
 
 /* The last claimant already owns the plan mutex. Only maintenance needs a

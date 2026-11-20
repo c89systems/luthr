@@ -38,7 +38,7 @@ int luaW_init (global_State *g) {
   world->storage_grace = 0;
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
-  world->waiters = NULL;
+  world->waiters = g->phase_waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
@@ -49,12 +49,19 @@ int luaW_init (global_State *g) {
     luaX_checksync(pthread_mutex_destroy(&world->mutex));
     return status;
   }
+  status = pthread_cond_init(&g->phase_changed, NULL);
+  if (status != 0) {
+    luaX_checksync(pthread_cond_destroy(&world->changed));
+    luaX_checksync(pthread_mutex_destroy(&world->mutex));
+    return status;
+  }
   for (i = 0; i < LUA_PUBLISH_SHARDS; i++) {
     g->publishers[i].head = NULL;
     status = pthread_mutex_init(&g->publishers[i].mutex, NULL);
     if (status != 0) {
       while (i-- > 0)
         luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
+      luaX_checksync(pthread_cond_destroy(&g->phase_changed));
       luaX_checksync(pthread_cond_destroy(&world->changed));
       luaX_checksync(pthread_mutex_destroy(&world->mutex));
       return status;
@@ -69,6 +76,7 @@ void luaW_destroy (global_State *g) {
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
+             g->phase_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
              world->storage_bytes == 0 && world->storage_busy == 0 &&
              world->storage_workers == 0 &&
@@ -77,6 +85,7 @@ void luaW_destroy (global_State *g) {
     lua_assert(g->publishers[i].head == NULL);
     luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
   }
+  luaX_checksync(pthread_cond_destroy(&g->phase_changed));
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
 }
@@ -434,14 +443,19 @@ static unsigned heapdepth (lua_State *L) {
   return luaW_ownsheap(L) ? world->heap_depth : 0;
 }
 
-void luaW_waitcollector (lua_State *L) {
-  LuaWorld *world = &G(L)->world;
+void luaW_waitcollector (lua_State *L, int reason) {
+  global_State *g = G(L);
+  LuaWorld *world = &g->world;
   lua_assert(L->native_depth != 0);
   luaW_deactivate(L);
-  luaQ_wake(&world->changed, &world->waiters);
-  do {
+  if (reason == LUA_WAIT_RECLAIM || (luaW_control(world) & LUA_WORLD_REQUESTS))
+    luaQ_wake(&world->changed, &world->waiters);
+  if (reason == LUA_WAIT_RECLAIM)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  } while (luaW_stopped(world));
+  else if (!luaW_stopped(world))
+    luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
+  while (luaW_stopped(world))
+    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   luaW_resume(L);
   luaC_checksnapshot(L);
 }
