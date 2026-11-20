@@ -763,7 +763,7 @@ static void coalesced_gc(lua_State *state) {
   require(pthread_mutex_unlock(&world->mutex) == 0);
   /* Service the request while the other mutator waits for metadata access. */
   luaC_fullgc(state, 0);
-  require(G(state)->gcstate == GCSpause && G(state)->GCdebt > 64);
+  require(G(state)->gcstate == GCSpause && luaE_getdebt(G(state)) > 64);
   luaW_heapleave(state);
   luaX_unlockstate(state);
   require(pthread_join(peer, NULL) == 0);
@@ -783,7 +783,8 @@ static void coalesced_gc(lua_State *state) {
   require(G(state)->gcstate == GCSpause);
   luaE_setdebt(G(state), 128);
   block = luaM_malloc_(state, 256, 0);
-  require(G(state)->GCdebt > 0 && G(state)->GCdebt <= -state->allocation_debt);
+  require(luaE_getdebt(G(state)) > 0 &&
+          luaE_getdebt(G(state)) <= -state->allocation_debt);
   /* Unpublished local allocations still require an automatic step. */
   luaC_checkGC(state);
   require(G(state)->gcstate != GCSpause);

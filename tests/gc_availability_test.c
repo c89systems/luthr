@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
   G(L)->pacer.goal = G(L)->pacer.start;
   G(L)->pacer.expected = G(L)->pacer.work + LUA_GC_ASSIST_BYTES;
   if (r.pressure)
-    __atomic_store_n(&G(L)->pacer.debt, -MAX_LMEM, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
   if (remote)
     luaC_traceobject(L, late);
   else if (publish)

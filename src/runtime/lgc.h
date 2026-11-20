@@ -126,7 +126,11 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define GCSpause	5
 
 
-#define issweepphase(g)  ((g)->gcstate == GCSswpallgc)
+#define luaC_state(g) __atomic_load_n(&(g)->gcstate, __ATOMIC_RELAXED)
+#define luaC_kind(g) __atomic_load_n(&(g)->gckind, __ATOMIC_RELAXED)
+#define luaC_setstate(g,s) __atomic_store_n(&(g)->gcstate, (s), __ATOMIC_RELAXED)
+#define luaC_setkind(g,k) __atomic_store_n(&(g)->gckind, (k), __ATOMIC_RELAXED)
+#define issweepphase(g)  (luaC_state(g) == GCSswpallgc)
 
 
 /*
@@ -314,7 +318,7 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 #endif
 
 #define luaC_needstep(L) \
-    (__atomic_load_n(&G(L)->GCdebt, __ATOMIC_RELAXED) <= -(L)->allocation_debt)
+    (luaE_getdebt(G(L)) <= -(L)->allocation_debt)
 
 #define LUA_GC_ASSIST_BYTES 65536
 #define luaC_retired(L) __atomic_load_n(&(L)->retired, __ATOMIC_ACQUIRE)
@@ -323,8 +327,7 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 #define luaC_needassist(L) \
     ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
 #define luaC_cyclepressure(L) \
-    (__atomic_load_n(&G(L)->pacer.debt, __ATOMIC_RELAXED) <= \
-     -(L)->allocation_debt)
+    (luaP_debt(G(L)) <= -(L)->allocation_debt)
 #define luaC_needtraceassist(L) \
     (luaC_tracing(L) && gcrunning(G(L)) && \
      !(L)->reclaiming && \
@@ -377,7 +380,7 @@ static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
   /* The shared trace publishes all newborns before local work can resume. */
   if (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE)) return 1;
   luaC_nurseryedge(L, owner, value);
-  if (G(L)->gckind != KGC_GENMINOR) return 0;
+  if (luaC_kind(G(L)) != KGC_GENMINOR) return 0;
   marked = getmarked(owner);
   if ((marked & AGEBITS) <= G_SURVIVAL) return 0;
   referent = getmarked(value);
@@ -408,7 +411,7 @@ enum { SWEEP_RETRY, SWEEP_LIVE, SWEEP_RETIRED, SWEEP_WATCH };
   __atomic_load_n(&G(L)->sweep_plan.active, __ATOMIC_ACQUIRE)
 LUAI_FUNC void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked);
 LUAI_FUNC int luaC_sweepready (global_State *g);
-LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit);
+LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit, int complete);
 LUAI_FUNC lu_mem luaC_sweeppayload (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_scansweep (lua_State *L, LuaSweepWork *work);
 LUAI_FUNC void luaC_waitsweep (lua_State *L);
@@ -417,6 +420,7 @@ LUAI_FUNC void luaC_assistsweep (lua_State *L);
 LUAI_FUNC int luaC_sweepobject (lua_State *L, GCObject *object, unsigned kind,
                               LuaSweepWork *work);
 LUAI_FUNC void luaC_endsweep (lua_State *L);
+LUAI_FUNC void luaC_sweepmaintenance (lua_State *L);
 LUAI_FUNC int luaC_tryretire (lua_State *L, GCObject *object);
 /* Publish a complete private batch while holding world.mutex. */
 LUAI_FUNC void luaC_publishretired (lua_State *L, LuaGCFrame *frame);

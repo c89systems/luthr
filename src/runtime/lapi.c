@@ -1600,8 +1600,8 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       int work = 0;  /* true if GC did some work */
       if (n <= 0)
         newdebt = 0;  /* force to run one basic step */
-      else if (g->GCdebt >= n - MAX_LMEM)  /* no overflow? */
-        newdebt = g->GCdebt - n;
+      else if (luaE_getdebt(g) >= n - MAX_LMEM)  /* no overflow? */
+        newdebt = luaE_getdebt(g) - n;
       else  /* overflow */
         newdebt = -MAX_LMEM;  /* set debt to mininum value */
       luaE_setdebt(g, newdebt);
@@ -1609,7 +1609,7 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
         luaC_step(L);
         work = 1;
       }
-      if (work && g->gcstate == GCSpause)  /* end of cycle? */
+      if (work && luaC_state(g) == GCSpause)  /* end of cycle? */
         res = 1;  /* signal it */
       break;
     }
@@ -1618,12 +1618,12 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       break;
     }
     case LUA_GCGEN: {
-      res = (g->gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN;
+      res = (luaC_kind(g) == KGC_INC) ? LUA_GCINC : LUA_GCGEN;
       luaC_changemode(L, KGC_GENMINOR);
       break;
     }
     case LUA_GCINC: {
-      res = (g->gckind == KGC_INC) ? LUA_GCINC : LUA_GCGEN;
+      res = (luaC_kind(g) == KGC_INC) ? LUA_GCINC : LUA_GCGEN;
       luaC_changemode(L, KGC_INC);
       break;
     }

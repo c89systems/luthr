@@ -73,7 +73,9 @@
 /* Pacing and charged storage are independent. Rebasing a work allowance never
 ** rewrites physical accounting or consumes another worker's return credits. */
 void luaE_setdebt (global_State *g, l_mem debt) {
-  __atomic_store_n(&g->GCdebt, debt, __ATOMIC_RELAXED);
+  l_mem used = getgcbytes(g);
+  l_mem step = debt > MAX_LMEM - used ? MAX_LMEM : used + debt;
+  __atomic_store_n(&g->GCstep, step, __ATOMIC_RELAXED);
 }
 
 
@@ -458,7 +460,8 @@ static void close_state (lua_State *L, int owns_gate) {
   luaCP_bind(L, NULL);
   luaHS_reclaim(L, LUAHS_DRAIN);
   luaM_reclaimpages(L);
-  lua_assert(gettotalbytes(g) == sizeof(global_State) && g->GCretired == 0);
+  lua_assert(gettotalbytes(g) == sizeof(global_State) &&
+             getgcbytes(g) == sizeof(global_State) && g->GCretired == 0);
   luaM_destroypools(L);
   if (owns_gate) {
     luaW_start(L);
@@ -623,6 +626,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->minor_mark = g->markminor = 0;
   g->new_mark = g->major_mark;
   g->strcache_epoch = 1;
+  g->shrink_strings = 0;
   L->marked = luaC_newmark(g);
   preinit_thread(L, g);
   if (luaW_init(g) != 0) {
@@ -681,8 +685,9 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->gray = g->grayagain = NULL;
   g->weak = g->ephemeron = g->allweak = NULL;
   g->GCbytes = sizeof(global_State);
+  g->GCused = sizeof(global_State);
   g->GCmarked = 0;
-  g->GCdebt = 0;
+  g->GCstep = 0;
   g->GCretired = 0;
   g->GCmajorlive = sizeof(global_State);
   g->GCcyclelive = sizeof(global_State);

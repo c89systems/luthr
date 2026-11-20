@@ -32,7 +32,7 @@ static void hold(void) {
   require(pthread_mutex_lock(&probe.mutex) == 0);
   if (probe.armed && !probe.entered) {
     G(probe.marker)->gcstp = GCSTPUSR;
-    G(probe.marker)->pacer.debt = MAX_LMEM;
+    G(probe.marker)->pacer.hard = MAX_LMEM;
     probe.entered = 1;
     require(pthread_cond_broadcast(&probe.changed) == 0);
     while (!probe.release)
@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
     luaC_runtilstate(L, GCSpropagate, 1);
     require(luaC_tracing(L));
   }
-  G(L)->pacer.debt = MAX_LMEM;
+  G(L)->pacer.hard = MAX_LMEM;
   luaW_start(L);
   lua_unlock(L);
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);

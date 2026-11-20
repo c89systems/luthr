@@ -179,7 +179,7 @@ void luaC_trimstack (lua_State *L) {
     if (!luaD_cantrimstack(L)) return;
     L->reclaiming = 1;
     luaD_shrinkstack(L);
-    luaM_flushdebt(L, L);
+    luaM_flushdebt(L);
     L->reclaiming = 0;
   }
 }

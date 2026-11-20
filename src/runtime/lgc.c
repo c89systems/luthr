@@ -89,7 +89,6 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete);
 static void waitcollection (lua_State *L);
 static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
-static l_mem livebytes (global_State *g);
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object);
 static void starttrace (lua_State *L, unsigned finish);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
@@ -213,7 +212,7 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
   lu_byte marked, claimed;
   int tracing = luaC_tracing(L);
   if (tracing) luaC_traceobject(L, v);
-  if (g->gckind == KGC_GENMINOR) {
+  if (luaC_kind(g) == KGC_GENMINOR) {
     unsigned touched = tracing ? G_TOUCHED0 : G_TOUCHED1;
     marked = getmarked(o);
     do {
@@ -238,6 +237,7 @@ void luaC_fix (lua_State *L, GCObject *o) {
   GCObject *previous = NULL;
   lua_assert(o->tt != LUA_VTABLE);
   luaW_heapenter(L);
+  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   link = &L->new_objects;
   while (*link != NULL && *link != o) {
     previous = *link;
@@ -257,6 +257,7 @@ void luaC_fix (lua_State *L, GCObject *o) {
   *link = luaC_allocnext(o);
   o->next = g->fixedgc;  /* link it to 'fixedgc' list */
   g->fixedgc = o;
+  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   luaW_heapleave(L);
 }
 
@@ -405,12 +406,12 @@ void luaC_finishstrong (LuaTraceWork *work, GCObject *object) {
   int remember;
   do {
     unsigned age = marked & AGEBITS;
-    if (work->global->gckind == KGC_GENMINOR) {
+    if (luaC_kind(work->global) == KGC_GENMINOR) {
       if (age == G_TOUCHED0) age = G_TOUCHED1;
       else if (age == G_TOUCHED1) age = G_TOUCHED2;
       else if (age == G_TOUCHED2) age = G_OLD;
     }
-    remember = work->global->gckind == KGC_GENMINOR &&
+    remember = luaC_kind(work->global) == KGC_GENMINOR &&
                (age == G_TOUCHED1 || age == G_TOUCHED2);
     changed = cast_byte((marked & ~AGEBITS) | age);
     if (!remember) changed &= cast_byte(~bitmask(QUEUEDBIT));
@@ -483,7 +484,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   else g->major_mark = g->major_mark == MAJORBITS
     ? bitmask(MAJOR0BIT) : cast_byte(g->major_mark + bitmask(MAJOR0BIT));
   g->new_mark = cast_byte(g->major_mark | g->minor_mark |
-    (finish == TRACE_GENERATIONAL || g->gckind == KGC_GENMAJOR ? G_OLD : 0));
+    (finish == TRACE_GENERATIONAL || luaC_kind(g) == KGC_GENMAJOR ? G_OLD : 0));
   g->trace_epoch++;
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
@@ -577,7 +578,7 @@ static void restartcollection (lua_State *L, global_State *g, unsigned finish) {
 */
 static void genlink (LuaTraceWork *work, GCObject *o) {
   lua_assert(isblack(work->global, o));
-  if (work->global->gckind == KGC_GENMINOR &&
+  if (luaC_kind(work->global) == KGC_GENMINOR &&
       (getage(o) == G_TOUCHED0 || getage(o) >= G_TOUCHED1))
     linkwork(&work->grayagain, o);
 }
@@ -586,7 +587,7 @@ static void genlink (LuaTraceWork *work, GCObject *o) {
 ** Convergence passes keep their queue but cannot consume another age. */
 static void blacken (LuaTraceWork *work, GCObject *o) {
   nw2black(o);
-  if (work->global->gckind == KGC_GENMINOR) {
+  if (luaC_kind(work->global) == KGC_GENMINOR) {
     unsigned age = getage(o);
     if (age == G_TOUCHED0) setage(o, G_TOUCHED1);
     else if (age == G_TOUCHED1) setage(o, G_TOUCHED2);
@@ -618,7 +619,7 @@ static void traverseweakvalue (LuaTraceWork *work, Table *h) {
         hasclears = 1;  /* table will have to be cleared */
     }
   }
-  if (g->gcstate == GCSpropagate)
+  if (luaC_state(g) == GCSpropagate)
     linkwork(&work->grayagain, obj2gco(h));
   else if (hasclears)
       linkwork(&work->weak, obj2gco(h));
@@ -680,7 +681,7 @@ static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
     }
   }
   /* link table into proper list */
-  if (g->gcstate == GCSpropagate)
+  if (luaC_state(g) == GCSpropagate)
     linkwork(&work->grayagain, obj2gco(h));
   else if (hasww)  /* table has white->white entries? */
     linkwork(&work->ephemeron, obj2gco(h));
@@ -772,7 +773,7 @@ static l_mem traversetable (LuaTraceWork *work, Table *h) {
       traverseephemeron(work, h, 0);
       break;
     case 3:  /* all weak; nothing to traverse */
-      if (g->gcstate == GCSpropagate)
+      if (luaC_state(g) == GCSpropagate)
         linkwork(&work->grayagain, obj2gco(h));
       else
         linkwork(&work->allweak, obj2gco(h));
@@ -905,7 +906,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     }
     work->marked += cast(l_mem, thread->trace_bytes);
     blacken(work, o);
-    if (g->gckind == KGC_GENMINOR && isold(o)) linkwork(&work->grayagain, o);
+    if (luaC_kind(g) == KGC_GENMINOR && isold(o)) linkwork(&work->grayagain, o);
     return 1;
   }
   if (o->tt == LUA_VPROTO) {
@@ -1277,7 +1278,7 @@ static void trimstacks (lua_State *L) {
         thread->trace_trimmed = thread->trace_snapshot;
         thread->reclaiming = 1;
         luaD_shrinkstack(thread);  /* recursive metadata ownership */
-        luaM_flushdebt(L, thread);
+        luaM_flushdebt(thread);
         thread->reclaiming = 0;
       }
       thread->native_depth--;
@@ -1367,16 +1368,19 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
 ** If possible, shrink string table.
 */
 static void checkSizes (lua_State *L, global_State *g) {
-  if (!g->gcemergency) {
-    int i;
-    for (i = 0; i < LUA_STRING_SHARDS; i++) {
-      stringtable *tb = &g->strt[i];
-      /* An allocation waiter may retain the old bucket allocation. Removal
-      ** is safe under quiescence; resizing that allocation must wait. */
-      if (__atomic_load_n(&tb->access.owner, __ATOMIC_ACQUIRE) == NULL &&
-          tb->size > LUA_STRING_INITIAL_BUCKETS && tb->nuse < tb->size / 4)
-        luaS_resize(L, tb, tb->size / 2);
-    }
+  int i;
+  for (i = 0; i < LUA_STRING_SHARDS; i++) {
+    stringtable *tb = &g->strt[i];
+    int target = tb->size;
+    while (target > LUA_STRING_INITIAL_BUCKETS && tb->nuse < target / 4)
+      target /= 2;
+    if (target == tb->size) continue;
+    /* A parked allocator may retain the old buckets. Retry that shard
+    ** during the next cycle if it cannot shrink here. */
+    if (__atomic_load_n(&tb->access.owner, __ATOMIC_ACQUIRE) == NULL)
+      luaS_resize(L, tb, target);
+    if (tb->size != target)
+      __atomic_store_n(&g->shrink_strings, 1, __ATOMIC_RELAXED);
   }
 }
 
@@ -1491,7 +1495,7 @@ void luaC_publish (lua_State *L) {
     g->publishers[shard].head = NULL;
     while (thread != NULL) {
       lua_State *next = thread->publish_next;
-      luaM_flushdebt(L, thread);
+      luaM_flushdebt(thread);
       if (thread->new_objects != NULL) {
         luaC_allocnext(thread->new_objects_tail) = g->allgc;
         if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
@@ -1581,13 +1585,6 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
 ** The cycle's fixed goal survives later physical reclamation: refreshing debt
 ** must not grant a fresh growth allowance for intervening allocations.
 */
-static l_mem livebytes (global_State *g) {
-  l_mem live = gettotalbytes(g) -
-    __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
-  lua_assert(live >= cast(l_mem, sizeof(global_State)));
-  return live;
-}
-
 static void setidledebt (global_State *g) {
   luaP_idle(g);
 }
@@ -1595,8 +1592,9 @@ static void setidledebt (global_State *g) {
 static void finishincremental (lua_State *L, global_State *g) {
   /* Allocations made after marking already consume the next cycle's
   ** allowance. Only the swept cohort sets its live base. */
-  g->gcstate = GCSpause;
-  g->pacer.goal = applygcparam(g, PAUSE, g->GCcyclelive);
+  luaC_setstate(g, GCSpause);
+  __atomic_store_n(&g->pacer.goal, applygcparam(g, PAUSE, g->GCcyclelive),
+                   __ATOMIC_RELAXED);
   setidledebt(g);
   L->reclaim_pages = 1;
 }
@@ -1605,14 +1603,12 @@ static void finishincremental (lua_State *L, global_State *g) {
 /*
 ** Finish a young-generation collection.
 */
-static void finishgencycle (lua_State *L, global_State *g) {
+static void finishgencycle (global_State *g) {
   l_mem live = g->GCcyclelive;
   l_mem growth = applygcparam(g, MINORMUL, g->GCmajorlive);
-  g->pacer.goal = growth > MAX_LMEM - live ? MAX_LMEM : live + growth;
-  checkSizes(L, g);
-  g->gcstate = GCSpropagate;  /* skip restart */
-  if (g->tobefnz != NULL && !g->gcemergency && luaD_checkminstack(L))
-    callallpendingfinalizers(L);
+  __atomic_store_n(&g->pacer.goal,
+    growth > MAX_LMEM - live ? MAX_LMEM : live + growth, __ATOMIC_RELAXED);
+  luaC_setstate(g, GCSpropagate);  /* skip restart */
 }
 
 
@@ -1622,10 +1618,10 @@ static void finishgencycle (lua_State *L, global_State *g) {
 */
 static void minor2inc (global_State *g, lu_byte kind) {
   g->GCmajorminor = g->GCmarked;  /* number of live bytes */
-  g->gckind = kind;
+  luaC_setkind(g, kind);
   g->old1 = g->survival = NULL;
   g->finobjold1 = g->finobjsur = NULL;
-  g->gcstate = GCSpause;  /* the next major rotates its stamp in constant time */
+  luaC_setstate(g, GCSpause);  /* the next major rotates its stamp in constant time */
   /* set a debt equal to the step size */
   luaE_setdebt(g, applygcparam(g, STEPSIZE, 100));
 }
@@ -1729,7 +1725,7 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
     ** estimate before publishing the batch, alongside deferred retirement. */
     if (!(g->gcstp & GCSTPCLS))
       __atomic_fetch_sub(&g->GCcyclelive, work->freed, __ATOMIC_RELAXED);
-    luaM_flushdebt(L, L);
+    luaM_flushdebt(L);
   }
 }
 
@@ -1788,14 +1784,9 @@ void luaC_endsweep (lua_State *L) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
   if (plan->kind == SWEEP_MAJOR) {
-    lu_byte stopem = g->gcstopem;
-    g->gcstopem = 1;
-    checkSizes(L, g);
-    g->gcstopem = stopem;
-    /* The sweep already holds quiescence. Only pending finalizers need a
-    ** separate incremental step after publishing the surviving cohort. */
+    /* Pending finalizers run in a separate incremental step. */
     if (g->tobefnz != NULL && !g->gcemergency) {
-      g->gcstate = GCScallfin;
+      luaC_setstate(g, GCScallfin);
       luaE_setdebt(g, 0);
     }
     else finishincremental(L, g);
@@ -1815,15 +1806,30 @@ void luaC_endsweep (lua_State *L) {
     }
   }
   else {
-    g->GCmajorlive = livebytes(g);
+    g->GCmajorlive = getgcbytes(g);
     g->GCmajorminor = plan->base_marked;
     g->GCmarked = 0;
   }
   L->reclaim_pages = 1;
-  finishgencycle(L, g);
+  finishgencycle(g);
   setidledebt(g);
 }
 
+/* Index resizing and young finalizers require an admitted collector. They
+** can run after the completed cohort and its next allocation limits publish. */
+void luaC_sweepmaintenance (lua_State *L) {
+  global_State *g = G(L);
+  lu_byte stopem = g->gcstopem;
+  lua_assert(luaW_iscollector(L));
+  if (g->gcemergency) return;
+  __atomic_store_n(&g->shrink_strings, 0, __ATOMIC_RELAXED);
+  g->gcstopem = 1;
+  checkSizes(L, g);
+  g->gcstopem = stopem;
+  if (luaC_kind(g) == KGC_GENMINOR && g->tobefnz != NULL &&
+      luaD_checkminstack(L))
+    callallpendingfinalizers(L);
+}
 
 /*
 ** Finish physical page reclamation independently of the cycle's fixed budget.
@@ -1844,9 +1850,9 @@ void luaC_finishreclaim (lua_State *L) {
 */
 static void entergen (lua_State *L, global_State *g) {
   luaC_runtilstate(L, GCSpause, 1);
-  if (g->gckind == KGC_GENMINOR) return;
+  if (luaC_kind(g) == KGC_GENMINOR) return;
   restartcollection(L, g, TRACE_GENERATIONAL);
-  g->gcstate = GCSpropagate;
+  luaC_setstate(g, GCSpropagate);
   atomic(L);
   luaC_waitsweep(L);
   L->reclaim_pages = 1;
@@ -1859,9 +1865,9 @@ static void entergen (lua_State *L, global_State *g) {
 void luaC_changemode (lua_State *L, int newmode) {
   global_State *g = G(L);
   waitcollection(L);
-  if (g->gckind == KGC_GENMAJOR)  /* doing major collections? */
-    g->gckind = KGC_INC;  /* already incremental but in name */
-  if (newmode != g->gckind) {  /* does it need to change? */
+  if (luaC_kind(g) == KGC_GENMAJOR)  /* doing major collections? */
+    luaC_setkind(g, KGC_INC);  /* already incremental but in name */
+  if (newmode != luaC_kind(g)) {  /* does it need to change? */
     if (newmode == KGC_INC)  /* entering incremental mode? */
       minor2inc(g, KGC_INC);  /* entering incremental mode */
     else {
@@ -1890,7 +1896,7 @@ static void fullgen (lua_State *L, global_State *g) {
 ** since the last collection ('addedbytes').
 */
 static int checkmajorminor (lua_State *L, global_State *g) {
-  if (g->gckind == KGC_GENMAJOR) {  /* generational mode? */
+  if (luaC_kind(g) == KGC_GENMAJOR) {  /* generational mode? */
     l_mem numbytes = gettotalbytes(g);
     l_mem addedbytes = numbytes - g->GCmajorminor;
     l_mem limit = applygcparam(g, MAJORMINOR, addedbytes);
@@ -1995,7 +2001,7 @@ void luaC_initialtrace (lua_State *L) {
   g->grayagain = NULL;
   lua_assert(g->ephemeron == NULL && g->weak == NULL);
   lua_assert(!iswhite(g, mainthread(g)));
-  g->gcstate = GCSatomic;
+  luaC_setstate(g, GCSatomic);
   g->trace_plan.phase = g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
   markobject(g, L);  /* mark running thread */
   marknativeframes(g);
@@ -2123,7 +2129,7 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete) {
     scope = luaW_suspend(L);
   }
   while (luaC_sweeping(L) && g->sweep_plan.epoch == epoch) {
-    lu_mem done = luaC_sweepbatch(L, LUA_TRACE_BATCH);
+    lu_mem done = luaC_sweepbatch(L, LUA_TRACE_BATCH, complete && !quiescent);
     worked = done > cast(lu_mem, MAX_LMEM) - worked
       ? cast(lu_mem, MAX_LMEM) : worked + done;
     if (!complete && (worked >= budget || done == 0)) break;
@@ -2131,23 +2137,11 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete) {
       luaX_pollrequests(L);
       luaQ_poll(L);
       if (done == 0) {
-        int finish;
         luaX_checksync(pthread_mutex_lock(&g->world.mutex));
         if (luaC_sweeping(L) && g->sweep_plan.epoch == epoch &&
             g->sweep_plan.busy != 0)
           luaW_waitcollector(L);
-        finish = luaC_sweeping(L) && g->sweep_plan.epoch == epoch &&
-                 g->sweep_plan.phase == SWEEP_DONE;
         luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-        /* A bounded poll defers a busy phase boundary. A caller paying its
-        ** allocation debt or requesting a full collection must instead join
-        ** that metadata owner, without spinning on an empty shared queue. */
-        if (finish) {
-          luaW_collectenter(L);
-          if (luaC_sweeping(L) && g->sweep_plan.epoch == epoch)
-            luaC_sweepbatch(L, LUA_TRACE_BATCH);
-          luaW_heapleave(L);
-        }
       }
     }
   }
@@ -2233,16 +2227,16 @@ static l_mem singlestep (lua_State *L, int fast) {
   l_mem stepresult;
   lua_assert(!g->gcstopem);  /* collector is not reentrant */
   g->gcstopem = 1;  /* no emergency collections while collecting */
-  switch (g->gcstate) {
+  switch (luaC_state(g)) {
     case GCSpause: {
       restartcollection(L, g, TRACE_MAJOR);
-      g->gcstate = GCSpropagate;
+      luaC_setstate(g, GCSpropagate);
       stepresult = luaC_tracing(L) ? 0 : 1;
       break;
     }
     case GCSpropagate: {
       lua_assert(luaC_tracing(L));
-      g->gcstate = GCSenteratomic;
+      luaC_setstate(g, GCSenteratomic);
       stepresult = 0;
       break;
     }
@@ -2251,7 +2245,7 @@ static l_mem singlestep (lua_State *L, int fast) {
         stepresult = stepinterrupted;
         break;
       }
-      if (g->gckind == KGC_GENMINOR)
+      if (luaC_kind(g) == KGC_GENMINOR)
         stepresult = step2minor;
       else
         stepresult = atomicstep;
@@ -2259,7 +2253,7 @@ static l_mem singlestep (lua_State *L, int fast) {
     }
     case GCSswpallgc: {  /* sweep every allocation exactly once */
       if (!sweepstep(L, g, fast)) stepresult = stepinterrupted;
-      else stepresult = g->gcstate == GCSpause ? step2pause : GCSWEEPMAX;
+      else stepresult = luaC_state(g) == GCSpause ? step2pause : GCSWEEPMAX;
       break;
     }
     case GCScallfin: {  /* call finalizers */
@@ -2289,8 +2283,8 @@ static l_mem singlestep (lua_State *L, int fast) {
 */
 void luaC_runtilstate (lua_State *L, int state, int fast) {
   global_State *g = G(L);
-  lua_assert(g->gckind != KGC_GENMINOR);
-  while (state != g->gcstate && g->gckind != KGC_GENMINOR) {
+  lua_assert(luaC_kind(g) != KGC_GENMINOR);
+  while (state != luaC_state(g) && luaC_kind(g) != KGC_GENMINOR) {
     l_mem result = singlestep(L, fast);
     if (result == stepinterrupted || result == step2minor) return;
   }
@@ -2334,7 +2328,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
       }
       tracework(L, budget, 0);
       if (automatic) return;  /* shared completion owns the next idle budget */
-      if (g->trace_epoch != epoch || g->gckind == KGC_GENMINOR) return;
+      if (g->trace_epoch != epoch || luaC_kind(g) == KGC_GENMINOR) return;
       break;
     }
     stres = singlestep(L, fast);  /* perform one single step */
@@ -2346,7 +2340,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
     else
       work2do -= stres;
   } while (fast || work2do > 0);
-  if (g->gcstate != GCSpause)
+  if (luaC_state(g) != GCSpause)
     luaE_setdebt(g, stepsize);
 }
 
@@ -2453,7 +2447,7 @@ static void collectnursery (lua_State *L) {
     dead = o->next;
     luaH_free(L, gco2t(o));
   } while (dead != NULL);
-  luaM_flushdebt(L, L);
+  luaM_flushdebt(L);
 }
 
 /*
@@ -2471,7 +2465,7 @@ void luaC_step (lua_State *L) {
     l_mem stepsize = applygcparam(g, STEPSIZE, 100);
     l_mem allocated = stepsize;
     l_mem outstanding = L->world_depth == 0
-      ? __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) : 0;
+      ? luaE_getdebt(g) : 0;
     lu_mem budget;
     if (stepsize != 0 && outstanding < 0)
       allocated = stepsize > MAX_LMEM + outstanding
@@ -2484,7 +2478,7 @@ void luaC_step (lua_State *L) {
     luaC_entergc(L, &frame);
     sweepwork(L, budget, budget == 0);
     if (budget == 0 && g->trace_epoch == trace_epoch &&
-        g->gckind != KGC_GENMINOR && g->gcstate != GCSpause) {
+        luaC_kind(g) != KGC_GENMINOR && luaC_state(g) != GCSpause) {
       luaW_stop(L);
       luaC_runtilstate(L, GCSpause, 1);
       luaW_start(L);
@@ -2530,7 +2524,7 @@ void luaC_step (lua_State *L) {
   }
   luaW_stop(L);
   luaW_heapleave(L);  /* retain exactly the ownership acquired by luaW_stop */
-  debt = automatic ? __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED) : 0;
+  debt = automatic ? luaE_getdebt(g) : 0;
   if (claimed) {
     /* The admission request is complete. A parked driver must not suppress
     ** future cycles after another execution finishes the shared job. */
@@ -2540,17 +2534,17 @@ void luaC_step (lua_State *L) {
   luaC_entergc(L, &frame);
   lua_assert(!g->gcemergency);
   luai_tracegc(L, 1);  /* for internal debugging */
-  switch (g->gckind) {
+  switch (luaC_kind(g)) {
     case KGC_INC: case KGC_GENMAJOR:
       incstep(L, g, debt, automatic);
       reclaim = !luaC_tracing(L) &&
-                (g->gcstate == GCSpause || g->gckind == KGC_GENMINOR);
+                (luaC_state(g) == GCSpause || luaC_kind(g) == KGC_GENMINOR);
       break;
     case KGC_GENMINOR: {
       l_mem budget = applygcparam(g, STEPMUL,
                         applygcparam(g, STEPSIZE, 100));
       uint64_t epoch;
-      lua_assert(g->gcstate == GCSpropagate);
+      lua_assert(luaC_state(g) == GCSpropagate);
       starttrace(L, TRACE_YOUNG);
       epoch = g->trace_epoch;
       if (automatic) {
@@ -2589,7 +2583,7 @@ static void fullinc (lua_State *L, global_State *g) {
   uint64_t interrupted = g->trace_interrupt;
   /* finish any pending sweep phase to start a new cycle */
   luaC_runtilstate(L, GCSpause, 1);
-  if (g->trace_interrupt != interrupted || g->gckind == KGC_GENMINOR) return;
+  if (g->trace_interrupt != interrupted || luaC_kind(g) == KGC_GENMINOR) return;
   singlestep(L, 1);  /* begin exactly one fresh cycle */
   luaC_runtilstate(L, GCSpause, 1);  /* finish collection */
 }
@@ -2618,7 +2612,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
     luaC_snapshot(L, L);
   }
   waitcollection(L);
-  kind = g->gckind;
+  kind = luaC_kind(g);
   switch (kind) {
     case KGC_GENMINOR: fullgen(L, g); break;
     case KGC_INC: case KGC_GENMAJOR: fullinc(L, g); break;

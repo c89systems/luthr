@@ -510,7 +510,8 @@ typedef struct global_State {
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   TString *operation_error;
   l_mem GCbytes;  /* atomic charged storage, including pending destruction */
-  l_mem GCdebt;  /* atomic remaining logical allocation/work allowance */
+  l_mem GCused;  /* atomic logical storage, excluding retired objects */
+  l_mem GCstep;  /* atomic logical byte threshold for a collector step */
   l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
   LuaGCPacer pacer;
@@ -533,6 +534,7 @@ typedef struct global_State {
   l_mem GCmarked;  /* bytes marked in a GC cycle */
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
   stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */
+  unsigned shrink_strings;  /* atomic request from a retiring intern shard */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
@@ -643,6 +645,18 @@ union GCUnion {
 
 /* actual number of total memory allocated */
 #define gettotalbytes(g) __atomic_load_n(&(g)->GCbytes, __ATOMIC_RELAXED)
+#define getgcbytes(g) __atomic_load_n(&(g)->GCused, __ATOMIC_RELAXED)
+
+l_sinline l_mem luaE_getdebt (const global_State *g) {
+  l_mem step = __atomic_load_n(&g->GCstep, __ATOMIC_RELAXED);
+  l_mem used = getgcbytes(g);
+  return step < used - MAX_LMEM ? -MAX_LMEM : step - used;
+}
+
+l_sinline l_mem luaP_debt (const global_State *g) {
+  l_mem limit = __atomic_load_n(&g->pacer.hard, __ATOMIC_RELAXED);
+  return limit - getgcbytes(g);
+}
 
 
 LUAI_FUNC void luaE_setdebt (global_State *g, l_mem debt);

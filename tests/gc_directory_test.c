@@ -34,9 +34,9 @@ void __wrap_luaA_beginlock(lua_State *L, LuaObjectLock *lock,
   __real_luaA_beginlock(L, lock, scope);
 }
 
-void __real_luaM_flushdebt(lua_State *, lua_State *);
-void __wrap_luaM_flushdebt(lua_State *actor, lua_State *owner) {
-  if (actor == observed && luaW_iscollector(actor)) {
+void __real_luaM_flushdebt(lua_State *);
+void __wrap_luaM_flushdebt(lua_State *owner) {
+  if (observed != NULL && luaW_iscollector(observed)) {
     if (owner == first_publisher)
       published |= 1;
     else if (owner == second_publisher)
@@ -44,7 +44,7 @@ void __wrap_luaM_flushdebt(lua_State *actor, lua_State *owner) {
     else
       unrelated++;
   }
-  __real_luaM_flushdebt(actor, owner);
+  __real_luaM_flushdebt(owner);
 }
 
 void __real_luaD_shrinkstack(lua_State *L);

@@ -247,6 +247,9 @@ void luaS_remove (lua_State *L, TString *ts) {
     p = &(*p)->u.hnext;
   *p = (*p)->u.hnext;  /* remove element from its list */
   tb->nuse--;
+  if (tb->size > LUA_STRING_INITIAL_BUCKETS && tb->nuse < tb->size / 4 &&
+      !__atomic_load_n(&G(L)->shrink_strings, __ATOMIC_RELAXED))
+    __atomic_store_n(&G(L)->shrink_strings, 1, __ATOMIC_RELAXED);
 }
 
 

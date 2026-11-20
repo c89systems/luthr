@@ -23,14 +23,14 @@ static void controller(lua_State *L) {
   luaW_stop(L);
   saved = g->pacer;
   cohort = g->GCcyclelive;
-  debt = g->GCdebt;
+  debt = luaE_getdebt(g);
   bytes = gettotalbytes(g) - g->GCretired;
   g->GCcyclelive = bytes;
   g->pacer.goal = bytes + 64 * 65536;
   g->pacer.work = 0;
   luaP_idle(g);
   require(g->pacer.trigger > bytes && g->pacer.trigger < g->pacer.goal);
-  require(g->GCdebt == g->pacer.trigger - bytes);
+  require(luaE_getdebt(g) == g->pacer.trigger - bytes);
   luaP_work(g, MAX_LMEM);
   luaP_work(g, MAX_LMEM);
   require(g->pacer.work == (lu_mem)MAX_LMEM);
@@ -46,7 +46,7 @@ static void controller(lua_State *L) {
   /* A later single-owner cycle need not retain a former parallel window. */
   g->pacer.goal = bytes;
   luaP_idle(g);
-  require(g->pacer.trigger == bytes && g->GCdebt == 0);
+  require(g->pacer.trigger == bytes && luaE_getdebt(g) == 0);
   g->pacer.goal = 0;
   {
     lu_byte pause = g->gcparams[LUA_GCPPAUSE];
@@ -57,20 +57,15 @@ static void controller(lua_State *L) {
     g->gcparams[LUA_GCPPAUSE] = pause;
   }
   luaP_idle(g);
-  require(g->pacer.trigger == 0 && g->GCdebt == 0);
+  require(g->pacer.trigger == 0 && luaE_getdebt(g) == 0);
   g->pacer.goal = MAX_LMEM;
   luaP_begin(g);
-  require(g->pacer.hard == MAX_LMEM && g->pacer.debt == MAX_LMEM - bytes);
+  require(g->pacer.hard == MAX_LMEM && luaP_debt(g) == MAX_LMEM - bytes);
   require(g->pacer.start == bytes && g->pacer.expected == (lu_mem)MAX_LMEM);
-  g->pacer.debt = MAX_LMEM;
-  luaP_account(g, MAX_LMEM);
-  require(g->pacer.debt == MAX_LMEM);
-  luaP_account(g, -MAX_LMEM);
-  luaP_account(g, -MAX_LMEM);
-  luaP_account(g, -1);
-  require(g->pacer.debt == -MAX_LMEM);
-  luaP_account(g, MAX_LMEM);
-  require(g->pacer.debt == 0);
+  luaE_setdebt(g, MAX_LMEM);
+  require(luaE_getdebt(g) == MAX_LMEM - bytes);
+  luaE_setdebt(g, -MAX_LMEM);
+  require(luaE_getdebt(g) == -MAX_LMEM);
   g->pacer.goal = bytes + 65536;
   g->pacer.expected = 65536;
   require(luaP_budget(L, 65536) == 0);
@@ -100,7 +95,7 @@ static void publication(lua_State *L, const char *kind) {
   l_mem before, allowance;
   lua_lock(L);
   before = gettotalbytes(G(L));
-  allowance = G(L)->pacer.debt;
+  allowance = luaP_debt(G(L));
   lua_unlock(L);
   if (strcmp(kind, "pair") == 0) {
     luaX_lockpair(L, peer);
@@ -126,14 +121,14 @@ static void publication(lua_State *L, const char *kind) {
   }
   require(L->allocation_debt == 0);
   require(gettotalbytes(G(L)) == before + (second != NULL ? 3072 : 1024));
-  require(G(L)->pacer.debt == allowance - (second != NULL ? 3072 : 1024));
+  require(luaP_debt(G(L)) == allowance - (second != NULL ? 3072 : 1024));
   lua_lock(L);
   luaM_free_(L, first, 1024);
   if (second != NULL)
     luaM_free_(L, second, 2048);
   lua_unlock(L);
   require(gettotalbytes(G(L)) == before);
-  require(G(L)->pacer.debt == allowance);
+  require(luaP_debt(G(L)) == allowance);
 }
 
 int main(int argc, char **argv) {

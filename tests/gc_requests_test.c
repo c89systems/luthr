@@ -22,7 +22,6 @@ static struct {
 } fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0, 0}, 0};
 static __thread unsigned role;
 static __thread unsigned stops;
-static int retain_handoff_contention;
 static void arrive(void);
 
 void __real_luaW_stop(lua_State *);
@@ -56,21 +55,6 @@ void __wrap_luaW_collectenter(lua_State *L) {
 int __wrap_luaW_trycollectenter(lua_State *L) {
   arrive();
   return __real_luaW_trycollectenter(L);
-}
-void __real_luaW_heapleave(lua_State *);
-void __wrap_luaW_heapleave(lua_State *L) {
-  if (retain_handoff_contention && role != 0 && L->world_depth == 0) {
-    LuaWorld *world = &G(L)->world;
-    require(pthread_mutex_lock(&world->mutex) == 0);
-    /* Keep another recipient queued if a grantee tries to relinquish its
-     * grant before finishing this empty phase. No scheduling gap may hide a
-     * retry loop which merely passes the permit between waiting helpers. */
-    while (luaC_sweeping(L) && G(L)->sweep_plan.phase == SWEEP_DONE &&
-           world->heap_depth == 1 && world->heap_head == NULL)
-      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-    require(pthread_mutex_unlock(&world->mutex) == 0);
-  }
-  __real_luaW_heapleave(L);
 }
 
 struct request {
@@ -175,25 +159,27 @@ static void boundary_handoff(lua_State *L, const char *kind) {
     luaC_waittrace(L);
     require(luaC_sweeping(L));
   }
-  /* Retiring fixture garbage must not repay the synthetic hard overshoot
-   * before both complete helpers have queued at the phase boundary. */
-  __atomic_store_n(&G(L)->pacer.debt, -MAX_LMEM, __ATOMIC_RELAXED);
-  retain_handoff_contention = sweeping;
+  /* Both helpers request the complete phase. */
+  __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
   luaW_heapenter(L);
   for (i = 0; i < 2; i++)
     require(pthread_create(&workers[i], NULL, request, &helpers[i]) == 0);
   require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
-  while (!helpers[0].state->heap_waiting || !helpers[1].state->heap_waiting)
+  /* The caller retains metadata and active stack participation. A table
+   * sweep must finish before it releases either, while tracing needs both. */
+  while (sweeping ? luaC_sweeping(L)
+                  : !helpers[0].state->heap_waiting ||
+                        !helpers[1].state->heap_waiting)
     luaQ_wait(L, &G(L)->world.mutex, &G(L)->world.changed,
               &G(L)->world.waiters);
   require(!luaW_stopped(&G(L)->world));
   require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
-  /* Both complete callers are queued at an empty phase boundary. The next
-   * grantee must complete it before handing metadata to the other waiter. */
   luaW_heapleave(L);
   lua_unlock(L);
   for (i = 0; i < 2; i++)
     require(pthread_join(workers[i], NULL) == 0);
+  if (sweeping)
+    require(helpers[0].stops == 0 && helpers[1].stops == 0);
   require(!luaC_tracing(L) && (!sweeping || !luaC_sweeping(L)));
   lua_gc(L, LUA_GCCOLLECT);
   lua_pushvalue(L, 1);
@@ -205,6 +191,40 @@ static void boundary_handoff(lua_State *L, const char *kind) {
   require(length == 10000);
 }
 
+static unsigned string_buckets(lua_State *L) {
+  unsigned i, count = 0;
+  for (i = 0; i < LUA_STRING_SHARDS; i++)
+    count += G(L)->strt[i].size;
+  return count;
+}
+
+static void sweep_string_index(lua_State *L) {
+  unsigned i, grown, shrunk;
+  char name[32];
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 4096, 0);
+  for (i = 1; i <= 4096; i++) {
+    snprintf(name, sizeof(name), "temporary string %u", i);
+    lua_pushstring(L, name);
+    lua_rawseti(L, -2, i);
+  }
+  grown = string_buckets(L);
+  require(grown >= 4096);
+  lua_pop(L, 1);
+  lua_gc(L, LUA_GCRESTART);
+  lua_lock(L);
+  G(L)->pacer.goal = MAX_LMEM;
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  luaC_waittrace(L);
+  require(luaC_sweeping(L));
+  luaC_waitsweep(L);
+  shrunk = string_buckets(L);
+  require(shrunk < grown / 4);
+  require(getgcbytes(G(L)) == gettotalbytes(G(L)) - G(L)->GCretired);
+  lua_unlock(L);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   struct request requests[2] = {{0}};
@@ -212,6 +232,10 @@ int main(int argc, char **argv) {
   unsigned round;
   int explicit_step, stop, overdue;
   require(L != NULL && argc == 2);
+  if (strcmp(argv[1], "shrink_strings") == 0) {
+    sweep_string_index(L);
+    goto done;
+  }
   if (strncmp(argv[1], "handoff_", 8) == 0) {
     boundary_handoff(L, argv[1]);
     goto done;
@@ -247,7 +271,7 @@ int main(int argc, char **argv) {
     luaW_heapenter(L);
     luaE_setdebt(G(L), overdue ? MAX_LMEM : 0);
     if (overdue)
-      __atomic_store_n(&G(L)->pacer.debt, 0, __ATOMIC_RELAXED);
+      __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
     require(pthread_create(&workers[0], NULL, request, &requests[0]) == 0);
     require(pthread_mutex_lock(&fixture.mutex) == 0);
     while (fixture.arrived[0] == 0)

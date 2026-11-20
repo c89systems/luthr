@@ -23,7 +23,7 @@ LUAI_FUNC void *luaM_reallocbuffer (lua_State *L, void *block, size_t osize,
                                    size_t nsize);
 /* The actor owns its context; a quiescent target may have an API entrant
 ** rebinding its stack gate without permission to change allocation debt. */
-LUAI_FUNC void luaM_flushdebt (lua_State *actor, lua_State *target);
+LUAI_FUNC void luaM_flushdebt (lua_State *L);
 /* Withdrawals publish both owned stacks before losing their participation. */
 LUAI_FUNC void luaM_publishdebt (lua_State *L);
 LUAI_FUNC int luaM_initpools (lua_State *L);

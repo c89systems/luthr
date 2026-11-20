@@ -118,15 +118,15 @@ void __wrap_luaC_reclaim(lua_State *state) {
   __real_luaC_reclaim(state);
 }
 
-lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
-lu_mem __wrap_luaC_sweepbatch(lua_State *state, unsigned limit) {
+lu_mem __real_luaC_sweepbatch(lua_State *, unsigned, int);
+lu_mem __wrap_luaC_sweepbatch(lua_State *state, unsigned limit, int complete) {
   struct fixture *test = fixture;
   lu_mem worked;
   if (test != NULL && state == test->worker && test->entered &&
       !test->release && test->helpers >= 8)
     return 0; /* Keep the cohort pending while its first scanner is parked. */
   sweep_limit = limit < LUA_TRACE_BATCH ? limit : LUA_TRACE_BATCH;
-  worked = __real_luaC_sweepbatch(state, limit);
+  worked = __real_luaC_sweepbatch(state, limit, complete);
   require(worked <= sweep_limit * sizeof(GCObject));
   if (test != NULL && state == test->worker && worked != 0)
     test->helpers++;

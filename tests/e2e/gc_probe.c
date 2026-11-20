@@ -154,8 +154,7 @@ void gc_probe_allocation(uint64_t live) {
   previous =
       __atomic_load_n(&record->logical_live_peak_bytes, __ATOMIC_RELAXED);
   {
-    l_mem observed =
-        gettotalbytes(g) - __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
+    l_mem observed = getgcbytes(g);
     uint64_t logical = observed > 0 ? (uint64_t)observed : 0;
     while (previous < logical &&
            !__atomic_compare_exchange_n(&record->logical_live_peak_bytes,
@@ -198,7 +197,7 @@ void __real_luaC_step(lua_State *);
 void __real_luaC_fullgc(lua_State *, int);
 void __real_luaC_finishtrace(lua_State *);
 void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *);
-lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
+lu_mem __real_luaC_sweepbatch(lua_State *, unsigned, int);
 void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __real_luaC_pollsweep(lua_State *);
 void __real_luaC_assistsweep(lua_State *);
@@ -623,10 +622,10 @@ void __wrap_luaC_polltrace(lua_State *L) {
   collect(L, COLLECT_POLL, 0);
 }
 
-lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
+lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit, int complete) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
-  lu_mem worked = __real_luaC_sweepbatch(L, limit);
+  lu_mem worked = __real_luaC_sweepbatch(L, limit, complete);
   if (record != NULL) {
     record->sweep_calls++;
     record->sweep_ns += now() - started;

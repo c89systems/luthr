@@ -11,19 +11,10 @@ static l_mem add (l_mem a, l_mem b) {
   return b > MAX_LMEM - a ? MAX_LMEM : a + b;
 }
 
-static l_mem live (global_State *g) {
-  l_mem bytes = gettotalbytes(g) -
-    __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
-  /* Physical completion updates these words separately. A concurrent sample
-  ** may briefly observe the newer charged total with older retirement. */
-  return bytes > 0 ? bytes : 0;
-}
-
-static void deadline (global_State *g, l_mem bytes) {
+static void deadline (global_State *g) {
   LuaGCPacer *p = &g->pacer;
   l_mem growth = p->goal > g->GCcyclelive ? p->goal - g->GCcyclelive : 0;
-  p->hard = add(p->goal, growth);
-  __atomic_store_n(&p->debt, p->hard - bytes, __ATOMIC_RELAXED);
+  __atomic_store_n(&p->hard, add(p->goal, growth), __ATOMIC_RELAXED);
 }
 
 /* Invert the work/allocated-byte parameter without a floating-point fast path. */
@@ -41,17 +32,19 @@ static l_mem runway (global_State *g, lu_mem work) {
 
 void luaP_idle (global_State *g) {
   LuaGCPacer *p = &g->pacer;
+  l_mem bytes = getgcbytes(g);
   /* Fixed handshake costs need an amortization window on a parallel heap.
   ** Keep the single-mutator footprint and zero parameters unchanged. Each
   ** additional simultaneously admitted mutator contributes a bounded 512-KiB
   ** window; this is independent of task count and total allocation volume. */
-  if (p->parallelism > 1 && g->gcparams[g->gckind == KGC_GENMINOR
+  if (p->parallelism > 1 && g->gcparams[luaC_kind(g) == KGC_GENMINOR
                                       ? LUA_GCPMINORMUL : LUA_GCPPAUSE] != 0) {
     lu_mem workers = p->parallelism - 1;
     l_mem window = workers > cast(lu_mem, MAX_LMEM) / (8 * LUA_GC_ASSIST_BYTES)
       ? MAX_LMEM : cast(l_mem, workers * (8 * LUA_GC_ASSIST_BYTES));
     l_mem minimum = add(g->GCcyclelive, window);
-    if (p->goal < minimum) p->goal = minimum;
+    if (p->goal < minimum)
+      __atomic_store_n(&p->goal, minimum, __ATOMIC_RELAXED);
   }
   l_mem headroom = runway(g, p->work);
   l_mem floor = g->GCcyclelive;
@@ -67,17 +60,15 @@ void luaP_idle (global_State *g) {
   if (headroom < minimum) headroom = minimum;
   if (headroom > maximum) headroom = maximum;
   p->trigger = p->goal - headroom;
-  deadline(g, live(g));
-  {
-    l_mem debt = p->trigger - live(g);
-    luaE_setdebt(g, debt > 0 ? debt : 0);
-  }
+  deadline(g);
+  __atomic_store_n(&g->GCstep, p->trigger > bytes ? p->trigger : bytes,
+                   __ATOMIC_RELAXED);
   p->parallelism = 0;  /* the next completed cycle observes its own demand */
 }
 
 void luaP_init (global_State *g) {
   LuaGCPacer *p = &g->pacer;
-  p->trigger = p->hard = p->debt = p->start = 0;
+  p->trigger = p->hard = p->start = 0;
   p->expected = p->work = p->previous = 0;
   p->nursery_scans = 0;
   p->parallelism = 0;
@@ -87,25 +78,14 @@ void luaP_init (global_State *g) {
 
 void luaP_begin (global_State *g) {
   LuaGCPacer *p = &g->pacer;
-  p->start = live(g);
+  p->start = getgcbytes(g);
   /* A growing live graph can consume the following cycle's allowance. The
   ** soft goal paces ordinary work; only this hard guard drains an overdue job. */
-  deadline(g, p->start);
+  deadline(g);
   p->expected = cast(lu_mem, add(p->start, p->start));
   if (p->previous > p->expected) p->expected = p->previous;
   p->work = 0;
   __atomic_store_n(&p->nursery_scans, 0, __ATOMIC_RELAXED);
-}
-
-void luaP_account (global_State *g, l_mem change) {
-  l_mem current = __atomic_load_n(&g->pacer.debt, __ATOMIC_RELAXED), next;
-  if (change == 0) return;
-  do {
-    if (change > 0 && current > MAX_LMEM - change) next = MAX_LMEM;
-    else if (change < 0 && current < -MAX_LMEM - change) next = -MAX_LMEM;
-    else next = current + change;
-  } while (!__atomic_compare_exchange_n(&g->pacer.debt, &current, next, 0,
-                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
 }
 
 void luaP_work (global_State *g, lu_mem work) {
@@ -121,8 +101,9 @@ void luaP_work (global_State *g, lu_mem work) {
 lu_mem luaP_budget (lua_State *L, lu_mem requested) {
   global_State *g = G(L);
   LuaGCPacer *p = &g->pacer;
-  l_mem bytes = live(g);
-  l_mem distance = p->goal > p->start ? p->goal - p->start : 0;
+  l_mem bytes = getgcbytes(g);
+  l_mem goal = __atomic_load_n(&p->goal, __ATOMIC_RELAXED);
+  l_mem distance = goal > p->start ? goal - p->start : 0;
   lu_mem done = __atomic_load_n(&p->work, __ATOMIC_RELAXED);
   lu_mem target;
   if (L->allocation_debt < 0) {
@@ -131,7 +112,7 @@ lu_mem luaP_budget (lua_State *L, lu_mem requested) {
       ? MAX_LMEM : bytes + cast(l_mem, pending);
   }
   else bytes = L->allocation_debt < bytes ? bytes - L->allocation_debt : 0;
-  if (distance == 0 || bytes >= p->goal) target = p->expected;
+  if (distance == 0 || bytes >= goal) target = p->expected;
   else if (bytes <= p->start) target = 0;
   else {
     /* Only the slow assist path computes the work/remaining-runway ratio.

@@ -69,14 +69,14 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   plan->tail[1] = &plan->live[1];
   g->allgc = plan->limit;
   plan->append = &g->allgc;
-  g->gcstate = GCSswpallgc;
+  luaC_setstate(g, GCSswpallgc);
   if (kind == SWEEP_MAJOR) {
     g->grayagain = g->weak = g->allweak = g->ephemeron = NULL;
   }
   else if (kind == SWEEP_OLD) {
     LuaSweepWork work = {0};
     int result;
-    g->gckind = KGC_GENMINOR;
+    luaC_setkind(g, KGC_GENMINOR);
     result = luaC_sweepobject(L, main, kind, &work);
     if (result == SWEEP_WATCH) {
       plan->watch.head = main;
@@ -194,22 +194,54 @@ static void publish (lua_State *L, LuaSweepWork *work) {
   luaQ_wake(&g->world.changed, &g->world.waiters);
 }
 
-static void finish (lua_State *L) {
+/* All claims have published before the sweep reaches DONE. Mutators' new
+** objects stay on their private lists until the next existing world stop. */
+static void publishfinish (lua_State *L) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
-  uint64_t epoch = plan->epoch;
-  unsigned expected = 0;
-  /* One poll may attempt this boundary. Defer busy metadata without parking;
-  ** explicit/debt-paying callers join the owner in their shared work loop. */
-  if (!luaW_iscollector(L) &&
-      !__atomic_compare_exchange_n(&plan->finishing, &expected, 1, 0,
-                                   __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
-  if (!luaW_trycollectenter(L)) {
-    __atomic_store_n(&plan->finishing, 0, __ATOMIC_RELEASE);
-    return;
+  *plan->tail[1] = plan->limit;
+  *plan->tail[0] = plan->live[1];
+  *plan->append = plan->live[0];
+  if (plan->watch.head != NULL) {
+    *plan->watch.tail = g->grayagain;
+    g->grayagain = plan->watch.head;
   }
-  if (!luaC_sweeping(L) || plan->epoch != epoch ||
-      plan->phase != SWEEP_DONE || plan->busy != 0) {
+  luaC_endsweep(L);
+  __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
+  luaQ_wake(&g->world.changed, &g->world.waiters);
+}
+
+/* The last claimant already owns the plan mutex. Only maintenance needs a
+** second admission after dropping it. */
+static int finishready (lua_State *L) {
+  global_State *g = G(L);
+  LuaSweepPlan *plan = &g->sweep_plan;
+  if (!luaC_sweeping(L) || plan->phase != SWEEP_DONE) return 0;
+  lua_assert(plan->busy == 0);
+  if (!g->gcemergency &&
+      (__atomic_load_n(&g->shrink_strings, __ATOMIC_RELAXED) ||
+       (plan->kind != SWEEP_MAJOR && g->tobefnz != NULL)))
+    return 1;
+  publishfinish(L);
+  return 0;
+}
+
+static void finishmaintenance (lua_State *L, uint64_t epoch, int complete) {
+  global_State *g = G(L);
+  LuaWorld *world = &g->world;
+  LuaSweepPlan *plan = &g->sweep_plan;
+  if (complete) luaW_collectenter(L);
+  else {
+    unsigned expected = 0;
+    if (!luaW_ownsheap(L) &&
+        !__atomic_compare_exchange_n(&plan->finishing, &expected, 1, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    if (!luaW_trycollectenter(L)) {
+      __atomic_store_n(&plan->finishing, 0, __ATOMIC_RELEASE);
+      return;
+    }
+  }
+  if (!luaC_sweeping(L) || plan->epoch != epoch) {
     if (plan->epoch == epoch)
       __atomic_store_n(&plan->finishing, 0, __ATOMIC_RELEASE);
     luaW_heapleave(L);
@@ -218,24 +250,21 @@ static void finish (lua_State *L) {
   luaW_stop(L);
   luaW_heapleave(L);
   if (luaC_sweeping(L) && plan->epoch == epoch) {
-    *plan->tail[1] = plan->limit;
-    *plan->tail[0] = plan->live[1];
-    *plan->append = plan->live[0];
-    if (plan->watch.head != NULL) {
-      *plan->watch.tail = g->grayagain;
-      g->grayagain = plan->watch.head;
-    }
-    __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
-    luaC_endsweep(L);
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    publishfinish(L);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    luaC_sweepmaintenance(L);
   }
   luaW_start(L);
 }
 
-static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
+static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance,
+                           int complete) {
   LuaSweepWork work = {0};
   LuaGCFrame frame;
   LuaWorld *world = &G(L)->world;
-  int done;
+  uint64_t epoch = G(L)->sweep_plan.epoch;
+  int maintenance;
   unsigned previous, scanned;
   if (!luaC_sweeping(L) || limit == 0) return 0;
   luaC_entergc(L, &frame);
@@ -244,7 +273,7 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   previous = __atomic_load_n(&G(L)->sweep_workers, __ATOMIC_RELAXED);
   claim(L, &work, limit);
-  done = G(L)->sweep_plan.phase == SWEEP_DONE;
+  maintenance = advance && finishready(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   if (!previous && luaC_workerready(G(L))) luaSC_notifygc(G(L));
   scanned = work.count;
@@ -262,20 +291,20 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
     luaC_publishretired(L, &frame);
     publish(L, &work);
     luaP_work(G(L), cast(lu_mem, scanned) * sizeof(GCObject));
-    done = G(L)->sweep_plan.phase == SWEEP_DONE;
+    maintenance = advance && finishready(L);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
   frame.batch = 0;
-  if (done && advance) finish(L);
+  if (maintenance) finishmaintenance(L, epoch, complete);
   luaC_leavegc(L, &frame);
   return cast(lu_mem, scanned) * sizeof(GCObject);
 }
 
-lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {
-  return sweepbatch(L, limit, 1);
+lu_mem luaC_sweepbatch (lua_State *L, unsigned limit, int complete) {
+  return sweepbatch(L, limit, 1, complete);
 }
 
 /* Background capacity never runs finalizers or changes collector phases. */
 lu_mem luaC_sweeppayload (lua_State *L, unsigned limit) {
-  return sweepbatch(L, limit, 0);
+  return sweepbatch(L, limit, 0, 0);
 }

@@ -35,7 +35,6 @@ static struct {
 
 enum { MUTATOR = 1, COLLECTOR };
 static __thread int role;
-static __thread int stopping;
 
 static void signal_flag(unsigned *flag) {
   require(pthread_mutex_lock(&fixture.mutex) == 0);
@@ -53,9 +52,7 @@ static void wait_flag(unsigned *flag) {
 
 void __real_luaW_stop(lua_State *);
 void __wrap_luaW_stop(lua_State *state) {
-  stopping = 1;
   __real_luaW_stop(state);
-  stopping = 0;
   if (role == COLLECTOR && !fixture.stopped) {
     signal_flag(&fixture.stopped);
     wait_flag(&fixture.release_gc);
@@ -70,8 +67,8 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
   int entering = role == MUTATOR && mutex == &world->mutex;
   if (entering && luaW_stopped(world))
     signal_flag(&fixture.entry_waiting);
-  if (role == COLLECTOR && stopping && mutex == &world->mutex &&
-      !luaW_stopped(world))
+  if (role == COLLECTOR && mutex == &world->mutex && !luaW_stopped(world) &&
+      world->entry_waiting != 0 && luaW_ownsheap(state))
     signal_flag(&fixture.collector_waiting);
   __real_luaQ_wait(state, mutex, changed, waiters);
   if (entering && !luaW_stopped(world) && !fixture.notified) {

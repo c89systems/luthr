@@ -68,17 +68,9 @@
 
 #define DEBT_BATCH 65536
 
-static void adddebt (global_State *g, l_mem change, int exclusive) {
+static void adddebt (global_State *g, l_mem change) {
   __atomic_fetch_sub(&g->GCbytes, change, __ATOMIC_RELAXED);
-  luaP_account(g, change);
-  if (exclusive) {
-    /* Match the word-sized arithmetic of mutator accumulation. */
-    lu_mem debt = cast(lu_mem, __atomic_load_n(&g->GCdebt, __ATOMIC_RELAXED));
-    __atomic_store_n(&g->GCdebt, cast(l_mem, debt + cast(lu_mem, change)),
-                     __ATOMIC_RELAXED);
-  }
-  else
-    __atomic_fetch_add(&g->GCdebt, change, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&g->GCused, change, __ATOMIC_RELAXED);
 }
 
 static void accountassist (lua_State *L, l_mem change) {
@@ -104,14 +96,14 @@ static void accountassist (lua_State *L, l_mem change) {
   }
 }
 
-void luaM_flushdebt (lua_State *actor, lua_State *L) {
+void luaM_flushdebt (lua_State *L) {
   l_mem debt = L->allocation_debt;
   l_mem reclaimed = L->reclaim_credit;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
   accountassist(L, debt);
   if (debt != 0)
-    adddebt(G(L), debt, !completestate(G(L)) || luaW_iscollector(actor));
+    adddebt(G(L), debt);
   if (reclaimed != 0) {
     __atomic_fetch_sub(&G(L)->GCretired, reclaimed, __ATOMIC_RELAXED);
     __atomic_fetch_sub(&G(L)->GCbytes, reclaimed, __ATOMIC_RELAXED);
@@ -120,21 +112,21 @@ void luaM_flushdebt (lua_State *actor, lua_State *L) {
 
 void luaM_publishdebt (lua_State *L) {
   lua_State *peer = L->stack_peer;
-  if (L->allocation_debt != 0 || L->reclaim_credit != 0) luaM_flushdebt(L, L);
+  if (L->allocation_debt != 0 || L->reclaim_credit != 0) luaM_flushdebt(L);
   if (peer != NULL && (peer->allocation_debt != 0 || peer->reclaim_credit != 0))
-    luaM_flushdebt(L, peer);
+    luaM_flushdebt(peer);
 }
 
 static void accountowned (lua_State *L, l_mem change, int exclusive) {
   if (exclusive || change >= DEBT_BATCH || change <= -DEBT_BATCH) {
-    luaM_flushdebt(L, L);
+    luaM_flushdebt(L);
     if (!exclusive) accountassist(L, change);
-    adddebt(G(L), change, exclusive);
+    adddebt(G(L), change);
   }
   else {
     L->allocation_debt += change;
     if (L->allocation_debt >= DEBT_BATCH || L->allocation_debt <= -DEBT_BATCH)
-      luaM_flushdebt(L, L);
+      luaM_flushdebt(L);
   }
 }
 
@@ -547,13 +539,13 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
     /* Logical retirement already paid this storage's pacing credit. Physical
     ** return changes charged/pending bytes only, without a collector phase. */
     if (osize >= DEBT_BATCH) {
-      luaM_flushdebt(L, L);
+      luaM_flushdebt(L);
       __atomic_fetch_sub(&G(L)->GCretired, cast(l_mem, osize), __ATOMIC_RELAXED);
       __atomic_fetch_sub(&G(L)->GCbytes, cast(l_mem, osize), __ATOMIC_RELAXED);
     }
     else {
       L->reclaim_credit += cast(l_mem, osize);
-      if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L, L);
+      if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L);
     }
   }
   else accountowned(L, cast(l_mem, osize), exclusive);
@@ -562,8 +554,7 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
 void luaM_creditretired (lua_State *L, l_mem bytes) {
   global_State *g = G(L);
   __atomic_fetch_add(&g->GCretired, bytes, __ATOMIC_RELAXED);
-  luaP_account(g, bytes);
-  __atomic_fetch_add(&g->GCdebt, bytes, __ATOMIC_RELAXED);
+  __atomic_fetch_sub(&g->GCused, bytes, __ATOMIC_RELAXED);
   if (issweepphase(g) && !(g->gcstp & GCSTPCLS))
     __atomic_fetch_sub(&g->GCcyclelive, bytes, __ATOMIC_RELAXED);
 }

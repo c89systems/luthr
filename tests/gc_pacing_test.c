@@ -47,10 +47,10 @@ void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
   __real_luaM_free_(L, block, size);
 }
 
-lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
-lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
+lu_mem __real_luaC_sweepbatch(lua_State *, unsigned, int);
+lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit, int complete) {
   sweep_batches++;
-  return __real_luaC_sweepbatch(L, limit);
+  return __real_luaC_sweepbatch(L, limit, complete);
 }
 void __real_luaW_stop(lua_State *);
 void __wrap_luaW_stop(lua_State *L) {
@@ -124,14 +124,14 @@ static l_mem progress(l_mem debt, enum step_mode mode) {
      * Work-quota debt must not bypass the shared credit on the next check. */
     G(L)->pacer.goal = G(L)->pacer.start;
     G(L)->pacer.expected = G(L)->pacer.work;
-    __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.hard, MAX_LMEM, __ATOMIC_RELAXED);
     L->trace_debt = LUA_GC_ASSIST_BYTES;
     luaC_checkGC(L);
     require(L->trace_debt == 0 && sweep_batches == before);
     luaC_checkGC(L);
     require(luaC_sweeping(L) && sweep_batches == before);
   } else if (mode == SWEEP_PRESSURE || mode == SWEEP_POLL_PRESSURE) {
-    __atomic_store_n(&G(L)->pacer.debt, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
     L->trace_debt = 0;
     if (mode == SWEEP_POLL_PRESSURE) {
       luaC_pollsweep(L);
@@ -224,7 +224,7 @@ static void bounded_marking(const char *kind) {
     lua_lock(L);
     /* Even a worker which has not allocated a full debt batch must help when
      * the shared allocation runway is spent. No stale epoch may bypass it. */
-    __atomic_store_n(&G(L)->pacer.debt, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
     L->assist_epoch = G(L)->world.work_epoch - 1;
     L->trace_debt = 0;
     luaC_assisttrace(L);
@@ -498,17 +498,17 @@ static void persistent_storage(int generational, int refresh) {
   if (refresh) {
     l_mem before, spent;
     lua_lock(L);
-    luaM_flushdebt(L, L);
-    before = G(L)->GCdebt;
+    luaM_flushdebt(L);
+    before = luaE_getdebt(G(L));
     extra = luaM_alloccontrol(L, 65536);
     require(extra != NULL);
-    luaM_flushdebt(L, L);
-    spent = G(L)->GCdebt;
+    luaM_flushdebt(L);
+    spent = luaE_getdebt(G(L));
     require(spent == before - 65536 && spent > 0);
     /* A late physical completion must preserve the outstanding allocation
      * liability rather than treating these new bytes as a fresh baseline. */
     luaC_finishreclaim(L);
-    require(G(L)->GCdebt == spent);
+    require(luaE_getdebt(G(L)) == spent);
     lua_unlock(L);
   }
   text = malloc(65);
@@ -773,7 +773,8 @@ static void nursery(int generational) {
   lua_gc(L, LUA_GCCOLLECT);
   lua_lock(L);
   luaE_setdebt(G(L), 32768);
-  __atomic_store_n(&G(L)->pacer.debt, 65536, __ATOMIC_RELAXED);
+  __atomic_store_n(&G(L)->pacer.hard, getgcbytes(G(L)) + 65536,
+                   __ATOMIC_RELAXED);
   lua_unlock(L);
   before = stops;
   require(lua_pcall(L, 3, 1, 0) == LUA_OK);
@@ -796,7 +797,7 @@ static void nursery_backing_wait(void) {
   lua_gc(L, LUA_GCCOLLECT);
   lua_lock(L);
   luaE_setdebt(G(L), MAX_LMEM);
-  __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
+  __atomic_store_n(&G(L)->pacer.hard, MAX_LMEM, __ATOMIC_RELAXED);
   lua_unlock(L);
 
   lua_createtable(L, 256, 0);
@@ -838,7 +839,8 @@ static void nursery_progress(void) {
   lua_remove(L, 1);
   lua_lock(L);
   luaE_setdebt(G(L), 32768);
-  __atomic_store_n(&G(L)->pacer.debt, 65536, __ATOMIC_RELAXED);
+  __atomic_store_n(&G(L)->pacer.hard, getgcbytes(G(L)) + 65536,
+                   __ATOMIC_RELAXED);
   lua_unlock(L);
   require(lua_pcall(L, 0, 0, 0) == LUA_OK);
   require(nursery_finalizers == 1);
