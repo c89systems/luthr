@@ -584,7 +584,7 @@ target_compile_options(memory_publication_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(memory_publication_test PRIVATE luthr_static)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaW_enter -Wl,--wrap=luaW_leave -Wl,--wrap=luaX_poll -Wl,--wrap=luaQ_wait
-  -Wl,--wrap=luaM_realloc_)
+  -Wl,--wrap=luaM_realloc_ -Wl,--wrap=luaX_valueenter)
 target_link_options(memory_publication_test PRIVATE -Wl,--wrap=luaAL_enter)
 foreach(case IN ITEMS no_requests stack_admission allocation_admission stack_contention intern_hits ordinary_operations allocation_cache local_returns stack_retry marking_cache coalesced_gc handoff paired_handoff late waiting
     totals construction weak_resize metatable_resize incremental generational page_growth page_cap page_isolation

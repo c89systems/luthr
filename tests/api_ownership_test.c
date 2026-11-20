@@ -38,8 +38,8 @@ static struct fixture *active_fixture;
 
 void __real_luaX_apienter(lua_State *state);
 void __real_luaX_apileave(lua_State *state);
-void *__real_luaX_valueenter(lua_State *state);
-void __real_luaX_valueleave(lua_State *state, void *owner);
+uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
+void __real_luaX_valueleave(lua_State *state, uintptr_t owner);
 void __real_luaX_pollrequests(lua_State *state);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
 
@@ -100,11 +100,11 @@ void __wrap_luaX_apileave(lua_State *state) {
   __real_luaX_apileave(state);
   leave_boundary(state);
 }
-void *__wrap_luaX_valueenter(lua_State *state) {
+uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
   entry_boundary(state);
-  return __real_luaX_valueenter(state);
+  return __real_luaX_valueenter(state, stackonly);
 }
-void __wrap_luaX_valueleave(lua_State *state, void *owner) {
+void __wrap_luaX_valueleave(lua_State *state, uintptr_t owner) {
   __real_luaX_valueleave(state, owner);
   leave_boundary(state);
 }

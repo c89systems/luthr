@@ -43,13 +43,14 @@ LUAI_FUNC int luaX_tryworker (lua_State *L);
 ** physical state gates themselves remain strictly nonrecursive. */
 LUAI_FUNC void luaX_apienter (lua_State *L);
 LUAI_FUNC void luaX_apileave (lua_State *L);
-/* Value-only API transactions retain the same ownership, participation and
-** snapshot handshake. They cannot allocate or call Lua; a closing stack
-** operation upgrades before invoking its first user callback. Entry returns
-** the gate's owner token, or NULL when borrowing an attached activation. */
-LUAI_FUNC void *luaX_valueenter (lua_State *L);
-LUAI_FUNC void luaX_valueleave (lua_State *L, void *owner);
-LUAI_FUNC void luaX_valuecall (lua_State *L, void *owner);
+/* Stack-only operations can use a native carrier's existing capacity. They
+** may borrow stack slots and immutable payloads, within one gate scope, but
+** cannot park, allocate, mutate heap objects or acquire another reservation. */
+LUAI_FUNC uintptr_t luaX_valueenter (lua_State *L, int stackonly);
+LUAI_FUNC void luaX_valueleave (lua_State *L, uintptr_t owner);
+/* If managed capacity requires a new reservation, release the stack so the
+** caller can retry before changing it or invoking a user function. */
+LUAI_FUNC int luaX_valuecall (lua_State *L, uintptr_t owner);
 /* Nonblocking collector reservation. 0 means busy, 1 is a new reservation,
 ** and 2 means this execution already owns the target. The collector remains
 ** admitted on its own state throughout a reservation. */

@@ -66,6 +66,7 @@ static struct {
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
+uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
 void __real_luaW_leave(LuaWorld *world, int queued);
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
@@ -155,19 +156,29 @@ int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   return __real_pthread_mutex_lock(mutex);
 }
 
+static void hold_handoff(void) {
+  require(pthread_mutex_lock(&handoff->mutex) == 0);
+  handoff->entered = 1;
+  require(pthread_cond_broadcast(&handoff->changed) == 0);
+  while (!handoff->release)
+    require(pthread_cond_wait(&handoff->changed, &handoff->mutex) == 0);
+  require(pthread_mutex_unlock(&handoff->mutex) == 0);
+}
+
 void __wrap_luaW_enter(lua_State *state) {
   measured++;
   entries++;
   __real_luaW_enter(state);
   measured--;
-  if (role == 2) {
-    require(pthread_mutex_lock(&handoff->mutex) == 0);
-    handoff->entered = 1;
-    require(pthread_cond_broadcast(&handoff->changed) == 0);
-    while (!handoff->release)
-      require(pthread_cond_wait(&handoff->changed, &handoff->mutex) == 0);
-    require(pthread_mutex_unlock(&handoff->mutex) == 0);
-  }
+  if (role == 2 && handoff->paired)
+    hold_handoff();
+}
+
+uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
+  uintptr_t owner = __real_luaX_valueenter(state, stackonly);
+  if (role == 2 && !handoff->paired)
+    hold_handoff();
+  return owner;
 }
 
 void __wrap_luaW_leave(LuaWorld *world, int queued) {
@@ -213,6 +224,7 @@ static void no_requests(lua_State *state) {
     require(lua_gettop(state) == 1);
     lua_pop(state, 1);
   }
+  require(entries == 0 && world_locks == 0);
   thread = lua_newthread(state);
   require(luaL_loadstring(thread,
                           "local n=0; for i=1,2000 do n=n+i end; return n") ==
@@ -226,7 +238,7 @@ static void no_requests(lua_State *state) {
   luaE_setnativestackcontext(previous);
   require(luaTK_collect(state, &task, &status, &results) == LUA_OK);
   require(lua_tointeger(state, -1) == 2001000);
-  require(entries > 40 && polls > 0 && world_locks == 0);
+  require(entries > 0 && polls > 0 && world_locks == 0);
   printf(
       "request-free admission/polling: %u entries, %u polls, %u world locks\n",
       entries, polls, world_locks);

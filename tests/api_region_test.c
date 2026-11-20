@@ -32,8 +32,8 @@ struct invocation {
   int status;
 };
 
-/* A batch in an attached activation must not transact on its physical gate.
- * Ordinary foreign bindings must continue to acquire it for their API calls. */
+/* An attached activation borrows its existing admission. A foreign call
+ * still needs admission to read shared pseudo-indices. */
 static void check_api(lua_State *state, int foreign) {
   unsigned before = admissions;
   int top = lua_gettop(state);
@@ -44,9 +44,10 @@ static void check_api(lua_State *state, int foreign) {
     lua_pop(state, 1);
   }
   require(lua_gettop(state) == top);
-  if (foreign)
+  if (foreign) {
+    require(lua_type(state, LUA_REGISTRYINDEX) == LUA_TTABLE);
     require(admissions > before);
-  else
+  } else
     require(admissions == before);
   checks++;
 }
@@ -94,6 +95,42 @@ static void metadata(lua_State *state) {
 static int foreign(lua_State *state) {
   check_api(state, 1);
   return 0;
+}
+
+static void request_slot(LuaExecution *execution, lua_State *state) {
+  unsigned *requests = execution->context;
+  (void)state;
+  (*requests)++;
+}
+
+static void native_values(lua_State *state) {
+  unsigned requests = 0;
+  LuaExecution execution = {
+      .context = &requests, .managed_enter = request_slot, .native_depth = 1};
+  NativeStackContext context = {.execution = &execution,
+                                .limit = luaE_initnativestack()};
+  NativeStackContext *previous;
+  const char *string;
+  size_t length;
+  lua_gc(state, LUA_GCSTOP);
+  lua_pushliteral(state, "rooted across a native entry");
+  previous = luaE_setnativestackcontext(&context);
+  check_api(state, 0);
+  lua_pushvalue(state, 1);
+  string = lua_tolstring(state, -1, &length);
+  require(length == strlen("rooted across a native entry") &&
+          strcmp(string, "rooted across a native entry") == 0);
+  lua_pop(state, 1);
+  require(requests == 0);
+  require(lua_type(state, LUA_REGISTRYINDEX) == LUA_TTABLE && requests == 1);
+  lua_pushinteger(state, 1234);
+  require(strcmp(lua_tostring(state, -1), "1234") == 0 && requests == 2);
+  lua_pop(state, 1);
+  require(requests == 2 && execution.managed_depth == 0);
+  require(luaE_setnativestackcontext(previous) == &context);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(strcmp(string, "rooted across a native entry") == 0);
+  lua_pop(state, 1);
 }
 
 static int failing(lua_State *state) {
@@ -212,6 +249,8 @@ int main(int argc, char **argv) {
   } else
     require(luaL_dostring(state, source) == LUA_OK);
   require(checks != 0 && state->native_depth == 0);
+  if (is_foreign)
+    native_values(state);
   require(luaE_getnativestackcontext()->api_region == NULL);
   lua_close(state);
   return 0;

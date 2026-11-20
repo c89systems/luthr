@@ -85,21 +85,24 @@ static void reserve (lua_State *L, NativeStackContext *context,
   gate->context = context;
 }
 
+l_sinline void leavegate (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  /* Retire ownership and participation together. After publication a
+  ** collector can reclaim L; only the world directory is still accessible. */
+  uintptr_t previous = __atomic_fetch_and(&L->stack_gate.word, LUA_GATE_WAITING,
+                                           __ATOMIC_SEQ_CST);
+  luaW_leave(world, previous & LUA_GATE_WAITING);
+}
+
 static void release (lua_State *L, void *token) {
   LuaStackGate *gate = &L->stack_gate;
-  LuaWorld *world = &G(L)->world;
-  uintptr_t previous;
   lua_assert(L->world_depth == 0);
   if (luaX_gateowner(__atomic_load_n(&gate->word, __ATOMIC_RELAXED)) != token) {
     fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
   gate->context = NULL;
-  /* Retire ownership and participation together. After publication a
-  ** collector can reclaim L; only the world directory is still accessible. */
-  previous = __atomic_fetch_and(&gate->word, LUA_GATE_WAITING,
-                                __ATOMIC_SEQ_CST);
-  luaW_leave(world, previous & LUA_GATE_WAITING);
+  leavegate(L);
 }
 
 int luaX_tryreserve (lua_State *target) {
@@ -203,17 +206,48 @@ static int attachedapi (lua_State *L, NativeStackContext *context) {
   return 1;
 }
 
-static void *apienter (lua_State *L) {
+/* Entry tokens carry the obligations of this scope on their low bits. */
+enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
+
+l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
-  if (!attachedapi(L, context)) return lockstate(L, thread, context);
-  luaX_pollrequests(L);
-  return NULL;
+  LuaExecution *execution = context->execution;
+  if (attachedapi(L, context)) {
+    luaX_pollrequests(L);
+    return 0;
+  }
+  if (stackonly && (execution == NULL ||
+      (execution->native_depth != 0 && execution->managed_depth == 0))) {
+    uintptr_t owner = cast(uintptr_t, execution != NULL ? cast(void *, execution)
+                                                       : cast(void *, &thread->native));
+    uintptr_t expected = 0;
+    if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
+          owner | LUA_GATE_ACTIVE, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+      /* A stop either observes this active reservation or precedes the
+      ** check below. A stack-only scope borrows no table storage. */
+      if (l_likely(!luaW_stopped(&G(L)->world))) {
+        if (l_unlikely(luaC_tracing(L))) {
+          luaC_checksnapshot(L);
+          return owner | LUA_VALUE_STACK | LUA_VALUE_TRACING;
+        }
+        return owner | LUA_VALUE_STACK;
+      }
+      if (execution == NULL) {  /* the host already owns the stack */
+        L->stack_gate.context = context;
+        luaW_enter(L);
+        return owner;
+      }
+      /* Managed capacity can park. Release before asking for a slot. */
+      leavegate(L);
+    }
+  }
+  return cast(uintptr_t, lockstate(L, thread, context));
 }
 
 void luaX_apienter (lua_State *L) {
-  if (apienter(L) != NULL) preparecall(L, L->stack_gate.context->execution);
+  if (apienter(L, 0) != 0) preparecall(L, L->stack_gate.context->execution);
 }
 
 void luaX_apileave (lua_State *L) {
@@ -227,14 +261,32 @@ void luaX_apileave (lua_State *L) {
   }
 }
 
-void *luaX_valueenter (lua_State *L) { return apienter(L); }
-
-void luaX_valueleave (lua_State *L, void *owner) {
-  if (owner != NULL) unlockstate(L, owner, 1);
+uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
+  return apienter(L, stackonly);
 }
 
-void luaX_valuecall (lua_State *L, void *owner) {
-  if (owner != NULL) preparecall(L, L->stack_gate.context->execution);
+void luaX_valueleave (lua_State *L, uintptr_t owner) {
+  if (owner & LUA_VALUE_STACK) {
+    if ((owner & LUA_VALUE_TRACING) &&
+        __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
+      luaSC_notifygc(G(L));
+    leavegate(L);
+  }
+  else if (owner != 0) unlockstate(L, cast(void *, owner), 1);
+}
+
+int luaX_valuecall (lua_State *L, uintptr_t owner) {
+  if (owner & LUA_VALUE_STACK) {
+    NativeStackContext *context = luaE_getnativestackcontext();
+    if (context->execution != NULL) {
+      luaX_valueleave(L, owner);
+      return 0;
+    }
+    L->stack_gate.context = context;
+    luaW_enter(L);
+  }
+  if (owner != 0) preparecall(L, L->stack_gate.context->execution);
+  return 1;
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation
