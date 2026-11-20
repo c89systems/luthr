@@ -34,30 +34,11 @@ static void clearing (global_State *g, unsigned phase) {
     __atomic_store_n(&g->trace_weakcutoff, 1, __ATOMIC_RELEASE);
 }
 
-/* Quiescence closes the claim-to-publication gap before a phase transition.
-** All payload cursors are stored in the plan before any worker can park.
-** Competing helpers recheck the phase after acquiring this boundary. */
-void luaC_advancetrace (lua_State *L) {
+/* Phase changes consume closed input queues and publish their next work
+** before any mutator can resume. */
+static void advanceclosedtrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
-  int deferred;
-  /* Several helpers may observe the same empty queue. Metadata admission
-  ** orders phase requests; recheck after it, before stopping every worker. */
-  if (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0) return;
-  if (!luaW_trycollectenter(L)) return;
-  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
-  deferred = !luaC_tracing(L) || plan->finish == 0 ||
-    __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
-    (luaC_tracephase(g) != TRACE_INIT && luaC_tracepending(g));
-  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
-  if (deferred) {
-    luaW_heapleave(L);
-    return;
-  }
-  luaW_stop(L);
-  luaW_heapleave(L);  /* retain exactly the stop's metadata ownership */
-  luaC_publish(L);
-  luaC_drainbarriers(L);
   while (luaC_tracing(L) && plan->finish != 0) {
     if (plan->phase == TRACE_INIT)
       luaC_initialtrace(L);
@@ -120,8 +101,7 @@ void luaC_advancetrace (lua_State *L) {
           clearing(g, TRACE_CLEAR);
         else {
           luaC_finishtrace(L);
-          luaW_start(L);
-          return;  /* finalizers may have allowed a later cycle to start */
+          return;
         }
         break;
       default: lua_assert(0); break;
@@ -129,5 +109,38 @@ void luaC_advancetrace (lua_State *L) {
   }
   if (luaC_tracing(L))
     luaC_readytrace(L);
+}
+
+static int canadvance (lua_State *L) {
+  global_State *g = G(L);
+  return luaC_tracing(L) && g->trace_plan.finish != 0 &&
+    __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) == 0 &&
+    (luaC_tracephase(g) == TRACE_INIT || !luaC_tracepending(g));
+}
+
+/* Quiescence closes the claim-to-publication gap before a phase transition.
+** Reuse an existing closed boundary when starting a trace. Competing helpers
+** recheck their observation before requesting a new rendezvous. */
+void luaC_advancetrace (lua_State *L) {
+  global_State *g = G(L);
+  int ready;
+  if (L->world_depth != 0) {
+    if (!canadvance(L)) return;
+    luaC_drainbarriers(L);  /* the stopped owner can still publish root edges */
+    advanceclosedtrace(L);
+    return;
+  }
+  if (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0) return;
+  if (!luaW_trycollectenter(L)) return;
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  ready = canadvance(L);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  if (!ready) {
+    luaW_heapleave(L);
+    return;
+  }
+  luaW_stop(L);  /* also publishes allocations and drains barriers */
+  luaW_heapleave(L);  /* retain exactly the stop's metadata ownership */
+  advanceclosedtrace(L);
   luaW_start(L);
 }

@@ -58,7 +58,7 @@ set(workers_peak 0)
 foreach(path IN LISTS gc_profile_paths)
   file(STRINGS "${path}" rows)
   foreach(row IN LISTS rows)
-    foreach(field IN ITEMS stop_requests stop_gc stop_barrier stop_other
+    foreach(field IN ITEMS stop_requests stop_gc stop_barrier stop_other publish_calls
         collector_body_ns collector_calls collector_running_calls barrier_records
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
         trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
@@ -87,6 +87,7 @@ foreach(path IN LISTS gc_profile_paths)
       endif()
     endforeach()
     if(NOT classified EQUAL stop_requests OR
+        NOT publish_calls EQUAL stop_requests OR
         repeated_back_records GREATER back_records OR
         back_records GREATER barrier_records OR
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
