@@ -225,6 +225,61 @@ static void sweep_string_index(lua_State *L) {
   lua_unlock(L);
 }
 
+static int callbacks;
+
+static int live_finalizer(lua_State *L) {
+  (void)L;
+  callbacks++;
+  return 0;
+}
+
+static void push_finalizable(lua_State *L, int index) {
+  lua_newtable(L);
+  lua_pushvalue(L, 2);
+  require(lua_setmetatable(L, -2));
+  lua_rawseti(L, 1, index);
+}
+
+static void reachable_finalizers(lua_State *L, int late) {
+  int live = late ? 16 : 8 * LUA_TRACE_BATCH;
+  struct request helper = {0};
+  pthread_t worker;
+  int i;
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, live, 0);
+  lua_newtable(L);
+  lua_pushcfunction(L, live_finalizer);
+  lua_setfield(L, 2, "__gc");
+  for (i = 1; i <= live; i++)
+    push_finalizable(L, i);
+  helper.state = lua_newthread(L);
+  helper.role = 1;
+  helper.phase = 2;
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  lua_gc(L, LUA_GCRESTART);
+  lua_lock(L);
+  G(L)->pacer.goal = MAX_LMEM;
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  require(luaC_tracing(L));
+  if (late) {
+    for (i = 0; G(L)->trace_plan.finalizers != NULL && i < 64; i++)
+      luaC_tracebatch(L, LUA_TRACE_BATCH);
+    require(G(L)->trace_plan.finalizers == NULL);
+  }
+  lua_unlock(L);
+  if (late)
+    push_finalizable(L, ++live);
+  require(luaC_tracing(L));
+  __atomic_store_n(&G(L)->pacer.hard, 0, __ATOMIC_RELAXED);
+  require(pthread_create(&worker, NULL, request, &helper) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(!luaC_tracing(L) && helper.stops == 1 && callbacks == 0);
+  lua_remove(L, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(callbacks == live);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   struct request requests[2] = {{0}};
@@ -232,6 +287,11 @@ int main(int argc, char **argv) {
   unsigned round;
   int explicit_step, stop, overdue;
   require(L != NULL && argc == 2);
+  if (strcmp(argv[1], "reachable_finalizers") == 0 ||
+      strcmp(argv[1], "late_finalizer") == 0) {
+    reachable_finalizers(L, strcmp(argv[1], "late_finalizer") == 0);
+    goto done;
+  }
   if (strcmp(argv[1], "shrink_strings") == 0) {
     sweep_string_index(L);
     goto done;

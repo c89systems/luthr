@@ -461,6 +461,7 @@ LUAI_FUNC void luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_readytrace (lua_State *L);
+LUAI_FUNC unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit);
 /* Strong tables use bounded, validated reads under the admission storage epoch.
 ** Return -1 for weak/borrowed ownership, 0 to defer, or 1 on completion. */
 LUAI_FUNC int luaC_scanstrong (lua_State *, LuaTraceWork *, Table *);

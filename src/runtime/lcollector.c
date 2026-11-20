@@ -64,8 +64,8 @@ void luaC_advancetrace (lua_State *L) {
       plan->again = NULL;
       break;
     }
-    if (plan->next != NULL || plan->deferred != NULL ||
-        plan->pending != NULL || plan->finalizers != NULL) break;
+    if (plan->next != NULL || plan->deferred != NULL || plan->pending != NULL ||
+        (plan->phase == TRACE_FINALIZERS && plan->finalizers != NULL)) break;
     switch (plan->phase) {
       case TRACE_PENDING:
         plan->phase = TRACE_MARK;
@@ -84,8 +84,10 @@ void luaC_advancetrace (lua_State *L) {
           clearing(g, plan->after);
         else {
           plan->phase = plan->after;
-          if (plan->phase == TRACE_FINALIZERS && g->finobj != g->finobjold1)
-            plan->finalizers = &g->finobj;
+          if (plan->phase == TRACE_FINALIZERS) {
+            unsigned skipped = luaC_skiplivefinalizers(g, LUA_TRACE_BATCH);
+            if (skipped != 0) luaP_work(g, skipped * sizeof(GCObject));
+          }
         }
         break;
       case TRACE_VALUES:

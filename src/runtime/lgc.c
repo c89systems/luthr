@@ -496,7 +496,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
   g->trace_plan.pending = g->tobefnz;
-  g->trace_plan.finalizers = NULL;
+  g->trace_plan.finalizers = g->finobj != g->finobjold1 ? &g->finobj : NULL;
   g->trace_plan.finalizer_gray = NULL;
   g->trace_plan.finalizer_tail = NULL;
   g->trace_plan.finalizer_new = NULL;
@@ -1057,16 +1057,29 @@ static GCObject *takeweak (GCObject **head, GCObject **tail) {
 /* Claims/publication serialize list ownership, never payload scanning. A batch
 ** stays participating until its discoveries are published; stopping the world
 ** therefore also joins all scanners before a phase can change. */
+/* A marked object cannot become a candidate in this trace. The cursor stays
+** at the first possible candidate until strong and weak-value work is done. */
+unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit) {
+  LuaTracePlan *plan = &g->trace_plan;
+  unsigned count = 0;
+  while (plan->finalizers != NULL && count < limit &&
+         !iswhite(g, *plan->finalizers)) {
+    GCObject *object = *plan->finalizers;
+    plan->finalizers = object->next != g->finobjold1 ? &object->next : NULL;
+    count++;
+  }
+  return count;
+}
+
 void luaC_readytrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
   unsigned ready = g->gray != NULL || plan->next != NULL ||
-    plan->pending != NULL || plan->finalizers != NULL;
+    plan->pending != NULL || (plan->finalizers != NULL &&
+      (plan->phase == TRACE_FINALIZERS || !iswhite(g, *plan->finalizers)));
   __atomic_store_n(&g->trace_workers, ready, __ATOMIC_RELEASE);
   __atomic_store_n(&g->trace_ready,
-    g->gray != NULL || g->trace_deferred != NULL ||
-    plan->next != NULL || plan->deferred != NULL ||
-    plan->pending != NULL || plan->finalizers != NULL,
+    ready || g->trace_deferred != NULL || plan->deferred != NULL,
     __ATOMIC_RELEASE);
 }
 
@@ -1165,6 +1178,8 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   }
   if (work->count != 0)
     __atomic_fetch_add(&g->trace_busy, 1, __ATOMIC_RELAXED);
+  else if (plan->phase != TRACE_FINALIZERS)
+    work->scanned += luaC_skiplivefinalizers(g, limit) * sizeof(GCObject);
   luaC_readytrace(L);
 }
 
@@ -1463,6 +1478,18 @@ static void separateallfinalizers (global_State *g) {
 }
 
 
+/* New registrations prepend to the stable index. Before candidate selection
+** they invalidate the already checked prefix. */
+static void resetfinalizercursor (lua_State *L) {
+  global_State *g = G(L);
+  LuaTracePlan *plan = &g->trace_plan;
+  if (luaC_tracing(L) &&
+      (plan->phase <= TRACE_MARK || plan->phase == TRACE_VALUES ||
+       (plan->phase == TRACE_EPHEMERONS &&
+        (plan->after == TRACE_VALUES || plan->after == TRACE_FINALIZERS))))
+    plan->finalizers = &g->finobj;
+}
+
 /* Finalization is an independent index. Registration never searches or
 ** modifies allocation membership, generation boundaries, or a sweep cursor. */
 static void registerfinalizer (lua_State *L, GCObject *o) {
@@ -1472,6 +1499,7 @@ static void registerfinalizer (lua_State *L, GCObject *o) {
   if (luaW_iscollector(L)) {
     o->next = g->finobj;
     g->finobj = o;
+    resetfinalizercursor(L);
   }
   else {
     pthread_mutex_t *mutex = &g->publishers[0].mutex;
@@ -1518,6 +1546,7 @@ void luaC_publish (lua_State *L) {
     g->new_finalizers_tail->next = g->finobj;
     g->finobj = g->new_finalizers;
     g->new_finalizers = g->new_finalizers_tail = NULL;
+    resetfinalizercursor(L);
   }
 #if defined(LUAI_ASSERT)
   {
