@@ -11,7 +11,7 @@
 #include <string.h>
 #include <time.h>
 
-enum { SC_READY, SC_RESOURCE, SC_DONE };
+enum { SC_READY, SC_FIRST_SLICE, SC_RESOURCE, SC_DONE };
 enum {
   DEFAULT_SLICE_NS = 2 * 1000 * 1000,
   FIRST_SERIAL_SLICE_NS = 250 * 1000,
@@ -107,11 +107,19 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
 
 /* Caller retains scheduler.mutex on host/wake/publication paths. Queue
 ** ownership is independent; successful dispatch needs no engine mutex. */
-static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
+static void enqueue (LuaScheduler *s, LuaScheduledTask *task, int firstslice) {
   LuaExecutionSlot *slot = &s->slots[task->home];
   lua_assert(task->slot == NULL);
   luaX_checksync(pthread_mutex_lock(&slot->mutex));
-  append(&slot->head, &slot->tail, task);
+  if (firstslice && slot->head != NULL) {
+    /* Keep the head ahead, then resume the first-slice task before opening
+    ** more live graphs. Subsequent slices rotate through the full queue. */
+    lua_assert(task->next == NULL);
+    task->next = slot->head->next;
+    slot->head->next = task;
+    if (slot->tail == slot->head) slot->tail = task;
+  }
+  else append(&slot->head, &slot->tail, task);
   slot->count++;
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   wakequeued(s, task);
@@ -517,7 +525,8 @@ static void poll (LuaExecution *execution, lua_State *L) {
     __atomic_fetch_sub(&s->external_yields, 1, __ATOMIC_RELEASE);
     unlock(s);
   }
-  else pause(task, SC_READY);
+  else pause(task, timed && serial && task->dispatches == 1 && reentry == 0
+                   ? SC_FIRST_SLICE : SC_READY);
   luaW_attach(L, depth);
 }
 
@@ -558,7 +567,7 @@ static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
   if (!task->external) {
     if (task->published) {
       task->published = 0;
-      enqueue(s, task);
+      enqueue(s, task, 0);
     }
     else {
       task->early_wakes++;
@@ -697,12 +706,12 @@ static void *carrierentry (void *argument) {
     }
     else if (task->reason == SC_RESOURCE) {
       if (task->notified) {
-        enqueue(s, task);
+        enqueue(s, task, 0);
         __atomic_fetch_sub(&s->pending_ready, 1, __ATOMIC_RELEASE);
       }
       else task->published = 1;
     }
-    else enqueue(s, task);
+    else enqueue(s, task, task->reason == SC_FIRST_SLICE);
     notify(s);
     unlock(s);
   }
@@ -932,7 +941,7 @@ int luaSC_submit (LuaScheduler *s, LuaScheduledTask *task, lua_State *L,
       s->tasks = task;
       s->submitted++;
       s->outstanding++;
-      enqueue(s, task);
+      enqueue(s, task, 0);
     }
   }
   unlock(s);

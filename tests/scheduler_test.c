@@ -376,11 +376,25 @@ static int mark_running(lua_State *L) {
   return 0;
 }
 
+enum { SLICE_PEERS = 3 };
+
+static int first_slice_peer(lua_State *L) {
+  LuaScheduler *scheduler = &fixture->scheduler;
+  /* A spare carrier may take this task before the interrupted fiber is
+   * saved. Keep the other two peers queued until that fiber is published. */
+  require(pthread_mutex_lock(&scheduler->mutex) == 0);
+  while (__atomic_load_n(&scheduler->runnable, __ATOMIC_ACQUIRE) < SLICE_PEERS)
+    require(pthread_cond_wait(&scheduler->changed, &scheduler->mutex) == 0);
+  require(pthread_mutex_unlock(&scheduler->mutex) == 0);
+  return started(L);
+}
+
 static int poll_slice(lua_State *L) {
   struct fixture *f = fixture;
   uint64_t slice_ns = (uint64_t)luaL_checkinteger(L, 1);
   lua_lock(L);
-  while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) == 0)
+  while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) <
+         SLICE_PEERS)
     luaX_pollrequests(L);
   /* Repeated polls keep the current task until its slice expires. */
   for (unsigned i = 0; i < 16; i++)
@@ -390,7 +404,12 @@ static int poll_slice(lua_State *L) {
   require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
   __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
-  require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 1);
+  /* The queue head stays ahead at publication. If a spare carrier already
+   * took peer 1, peer 2 can also run ahead. Later slices rotate behind all
+   * three peers. */
+  require(__atomic_load_n(&f->seen[1], __ATOMIC_ACQUIRE) == 1);
+  require(__atomic_load_n(&f->seen[SLICE_PEERS], __ATOMIC_ACQUIRE) ==
+          (slice_ns == 250000 ? 0u : 1u));
   lua_unlock(L);
   return 0;
 }
@@ -401,6 +420,7 @@ static void timed_slice(struct fixture *f, int continuation) {
   f->scheduler.config.quantum_polls = 0;
   lua_gc(f->main, LUA_GCSTOP);
   managed(f->main, "poll_slice", poll_slice);
+  managed(f->main, "first_slice_peer", first_slice_peer);
   managed(f->main, "started", started);
   managed(f->main, "mark_running", mark_running);
   submit(f, 0,
@@ -412,9 +432,12 @@ static void timed_slice(struct fixture *f, int continuation) {
   while (f->waiting == 0)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  submit(f, 1, "started(...); return 20", 1);
+  submit(f, 1, "first_slice_peer(...); return ...", 1);
+  for (unsigned i = 2; i <= SLICE_PEERS; i++)
+    submit(f, i, "started(...); return ...", (int)i);
   require(collect(f, 0, LUA_OK) == 10);
-  require(collect(f, 1, LUA_OK) == 20);
+  for (unsigned i = 1; i <= SLICE_PEERS; i++)
+    require(collect(f, i, LUA_OK) == (lua_Integer)i);
   finish(f);
 }
 
