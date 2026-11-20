@@ -209,6 +209,7 @@ int main(int argc, char **argv) {
     lua_pushvalue(L, i == 1 ? probe.second_parent : 1);
     lua_xmove(L, state, 1);
   }
+  require(!(probe.table->sequence & LUA_TABLE_WRITER_FLAGS));
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
   deadline.tv_sec += 10;
   require(pthread_create(&a, NULL, first, NULL) == 0);
@@ -224,19 +225,36 @@ int main(int argc, char **argv) {
             0);
   require(!probe.release);
   require(pthread_mutex_unlock(&probe.mutex) == 0);
+  if (!probe.graph) {
+    /* A paused same-type store leaves the previous atomic payload readable. */
+    require((probe.hash ? lua_getfield(L, 1, "field-1")
+                        : lua_rawgeti(L, 1, 1)) == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 0);
+    lua_pop(L, 1);
+  }
   /* A collector must defer rather than park, and must preserve the activity
    * hint so the next layout owner still waits for this outstanding writer. */
   lua_lock(L);
   {
     GCObject *edges[2];
-    /* The layout version is still even. GC must reject this claimed element
-     * before following its split tag/payload, independently of layout checks.
-     */
+    unsigned found;
+    /* The layout version is still even. The scanner validates a slot only
+     * if a writer can change both its tag and payload. */
     require(!(probe.table->sequence & 1));
-    require(luaH_tracechunk(G(L), probe.table, probe.first_slot, 1, probe.hash,
-                            edges) == UINT_MAX);
+    require(probe.table->sequence & LUA_TABLE_ELEMENT_WRITES);
+    require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == probe.graph);
+    found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,
+                            probe.first_slot, 1, probe.hash, edges);
+    if (probe.graph)
+      require(found == UINT_MAX);
+    else if (probe.hash) {
+      require(found == 1);
+      require(edges[0] == gckey(gnode(probe.table, probe.first_slot)));
+    } else
+      require(found == 0);
   }
   require(!luaA_tryscan(L, (GCObject *)probe.table));
+  require(probe.table->sequence & LUA_TABLE_ELEMENT_WRITES);
   lua_unlock(L);
   require(pthread_create(&c, NULL, resize, NULL) == 0);
   require(pthread_mutex_lock(&probe.mutex) == 0);
@@ -249,6 +267,7 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_join(a, NULL) == 0 && pthread_join(b, NULL) == 0);
   require(pthread_join(c, NULL) == 0 && probe.layout_done);
+  require(!(probe.table->sequence & LUA_TABLE_WRITER_FLAGS));
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCCOLLECT);
   require((probe.hash ? lua_getfield(L, 1, "field-1") : lua_rawgeti(L, 1, 1)) ==

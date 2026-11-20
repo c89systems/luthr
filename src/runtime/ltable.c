@@ -870,7 +870,6 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
   t->gcweak = 0;
   t->weak_cleared = 0;
   t->weak_initial_cutoff = 0;
-  t->writers_seen = 0;
   t->inline_bytes = cast_byte(bytes);
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
@@ -1413,7 +1412,9 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   /* Key retirement is a layout operation. A missing value may also invoke
   ** __newindex; resolve that under ordinary ordered metatable ownership. */
   if ((!raw && tagisempty(*slot.tag) && table->metatable != NULL) ||
-      (node != NULL && ttisnil(value) && keyiscollectable(node))) {
+      (node != NULL && ttisnil(value) && keyiscollectable(node)) ||
+      (*slot.tag != rawtt(value) &&
+       !luaH_beginsplit(table, writer, slot.payload, slot.sequence))) {
     luaH_releasewriter(L, table, writer);
     return 0;
   }
@@ -1472,7 +1473,8 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
   }
   /* Failure has not changed any key, value or image. Restore that version;
   ** the rooted fallback will publish the operation's single committed image. */
-  __atomic_store_n(&t->sequence, sequence + (done ? 2 : 0), __ATOMIC_RELEASE);
+  __atomic_store_n(&t->sequence, sequence + (done ? LUA_TABLE_VERSION_STEP : 0),
+                   __ATOMIC_RELEASE);
   return done;
 }
 
@@ -1692,7 +1694,7 @@ static int readshortstr (global_State *g, Table *table, TString *key,
       TValue value;
       __atomic_load(&node->u.key_val, &candidate, __ATOMIC_ACQUIRE);
       if (memcmp(&candidate, &key, sizeof(key)) == 0) {
-        if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value) ||
+        if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, sequence) ||
             !sameversion(table, sequence)) return 0;
         *tag = finishnodeget(&value, result);
         return 1;
@@ -1766,7 +1768,7 @@ static int readinteger (lua_State *L, Table *table, lua_Integer key,
   array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
   if (!sameversion(table, sequence)) return 0;
   if (!luaH_readvalue(G(L), array - k,
-        cast(lu_byte *, array) + sizeof(unsigned) + k - 1, &value)) return 0;
+        cast(lu_byte *, array) + sizeof(unsigned) + k - 1, &value, sequence)) return 0;
   if (!sameversion(table, sequence)) return 0;
   *tag = rawtt(&value);
   if (!tagisempty(*tag)) setobj(L, result, &value);
@@ -1800,7 +1802,7 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
   if (k != 0) {
     TValue value;
     if (!luaH_readvalue(G(L), getArrVal(&view, k - 1), getArrTag(&view, k - 1),
-                        &value)) return 0;
+                        &value, sequence)) return 0;
     if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;
     *tag = rawtt(&value);
@@ -1816,7 +1818,7 @@ static int optimistic (lua_State *L, Table *table, const TValue *key,
     if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;
     if (equalkey(key, &snapshot, 0)) {
-      if (!luaH_readvalue(G(L), &node->u.value_, &node->u.tt_, gval(&snapshot)) ||
+      if (!luaH_readvalue(G(L), &node->u.value_, &node->u.tt_, gval(&snapshot), sequence) ||
           !sameversion(table, sequence)) return 0;
       *tag = finishnodeget(gval(&snapshot), result);
       return 1;

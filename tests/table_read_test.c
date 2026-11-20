@@ -816,7 +816,8 @@ static void lua_writes(lua_State *state, Table *metatable) {
   before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   require(lua_pcall(state, 2, 1, 0) == LUA_OK);
   require(lua_tointeger(state, -1) == 59);
-  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before == 8);
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before ==
+          4 * LUA_TABLE_VERSION_STEP);
   require(metatable == NULL ||
           __atomic_load_n(&metatable->sequence, __ATOMIC_ACQUIRE) ==
               meta_before);
@@ -850,7 +851,7 @@ static void writes(lua_State *state, int generational) {
     lua_settable(state, 1);
   }
   require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before ==
-          2 * 3 * 128);
+          LUA_TABLE_VERSION_STEP * 3 * 128);
   lua_getfield(state, 1, "field-128");
   require(lua_tointeger(state, -1) == 128);
   lua_pop(state, 1);

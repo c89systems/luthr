@@ -256,6 +256,11 @@ int main(int argc, char **argv) {
     }
   }
   require(probe.keys[1] && probe.keys[2]);
+  if (probe.reader && !probe.graph) {
+    /* Exercise a read that must wait for a split publication. */
+    lua_pushboolean(L, 0);
+    lua_rawseti(L, 1, probe.keys[0]);
+  }
   probe.first = lua_newthread(L);
   probe.blocked = lua_newthread(L);
   probe.independent = lua_newthread(L);

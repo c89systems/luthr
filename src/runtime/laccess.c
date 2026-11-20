@@ -25,12 +25,24 @@ static LuaObjectLock *objectlock (GCObject *object) {
   }
 }
 
-l_sinline void version (GCObject *object, LuaObjectLock *lock) {
+enum { VERSION_ENTER_LOCAL, VERSION_ENTER_SHARED, VERSION_LEAVE };
+
+l_sinline void version (GCObject *object, LuaObjectLock *lock, int transition) {
   if (object != NULL && lock == objectlock(object)) {
     uint64_t *sequence = luaA_sequence(object);
-    if (sequence != NULL)
-      __atomic_store_n(sequence,
-        __atomic_load_n(sequence, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);
+    if (sequence != NULL) {
+      if (transition == VERSION_ENTER_SHARED && object->tt == LUA_VTABLE) {
+        /* Preserve a first writer's advertisement if it published before
+        ** our layout admission closed. The drain uses the resulting flag. */
+        __atomic_fetch_or(sequence, 1, __ATOMIC_RELEASE);
+      }
+      else {
+        unsigned delta = transition == VERSION_LEAVE && object->tt == LUA_VTABLE
+                         ? LUA_TABLE_VERSION_STEP - 1 : 1;
+        __atomic_store_n(sequence, __atomic_load_n(sequence, __ATOMIC_RELAXED) +
+                                     delta, __ATOMIC_RELEASE);
+      }
+    }
   }
 }
 
@@ -45,7 +57,7 @@ static int mutatoraccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
     else {
       __atomic_store_n(&lock->owner, token, __ATOMIC_RELEASE);
       lock->depth = 1;
-      version(object, lock);
+      version(object, lock, VERSION_ENTER_LOCAL);
     }
     return 1;
   }
@@ -64,7 +76,7 @@ static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
           token, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     lua_assert(lock->depth == 0);
     lock->depth = 1;
-    version(object, lock);
+    version(object, lock, VERSION_ENTER_SHARED);
     return 1;
   }
   return 0;
@@ -85,7 +97,7 @@ void luaA_endscan (lua_State *L, GCObject *object) {
   lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
              luaX_token(L) && lock->depth != 0);
   if (--lock->depth == 0) {
-    version(object, lock);
+    version(object, lock, VERSION_LEAVE);
     __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
     /* A scanner never parks with ownership. Existing mutator waiters need
     ** the same notification handshake as an ordinary scoped release. */
@@ -186,7 +198,7 @@ static void releasescope (lua_State *L, LuaObjectScope *scope) {
     if (--scope->lock->depth == 0) {
       GCObject *object = iscollectable(&scope->root.value)
         ? gcvalue(&scope->root.value) : NULL;
-      version(object, scope->lock);
+      version(object, scope->lock, VERSION_LEAVE);
       if (object != NULL && scope->lock == objectlock(object) &&
           luaA_local(L, object)) {
         __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_RELEASE);

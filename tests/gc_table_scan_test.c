@@ -26,11 +26,12 @@ static struct {
   Table *table;
   GCObject *child;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember;
+      remember, first_write;
+  uint64_t initial_layout;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
-static __thread int scanning, hash_chunk;
+static __thread int scanning, hash_chunk, interrupted;
 static __thread unsigned first_chunk;
 
 static void hold(void) {
@@ -54,7 +55,10 @@ int __wrap_luaC_scanstrong(lua_State *L, LuaTraceWork *work, Table *table) {
   int result;
   scanning = L == probe.marker && table == probe.table;
   hash_chunk = 0;
+  interrupted = 0;
   result = __real_luaC_scanstrong(L, work, table);
+  if (interrupted)
+    require(result == 0);
   scanning = 0;
   return result;
 }
@@ -64,12 +68,22 @@ unsigned __real_luaH_tracechunk(global_State *, const Table *, unsigned,
 unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
                                 unsigned first, unsigned count, int hash,
                                 GCObject **edges) {
-  unsigned found = __real_luaH_tracechunk(g, view, first, count, hash, edges);
+  unsigned found;
+  if (scanning && probe.first_write && !probe.entered) {
+    /* Hold an unflagged scan after it chose its validation path and before
+     * it loads a value whose type the first concurrent writer will change. */
+    require(g == NULL && first == 0 && !hash);
+    probe.initial_layout =
+        __atomic_load_n(&probe.table->sequence, __ATOMIC_ACQUIRE);
+    interrupted = 1;
+    hold();
+  }
+  found = __real_luaH_tracechunk(g, view, first, count, hash, edges);
   hash_chunk = hash;
   first_chunk = first;
   if (scanning)
     probe.chunks++;
-  if (scanning && !probe.relocate && !probe.remember)
+  if (scanning && !probe.relocate && !probe.remember && !probe.first_write)
     hold();
   return found;
 }
@@ -135,6 +149,11 @@ static void *write_values(void *unused) {
     luaW_start(L);
     lua_unlock(L);
     return NULL;
+  } else if (probe.first_write) {
+    lua_pushinteger(L, LUA_MININTEGER);
+    lua_rawseti(L, probe.index, 1);
+    require(__atomic_load_n(&probe.table->sequence, __ATOMIC_ACQUIRE) ==
+            (probe.initial_layout | LUA_TABLE_WRITER_FLAGS));
   } else if (probe.relocate) {
     lua_pushvalue(L, 2);
     lua_pushinteger(L, 123);
@@ -187,6 +206,7 @@ int main(int argc, char **argv) {
   probe.relocate = strncmp(argv[1], "relocate", 8) == 0;
   probe.pause = strncmp(argv[1], "pause", 5) == 0;
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
+  probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.marker = lua_newthread(L);
   probe.writer = lua_newthread(L);
   lua_createtable(L, probe.relocate ? 0 : 128, probe.relocate ? 64 : 0);
@@ -293,7 +313,10 @@ int main(int argc, char **argv) {
     lua_gc(L, LUA_GCCOLLECT);
     lua_gc(L, LUA_GCCOLLECT);
   }
-  if (!probe.relocate) {
+  if (probe.first_write) {
+    require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TNUMBER);
+    require(lua_tointeger(probe.writer, -1) == LUA_MININTEGER);
+  } else if (!probe.relocate) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);
     require(lua_tointeger(probe.writer, -1) == 42);

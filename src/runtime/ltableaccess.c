@@ -30,45 +30,63 @@ void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
   }
 }
 
+static int advertise (Table *table, uint64_t layout, uint64_t flag) {
+  uint64_t current = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  lua_assert(!(layout & 1));
+  /* Flags only accumulate while this even layout is current. A structural
+  ** owner closes the layout before it can drain writers and clear them. */
+  while (((current ^ layout) & ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS)) == 0) {
+    if ((current & flag) ||
+        __atomic_compare_exchange_n(&table->sequence, &current, current | flag,
+                                    0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+      return 1;
+  }
+  return 0;
+}
+
 LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, Value *slot,
                                   uint64_t layout) {
   LuaTableWriter *writer = luaH_writer(G(L), slot);
   Table *empty = NULL;
-  uint64_t sequence;
   if (!__atomic_compare_exchange_n(&writer->owner, &empty, table, 0,
                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return NULL;
-  /* Publish AFTER the row claim. Layout owners clear this hint BEFORE they
-  ** scan, so a late claimant cannot be lost behind a completed scan. The row
-  ** CAS and owner check are the store/load admission handshake, not a count
-  ** modified by every writer on the same table. */
-  if (!__atomic_load_n(&table->writers_seen, __ATOMIC_SEQ_CST))
-    __atomic_store_n(&table->writers_seen, 1, __ATOMIC_SEQ_CST);
+  /* A layout owner either sees the claimed row, or closes the even version
+  ** before the claimant advertises itself. An odd version rejects new writers. */
   if (__atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST) != NULL ||
-      __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout ||
-      !luaH_strongaccess(L, table)) {
+      !luaH_strongaccess(L, table) ||
+      !advertise(table, layout, LUA_TABLE_ELEMENT_WRITES)) {
     luaH_releasewriter(L, table, writer);
     return NULL;
   }
+  return writer;
+}
+
+int luaH_beginsplit (Table *table, LuaTableWriter *writer, Value *slot,
+                     uint64_t layout) {
+  uint64_t sequence;
+  /* Announce split publication before either component changes. A reader
+  ** using the previous layout must detect this change on validation. */
+  if (!advertise(table, layout, LUA_TABLE_SPLIT_VALUES)) return 0;
   sequence = __atomic_load_n(&writer->sequence, __ATOMIC_RELAXED);
   lua_assert(!(sequence & 1));
   __atomic_store_n(&writer->slot, cast(uintptr_t, slot), __ATOMIC_RELEASE);
   __atomic_store_n(&writer->sequence, sequence + 1, __ATOMIC_RELEASE);
-  return writer;
+  return 1;
 }
 
 /* The caller has claimed layout ownership. A scanner defers busy tables;
 ** mutators park with that ownership rooted, as ordinary object waits do. */
 int luaH_quiescewriters (lua_State *L, Table *table, int wait) {
-  if (!(__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED))
-    return 1;
-  if (!__atomic_load_n(&table->writers_seen, __ATOMIC_SEQ_CST)) return 1;
-  __atomic_store_n(&table->writers_seen, 0, __ATOMIC_SEQ_CST);
-  if (!active(G(L), table, NULL)) return 1;
-  if (!wait) {
-    __atomic_store_n(&table->writers_seen, 1, __ATOMIC_SEQ_CST);
-    return 0;
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_RELAXED);
+  lua_assert(layout & 1);
+  if (layout & LUA_TABLE_ELEMENT_WRITES) {
+    if (active(G(L), table, NULL)) {
+      if (!wait) return 0;
+      luaH_waitwriters(L, table, NULL);
+    }
+    __atomic_store_n(&table->sequence, layout & ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS),
+                     __ATOMIC_RELEASE);
   }
-  luaH_waitwriters(L, table, NULL);
   return 1;
 }
 
@@ -131,8 +149,10 @@ void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag
   TValue old;
   old.value_ = *payload;
   old.tt_ = *tag;
+  lua_assert(old.tt_ == value->tt_ ||
+    (__atomic_load_n(&luaH_writer(G(L), payload)->sequence, __ATOMIC_RELAXED) & 1));
   luaC_prewrite(L, &old, value);
   __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
-  __atomic_store_n(tag, value->tt_, __ATOMIC_RELEASE);
+  if (old.tt_ != value->tt_) __atomic_store_n(tag, value->tt_, __ATOMIC_RELEASE);
   luaC_barrierback(L, obj2gco(table), value);
 }

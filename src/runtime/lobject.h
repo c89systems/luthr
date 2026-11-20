@@ -811,6 +811,15 @@ typedef union Node {
 
 
 
+/* Layout owners close admission with the low bit. Element writers announce
+** their presence, and only writers changing a tag announce split values. */
+enum {
+  LUA_TABLE_ELEMENT_WRITES = 2,
+  LUA_TABLE_SPLIT_VALUES = 4,
+  LUA_TABLE_WRITER_FLAGS = LUA_TABLE_ELEMENT_WRITES | LUA_TABLE_SPLIT_VALUES,
+  LUA_TABLE_VERSION_STEP = 8
+};
+
 typedef struct Table {
   CommonHeader;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
@@ -827,7 +836,6 @@ typedef struct Table {
   lu_byte gcweak;  /* weakness selected for this collection cycle */
   lu_byte weak_cleared;
   lu_byte weak_initial_cutoff;
-  lu_byte writers_seen;  /* element writers since the last layout admission */
   lu_byte inline_bytes;  /* immutable tail allocation, retained across resize */
 } Table;
 
