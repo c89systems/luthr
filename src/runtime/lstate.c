@@ -706,6 +706,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   setgcparam(g, MINORMAJOR, LUAI_MINORMAJOR);
   setgcparam(g, MAJORMINOR, LUAI_MAJORMINOR);
   luaP_init(g);
+  g->string_index = NULL;
   for (i=0; i < LUA_NUMTYPES; i++) {
     g->mt[i] = NULL;
     g->metatable_sequence[i] = 0;

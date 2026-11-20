@@ -569,6 +569,7 @@ typedef struct global_State {
   void *policy_context;
   TString *tmname[TM_N];  /* array with tag-method names */
   struct Table *mt[LUA_NUMTYPES];  /* metatables for basic types */
+  struct Table *string_index;  /* atomic projection of the installed __index */
   lua_WarnFunction warnf;  /* warning function */
   void *ud_warn;         /* auxiliary data to 'warnf' */
   LX mainth;  /* main thread of this state */

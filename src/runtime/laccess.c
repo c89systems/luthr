@@ -272,6 +272,17 @@ void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *resul
   }
 }
 
+/* The layout scope excludes all writers. A detached metatable may still
+** carry the flag. Invalidating a newer binding is harmless if it changes
+** after the identity check. */
+void luaA_invalidatestringindex (lua_State *L, Table *mt) {
+  global_State *g = G(L);
+  if (__atomic_load_n(&g->mt[LUA_TSTRING], __ATOMIC_ACQUIRE) == mt)
+    __atomic_store_n(&g->string_index, NULL, __ATOMIC_RELEASE);
+  __atomic_fetch_and(&mt->flags, cast_byte(~LUA_TABLE_STRING_INDEX),
+                     __ATOMIC_RELEASE);
+}
+
 void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
   LuaNativeRoot rooted_object, rooted_mt;
   luaR_pushroot(L, &rooted_object);
@@ -289,8 +300,12 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
     if (mt != NULL) luaA_publish(L, owner, &rooted_mt.value);
     luaC_prewriteptr(L, objectmeta(object), mt);
-    if (ttistable(object))
-      __atomic_store_n(&hvalue(object)->metatable, mt, __ATOMIC_RELEASE);
+    if (ttistable(object)) {
+      Table *table = hvalue(object);
+      if (gettableflags(table) & LUA_TABLE_STRING_INDEX)
+        luaA_invalidatestringindex(L, table);
+      __atomic_store_n(&table->metatable, mt, __ATOMIC_RELEASE);
+    }
     else __atomic_store_n(&uvalue(object)->metatable, mt, __ATOMIC_RELEASE);
     if (mt) {
       luaC_objbarrier(L, gcvalue(object), mt);
@@ -303,15 +318,34 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     int type = ttype(object);
     global_State *g = G(L);
     uint64_t sequence;
-    LuaObjectScope access;
+    Table *index = NULL;
+    LuaObjectScope access, layout;
+    int cache = type == LUA_TSTRING && mt != NULL && luaA_localtable(L, mt) &&
+      mt->metatable == NULL &&
+      !(__atomic_load_n(&mt->sequence, __ATOMIC_RELAXED) & 1);
+    /* Start with a private, strong metatable. Keep its layout owned until
+    ** both the binding and the derived index are visible to other states. */
+    if (cache) luaA_begin(L, obj2gco(mt), &layout);
     luaA_beginlock(L, &g->metatable_access[type], &access);
+    if (cache) {
+      const TValue *field = luaH_Hgetshortstr(mt, g->tmname[TM_INDEX]);
+      if (ttistable(field)) {
+        index = hvalue(field);
+        __atomic_fetch_or(&mt->flags, LUA_TABLE_STRING_INDEX, __ATOMIC_RELEASE);
+      }
+    }
     if (mt != NULL) luaA_share(L, obj2gco(mt));
     luaC_prewriteptr(L, __atomic_load_n(&g->mt[type], __ATOMIC_RELAXED), mt);
     sequence = __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_RELAXED);
     __atomic_store_n(&g->metatable_sequence[type], sequence + 1, __ATOMIC_RELEASE);
+    if (type == LUA_TSTRING)
+      __atomic_store_n(&g->string_index, NULL, __ATOMIC_RELEASE);
     __atomic_store_n(&g->mt[type], mt, __ATOMIC_RELEASE);
+    if (index != NULL)
+      __atomic_store_n(&g->string_index, index, __ATOMIC_RELEASE);
     __atomic_store_n(&g->metatable_sequence[type], sequence + 2, __ATOMIC_RELEASE);
     luaA_end(L, &access);
+    if (cache) luaA_end(L, &layout);
   }
   luaR_poproot(L, &rooted_mt);
   luaR_poproot(L, &rooted_object);
@@ -384,10 +418,17 @@ void luaA_tabletm (lua_State *L, Table *mt, TMS event, LuaNativeRoot *result) {
 ** a detached metatable can be modified before it is installed again. */
 int luaA_readtypefield (lua_State *L, int type, TString *key, TValue *result) {
   global_State *g = G(L);
-  uint64_t sequence =
-    __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE);
+  uint64_t sequence;
   TValue value;
   Table *mt;
+  if (type == LUA_TSTRING && key == g->tmname[TM_INDEX]) {
+    Table *index = __atomic_load_n(&g->string_index, __ATOMIC_ACQUIRE);
+    if (index != NULL) {
+      sethvalue(L, result, index);
+      return 1;
+    }
+  }
+  sequence = __atomic_load_n(&g->metatable_sequence[type], __ATOMIC_ACQUIRE);
   if (sequence & 1) return 0;
   mt = __atomic_load_n(&g->mt[type], __ATOMIC_ACQUIRE);
   if (mt == NULL) setnilvalue(&value);

@@ -1393,6 +1393,7 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   LuaTableWriter *writer;
   Node *node;
   if (luaW_stopped(&G(L)->world) ||
+      (gettableflags(table) & LUA_TABLE_STRING_INDEX) ||
       !published(key) || !published(value) || !luaH_strongaccess(L, table) ||
       !locateslot(table, key, &slot)) return 0;
   node = slot.node;
@@ -1511,6 +1512,8 @@ int luaH_setshared (lua_State *L, Table *table, const TValue *key,
 int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
                        int raw) {
   int hres;
+  if (gettableflags(t) & LUA_TABLE_STRING_INDEX)
+    luaA_invalidatestringindex(L, t);
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
     luaA_sharevalue(L, key);
     luaA_sharevalue(L, value);

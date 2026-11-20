@@ -168,4 +168,33 @@ yielded('write',2)
 yielded('write',key)
 local ok,result=coroutine.resume(co)
 assert(ok and result==true and coroutine.status(co)=='dead')
+
+-- A primitive lookup tracks both edits to its method table and replacement
+-- of that table. Turning the metatable weak also releases its index table.
+local original_string_mt=debug.getmetatable('')
+local function string_label() return ('subject').label end
+local methods={label=41}
+local string_mt={__index=methods}
+debug.setmetatable('',string_mt)
+assert(string_label()==41)
+methods.label=42
+assert(string_label()==42)
+rawset(string_mt,'__index',{label=43})
+assert(string_label()==43)
+string_mt.__index=function(_,key) return key..'-callback' end
+assert(string_label()=='label-callback')
+
+local function weak_string_index()
+  local owner={__index={label=44}}
+  debug.setmetatable('',owner)
+  assert(string_label()==44)
+  return setmetatable(owner,{__mode='v'})
+end
+local weak_string_mt=weak_string_index()
+collectgarbage('collect')
+collectgarbage('collect')
+assert(rawget(weak_string_mt,'__index')==nil)
+assert(not pcall(string_label))
+debug.setmetatable('',original_string_mt)
+assert(('abc'):sub(2)=='bc')
 print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')

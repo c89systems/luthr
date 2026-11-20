@@ -820,6 +820,9 @@ enum {
   LUA_TABLE_VERSION_STEP = 8
 };
 
+/* Retire the direct string index before changing this metatable. */
+#define LUA_TABLE_STRING_INDEX (1u << 7)
+
 typedef struct Table {
   CommonHeader;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */

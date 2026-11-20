@@ -36,6 +36,21 @@ static unsigned returned;
 static __thread lua_State *relocating;
 static __thread unsigned relocations;
 static __thread int capture_retry;
+static __thread lua_State *string_reader;
+
+int __real_lua_setmetatable(lua_State *, int);
+int __wrap_lua_setmetatable(lua_State *state, int object) {
+  lua_State *reader = string_reader;
+  int observe = reader != NULL && lua_type(state, object) == LUA_TSTRING;
+  int result = __real_lua_setmetatable(state, object);
+  if (observe) {
+    string_reader = NULL;
+    require(lua_pcall(reader, 0, 1, 0) == LUA_OK);
+    require(lua_type(reader, -1) == LUA_TSTRING);
+    require(strcmp(lua_tostring(reader, -1), "bc") == 0);
+  }
+  return result;
+}
 
 static int retry_lookup(TString *key) {
   if (capture_retry != 1 || !strisshr(key) ||
@@ -322,6 +337,14 @@ static void primitive_index(lua_State *state) {
   finished_index = NULL;
 }
 
+static void string_publication(lua_State *state) {
+  lua_State *reader = lua_newthread(state);
+  require(luaL_loadstring(reader, "return ('abc'):sub(2)") == LUA_OK);
+  string_reader = reader;
+  require(luaopen_string(state) == 1);
+  require(string_reader == NULL);
+}
+
 static void *primitive_method_reader(void *argument) {
   lua_State *state = argument;
   unsigned i;
@@ -335,9 +358,26 @@ static void *primitive_method_reader(void *argument) {
   return NULL;
 }
 
+static void *primitive_method_editor(void *argument) {
+  lua_State *state = argument;
+  for (unsigned i = 0; i < 5000; i++) {
+    require(lua_getmetatable(state, 1) == 1);
+    lua_pushvalue(state, 2);
+    lua_setfield(state, 3, "__index");
+    require(lua_getfield(state, 1, "label") == LUA_TSTRING);
+    require(lua_getmetatable(state, 1) == 1);
+    /* A fresh metatable is installed at most once, so identity across the
+     * read means the index assignment must already be visible. */
+    if (lua_rawequal(state, 3, 5))
+      require(strcmp(lua_tostring(state, 4), "second") == 0);
+    lua_settop(state, 2);
+  }
+  return NULL;
+}
+
 static void primitive_replacement(lua_State *state, int generational) {
-  pthread_t reader;
-  lua_State *child;
+  pthread_t reader, editor;
+  lua_State *child, *edits;
   unsigned i;
   if (generational)
     lua_gc(state, LUA_GCGEN);
@@ -346,13 +386,21 @@ static void primitive_replacement(lua_State *state, int generational) {
   child = lua_newthread(state);
   lua_pushvalue(state, 1);
   lua_xmove(state, child, 1);
+  edits = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_newtable(state);
+  lua_pushliteral(state, "second");
+  lua_setfield(state, -2, "label");
+  lua_xmove(state, edits, 2);
   require(pthread_create(&reader, NULL, primitive_method_reader, child) == 0);
+  require(pthread_create(&editor, NULL, primitive_method_editor, edits) == 0);
   for (i = 0; i < 2000; i++) {
     set_string_method(state, i % 2 == 0 ? "second" : "first");
     if (i % 67 == 0)
       lua_gc(state, LUA_GCCOLLECT);
   }
   require(pthread_join(reader, NULL) == 0);
+  require(pthread_join(editor, NULL) == 0);
 }
 
 struct index_reader {
@@ -1074,6 +1122,8 @@ int main(int argc, char **argv) {
     primitive_reattach(state);
   else if (strcmp(argv[1], "primitive_index") == 0)
     primitive_index(state);
+  else if (strcmp(argv[1], "string_publication") == 0)
+    string_publication(state);
   else if (strcmp(argv[1], "index_hit") == 0)
     index_hit(state);
   else if (strcmp(argv[1], "index_miss") == 0)

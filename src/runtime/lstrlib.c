@@ -450,7 +450,7 @@ static int str_dump (lua_State *L) {
 /* no coercion from strings to numbers */
 
 static const luaL_Reg stringmetamethods[] = {
-  {"__index", NULL},  /* placeholder */
+  {"__index", NULL},
   {NULL, NULL}
 };
 
@@ -538,6 +538,8 @@ static int arith_unm (lua_State *L) {
 
 
 static const luaL_Reg stringmetamethods[] = {
+  /* Insert the method lookup first so it occupies its main hash position. */
+  {"__index", NULL},
   {"__add", arith_add},
   {"__sub", arith_sub},
   {"__mul", arith_mul},
@@ -546,7 +548,6 @@ static const luaL_Reg stringmetamethods[] = {
   {"__div", arith_div},
   {"__idiv", arith_idiv},
   {"__unm", arith_unm},
-  {"__index", NULL},  /* placeholder */
   {NULL, NULL}
 };
 
@@ -2306,16 +2307,13 @@ static void createmetatable (lua_State *L) {
   luaL_newlibtable(L, stringmetamethods);
   for (entry = stringmetamethods; entry->name != NULL; ++entry) {
     if (entry->func != NULL) luaQ_pushmanaged(L, entry->func, 0);
-    else lua_pushboolean(L, 0);
+    else lua_pushvalue(L, -2);  /* __index is the string library */
     lua_setfield(L, -2, entry->name);
   }
   lua_pushliteral(L, "");  /* dummy string */
   lua_pushvalue(L, -2);  /* copy table */
   lua_setmetatable(L, -2);  /* set table as metatable for strings */
-  lua_pop(L, 1);  /* pop dummy string */
-  lua_pushvalue(L, -2);  /* get string library */
-  lua_setfield(L, -2, "__index");  /* metatable.__index = string */
-  lua_pop(L, 1);  /* pop metatable */
+  lua_pop(L, 2);  /* pop dummy string and metatable */
 }
 
 
