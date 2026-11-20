@@ -966,8 +966,8 @@ static Node *getfreepos (Table *t) {
 ** its main position), new key goes to an empty position. Return 0 if
 ** could not insert key (could not find a free space).
 */
-static int insertkey (lua_State *L, Table *t, const TValue *key, TValue *value) {
-  Node *mp = mainpositionTV(t, key);
+static int insertat (lua_State *L, Table *t, const TValue *key, TValue *value,
+                     Node *mp) {
   /* table cannot already contain the key */
   lua_assert(isabstkey(getgeneric(t, key, 0)));
   if (!isempty(gval(mp)) || isdummy(t)) {  /* main position is taken? */
@@ -1014,6 +1014,9 @@ static int insertkey (lua_State *L, Table *t, const TValue *key, TValue *value) 
   return 1;
 }
 
+static int insertkey (lua_State *L, Table *t, const TValue *key, TValue *value) {
+  return insertat(L, t, key, value, mainpositionTV(t, key));
+}
 
 /*
 ** Insert a key in a table where there is space for that key, the
@@ -1094,8 +1097,7 @@ static lu_byte rawgetint (Table *t, lua_Integer key, TValue *res) {
 /*
 ** search function for short strings
 */
-const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
-  Node *n = hashstr(t, key);
+l_sinline const TValue *findshortstr (Node *n, TString *key) {
   lua_assert(strisshr(key));
   for (;;) {  /* check whether 'key' is somewhere in the chain */
     if (keyisshrstr(n) && eqshrstr(keystrval(n), key))
@@ -1109,6 +1111,9 @@ const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
   }
 }
 
+const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
+  return findshortstr(hashstr(t, key), key);
+}
 
 static lu_byte rawgetshortstr (Table *t, TString *key, TValue *res) {
   return finishnodeget(luaH_Hgetshortstr(t, key), res);
@@ -1246,35 +1251,13 @@ static int psetint (lua_State *L, Table *t, lua_Integer key, TValue *val) {
 }
 
 
-/* Update a short-string key or retain its owned insertion location. */
-
-static int rawpsetshortstr (lua_State *L, Table *t, TString *key, TValue *val) {
-  const TValue *slot = luaH_Hgetshortstr(t, key);
-  if (!ttisnil(slot)) {  /* key already has a value? (all too common) */
-    tracenodewrite(L, slot, val);
-    setnodevalue(NULL, cast(Node*, slot), val);  /* update it */
-    return HOK;  /* done */
-  }
-  /* Else, either table has new-index metamethod, or it needs barrier,
-     or it needs to rehash for the new key. In any of these cases, the
-     operation cannot be completed here. Return a code for the caller. */
-  return retpsetcode(t, slot);
-}
-
-
-static int rawpsetstr (lua_State *L, Table *t, TString *key, TValue *val) {
-  if (strisshr(key))
-    return rawpsetshortstr(L, t, key, val);
-  else
-    return finishnodeset(L, t, Hgetlongstr(t, key), val);
-}
-
-
 static int rawpset (lua_State *L, Table *t, const TValue *key, TValue *val) {
   luaC_tracevalue(L, key);
   switch (ttypetag(key)) {
-    case LUA_VSHRSTR: return rawpsetshortstr(L, t, tsvalue(key), val);
-    case LUA_VLNGSTR: return rawpsetstr(L, t, tsvalue(key), val);
+    case LUA_VSHRSTR:
+      return finishnodeset(L, t, luaH_Hgetshortstr(t, tsvalue(key)), val);
+    case LUA_VLNGSTR:
+      return finishnodeset(L, t, Hgetlongstr(t, tsvalue(key)), val);
     case LUA_VNUMINT: return psetint(L, t, ivalue(key), val);
     case LUA_VNIL: return HNOTFOUND;
     case LUA_VNUMFLT: {
@@ -1457,35 +1440,52 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
                  int raw) {
   uint64_t sequence;
   uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
-  int hres, done = 1;
+  Node *position = NULL;
+  int hres, tracing, field, done = 1;
   if (sharing & LUA_OBJECT_SHARED)
     return sharedset(L, t, key, value, raw, NULL);
-  if (sharing != cast(uintptr_t, L) || !luaH_strongaccess(L, t)) return 0;
+  if (sharing != cast(uintptr_t, L)) return 0;
   sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
   if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
-  __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
-  hres = rawpset(L, t, key, value);
+  /* Only the owner and a concurrent marker can read these slots. Sweep
+  ** reads the stable storage pointers and capacities. A new trace requires
+  ** quiescence, and the write completes before reaching a safepoint. */
+  tracing = luaC_tracing(L);
+  if (tracing) {
+    if (!luaH_strongaccess(L, t)) return 0;
+    __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
+  }
+  field = ttisshrstring(key);
+  if (field) {
+    TString *name = tsvalue(key);
+    position = hashstr(t, name);
+    if (tracing) luaC_traceobject(L, obj2gco(name));
+    hres = finishnodeset(L, t, findshortstr(position, name), value);
+  }
+  else hres = rawpset(L, t, key, value);
   if (hres != HOK) {
     if ((!raw && t->metatable != NULL) ||
-        (hres == HNOTFOUND &&
+        (!field && hres == HNOTFOUND &&
          (ttisnil(key) || ttisfloat(key) || isextstr(key)))) done = 0;
     else if (hres == HNOTFOUND) {
       luaC_tracevalue(L, value);
       if (!ttisnil(value)) {
-        done = insertkey(L, t, key, value);
+        done = field ? insertat(L, t, key, value, position)
+                     : insertkey(L, t, key, value);
         if (done) luaC_barrierback(L, obj2gco(t), key);
       }
     }
     else rawfinishset(L, t, key, value, hres);  /* existing array/hash storage */
   }
   if (done) {
-    invalidateTMcache(t);
+    settableflags(t, gettableflags(t) & cast_byte(~maskflags));
     luaC_barrierback(L, obj2gco(t), value);
   }
   /* Failure has not changed any key, value or image. Restore that version;
   ** the rooted fallback will publish the operation's single committed image. */
-  __atomic_store_n(&t->sequence, sequence + (done ? LUA_TABLE_VERSION_STEP : 0),
-                   __ATOMIC_RELEASE);
+  if (tracing)
+    __atomic_store_n(&t->sequence, sequence + (done ? LUA_TABLE_VERSION_STEP : 0),
+                     __ATOMIC_RELEASE);
   return done;
 }
 

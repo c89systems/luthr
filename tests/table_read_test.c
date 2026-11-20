@@ -870,16 +870,15 @@ static void lua_writes(lua_State *state, Table *metatable) {
   before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   require(lua_pcall(state, 2, 1, 0) == LUA_OK);
   require(lua_tointeger(state, -1) == 59);
-  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before ==
-          4 * LUA_TABLE_VERSION_STEP);
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == before);
   require(metatable == NULL ||
           __atomic_load_n(&metatable->sequence, __ATOMIC_ACQUIRE) ==
               meta_before);
   lua_pop(state, 1);
 }
 
-/* Insertion, including resize, has the same single ownership boundary as an
- * update. Existing values must not acquire the table's unrelated metatable. */
+/* Private writes use the existing layout until insertion needs a resize.
+ * Existing values must not acquire the table's unrelated metatable. */
 static void writes(lua_State *state, int generational) {
   Table *table, *metatable;
   uint64_t before;
@@ -887,7 +886,7 @@ static void writes(lua_State *state, int generational) {
   if (generational)
     lua_gc(state, LUA_GCGEN);
   lua_gc(state, LUA_GCSTOP);
-  lua_newtable(state);
+  lua_createtable(state, 128, 512);
   table = (Table *)lua_topointer(state, 1);
   before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   for (i = 1; i <= 128; i++) {
@@ -904,8 +903,7 @@ static void writes(lua_State *state, int generational) {
     lua_pushinteger(state, i * 3);
     lua_settable(state, 1);
   }
-  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) - before ==
-          LUA_TABLE_VERSION_STEP * 3 * 128);
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == before);
   lua_getfield(state, 1, "field-128");
   require(lua_tointeger(state, -1) == 128);
   lua_pop(state, 1);
@@ -919,6 +917,15 @@ static void writes(lua_State *state, int generational) {
   lua_setfield(state, -2, "__newindex");
   lua_setmetatable(state, 1);
   lua_writes(state, metatable);
+  lua_newtable(state);
+  table = (Table *)lua_topointer(state, -1);
+  before = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  lua_pushinteger(state, 42);
+  lua_setfield(state, -2, "first");
+  require(__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) ==
+          before + LUA_TABLE_VERSION_STEP);
+  lua_getfield(state, -1, "first");
+  require(lua_tointeger(state, -1) == 42);
   lua_gc(state, LUA_GCCOLLECT);
 }
 
