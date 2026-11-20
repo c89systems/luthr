@@ -121,30 +121,32 @@ void luaX_endreserve (lua_State *target, int reservation) {
   if (reservation == 1) release(target, luaQ_ownertoken());
 }
 
-static void lockstate (lua_State *L, LuaThreadContext *thread,
-                       NativeStackContext *context, int values) {
+static void preparecall (lua_State *L, LuaExecution *execution) {
+  luaCP_apply(L);
+  if (L->errorJmp == NULL && execution != NULL) luaE_refreshnativestack(L);
+}
+
+static void *lockstate (lua_State *L, LuaThreadContext *thread,
+                        NativeStackContext *context) {
   LuaExecution *execution = context->execution;
   void *token = execution != NULL ? cast(void *, execution)
                                   : cast(void *, &thread->native);
   if (execution != NULL) luaQ_entermanaged(L, execution);
   reserve(L, context, token, LUA_GATE_ACTIVE);
   luaW_enter(L);
-  if (!values) {
-    luaCP_apply(L);
-    if (L->errorJmp == NULL && execution != NULL)
-      luaE_refreshnativestack(L);
-  }
+  return token;
 }
 
 void luaX_lockstate (lua_State *L) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
-  lockstate(L, thread, context, 0);
+  lockstate(L, thread, context);
+  preparecall(L, context->execution);
 }
 
 static void unlockstate (lua_State *L, void *token, int values) {
-  LuaExecution *execution = luaX_execution(L);
+  LuaExecution *execution = L->stack_gate.context->execution;
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
   ** and the next allocating/calling API, instead of extending every read. */
@@ -201,38 +203,38 @@ static int attachedapi (lua_State *L, NativeStackContext *context) {
   return 1;
 }
 
-static void apienter (lua_State *L, int values) {
+static void *apienter (lua_State *L) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
-  if (!attachedapi(L, context)) lockstate(L, thread, context, values);
-  else luaX_pollrequests(L);
+  if (!attachedapi(L, context)) return lockstate(L, thread, context);
+  luaX_pollrequests(L);
+  return NULL;
 }
 
-static void apileave (lua_State *L, int values) {
+void luaX_apienter (lua_State *L) {
+  if (apienter(L) != NULL) preparecall(L, L->stack_gate.context->execution);
+}
+
+void luaX_apileave (lua_State *L) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
                                  ? thread->override : &thread->native;
   if (!attachedapi(L, context)) {
     void *token = context->execution != NULL ? cast(void *, context->execution)
                                             : cast(void *, &thread->native);
-    unlockstate(L, token, values);
+    unlockstate(L, token, 0);
   }
 }
 
-void luaX_apienter (lua_State *L) { apienter(L, 0); }
+void *luaX_valueenter (lua_State *L) { return apienter(L); }
 
-void luaX_apileave (lua_State *L) { apileave(L, 0); }
+void luaX_valueleave (lua_State *L, void *owner) {
+  if (owner != NULL) unlockstate(L, owner, 1);
+}
 
-void luaX_valueenter (lua_State *L) { apienter(L, 1); }
-
-void luaX_valueleave (lua_State *L) { apileave(L, 1); }
-
-void luaX_valuecall (lua_State *L) {
-  if (attachedapi(L, luaX_context(L))) return;
-  luaCP_apply(L);
-  if (L->errorJmp == NULL && luaX_execution(L) != NULL)
-    luaE_refreshnativestack(L);
+void luaX_valuecall (lua_State *L, void *owner) {
+  if (owner != NULL) preparecall(L, L->stack_gate.context->execution);
 }
 
 /* Reserve both stacks before joining managed execution. A blocked reservation

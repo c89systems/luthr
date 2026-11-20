@@ -1261,9 +1261,9 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
 
 LUA_API int lua_isyieldable (lua_State *L) {
   int result;
-  luaX_valueenter(L);
+  void *owner = luaX_valueenter(L);
   result = yieldable(L);
-  luaX_valueleave(L);
+  luaX_valueleave(L, owner);
   return result;
 }
 
