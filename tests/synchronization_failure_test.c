@@ -126,6 +126,10 @@ static int facade_case(const char *name) {
 }
 
 static int run_case(const char *name) {
+  static const char *const conditions[] = {
+      "allocator_condition",    "world_condition",
+      "world_resume_condition", "world_phase_condition",
+      "world_trace_condition",  "pool_condition"};
   lua_State *state;
   int status = LUA_OK;
   int failed = 0;
@@ -140,9 +144,17 @@ static int run_case(const char *name) {
     return facade_case(name);
   if (main_case) {
     int position = allocator_case ? 1 : world_case ? 2 : 3;
-    if (condition_case)
-      fail_condition = position;
-    else if (publisher_case)
+    if (condition_case) {
+      unsigned i;
+      for (i = 0; i < sizeof(conditions) / sizeof(conditions[0]); i++) {
+        if (strcmp(name, conditions[i]) == 0) {
+          fail_condition = (int)i + 1;
+          break;
+        }
+      }
+      if (fail_condition == 0)
+        return 1;
+    } else if (publisher_case)
       fail_mutex = 2 + LUA_PUBLISH_SHARDS;
     else
       fail_mutex = position + (pool_case ? LUA_PUBLISH_SHARDS : 0);

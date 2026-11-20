@@ -186,8 +186,10 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
     if (part == NULL ||
         (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT)))
       luaQ_wake(&world->changed, &world->waiters);
-    do {
-      if (part != NULL && !luaW_stopped(world)) {
+    for (;;) {
+      luaW_waitresume(L);
+      if (!(part != NULL ? partbusy(part) : busy(L, table, writer))) break;
+      if (part != NULL) {
         /* The release tests this bit in the same operation that opens the
         ** partition. A registering waiter either observes that departure
         ** or is visible to the release while holding the predicate mutex. */
@@ -200,7 +202,7 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
       }
       else
         luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-    } while (luaW_stopped(world) || (part != NULL ? partbusy(part) : busy(L, table, writer)));
+    }
     luaW_resume(L);
     luaC_checksnapshot(L);
     L->object_waiting--;

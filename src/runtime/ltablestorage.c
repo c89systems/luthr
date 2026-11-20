@@ -166,8 +166,7 @@ static void waitstorage (lua_State *L, uint64_t needed, int reader) {
     wait = wait && __atomic_load_n(&world->storage_bytes, __ATOMIC_ACQUIRE) != 0;
   }
   if (wait) luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  while (luaW_stopped(world))
-    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  luaW_waitresume(L);
   luaW_resume(L);
   if (--world->storage_waiters == 0)
     __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_STORAGE_WAIT),

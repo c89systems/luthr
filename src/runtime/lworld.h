@@ -28,10 +28,10 @@ enum {
 
 typedef struct LuaWorld {
   pthread_mutex_t mutex;
-  pthread_cond_t changed;
+  pthread_cond_t changed, resumed;
   LuaOwner collector;
   LuaOwner heap_owner;
-  LuaWaiter *waiters;
+  LuaWaiter *waiters, *resume_waiters;
   struct LuaHeapWaiter *heap_head;
   struct LuaHeapWaiter **heap_tail;
   LuaParticipation *participants;
@@ -84,6 +84,8 @@ LUAI_FUNC void luaW_leave (LuaWorld *world, unsigned flags);
 LUAI_FUNC unsigned luaW_active (const LuaParticipation *participant);
 LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
+/* Caller retains its stack gate and holds world.mutex while inactive. */
+LUAI_FUNC void luaW_waitresume (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);
 LUAI_FUNC void luaW_collectenter (lua_State *L);
 /* Phase polls may defer behind an existing metadata owner without parking. */

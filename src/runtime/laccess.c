@@ -139,11 +139,13 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
         L->object_waiting++;
         luaW_deactivate(L);
         luaQ_wake(&world->changed, &world->waiters);
-        do {
-          luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+        for (;;) {
+          luaW_waitresume(L);
           luaA_watchlock(lock);
-        } while (luaW_stopped(world) ||
-                 !(scope->held = tryaccess(L, lock, object)));
+          scope->held = tryaccess(L, lock, object);
+          if (scope->held) break;
+          luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+        }
         luaW_resume(L);
         luaC_checksnapshot(L);
         L->object_waiting--;

@@ -62,8 +62,7 @@ void luaAL_enter (lua_State *L) {
     /* Never own callback admission while inactive. Join any intervening stop
     ** and publish stable roots before retrying the fast ownership claim. */
     luaX_checksync(pthread_mutex_lock(&world->mutex));
-    while (luaW_stopped(world))
-      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+    luaW_waitresume(L);
     luaW_resume(L);
     /* A stack resize retains metadata ownership while pointers are offsets.
     ** Its entry already published roots; do not scan that partial frame. */

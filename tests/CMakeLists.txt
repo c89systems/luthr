@@ -133,7 +133,7 @@ target_compile_options(stack_admission_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(stack_admission_test PRIVATE luthr_static Threads::Threads)
 target_link_options(stack_admission_test PRIVATE -Wl,--wrap=luaW_leave -Wl,--wrap=luaQ_wait)
 foreach(case IN ITEMS fifo_incremental fifo_generational retire_incremental retire_generational
-    reuse_incremental reuse_generational)
+    reuse_incremental reuse_generational world_stop_incremental world_stop_generational)
   add_test(NAME stack_admission_${case} COMMAND stack_admission_test ${case})
   set_tests_properties(stack_admission_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
@@ -1092,7 +1092,8 @@ target_link_libraries(synchronization_failure_test PRIVATE luthr_static)
 target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
-foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition publisher_mutex pool_mutex pool_condition
+foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition
+    world_resume_condition world_phase_condition world_trace_condition publisher_mutex pool_mutex pool_condition
     thread_no_resources closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex
     facade_world_mutex facade_pool_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})

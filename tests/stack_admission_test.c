@@ -15,11 +15,12 @@
     }                                                                          \
   } while (0)
 
-enum { FIFO, RETIRE };
+enum { FIFO, RETIRE, WORLD_STOP };
 struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *state;
+  LuaWaiter **waiters;
   unsigned queued[4];
   unsigned paused, resume;
   int mode;
@@ -53,16 +54,17 @@ void __wrap_luaW_leave(LuaWorld *world, unsigned flags) {
 void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
   struct fixture *fixture = role > 0 ? current : NULL;
-  int measured = fixture != NULL && fixture->mode == FIFO && role > 0 &&
+  int measured = fixture != NULL && fixture->mode != RETIRE &&
                  state == fixture->state && mutex == &G(state)->world.mutex;
   if (measured) {
     require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->waiters = waiters;
     fixture->queued[role] = 1;
     require(pthread_cond_broadcast(&fixture->changed) == 0);
     require(pthread_mutex_unlock(&fixture->mutex) == 0);
   }
   __real_luaQ_wait(state, mutex, changed, waiters);
-  if (measured && role == 1 && !fixture->paused &&
+  if (measured && fixture->mode == FIFO && role == 1 && !fixture->paused &&
       __atomic_load_n(&state->stack_gate.word, __ATOMIC_ACQUIRE) ==
           LUA_GATE_WAITING) {
     /* Delay the selected recipient after wakeup, before it can claim its
@@ -155,6 +157,36 @@ static void retire(lua_State *parent, struct fixture *fixture) {
   require(pthread_join(thread, NULL) == 0);
 }
 
+static void *enter_managed(void *argument) {
+  struct fixture *fixture = argument;
+  role = 1;
+  luaX_lockstate(fixture->state);
+  luaX_unlockstate(fixture->state);
+  lua_pushinteger(fixture->state, 1);
+  return NULL;
+}
+
+static void world_stop(lua_State *parent, struct fixture *fixture) {
+  LuaWorld *world = &G(parent)->world;
+  pthread_t thread;
+  fixture->state = lua_newthread(parent);
+  luaX_lockstate(parent);
+  luaW_stop(parent);
+  require(pthread_create(&thread, NULL, enter_managed, fixture) == 0);
+  wait_flag(fixture, &fixture->queued[1]);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  require(luaW_stopped(world) && *fixture->waiters != NULL);
+  luaQ_wake(&world->changed, &world->waiters);
+  /* An unrelated notification must leave this parked entry registered. */
+  require(*fixture->waiters != NULL);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+  luaW_start(parent);
+  luaX_unlockstate(parent);
+  require(pthread_join(thread, NULL) == 0);
+  require(lua_gettop(fixture->state) == 1 &&
+          lua_tointeger(fixture->state, 1) == 1);
+}
+
 static int one(lua_State *state) {
   lua_pushinteger(state, 1);
   return 1;
@@ -205,7 +237,10 @@ int main(int argc, char **argv) {
     fifo(state, &fixture);
   else if (strncmp(argv[1], "reuse_", 6) == 0)
     reuse_frames(state);
-  else {
+  else if (strncmp(argv[1], "world_stop_", 11) == 0) {
+    fixture.mode = WORLD_STOP;
+    world_stop(state, &fixture);
+  } else {
     require(strncmp(argv[1], "retire_", 7) == 0);
     fixture.mode = RETIRE;
     retire(state, &fixture);

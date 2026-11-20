@@ -39,6 +39,7 @@ int luaW_init (global_State *g) {
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
   world->waiters = g->phase_waiters = g->minor_waiters = g->trace_waiters = NULL;
+  world->resume_waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
@@ -49,12 +50,10 @@ int luaW_init (global_State *g) {
     luaX_checksync(pthread_mutex_destroy(&world->mutex));
     return status;
   }
+  status = pthread_cond_init(&world->resumed, NULL);
+  if (status != 0) goto failed_changed;
   status = pthread_cond_init(&g->phase_changed, NULL);
-  if (status != 0) {
-    luaX_checksync(pthread_cond_destroy(&world->changed));
-    luaX_checksync(pthread_mutex_destroy(&world->mutex));
-    return status;
-  }
+  if (status != 0) goto failed_resumed;
   status = pthread_mutex_init(&g->trace_mutex, NULL);
   if (status != 0) goto failed_phase;
   status = pthread_cond_init(&g->trace_changed, NULL);
@@ -75,6 +74,9 @@ int luaW_init (global_State *g) {
   luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
  failed_phase:
   luaX_checksync(pthread_cond_destroy(&g->phase_changed));
+ failed_resumed:
+  luaX_checksync(pthread_cond_destroy(&world->resumed));
+ failed_changed:
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
   return status;
@@ -86,6 +88,7 @@ void luaW_destroy (global_State *g) {
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
+             world->resume_waiters == NULL &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
              g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
@@ -99,6 +102,7 @@ void luaW_destroy (global_State *g) {
   luaX_checksync(pthread_cond_destroy(&g->trace_changed));
   luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
   luaX_checksync(pthread_cond_destroy(&g->phase_changed));
+  luaX_checksync(pthread_cond_destroy(&world->resumed));
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
 }
@@ -213,6 +217,12 @@ void luaW_resume (lua_State *L) {
   luaW_activate(L);
 }
 
+void luaW_waitresume (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  while (luaW_stopped(world))
+    luaQ_wait(L, &world->mutex, &world->resumed, &world->resume_waiters);
+}
+
 static void __attribute__((noinline)) awaitentry (lua_State *L, LuaWorld *world) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   /* Only the atomic participation record can change before admission. In
@@ -222,9 +232,7 @@ static void __attribute__((noinline)) awaitentry (lua_State *L, LuaWorld *world)
   if (luaW_stopped(world)) {
     world->entry_waiting++;
     luaQ_wake(&world->changed, &world->waiters);
-    do {
-      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-    } while (luaW_stopped(world));
+    luaW_waitresume(L);
     luaW_resume(L);
     if (--world->entry_waiting == 0)
       luaQ_wake(&world->changed, &world->waiters);
@@ -334,6 +342,7 @@ void luaW_start (lua_State *L) {
   luaW_resume(L);  /* the collector resumes as an ordinary mutator */
   __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_STOPPED),
                      __ATOMIC_SEQ_CST);
+  luaQ_wake(&world->resumed, &world->resume_waiters);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaSC_notifygc(G(L));
@@ -483,8 +492,7 @@ void luaW_waitcollector (lua_State *L, int reason) {
   else if (!luaW_stopped(world))
     luaQ_wait(L, &world->mutex, &g->phase_changed,
       reason == LUA_WAIT_MINOR ? &g->minor_waiters : &g->phase_waiters);
-  while (luaW_stopped(world))
-    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  luaW_waitresume(L);
   luaW_resume(L);
   luaC_checksnapshot(L);
 }
