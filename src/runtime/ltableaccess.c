@@ -5,14 +5,68 @@
 #include "ltableaccess.h"
 #include "ldo.h"
 
+static int partbusy (const LuaHashPart *part) {
+  return (__atomic_load_n(&part->gate, __ATOMIC_SEQ_CST) &
+          LUA_HASH_WRITING) != 0;
+}
+
 static int active (global_State *g, Table *table, LuaTableWriter *writer) {
+  LuaHashDirectory *directory;
   unsigned i;
   if (writer != NULL)
     return __atomic_load_n(&writer->owner, __ATOMIC_SEQ_CST) == table;
+  directory = luaH_hashdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
+  if (directory != NULL)
+    for (i = 1; i < LUA_HASH_PARTS; ++i)
+      if (partbusy(&directory->parts[i])) return 1;
+  if (!(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) &
+        LUA_TABLE_ELEMENT_WRITES)) return 0;
   for (i = 0; i < LUA_TABLE_WRITERS; i++)
     if (__atomic_load_n(&g->table_writers[i].owner, __ATOMIC_SEQ_CST) == table)
       return 1;
   return 0;
+}
+
+void luaH_releasepart (lua_State *L, Table *table, LuaHashPart *part) {
+  unsigned previous = __atomic_fetch_and(&part->gate,
+    ~cast_uint(LUA_HASH_WRITING), __ATOMIC_SEQ_CST);
+  int watched = luaA_lockwatched(&table->access);
+  lua_assert(previous & LUA_HASH_WRITING);
+  if ((previous & LUA_HASH_WAITING) || watched) {
+    LuaWorld *world = &G(L)->world;
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    if (previous & LUA_HASH_WAITING)
+      luaQ_wake(&part->changed, &part->waiters);
+    if (watched) luaQ_wake(&world->changed, &world->waiters);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  }
+}
+
+int luaH_claimpart (lua_State *L, Table *table, LuaHashPart *part,
+                    uint64_t layout) {
+  unsigned spins;
+  /* A partition writer never allocates or reaches a safepoint. A short
+  ** retry can finish the write before it needs to publish roots and park. */
+  for (spins = 0;; ++spins) {
+    unsigned gate = __atomic_load_n(&part->gate, __ATOMIC_RELAXED);
+    if (!(gate & LUA_HASH_WRITING) &&
+        __atomic_compare_exchange_n(&part->gate, &gate,
+          gate | LUA_HASH_WRITING, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+      break;
+    if (spins == 32 || luaW_stopped(&G(L)->world)) return -1;
+    __builtin_ia32_pause();
+  }
+  /* Either the layout owner sees this claim or the claimant observes the
+  ** closed layout before touching storage. Unlike a row, the partition
+  ** exists for the rest of the table's lifetime and needs no advertisement. */
+  if (luaA_lockowner(&table->access) != NULL ||
+      !luaH_strongaccess(L, table) ||
+      ((__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) ^ layout) &
+       ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS)) != 0) {
+    luaH_releasepart(L, table, part);
+    return 0;
+  }
+  return 1;
 }
 
 void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
@@ -80,14 +134,13 @@ int luaH_beginsplit (Table *table, LuaTableWriter *writer, Value *slot,
 int luaH_quiescewriters (lua_State *L, Table *table, int wait) {
   uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_RELAXED);
   lua_assert(layout & 1);
-  if (layout & LUA_TABLE_ELEMENT_WRITES) {
-    if (active(G(L), table, NULL)) {
-      if (!wait) return 0;
-      luaH_waitwriters(L, table, NULL);
-    }
+  if (active(G(L), table, NULL)) {
+    if (!wait) return 0;
+    luaH_waitwriters(L, table, NULL);
+  }
+  if (layout & LUA_TABLE_ELEMENT_WRITES)
     __atomic_store_n(&table->sequence, layout & ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS),
                      __ATOMIC_RELEASE);
-  }
   return 1;
 }
 
@@ -103,6 +156,7 @@ static int layoutbusy (lua_State *L, Table *table, LuaTableWriter *writer) {
 
 /* Publish the whole Lua frame before parking, as an object scope does. */
 static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
+                       LuaHashPart *part,
                        int (*busy)(lua_State *, Table *, LuaTableWriter *)) {
   LuaWorld *world = &G(L)->world;
   ptrdiff_t saved_top = -1;
@@ -113,17 +167,32 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (writer != NULL)
     __atomic_fetch_add(&writer->waiting, 1, __ATOMIC_SEQ_CST);
-  else luaA_watchlock(&table->access);
-  if (luaW_stopped(world) || busy(L, table, writer)) {
+  else if (part == NULL) luaA_watchlock(&table->access);
+  if (luaW_stopped(world) || (part != NULL ? partbusy(part) : busy(L, table, writer))) {
     lua_assert(world->heap_depth == 0 || !luaX_isowner(L, &world->heap_owner));
     L->native_depth++;
     L->object_waiting++;
     luaW_deactivate(L);
-    luaQ_wake(&world->changed, &world->waiters);
+    if (part == NULL ||
+        (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT)))
+      luaQ_wake(&world->changed, &world->waiters);
     do {
-      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-      if (writer == NULL) luaA_watchlock(&table->access);
-    } while (luaW_stopped(world) || busy(L, table, writer));
+      if (part != NULL && !luaW_stopped(world)) {
+        /* The release tests this bit in the same operation that opens the
+        ** partition. A registering waiter either observes that departure
+        ** or is visible to the release while holding the predicate mutex. */
+        if (__atomic_fetch_or(&part->gate, LUA_HASH_WAITING,
+                              __ATOMIC_SEQ_CST) & LUA_HASH_WRITING)
+          luaQ_wait(L, &world->mutex, &part->changed, &part->waiters);
+        if (part->waiters == NULL)
+          __atomic_fetch_and(&part->gate, ~cast_uint(LUA_HASH_WAITING),
+                             __ATOMIC_SEQ_CST);
+      }
+      else {
+        luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+        if (writer == NULL && part == NULL) luaA_watchlock(&table->access);
+      }
+    } while (luaW_stopped(world) || (part != NULL ? partbusy(part) : busy(L, table, writer)));
     luaW_resume(L);
     luaC_checksnapshot(L);
     L->object_waiting--;
@@ -136,14 +205,19 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
 }
 
 void luaH_waitwriters (lua_State *L, Table *table, LuaTableWriter *writer) {
-  waittable(L, table, writer, writersbusy);
+  waittable(L, table, writer, NULL, writersbusy);
+}
+
+void luaH_waitpart (lua_State *L, Table *table, LuaHashPart *part) {
+  if (partbusy(part) || luaW_stopped(&G(L)->world))
+    waittable(L, table, NULL, part, NULL);
 }
 
 /* Waiting for a layout change is not a request to own the following layout.
 ** Reentrant native borrows and the quiescent collector keep their scoped path. */
 int luaH_waitlayout (lua_State *L, Table *table) {
   if (luaW_iscollector(L) || !layoutbusy(L, table, NULL)) return 0;
-  waittable(L, table, NULL, layoutbusy);
+  waittable(L, table, NULL, NULL, layoutbusy);
   return 1;
 }
 

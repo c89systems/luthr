@@ -7,6 +7,7 @@
 #ifndef ltable_h
 #define ltable_h
 
+#include <pthread.h>
 #include "lobject.h"
 
 
@@ -35,9 +36,16 @@ LUAI_DDEC(const Node luaH_dummynode;)
 /* The tag distinguishes a directory from a single node image without
 ** expanding every small table. Once installed, the directory stays put. */
 #define LUA_HASH_PARTS 16
+enum {
+  LUA_HASH_WRITING = 1,
+  LUA_HASH_WAITING = 2
+};
 typedef struct LuaHashPart {
   Node *nodes;
-  uint64_t version;
+  uint64_t version;  /* odd during structural or split-value changes */
+  unsigned gate;
+  pthread_cond_t changed;
+  struct LuaWaiter *waiters;  /* world.mutex */
 } LuaHashPart;
 
 typedef struct LuaHashDirectory {

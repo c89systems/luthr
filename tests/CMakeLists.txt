@@ -464,8 +464,8 @@ luthr_test_program(table_partitions_test table_partitions_test.c)
 set_target_properties(table_partitions_test PROPERTIES C_STANDARD 99)
 target_compile_options(table_partitions_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(table_partitions_test PRIVATE luthr_static)
-target_link_options(table_partitions_test PRIVATE -Wl,--wrap=luaH_releasewriter
-  -Wl,--wrap=luaM_realloc_)
+target_link_options(table_partitions_test PRIVATE -Wl,--wrap=luaH_releasepart
+  -Wl,--wrap=luaQ_wait -Wl,--wrap=luaM_realloc_)
 foreach(collector IN ITEMS incremental generational)
   add_test(NAME table_partitions_${collector}
     COMMAND table_partitions_test ${collector})
