@@ -53,7 +53,7 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
   struct fixture *fixture = active;
   if (fixture != NULL && fixture->handshake && L == fixture->worker &&
-      mutex == &G(L)->world.mutex && G(L)->world.stopped &&
+      mutex == &G(L)->world.mutex && luaW_stopped(&G(L)->world) &&
       luaQ_isowner(&G(L)->world.collector)) {
     require(pthread_mutex_lock(&fixture->mutex) == 0);
     fixture->waiting = 1;
@@ -114,7 +114,7 @@ void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
   if (watched) {
     require(L == fixture->collector && L->reclaiming);
     require(L->world_depth == 0 && luaW_scope(L).heap == 0);
-    require(!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_ACQUIRE));
+    require(!luaW_stopped(&G(L)->world));
     require(L->retired != NULL); /* Other private garbage is still pending. */
     if (fixture->detached)
       scope = luaW_detach(L); /* Model an actual allocator ownership wait. */

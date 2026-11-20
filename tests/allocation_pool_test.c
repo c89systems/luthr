@@ -171,7 +171,7 @@ static void batch(int capped, int collect_during_init) {
     require(pthread_join(second, NULL) == 0);
     require(allocator.live <= base + 5 * 4096);
     require(pthread_create(&collector, NULL, collect, L) == 0);
-    while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST))
+    while (!luaW_stopped(&G(L)->world))
       sched_yield();
     require(pthread_mutex_lock(&pause_init.mutex) == 0);
     pause_init.release = 1;

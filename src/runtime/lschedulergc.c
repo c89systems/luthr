@@ -23,7 +23,7 @@ void luaSC_collectidle (LuaCarrier *carrier, LuaExecutionSlot *slot) {
       if (luaC_tracing(L)) worked = luaC_tracebatch(L, LUA_TRACE_BATCH);
       else worked = luaC_sweeppayload(L, LUA_TRACE_BATCH);
       if (worked == 0 ||
-          __atomic_load_n(&s->global->world.stopped, __ATOMIC_SEQ_CST) ||
+          luaW_stopped(&s->global->world) ||
           __atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) != 0 ||
           __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) break;
     }

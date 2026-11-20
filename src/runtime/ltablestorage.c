@@ -48,7 +48,8 @@ static LuaTableRetirement *finishbatch (lua_State *L) {
   /* The replacement's release-publication precedes this epoch. An entrant
   ** announcing a later epoch must observe the replacement. Older entrants
   ** remain registered until a safepoint or API withdrawal. */
-  epoch = __atomic_fetch_add(&world->storage_epoch, 1, __ATOMIC_SEQ_CST);
+  epoch = luaW_epoch(__atomic_fetch_add(&world->control, LUA_WORLD_EPOCH_STEP,
+                                        __ATOMIC_SEQ_CST));
   for (block = head; block != NULL; block = block->next) block->epoch = epoch;
   __atomic_fetch_add(&world->storage_bytes, L->storage_bytes, __ATOMIC_RELAXED);
   L->storage_retired = L->storage_tail = NULL;
@@ -72,7 +73,7 @@ void luaHS_publishpending (lua_State *L) {
 }
 
 static void notify (LuaWorld *world) {
-  if (__atomic_load_n(&world->storage_waiting, __ATOMIC_SEQ_CST)) {
+  if (luaW_control(world) & LUA_WORLD_STORAGE_WAIT) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -81,19 +82,22 @@ static void notify (LuaWorld *world) {
 
 void luaHS_quiescent (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  LuaParticipation *participant = L->admission;
-  uint64_t epoch = __atomic_load_n(&world->storage_epoch, __ATOMIC_SEQ_CST);
-  if (__atomic_load_n(&participant->storage_epoch, __ATOMIC_RELAXED) != epoch) {
-    __atomic_store_n(&participant->storage_epoch, epoch, __ATOMIC_SEQ_CST);
-    notify(world);
-  }
+  luaHS_announce(world, L->admission, luaW_epoch(luaW_control(world)));
+}
+
+void luaHS_report (LuaWorld *world, LuaParticipation *participant,
+                    uint64_t epoch) {
+  __atomic_store_n(&participant->storage_epoch, epoch, __ATOMIC_SEQ_CST);
+  /* A waiter can register after the entrant sampled the epoch. Its predicate
+  ** scan must see our publication, or this fresh check must wake it. */
+  notify(world);
 }
 
 /* world.mutex keeps the directory alive; only atomic participation fields are
 ** observed. A completed global rendezvous also certifies earlier retirements. */
 static uint64_t minimum (LuaWorld *world) {
   LuaParticipation *participant;
-  uint64_t result = __atomic_load_n(&world->storage_epoch, __ATOMIC_SEQ_CST);
+  uint64_t result = luaW_epoch(luaW_control(world));
   uint64_t grace = __atomic_load_n(&world->storage_grace, __ATOMIC_ACQUIRE);
   for (participant = world->participants; participant != NULL;
        participant = participant->next) {
@@ -147,7 +151,8 @@ static void waitstorage (lua_State *L, uint64_t needed, int reader) {
   LuaWorld *world = &G(L)->world;
   int wait;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  __atomic_fetch_add(&world->storage_waiting, 1, __ATOMIC_SEQ_CST);
+  if (world->storage_waiters++ == 0)
+    __atomic_fetch_or(&world->control, LUA_WORLD_STORAGE_WAIT, __ATOMIC_SEQ_CST);
   luaW_deactivate(L);
   luaQ_wake(&world->changed, &world->waiters);
   if (reader) wait = after(needed, minimum(world));
@@ -159,10 +164,12 @@ static void waitstorage (lua_State *L, uint64_t needed, int reader) {
     wait = wait && __atomic_load_n(&world->storage_bytes, __ATOMIC_ACQUIRE) != 0;
   }
   if (wait) luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-  while (world->stopped)
+  while (luaW_stopped(world))
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   luaW_resume(L);
-  __atomic_fetch_sub(&world->storage_waiting, 1, __ATOMIC_SEQ_CST);
+  if (--world->storage_waiters == 0)
+    __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_STORAGE_WAIT),
+                       __ATOMIC_SEQ_CST);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaC_checksnapshot(L);
 }
@@ -189,7 +196,7 @@ static void destroywork (lua_State *L, LuaTableRetirement *head, int all) {
       __atomic_fetch_sub(&world->storage_bytes, bytes, __ATOMIC_RELAXED);
     }
     else if (all && canwait(L)) {
-      waitstorage(L, block->epoch + 1, 1);
+      waitstorage(L, block->epoch + LUA_WORLD_EPOCH_STEP, 1);
       count = 0;  /* refresh the grace-period view before retrying */
     }
     else {

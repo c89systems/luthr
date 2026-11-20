@@ -83,7 +83,7 @@ void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
       work->kind == test->kind && work->phase == SWEEP_OBJECTS && candidate) {
     require(pthread_mutex_lock(&test->mutex) == 0);
     if (!test->entered) {
-      require(state->world_depth == 0 && !G(state)->world.stopped);
+      require(state->world_depth == 0 && !luaW_stopped(&G(state)->world));
       test->entered = 1;
       require(pthread_cond_broadcast(&test->changed) == 0);
       while (!test->release)
@@ -396,11 +396,11 @@ int main(int argc, char **argv) {
   if (test.revive == NULL)
     require(test.helpers != 0 && test.scanned != 0);
   require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
-  require(G(state)->sweep_plan.busy == 1 && !G(state)->world.stopped);
+  require(G(state)->sweep_plan.busy == 1 && !luaW_stopped(&G(state)->world));
   require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
   if (test.emergency) {
     require(pthread_create(&finisher, NULL, emergency, &test) == 0);
-    while (!__atomic_load_n(&G(state)->world.stopped, __ATOMIC_ACQUIRE))
+    while (!luaW_stopped(&G(state)->world))
       sched_yield();
   }
   require(pthread_mutex_lock(&test.mutex) == 0);

@@ -17,6 +17,15 @@ typedef struct LuaParticipation {
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
 } LuaParticipation;
 
+/* Control publishes admission requests and the reclamation epoch together.
+** Epochs use the masked word so modular comparisons still span 64 bits. */
+enum {
+  LUA_WORLD_STOPPED = 1,
+  LUA_WORLD_STORAGE_WAIT = 2,
+  LUA_WORLD_REQUESTS = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT,
+  LUA_WORLD_EPOCH_STEP = 4
+};
+
 typedef struct LuaWorld {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -30,13 +39,25 @@ typedef struct LuaWorld {
   uint64_t work_epoch;
   struct LuaTableRetirement *storage_retired;  /* atomic producer list */
   struct LuaTableRetirement *storage_pending;  /* sole storage_busy consumer */
-  uint64_t storage_epoch, storage_grace;
+  uint64_t control, storage_grace;
   size_t storage_bytes;
-  unsigned storage_busy, storage_waiting, storage_workers;
+  unsigned storage_busy, storage_workers;
+  unsigned storage_waiters;  /* mutex-owned count behind the request bit */
   unsigned heap_depth;
-  int stopped;
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
 } LuaWorld;
+
+l_sinline uint64_t luaW_control (const LuaWorld *world) {
+  return __atomic_load_n(&world->control, __ATOMIC_SEQ_CST);
+}
+
+l_sinline int luaW_stopped (const LuaWorld *world) {
+  return (luaW_control(world) & LUA_WORLD_STOPPED) != 0;
+}
+
+l_sinline uint64_t luaW_epoch (uint64_t control) {
+  return control & ~cast(uint64_t, LUA_WORLD_REQUESTS);
+}
 
 LUAI_FUNC int luaW_init (struct global_State *g);
 LUAI_FUNC void luaW_destroy (struct global_State *g);

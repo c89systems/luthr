@@ -4,6 +4,7 @@
 
 #include "llimits.h"
 #include "lua.h"
+#include "lworld.h"
 
 typedef struct LuaTableRetirement {
   struct LuaTableRetirement *next;
@@ -24,6 +25,14 @@ LUAI_FUNC void luaHS_publishpending (lua_State *L);
 
 /* No optimistic storage borrow survives these execution boundaries. */
 LUAI_FUNC void luaHS_quiescent (lua_State *L);
+LUAI_FUNC void luaHS_report (LuaWorld *world, LuaParticipation *participant,
+                             uint64_t epoch);
+l_sinline void luaHS_announce (LuaWorld *world, LuaParticipation *participant,
+                                uint64_t epoch) {
+  if (__atomic_load_n(&participant->storage_epoch, __ATOMIC_RELAXED) != epoch)
+    luaHS_report(world, participant, epoch);
+}
+
 enum { LUAHS_ASSIST, LUAHS_DRAIN, LUAHS_WITHDRAW };
 
 /* Assist one batch, drain a finite snapshot, or publish small private batches

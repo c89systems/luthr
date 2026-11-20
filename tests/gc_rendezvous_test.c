@@ -315,7 +315,7 @@ int main(int argc, char **argv) {
   if (!fixture.native_case) {
     world = &G(fixture.main)->world;
     check(pthread_mutex_lock(&world->mutex));
-    while (!world->stopped)
+    while (!luaW_stopped(world))
       luaQ_wait(fixture.main, &world->mutex, &world->changed, &world->waiters);
     check(pthread_mutex_unlock(&world->mutex));
     check(pthread_mutex_lock(&fixture.mutex));
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
   fixture.active_phase = 0;
   world = &G(fixture.main)->world;
   fixture.failed |=
-      luaW_activecount(world) != 0 || world->stopped ||
+      luaW_activecount(world) != 0 || luaW_stopped(world) ||
       fixture.worker->native_depth != 0 || fixture.worker->world_depth != 0 ||
       fixture.main->native_depth != 0 || fixture.main->world_depth != 0 ||
       world->heap_depth != 0 || fixture.worker->heap_waiting != 0 ||

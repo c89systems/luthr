@@ -186,7 +186,7 @@ static void boundary_handoff(lua_State *L, const char *kind) {
   while (!helpers[0].state->heap_waiting || !helpers[1].state->heap_waiting)
     luaQ_wait(L, &G(L)->world.mutex, &G(L)->world.changed,
               &G(L)->world.waiters);
-  require(!G(L)->world.stopped);
+  require(!luaW_stopped(&G(L)->world));
   require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
   /* Both complete callers are queued at an empty phase boundary. The next
    * grantee must complete it before handing metadata to the other waiter. */

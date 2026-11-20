@@ -307,7 +307,7 @@ int main(int argc, char **argv) {
     probe.collecting = 1;
     require(pthread_mutex_unlock(&probe.mutex) == 0);
     require(pthread_create(&marker, NULL, collect, NULL) == 0);
-    while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST)) {
+    while (!luaW_stopped(&G(L)->world)) {
       struct timespec now;
       require(clock_gettime(CLOCK_REALTIME, &now) == 0);
       require(now.tv_sec < deadline.tv_sec);

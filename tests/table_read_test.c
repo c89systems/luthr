@@ -410,15 +410,27 @@ static void resume_epoch(lua_State *state) {
   luaX_lockstate(state);
   require(pthread_mutex_lock(&world->mutex) == 0);
   luaW_deactivate(state);
-  __atomic_fetch_add(&world->storage_epoch, 1, __ATOMIC_SEQ_CST);
-  __atomic_store_n(&world->storage_waiting, 1, __ATOMIC_SEQ_CST);
+  __atomic_fetch_add(&world->control, LUA_WORLD_EPOCH_STEP, __ATOMIC_SEQ_CST);
+  __atomic_fetch_or(&world->control, LUA_WORLD_STORAGE_WAIT, __ATOMIC_SEQ_CST);
   /* Resumption runs under world.mutex even when a new epoch needs reporting.
    * It must not recursively acquire that mutex to notify storage waiters. */
   luaW_resume(state);
   require(luaW_active(state->admission) == 1);
-  __atomic_store_n(&world->storage_waiting, 0, __ATOMIC_SEQ_CST);
   require(pthread_mutex_unlock(&world->mutex) == 0);
-  luaHS_quiescent(state);
+
+  /* Stopping, advancing a storage epoch, and restarting must preserve the
+   * concurrent request. A subsequent API entry announces the latest epoch. */
+  luaW_stop(state);
+  require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_REQUESTS);
+  __atomic_fetch_add(&world->control, LUA_WORLD_EPOCH_STEP, __ATOMIC_SEQ_CST);
+  require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_REQUESTS);
+  luaW_start(state);
+  require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_STORAGE_WAIT);
+  luaX_unlockstate(state);
+  luaX_lockstate(state);
+  require(state->admission->storage_epoch == luaW_epoch(luaW_control(world)));
+  __atomic_fetch_and(&world->control, ~(uint64_t)LUA_WORLD_STORAGE_WAIT,
+                     __ATOMIC_SEQ_CST);
   luaX_unlockstate(state);
 }
 
@@ -432,11 +444,12 @@ static void batching(lua_State *state) {
   luaX_lockstate(state);
   luaHS_reclaim(state, LUAHS_DRAIN);
   table = hvalue(s2v(state->stack.p + 1));
-  epoch = world->storage_epoch;
+  epoch = luaW_epoch(luaW_control(world));
   for (i = 0; i < 16; i++)
     luaH_resize(state, table, 0, i % 2 ? 16 : 32);
   require(state->storage_bytes != 0 && state->storage_bytes < 65536);
-  require(world->storage_bytes == 0 && world->storage_epoch == epoch);
+  require(world->storage_bytes == 0 &&
+          luaW_epoch(luaW_control(world)) == epoch);
   mutex_calls = 0;
   measuring = 1;
   for (i = 0; i < 1000; i++) {
@@ -447,7 +460,7 @@ static void batching(lua_State *state) {
   require(mutex_calls == 0);
   luaX_unlockstate(state);
   require(state->storage_retired == NULL && state->storage_bytes == 0);
-  require(world->storage_epoch == epoch + 1);
+  require(luaW_epoch(luaW_control(world)) == epoch + LUA_WORLD_EPOCH_STEP);
   lua_gc(state, LUA_GCCOLLECT);
   require(world->storage_bytes == 0);
 }
@@ -591,7 +604,7 @@ static void retirement(lua_State *state, int pressure, unsigned readers,
   luaX_unlockstate(state);
   if (pressure) {
     require(pthread_create(&worker, NULL, writer, &test) == 0);
-    while (!__atomic_load_n(&G(state)->world.storage_waiting, __ATOMIC_ACQUIRE))
+    while (!(luaW_control(&G(state)->world) & LUA_WORLD_STORAGE_WAIT))
       sched_yield();
     require(__atomic_load_n(&test.writer_done, __ATOMIC_ACQUIRE) == 0);
     /* A nonproducer can reach a VM poll while a producer waits for old

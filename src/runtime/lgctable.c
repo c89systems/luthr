@@ -64,7 +64,7 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
       return 0;
     luaC_traceedges(work, edges, count);
     first += slots;
-    if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST)) return 0;
+    if (luaW_stopped(&G(L)->world)) return 0;
   }
   return 1;
 }

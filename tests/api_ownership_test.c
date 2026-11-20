@@ -120,7 +120,7 @@ void __wrap_luaX_pollrequests(lua_State *state) {
     check(pthread_mutex_unlock(&fixture->mutex));
     /* The host requests a real collection after the VM allocation publishes
      * its result, before this request check decides whether to hand off. */
-    while (!__atomic_load_n(&G(state)->world.stopped, __ATOMIC_SEQ_CST))
+    while (!luaW_stopped(&G(state)->world))
       sched_yield();
     /* Hold this rooted handoff through the collection. Normal concurrent
      * marking can resume the VM before stack trimming, so a host wait must

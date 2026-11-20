@@ -215,7 +215,7 @@ int main(int argc, char **argv) {
     probe.pause = 1;
     require(pthread_mutex_unlock(&probe.mutex) == 0);
     require(pthread_create(&pauser, NULL, pause_world, receiver) == 0);
-    while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST))
+    while (!luaW_stopped(&G(L)->world))
       sched_yield();
   }
   require(pthread_mutex_lock(&probe.mutex) == 0);

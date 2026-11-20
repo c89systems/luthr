@@ -52,8 +52,7 @@ void luaAL_enter (lua_State *L) {
     lua_assert(L->world_depth == 0);
     L->native_depth++;
     luaW_deactivate(L);
-    if (world->stopped ||
-        __atomic_load_n(&world->storage_waiting, __ATOMIC_SEQ_CST))
+    if (luaW_control(world) & LUA_WORLD_REQUESTS)
       luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     luaX_checksync(pthread_mutex_lock(&allocator->mutex));
@@ -63,7 +62,7 @@ void luaAL_enter (lua_State *L) {
     /* Never own callback admission while inactive. Join any intervening stop
     ** and publish stable roots before retrying the fast ownership claim. */
     luaX_checksync(pthread_mutex_lock(&world->mutex));
-    while (world->stopped)
+    while (luaW_stopped(world))
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
     luaW_resume(L);
     /* A stack resize retains metadata ownership while pointers are offsets.

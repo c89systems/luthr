@@ -41,7 +41,7 @@ int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
         __atomic_load_n(version, __ATOMIC_ACQUIRE) != sequence) return 0;
     luaC_traceedges(work, edges, count);
     first += slots;
-    if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST)) return 0;
+    if (luaW_stopped(&G(L)->world)) return 0;
   } while (first < size);
   work->marked += luaC_objsize(object);
   luaC_finishstrong(work, object);

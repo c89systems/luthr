@@ -49,7 +49,7 @@ void __wrap_luaA_end(lua_State *L, LuaObjectScope *scope) {
       require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
     require(pthread_mutex_unlock(&probe.mutex) == 0);
     require(pthread_mutex_lock(&world->mutex) == 0);
-    while (world->stopped)
+    while (luaW_stopped(world))
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
     luaW_resume(L);
     luaC_checksnapshot(L);

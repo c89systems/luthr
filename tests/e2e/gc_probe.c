@@ -536,8 +536,7 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
       record->trace_empty_ready += ready != 0;
       record->trace_empty_metadata +=
           metadata != NULL && metadata != luaX_token(L);
-      record->trace_empty_quiescing +=
-          __atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) != 0;
+      record->trace_empty_quiescing += luaW_stopped(&G(L)->world);
       if (phase == TRACE_INIT)
         record->trace_empty_init++;
       else if (phase == TRACE_MARK)
@@ -750,11 +749,11 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     category = 4;
   } else if (record != NULL && mutex == &G(L)->world.mutex) {
     started = now();
-    if (G(L)->world.stopped && luaQ_isowner(&G(L)->world.collector))
+    if (luaW_stopped(&G(L)->world) && luaQ_isowner(&G(L)->world.collector))
       category = 1;
     else if (L->heap_waiting)
       category = 2;
-    else if (G(L)->world.stopped)
+    else if (luaW_stopped(&G(L)->world))
       category = 3;
   }
   if (category == 2 && host != NULL && G(L) == G(host)) {

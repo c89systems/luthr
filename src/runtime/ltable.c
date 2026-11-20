@@ -1398,7 +1398,7 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   LuaTableSlot slot;
   LuaTableWriter *writer;
   Node *node;
-  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
+  if (luaW_stopped(&G(L)->world) ||
       !published(key) || !published(value) || !luaH_strongaccess(L, table) ||
       !locateslot(table, key, &slot)) return 0;
   node = slot.node;

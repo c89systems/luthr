@@ -107,7 +107,7 @@ static void *allocate(void *context, void *pointer, size_t old, size_t size) {
   if (size == 0) {
     if (pointer != NULL && pointer == f->held) {
       require(pthread_mutex_lock(&f->mutex) == 0);
-      f->stopped = G(f->main)->world.stopped != 0;
+      f->stopped = luaW_stopped(&G(f->main)->world);
       f->entered = 1;
       require(pthread_cond_broadcast(&f->changed) == 0);
       while (!f->release)

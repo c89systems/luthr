@@ -419,7 +419,7 @@ static void wakecollectors (LuaScheduler *s) {
   unsigned i, available = 0;
   if (s->config.slots == 1 || s->idle == NULL || s->stopping ||
       !luaC_workerready(s->global) ||
-      __atomic_load_n(&s->global->world.stopped, __ATOMIC_SEQ_CST) ||
+      luaW_stopped(&s->global->world) ||
       __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
   for (i = 0; i < s->config.slots; i++)
     available += __atomic_load_n(&s->slots[i].owner, __ATOMIC_ACQUIRE) == NULL;
@@ -432,7 +432,7 @@ void luaSC_notifygc (global_State *g) {
   LuaScheduler *s = __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE);
   if (s == NULL || !__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE) ||
       s->config.slots == 1 || !luaC_workerready(g) ||
-      __atomic_load_n(&g->world.stopped, __ATOMIC_SEQ_CST)) return;
+      luaW_stopped(&g->world)) return;
   lock(s);
   wakecollectors(s);
   unlock(s);
@@ -607,7 +607,7 @@ static LuaExecutionSlot *dispatchcollector (LuaCarrier *carrier) {
   LuaScheduler *s = carrier->scheduler;
   unsigned i;
   if (s->gc_active == s->config.slots - 1 || !luaC_workerready(s->global) ||
-      __atomic_load_n(&s->global->world.stopped, __ATOMIC_SEQ_CST) ||
+      luaW_stopped(&s->global->world) ||
       __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return NULL;
   for (i = 0; i < s->config.slots; i++) {
     LuaExecutionSlot *slot = &s->slots[(carrier->cursor + i) % s->config.slots];

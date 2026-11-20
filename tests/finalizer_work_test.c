@@ -61,7 +61,7 @@ lu_mem __wrap_luaC_tracebatch(lua_State *state, unsigned limit) {
   lu_mem worked = __real_luaC_tracebatch(state, limit);
   if (test != NULL && state == test->collector && phase == test->phase &&
       worked != 0) {
-    require(state->world_depth == 0 && !G(state)->world.stopped);
+    require(state->world_depth == 0 && !luaW_stopped(&G(state)->world));
     test->batches++;
     require(pthread_mutex_lock(&test->mutex) == 0);
     if (!test->entered) {
@@ -81,7 +81,7 @@ lu_mem __wrap_luaC_tracebatch(lua_State *state, unsigned limit) {
       if (test->overlap) {
         LuaWorld *world = &G(state)->world;
         require(pthread_mutex_lock(&world->mutex) == 0);
-        while (world->stopped)
+        while (luaW_stopped(world))
           luaQ_wait(state, &world->mutex, &world->changed, &world->waiters);
         luaW_resume(state);
         require(pthread_mutex_unlock(&world->mutex) == 0);

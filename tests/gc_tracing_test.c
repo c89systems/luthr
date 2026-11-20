@@ -119,12 +119,14 @@ static void observescan(GCObject *object) {
       if (iswhite(G(weak_marker), weak_key))
         weak_deferred_seen = 1;
       else if (!weak_target_scanned) {
-        require(!G(weak_marker)->world.stopped && !weak_marker->world_depth);
+        require(!luaW_stopped(&G(weak_marker)->world) &&
+                !weak_marker->world_depth);
         weak_rescans++;
       }
     }
     if (object == weak_target) {
-      require(!G(weak_marker)->world.stopped && !weak_marker->world_depth);
+      require(!luaW_stopped(&G(weak_marker)->world) &&
+              !weak_marker->world_depth);
       weak_target_scanned++;
     }
   }
@@ -188,7 +190,8 @@ void __wrap_luaQ_poll(lua_State *L) {
       !collection->entered &&
       __atomic_load_n(&G(L)->trace_ready, __ATOMIC_ACQUIRE)) {
     LuaWorldScope scope = {0};
-    require(L->world_depth == 0 && !G(L)->world.stopped && !G(L)->trace_busy);
+    require(L->world_depth == 0 && !luaW_stopped(&G(L)->world) &&
+            !G(L)->trace_busy);
     /* These cases isolate graph publication and explicit helper handoffs.
      * Keep automatic allocation backpressure in gc_pacing's pressure cases. */
     __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
@@ -373,7 +376,7 @@ static void busy_object(void) {
   require(pthread_mutex_unlock(&busy.mutex) == 0);
   lua_lock(L);
   luaC_tracebatch(L, 256);
-  require(!G(L)->world.stopped && L->world_depth == 0);
+  require(!luaW_stopped(&G(L)->world) && L->world_depth == 0);
   require(isgray(busy.table) && isblack(G(L), independent));
   lua_unlock(L);
   require(pthread_mutex_lock(&busy.mutex) == 0);
@@ -437,7 +440,7 @@ static void closure_construction(int thread_build) {
   }
   lua_lock(L);
   luaC_tracebatch(L, 256);
-  require(!G(L)->world.stopped &&
+  require(!luaW_stopped(&G(L)->world) &&
           (thread_build ? isgray(obj2gco(builder.child))
                         : isblack(G(L), builder.closure)) &&
           isblack(G(L), independent));
@@ -990,7 +993,7 @@ static void parallel_marking(const char *kind) {
   require(pthread_mutex_unlock(&scan.mutex) == 0);
   require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
   marked = G(L)->GCmarked;
-  require(G(L)->trace_busy == 1 && !G(L)->world.stopped);
+  require(G(L)->trace_busy == 1 && !luaW_stopped(&G(L)->world));
   require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
   require(pthread_create(&workers[1], NULL, parallel_scanner, &identities[1]) ==
           0);
@@ -1000,12 +1003,12 @@ static void parallel_marking(const char *kind) {
   require(pthread_mutex_unlock(&scan.mutex) == 0);
   require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
   require(G(L)->trace_busy == 1 && G(L)->trace_plan.phase == phase &&
-          !G(L)->world.stopped);
+          !luaW_stopped(&G(L)->world));
   if (phase == TRACE_MARK)
     require(G(L)->GCmarked > marked);
   require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
   require(pthread_create(&finisher, NULL, parallel_finisher, &scan) == 0);
-  while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_ACQUIRE))
+  while (!luaW_stopped(&G(L)->world))
     sched_yield();
   /* An empty shared queue cannot finish a phase while the first scanner's
    * claimed payloads and newly discovered edges are still private. */

@@ -131,7 +131,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
     if (!mutatoraccess(L, lock, object)) {
       luaX_checksync(pthread_mutex_lock(&world->mutex));
       __atomic_fetch_add(&lock->waiting, 1, __ATOMIC_SEQ_CST);
-      if (world->stopped || !tryaccess(L, lock, object)) {
+      if (luaW_stopped(world) || !tryaccess(L, lock, object)) {
         /* Never acquire an unrelated object behind metadata ownership. */
         lua_assert(world->heap_depth == 0 ||
                    !luaX_isowner(L, &world->heap_owner));
@@ -142,7 +142,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
         luaQ_wake(&world->changed, &world->waiters);
         do {
           luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-        } while (world->stopped || !tryaccess(L, lock, object));
+        } while (luaW_stopped(world) || !tryaccess(L, lock, object));
         luaW_resume(L);
         luaC_checksnapshot(L);
         L->object_waiting--;

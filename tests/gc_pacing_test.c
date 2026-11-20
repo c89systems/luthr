@@ -185,7 +185,7 @@ static void bounded_marking(const char *kind) {
     require(stops == before + 1); /* returning a slice owes no new pause */
   }
   require(luaC_tracing(L));
-  require(!G(L)->world.stopped && L->world_depth == 0);
+  require(!luaW_stopped(&G(L)->world) && L->world_depth == 0);
   require(G(L)->trace_busy == 0);
   /* The synthetic debt below represents allocation through the soft target.
    * Keep the independent hard guard at MAX_LMEM to test bounded slices. */
@@ -223,7 +223,7 @@ static void bounded_marking(const char *kind) {
       luaC_assisttrace(L);
       if (unavailable && steps == 0)
         require(L->trace_debt == LUA_GC_ASSIST_BYTES);
-      require(!G(L)->world.stopped && G(L)->trace_busy == 0);
+      require(!luaW_stopped(&G(L)->world) && G(L)->trace_busy == 0);
       lua_unlock(L);
       require(++steps < 10000);
     }

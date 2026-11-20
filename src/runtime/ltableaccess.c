@@ -112,7 +112,7 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
   }
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   __atomic_fetch_add(waiting, 1, __ATOMIC_SEQ_CST);
-  if (world->stopped || busy(L, table, writer)) {
+  if (luaW_stopped(world) || busy(L, table, writer)) {
     lua_assert(world->heap_depth == 0 || !luaX_isowner(L, &world->heap_owner));
     L->native_depth++;
     L->object_waiting++;
@@ -120,7 +120,7 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
     luaQ_wake(&world->changed, &world->waiters);
     do {
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-    } while (world->stopped || busy(L, table, writer));
+    } while (luaW_stopped(world) || busy(L, table, writer));
     luaW_resume(L);
     luaC_checksnapshot(L);
     L->object_waiting--;

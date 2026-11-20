@@ -68,13 +68,13 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
   LuaWorld *world = &G(state)->world;
   int entering = role == MUTATOR && mutex == &world->mutex;
-  if (entering && world->stopped)
+  if (entering && luaW_stopped(world))
     signal_flag(&fixture.entry_waiting);
   if (role == COLLECTOR && stopping && mutex == &world->mutex &&
-      !world->stopped)
+      !luaW_stopped(world))
     signal_flag(&fixture.collector_waiting);
   __real_luaQ_wait(state, mutex, changed, waiters);
-  if (entering && !world->stopped && !fixture.notified) {
+  if (entering && !luaW_stopped(world) && !fixture.notified) {
     /* Let the collector run first after notification. The next stop must
      * give this entrant its admission before making the VM unavailable. */
     require(pthread_mutex_unlock(mutex) == 0);

@@ -153,7 +153,8 @@ static void unlockstate (lua_State *L, void *token, int values) {
     if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
       luaC_reclaim(L);
   }
-  if (!values || L->allocation_debt != 0 || L->reclaim_credit != 0)
+  if (L->allocation_debt != 0 || L->reclaim_credit != 0 ||
+      (!values && L->stack_peer != NULL))
     luaM_publishdebt(L);
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
@@ -311,7 +312,7 @@ void luaX_pollrequests (lua_State *L) {
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
-  if (__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST) ||
+  if (luaW_stopped(&G(L)->world) ||
       (__atomic_load_n(&L->stack_gate.word, __ATOMIC_ACQUIRE) &
         LUA_GATE_WAITING) != 0) {
     /* A real request publishes roots and hands off ownership. The successful

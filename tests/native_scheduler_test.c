@@ -697,7 +697,7 @@ static void run_resource_task(struct task *task) {
   if (task->id == 2 && pool->wait_kind == GC_WAIT) {
     LuaWorld *world = &G(pool->main)->world;
     check(pthread_mutex_lock(&world->mutex));
-    require(world->stopped && world->heap_depth != 0);
+    require(luaW_stopped(world) && world->heap_depth != 0);
     require(!luaQ_isowner(&world->heap_owner));
     require(!luaQ_isowner(&world->collector));
     check(pthread_mutex_unlock(&world->mutex));
@@ -1693,7 +1693,7 @@ static void parallel_poll(lua_State *state, void *context) {
   if (arrived == 2) {
     LuaWorld *world = &G(state)->world;
     check(pthread_mutex_lock(&world->mutex));
-    require(luaW_activecount(world) == 2 && !world->stopped);
+    require(luaW_activecount(world) == 2 && !luaW_stopped(world));
     check(pthread_mutex_unlock(&world->mutex));
   }
   status = pthread_barrier_wait(&pool->parallel);

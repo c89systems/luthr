@@ -279,7 +279,7 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_create(&writer, NULL, write_values, NULL) == 0);
   if (probe.pause) {
-    while (!__atomic_load_n(&G(L)->world.stopped, __ATOMIC_SEQ_CST))
+    while (!luaW_stopped(&G(L)->world))
       sched_yield();
     require(pthread_mutex_lock(&probe.mutex) == 0);
     probe.release = 1;
