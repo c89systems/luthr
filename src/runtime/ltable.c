@@ -883,17 +883,19 @@ lu_mem luaH_size (const Table *owner, Table *t) {
 }
 
 
-/*
-** Frees a table.
-*/
 /* A dead inline table on a slab can return its entire storage without
 ** invoking the host allocator or parking a sweep worker. */
-l_mem luaH_freeinline (lua_State *L, Table *t) {
+size_t luaH_inlineallocsize (Table *t) {
   size_t size = sizeof(*t) + t->inline_bytes;
-  if (luaMP_page(cast(LuaAllocBlock *, t) - 1) == NULL ||
-      luaH_size(t, t) != size)
-    return 0;
+  if (luaH_size(t, t) != size) return 0;
   lua_assert(t->access.depth == 0);
+  return size;
+}
+
+l_mem luaH_freeinline (lua_State *L, Table *t) {
+  size_t size = luaH_inlineallocsize(t);
+  lua_assert(luaMP_page(cast(LuaAllocBlock *, t) - 1) != NULL);
+  if (size == 0) return 0;
   luaM_freemem(L, t, size);
   return cast(l_mem, size);
 }

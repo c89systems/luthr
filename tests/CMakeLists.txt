@@ -209,7 +209,7 @@ target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_pacing_test PRIVATE luthr_static)
 target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
   -Wl,--wrap=luaC_sweepbatch -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop
-  -Wl,--wrap=luaM_free_)
+  -Wl,--wrap=luaM_free_ -Wl,--wrap=luaM_releasepage)
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
     managed_function_incremental managed_function_generational

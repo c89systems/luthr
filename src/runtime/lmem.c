@@ -224,6 +224,29 @@ static LuaAllocationCache *allocationcache (lua_State *L) {
 
 static void offerpage (global_State *g, LuaAllocPage *page);
 
+static void queuereturn (global_State *g, LuaAllocPage *page) {
+  LuaAllocPage *head = __atomic_load_n(&g->allocation_retired, __ATOMIC_RELAXED);
+  do { page->dirty_next = head; }
+  while (!__atomic_compare_exchange_n(&g->allocation_retired, &head, page,
+              0, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+void luaM_releasepage (lua_State *L, LuaAllocPage *page, l_mem bytes) {
+  global_State *g = G(L);
+  unsigned pool = page->pool;
+  luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+  lua_assert(page->state == LUA_PAGE_SWEEPING && page->owner == NULL &&
+             page->available_previous == NULL &&
+             __atomic_load_n(&page->remote, __ATOMIC_RELAXED) == 0);
+  page->used = 0;
+  /* Drop table membership until the backing-return queue unlinks the page. */
+  __atomic_store_n(&page->table_epoch, 0, __ATOMIC_RELAXED);
+  page->state = LUA_PAGE_RETURNING;
+  luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+  account(L, bytes);
+  queuereturn(g, page);  /* last page access */
+}
+
 /* The notification pins each claimed page. Cache borrowing is nonblocking;
 ** busy owners keep their notices for a later finite snapshot. No private page
 ** or cache reference survives a safepoint or backing-allocator admission. */
@@ -303,12 +326,7 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
       offerpage(g, page);
     luaMC_return(&borrow);
     luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
-    if (empty) {
-      LuaAllocPage *head = __atomic_load_n(&g->allocation_retired, __ATOMIC_RELAXED);
-      do { page->dirty_next = head; }
-      while (!__atomic_compare_exchange_n(&g->allocation_retired, &head, page,
-                  0, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
-    }
+    if (empty) queuereturn(g, page);
     luaMC_notify(&borrow);
   }
   if (count != 0) {

@@ -316,6 +316,14 @@ static void sweep_growth(void) {
   lua_close(L);
 }
 
+static unsigned page_releases;
+
+void __real_luaM_releasepage(lua_State *, LuaAllocPage *, l_mem);
+void __wrap_luaM_releasepage(lua_State *L, LuaAllocPage *page, l_mem bytes) {
+  __atomic_fetch_add(&page_releases, 1, __ATOMIC_RELAXED);
+  __real_luaM_releasepage(L, page, bytes);
+}
+
 static void sweep_inline(void) {
   enum { SMALL_TABLES = 512, LARGE_ARRAY = 2048 };
   lua_State *L = luaL_newstate();
@@ -348,6 +356,7 @@ static void sweep_inline(void) {
   luaC_entergc(L, &frame);
   before = gettotalbytes(g);
   luaC_waitsweep(L);
+  require(__atomic_load_n(&page_releases, __ATOMIC_RELAXED) != 0);
   require(before - gettotalbytes(g) >= SMALL_TABLES * (l_mem)sizeof(Table));
   require(g->GCretired >= LARGE_ARRAY * (l_mem)sizeof(Value));
   require(gettotalbytes(g) - g->GCretired == g->GCcyclelive);

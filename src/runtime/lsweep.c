@@ -29,6 +29,9 @@ static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
           (plan->kind != SWEEP_YOUNG || tables >= plan->epoch)) {
         page->state = LUA_PAGE_SWEEPING;
         work->page = page;
+        work->full_page = page->owner == NULL &&
+          page->available_previous == NULL && page->local == NULL &&
+          __atomic_load_n(&page->remote, __ATOMIC_ACQUIRE) == 0;
         break;
       }
     }

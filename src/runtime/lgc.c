@@ -1718,6 +1718,38 @@ static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
   }
 }
 
+/* A full, unowned page can be discarded without making its slots reusable.
+** Any live table, separate backing allocation, or other slot owner requires
+** the ordinary sweep. The page claim prevents allocator handoff meanwhile. */
+static int release_dead_page (lua_State *L, LuaSweepWork *work,
+                              size_t stride, uintptr_t birth) {
+  global_State *g = G(L);
+  LuaAllocPage *page = work->page;
+  l_mem bytes = 0;
+  unsigned count = 0;
+  size_t offset;
+  for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+       offset += stride) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+    uintptr_t header = luaMP_header(block);
+    Table *table = cast(Table *, block + 1);
+    size_t size;
+    if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth ||
+        (work->kind == SWEEP_YOUNG && isold(obj2gco(table))) ||
+        !iswhite(g, obj2gco(table))) return 0;
+    size = luaH_inlineallocsize(table);
+    if (size == 0) return 0;
+    bytes += cast(l_mem, size);
+    count++;
+  }
+  lua_assert(count != 0 && count == page->used);
+  work->page = NULL;
+  work->count = count;
+  work->freed = bytes;
+  luaM_releasepage(L, page, bytes);
+  return 1;
+}
+
 static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   if (work->page != NULL) {
@@ -1726,18 +1758,20 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
     uintptr_t birth = luaMP_birth(g->sweep_plan.epoch);
     unsigned count = 0;
     size_t offset;
-    for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
-         offset += stride) {
-      LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-      uintptr_t header = luaMP_header(block);
-      if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth)
-        continue;
-      if (work->kind == SWEEP_YOUNG && isold(cast(GCObject *, block + 1)))
-        continue;
-      sweeptable(L, work, block, header);
-      count++;
+    if (!work->full_page || !release_dead_page(L, work, stride, birth)) {
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+           offset += stride) {
+        LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+        uintptr_t header = luaMP_header(block);
+        if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth)
+          continue;
+        if (work->kind == SWEEP_YOUNG && isold(cast(GCObject *, block + 1)))
+          continue;
+        sweeptable(L, work, block, header);
+        count++;
+      }
+      work->count = count;
     }
-    work->count = count;
   }
   else {
     GCObject *object = work->next;

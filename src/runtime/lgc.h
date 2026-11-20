@@ -91,6 +91,7 @@ typedef struct LuaSweepWork {
   LuaTraceList watch;
   l_mem addedold, freed;
   unsigned count, kind, phase, region, tables;
+  int full_page;
 } LuaSweepWork;
 
 LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
