@@ -34,7 +34,7 @@ luthr_test_program(public_tasks_test public_tasks_test.c)
 luthr_c89(public_tasks_test)
 target_link_libraries(public_tasks_test PRIVATE luthr_static)
 foreach(case IN ITEMS results prepared parallel_load budget raw_policy traces blocked_trace defaults nested shutdown
-    callback callback_budget callback_shutdown callback_oom pin pin_cancel oom collect_oom automatic load_error raw_vm)
+    callback callback_budget callback_shutdown callback_oom pin pin_cancel oom collect_oom automatic independent_native_limits load_error raw_vm)
   add_test(NAME public_tasks_${case} COMMAND public_tasks_test ${case})
   set_tests_properties(public_tasks_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
@@ -56,7 +56,7 @@ set_tests_properties(native_sdk PROPERTIES LABELS "unit;runtime;memcheck" TIMEOU
 luthr_test_program(public_tasks_shared public_tasks_test.c)
 luthr_c89(public_tasks_shared)
 target_link_libraries(public_tasks_shared PRIVATE luthr_shared)
-foreach(case IN ITEMS results callback_budget pin_cancel)
+foreach(case IN ITEMS results callback_budget pin_cancel independent_native_limits)
   add_test(NAME public_tasks_shared_${case} COMMAND public_tasks_shared ${case})
   set_tests_properties(public_tasks_shared_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
@@ -72,7 +72,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime)
 foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational
-    native native_reentry shutdown yield saturation cancel_admission startup_failures callback_progress
+    native native_reentry shutdown yield saturation cancel_admission early_native_return startup_failures callback_progress
     timed_callback_progress simultaneous_reentry parked cancel_parked idle_notifications idle_affinity metadata_progress
     timed_metadata_progress timed_slice timed_continuation_slice)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})

@@ -70,6 +70,7 @@ struct LuaScheduler {
   pthread_mutex_t native_mutex;
   pthread_cond_t native_changed;
   LuaWaiter *native_waiters;
+  unsigned native, native_peak, native_waiting;  /* atomic permit accounting */
   LuaExecutionSlot *slots;
   LuaCarrier *carriers;
   LuaCarrier *idle;
@@ -80,7 +81,7 @@ struct LuaScheduler {
   unsigned external_yields;  /* atomic fairness request from provider threads */
   unsigned handoff_epoch;  /* scheduler mutex; saved-context publication */
   unsigned callbacks_active, callbacks_peak;
-  unsigned submitted, outstanding, native, native_peak;
+  unsigned submitted, outstanding;
   unsigned created, next_home;
   unsigned gc_active;  /* scheduler mutex; leave capacity for a phase driver */
   int closed, stopping, ready;

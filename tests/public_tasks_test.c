@@ -90,8 +90,7 @@ static unsigned integer(luthr_lua_state *L, int index) {
 static void push_integer(luthr_lua_state *L, unsigned value) {
   luthr_lua_pushinteger(L, luthr_lua_integer_make(0, value));
 }
-static int block(luthr_lua_state *L) {
-  struct fixture *f = active;
+static int block_in(luthr_lua_state *L, struct fixture *f) {
   lock(f);
   f->entered++;
   signal_change(f);
@@ -100,6 +99,13 @@ static int block(luthr_lua_state *L) {
   unlock(f);
   push_integer(L, 42);
   return 1;
+}
+static int block(luthr_lua_state *L) { return block_in(L, active); }
+
+static int block_in_task(luthr_lua_state *L) {
+  struct fixture *f = luthr_lua_task_context(L);
+  require(f != NULL);
+  return block_in(L, f);
 }
 static int context_id(luthr_lua_state *L) {
   struct context *context = luthr_lua_runtime_context_from_state(L);
@@ -629,6 +635,45 @@ static void automatic(struct fixture *f) {
     require(stats.parallelism <= (stats.quota_milli_cpus + 999) / 1000);
   finish(f);
 }
+
+static void independent_native_limits(struct fixture *f) {
+  struct fixture other = {0};
+  struct fixture *peers[2];
+  luthr_lua_task_options options = {0};
+  luthr_lua_scheduler_stats stats;
+  unsigned i, job;
+
+  peers[0] = f;
+  peers[1] = &other;
+  for (i = 0; i < 2; i++) {
+    struct fixture *peer = peers[i];
+    init(peer, 0);
+    luthr_lua_register(peer->state, "block_in_task", block_in_task);
+    options.context = peer;
+    for (job = 0; job < 2; job++)
+      submit(peer, job, "return block_in_task()", &options);
+    lock(peer);
+    while (peer->entered < 2)
+      change(peer);
+    unlock(peer);
+  }
+  for (i = 0; i < 2; i++) {
+    struct fixture *peer = peers[i];
+    require(luthr_lua_scheduler_snapshot(peer->scheduler, &stats) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(stats.native_active == 2 && stats.native_limit == 2);
+    release_block(peer);
+    for (job = 0; job < 2; job++) {
+      require(await(peer, job, LUTHR_LUA_RUNTIME_OK).result_count == 1);
+      discard(peer, job);
+    }
+    require(luthr_lua_scheduler_snapshot(peer->scheduler, &stats) ==
+            LUTHR_LUA_RUNTIME_OK);
+    require(stats.native_active == 0);
+    finish(peer);
+  }
+}
+
 static void load_error(struct fixture *f) {
   init(f, 0);
   require(luthr_lua_task_submit_buffer(
@@ -730,6 +775,8 @@ int main(int argc, char **argv) {
     allocation_failure(f, 1);
   else if (strcmp(argv[1], "automatic") == 0)
     automatic(f);
+  else if (strcmp(argv[1], "independent_native_limits") == 0)
+    independent_native_limits(f);
   else if (strcmp(argv[1], "load_error") == 0)
     load_error(f);
   else if (strcmp(argv[1], "raw_vm") == 0)

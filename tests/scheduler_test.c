@@ -31,6 +31,7 @@ struct fixture {
   LuaWaiter *waiters;
   unsigned started, seen[TASKS];
   unsigned waiting, native_entered, native_release;
+  unsigned admission_pause, admission_paused, admission_release;
   unsigned pause_hold, pause_seen, pause_release;
   unsigned finalized;
   unsigned native_callback_done;
@@ -159,10 +160,20 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attributes,
 
 int __real_pthread_mutex_lock(pthread_mutex_t *);
 int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  struct fixture *f = fixture;
   if (inspecting)
     __atomic_fetch_add(&poll_locks, 1, __ATOMIC_RELAXED);
-  if (measuring_reentry && mutex == &fixture->scheduler.mutex)
+  if (measuring_reentry && mutex == &f->scheduler.mutex)
     reentry_locks++;
+  if (f != NULL && f->admission_pause && mutex == &f->scheduler.native_mutex &&
+      luaQ_current() == &f->tasks[1].fiber.execution) {
+    require(__real_pthread_mutex_lock(&f->mutex) == 0);
+    f->admission_paused = 1;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    while (!f->admission_release)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
   return __real_pthread_mutex_lock(mutex);
 }
 void __real_luaX_poll(lua_State *);
@@ -529,7 +540,10 @@ static void native_reentry(struct fixture *f) {
   init(f, 1);
   lua_pushcfunction(f->main, local_api);
   lua_setglobal(f->main, "local_api");
+  require(pthread_mutex_lock(&f->scheduler.native_mutex) == 0);
   submit(f, 0, "return local_api()", 0);
+  luaSC_wait(&f->tasks[0]);
+  require(pthread_mutex_unlock(&f->scheduler.native_mutex) == 0);
   require(collect(f, 0, LUA_OK) == 1999000);
   require(f->scheduler.native_peak == 1 && f->scheduler.native == 0);
   require(f->scheduler.reentry_waiting == 0);
@@ -682,10 +696,13 @@ static void parked_wait(struct fixture *f, int cancel) {
   finish(f);
 }
 
-static void native_saturation(struct fixture *f, int cancel) {
+static void native_saturation(struct fixture *f, int cancel, int early_return) {
   LuaScheduler *s;
   int status = -1, results = -1;
-  init(f, 1);
+  f->admission_pause = early_return;
+  /* A paused admission still has its managed slot until it parks. The
+   * first task needs another slot to leave its native activation. */
+  initlimits(f, early_return ? 2 : 1, 1);
   s = &f->scheduler;
   lua_pushcfunction(f->main, block_binding);
   lua_setglobal(f->main, "block_binding");
@@ -695,19 +712,29 @@ static void native_saturation(struct fixture *f, int cancel) {
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   submit(f, 1, "return block_binding()", 0);
-  require(pthread_mutex_lock(&s->native_mutex) == 0);
-  while (s->native_waiters == NULL) {
-    require(pthread_mutex_unlock(&s->native_mutex) == 0);
-    sched_yield();
+  if (early_return) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (!f->admission_paused)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+    require(__atomic_load_n(&s->native_waiting, __ATOMIC_ACQUIRE) == 0);
+  } else {
     require(pthread_mutex_lock(&s->native_mutex) == 0);
+    while (s->native_waiters == NULL) {
+      require(pthread_mutex_unlock(&s->native_mutex) == 0);
+      sched_yield();
+      require(pthread_mutex_lock(&s->native_mutex) == 0);
+    }
+    require(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) == 1);
+    require(f->native_entered == 1);
+    require(pthread_mutex_unlock(&s->native_mutex) == 0);
+    submit(f, 2, "return 42", 0);
+    require(collect(f, 2, LUA_OK) == 42);
   }
-  require(s->native == 1 && f->native_entered == 1);
-  require(pthread_mutex_unlock(&s->native_mutex) == 0);
-  submit(f, 2, "return 42", 0);
-  require(collect(f, 2, LUA_OK) == 42);
   if (cancel) {
     require(luaTK_requeststop(&f->tasks[1].root) == LUA_OK);
     (void)collect(f, 1, LUA_ERRRUN);
+    require(__atomic_load_n(&s->native_waiting, __ATOMIC_ACQUIRE) == 0);
     require(!f->tasks[0].complete && f->native_entered == 1);
   }
   require(luaSC_collect(f->main, &f->tasks[0], &status, &results) ==
@@ -718,9 +745,17 @@ static void native_saturation(struct fixture *f, int cancel) {
   require(pthread_cond_broadcast(&f->changed) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(collect(f, 0, LUA_OK) == 500500);
+  if (early_return) {
+    /* The only release happened before this entrant could publish interest. */
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    f->admission_release = 1;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
   if (!cancel)
     require(collect(f, 1, LUA_OK) == 500500);
   require(f->native_entered == (cancel ? 1u : 2u));
+  require(s->native_waiting == 0 && s->native == 0);
   finish(f);
 }
 
@@ -972,9 +1007,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
-    native_saturation(f, 0);
+    native_saturation(f, 0, 0);
   else if (strcmp(argv[1], "cancel_admission") == 0)
-    native_saturation(f, 1);
+    native_saturation(f, 1, 0);
+  else if (strcmp(argv[1], "early_native_return") == 0)
+    native_saturation(f, 0, 1);
   else if (strcmp(argv[1], "startup_failures") == 0)
     startup_failures(f);
   else if (strcmp(argv[1], "idle_notifications") == 0)

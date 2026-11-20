@@ -318,11 +318,22 @@ static void managedleave (LuaExecution *execution) {
     releaseslot(execution->context);
 }
 
+static unsigned trynative (LuaScheduler *s) {
+  unsigned used = __atomic_load_n(&s->native, __ATOMIC_SEQ_CST);
+  while (used < s->config.native_limit) {
+    if (__atomic_compare_exchange_n(&s->native, &used, used + 1, 0,
+                                    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+      return used + 1;
+  }
+  return 0;
+}
+
 static void nativeenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   LuaWorldScope depth = {0};
   int detached = 0, managed = execution->managed_depth != 0;
+  unsigned admitted, peak;
   if (execution->native_depth != 0) return;
   task->native_pending = 1;
   if (!eligible(task, task->carrier)) {
@@ -333,19 +344,22 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
     ** through that boundary and every later native-admission wait. */
     if (managed) luaW_attach(L, depth);
   }
-  luaX_checksync(pthread_mutex_lock(&s->native_mutex));
-  if (s->native == s->config.native_limit) {
-    luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+  admitted = trynative(s);
+  if (admitted == 0) {
     if (managed) {
       depth = luaW_detach(L);  /* no foreign activation exists yet */
       detached = 1;
     }
     luaX_checksync(pthread_mutex_lock(&s->native_mutex));
-  }
-  while (s->native == s->config.native_limit) {
-    if (luaQ_waitstop(L, &s->native_mutex, &s->native_changed,
-                      &s->native_waiters)) {
-      luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+    /* Publish interest before the final capacity check. A return either
+    ** precedes that check or observes the waiter and synchronizes with it. */
+    __atomic_fetch_add(&s->native_waiting, 1, __ATOMIC_SEQ_CST);
+    while ((admitted = trynative(s)) == 0)
+      if (luaQ_waitstop(L, &s->native_mutex, &s->native_changed,
+                        &s->native_waiters)) break;
+    __atomic_fetch_sub(&s->native_waiting, 1, __ATOMIC_SEQ_CST);
+    luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+    if (admitted == 0) {
       if (managed) luaW_attach(L, depth);
       else lua_lock(L);
       luaTK_checkstop(L);  /* the admission wait has retired every borrow */
@@ -355,9 +369,10 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
   task->native = 1;
   if (!pincarrier(execution)) abort();
   task->native_pending = 0;
-  s->native++;
-  if (s->native > s->native_peak) s->native_peak = s->native;
-  luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+  peak = __atomic_load_n(&s->native_peak, __ATOMIC_RELAXED);
+  while (peak < admitted &&
+         !__atomic_compare_exchange_n(&s->native_peak, &peak, admitted, 0,
+                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
   if (detached) luaW_attach(L, depth);
   if (!managed) releaseslot(task); /* trusted hook/adapter now enters opaque C */
 }
@@ -367,12 +382,14 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
   LuaScheduler *s = task->scheduler;
   UNUSED(L);
   if (execution->native_depth != 0 || !task->native) return;
-  luaX_checksync(pthread_mutex_lock(&s->native_mutex));
   task->native = 0;
-  lua_assert(s->native != 0);
-  s->native--;
-  luaQ_wake(&s->native_changed, &s->native_waiters);
-  luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+  lua_assert(__atomic_load_n(&s->native, __ATOMIC_RELAXED) != 0);
+  __atomic_fetch_sub(&s->native, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&s->native_waiting, __ATOMIC_SEQ_CST) != 0) {
+    luaX_checksync(pthread_mutex_lock(&s->native_mutex));
+    luaQ_wake(&s->native_changed, &s->native_waiters);
+    luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
+  }
   if (execution->pin_depth == 0) unpincarrier(execution);
 }
 
