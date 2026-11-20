@@ -220,14 +220,19 @@ l_sinline unsigned distributedpart (lua_Unsigned bits) {
   return 1 + cast_uint((bits ^ (bits >> 16)) % (LUA_HASH_PARTS - 1));
 }
 
+l_sinline unsigned integerpart (lua_Integer integer) {
+  return integer > 0 ? 0 : distributedpart(l_castS2U(integer));
+}
+
 static unsigned hashpart (const TValue *key) {
   lua_Integer integer;
   lua_Unsigned bits;
   switch (ttypetag(key)) {
     case LUA_VNIL: return 0;
-    case LUA_VNUMINT: integer = ivalue(key); goto number;
+    case LUA_VNUMINT: return integerpart(ivalue(key));
     case LUA_VNUMFLT:
-      if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) goto number;
+      if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq))
+        return integerpart(integer);
       bits = l_hashfloat(fltvalue(key));
       break;
     case LUA_VSHRSTR: case LUA_VLNGSTR: bits = tsvalue(key)->hash; break;
@@ -240,8 +245,6 @@ static unsigned hashpart (const TValue *key) {
     default: bits = point2uint(gcvalue(key)); break;
   }
   return distributedpart(bits);
- number:
-  return integer > 0 ? 0 : distributedpart(l_castS2U(integer));
 }
 
 l_sinline Node *keynodes (const Table *table, const TValue *key) {
@@ -315,8 +318,7 @@ l_sinline int equalkey (const TValue *k1, const Node *n2, int deadok) {
 ** which may be in array part, nor for floats with integral values.)
 ** See explanation about 'deadok' in function 'equalkey'.
 */
-static const TValue *getgeneric (Node *nodes, const TValue *key, int deadok) {
-  Node *n = mainpositionTV(nodes, key);
+static const TValue *findkey (Node *n, const TValue *key, int deadok) {
   for (;;) {  /* check whether 'key' is somewhere in the chain */
     if (equalkey(key, n, deadok))
       return gval(n);  /* that's it */
@@ -329,6 +331,9 @@ static const TValue *getgeneric (Node *nodes, const TValue *key, int deadok) {
   }
 }
 
+l_sinline const TValue *getgeneric (Node *nodes, const TValue *key, int deadok) {
+  return findkey(mainpositionTV(nodes, key), key, deadok);
+}
 
 /*
 ** Return the index 'k' (converted to an unsigned) if it is inside
@@ -1210,15 +1215,7 @@ static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
 }
 
 
-static const TValue *getintfromhash (Table *t, lua_Integer key) {
-  Node *nodes = t->node;
-  Node *n;
-  LuaHashDirectory *directory = luaH_hashdir(nodes);
-  if (directory != NULL)
-    nodes = directory->parts[key > 0 ? 0 :
-      distributedpart(l_castS2U(key))].nodes;
-  n = nodes + hashint(nodesteps(nodes), key);
-  lua_assert(!ikeyinarray(t, key));
+l_sinline const TValue *findinteger (Node *n, lua_Integer key) {
   for (;;) {  /* check whether 'key' is somewhere in the chain */
     if (keyisinteger(n) && keyival(n) == key)
       return gval(n);  /* that's it */
@@ -1231,6 +1228,14 @@ static const TValue *getintfromhash (Table *t, lua_Integer key) {
   return &absentkey;
 }
 
+static const TValue *getintfromhash (Table *t, lua_Integer key) {
+  Node *nodes = t->node;
+  LuaHashDirectory *directory = luaH_hashdir(nodes);
+  if (directory != NULL)
+    nodes = directory->parts[integerpart(key)].nodes;
+  lua_assert(!ikeyinarray(t, key));
+  return findinteger(nodes + hashint(nodesteps(nodes), key), key);
+}
 
 static int hashkeyisempty (Table *t, lua_Unsigned key) {
   const TValue *val = getintfromhash(t, l_castU2S(key));
@@ -1498,6 +1503,8 @@ typedef struct LuaTableSlot {
   Value *payload;
   lu_byte *tag;
   Node *node;
+  LuaHashPart *part;
+  uint64_t revision;
 } LuaTableSlot;
 
 static int sameversion (Table *table, uint64_t sequence) {
@@ -1538,7 +1545,8 @@ l_sinline int __attribute__((always_inline)) probehash (
         match = equalkeybits(key, tag, bits, 0);
       }
       if (match) {
-        if (!samepartversion(table, layout, part, revision)) return 0;
+        /* The result is an address in retained storage. Its caller checks
+        ** the version after reading the value or claiming the slot. */
         slot->payload = &node->u.value_;
         slot->tag = &node->u.tt_;
         slot->node = node;
@@ -1555,14 +1563,29 @@ l_sinline int __attribute__((always_inline)) probehash (
 }
 
 l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
-                            uint64_t layout, LuaTableSlot *slot) {
+                            uint64_t layout, LuaTableSlot *slot, int writing) {
   Node *base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  return luaH_hashdir(base) == NULL &&
-    probehash(table, base, key, scalar, layout, slot, NULL, 0);
+  LuaHashDirectory *directory = luaH_hashdir(base);
+  uint64_t revision = 0;
+  if (directory != NULL) {
+    unsigned index = scalar == LUA_VNUMINT ? integerpart(ivalue(key)) :
+      scalar == ctb(LUA_VSHRSTR) ? distributedpart(tsvalue(key)->hash) :
+      hashpart(key);
+    LuaHashPart *part = &directory->parts[index];
+    if (index != 0) {
+      slot->part = part;
+      if (writing) return 1;  /* probe after claiming this partition */
+      revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
+      if (revision & 1) return 0;
+      slot->revision = revision;
+    }
+    base = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  }
+  return probehash(table, base, key, scalar, layout, slot, slot->part, revision);
 }
 
 l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
-                             LuaTableSlot *slot) {
+                             LuaTableSlot *slot, int writing) {
   unsigned asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
   unsigned k = checkrange(ivalue(key), asize);
   if (k != 0) {
@@ -1572,32 +1595,34 @@ l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
     slot->tag = cast(lu_byte *, array) + sizeof(unsigned) + k - 1;
     return 1;
   }
-  return findhashslot(table, key, LUA_VNUMINT, layout, slot);
+  return findhashslot(table, key, LUA_VNUMINT, layout, slot, writing);
 }
 
 static int __attribute__((noinline)) locategeneric (
-    Table *table, const TValue *key, uint64_t layout, LuaTableSlot *slot) {
+    Table *table, const TValue *key, uint64_t layout, LuaTableSlot *slot,
+    int writing) {
   lua_Integer integer;
   if (ttisnil(key)) return 1;
   if (ttisfloat(key) && luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
     TValue normalized;
     setivalue(&normalized, integer);
-    return locateinteger(table, &normalized, layout, slot);
+    return locateinteger(table, &normalized, layout, slot, writing);
   }
-  return findhashslot(table, key, 0, layout, slot);
+  return findhashslot(table, key, 0, layout, slot, writing);
 }
 
-/* One probe serves shared reads, existing-slot writes and their retries.
-** Success with a NULL payload is a miss. No slot survives a safepoint. */
+/* Route each access to one retained image. A writer in an independent hash
+** partition resolves its slot under the partition claim. */
 l_sinline int __attribute__((always_inline)) locateslot (
     Table *table, const TValue *key, lu_byte type, uint64_t layout,
-    LuaTableSlot *slot) {
+    LuaTableSlot *slot, int writing) {
   slot->payload = NULL;
   slot->node = NULL;
-  if (type == LUA_VNUMINT) return locateinteger(table, key, layout, slot);
+  slot->part = NULL;
+  if (type == LUA_VNUMINT) return locateinteger(table, key, layout, slot, writing);
   if (type == ctb(LUA_VSHRSTR))
-    return findhashslot(table, key, ctb(LUA_VSHRSTR), layout, slot);
-  return locategeneric(table, key, layout, slot);
+    return findhashslot(table, key, ctb(LUA_VSHRSTR), layout, slot, writing);
+  return locategeneric(table, key, layout, slot, writing);
 }
 
 typedef struct LuaHashGrowth {
@@ -1646,9 +1671,25 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
                       const TValue *key, TValue *value, int raw,
                       LuaHashGrowth *growth) {
   Node *nodes = part->nodes;
-  const TValue *slot = getgeneric(nodes, key, 0);
-  int existing = !isabstkey(slot);
+  Node *position;
+  const TValue *slot;
+  int existing;
   uint64_t revision;
+  if (ttisinteger(key)) {
+    lua_Integer integer = ivalue(key);
+    position = nodes + hashint(nodesteps(nodes), integer);
+    slot = findinteger(position, integer);
+  }
+  else if (ttisshrstring(key)) {
+    TString *name = tsvalue(key);
+    position = hashstr(nodes, name);
+    slot = findshortstr(position, name);
+  }
+  else {
+    position = mainpositionTV(nodes, key);
+    slot = findkey(position, key, 0);
+  }
+  existing = !isabstkey(slot);
   if (isempty(slot)) {
     if (!raw && table->metatable != NULL) return 0;
     if (ttisnil(value)) return 1;
@@ -1672,7 +1713,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
     setnodevalue(L, node, value);
   }
   else {
-    if (!insertkey(L, nodes, key, value)) {
+    if (!insertat(L, nodes, key, value, position)) {
       unsigned i, live = 1, size = luaH_nodesize(nodes);
       int needed;
       for (i = 0; i < size; ++i)
@@ -1757,6 +1798,7 @@ static int __attribute__((noinline)) sharedpartset (
   }
   result = writepart(L, table, part, key, value, raw, growth);
   luaH_releasepart(L, table, part);
+  if (result < 0 && blocked != NULL) *blocked = part;
   return result;
 }
 
@@ -1769,25 +1811,32 @@ l_sinline uint64_t sharedlayout (lua_State *L, Table *table,
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
 }
 
+typedef struct LuaTableWriteRetry {
+  LuaTableWriter *writer;
+  LuaHashPart *part;
+} LuaTableWriteRetry;
+
 /* Keep the shared snapshot's frame out of ordinary private assignments. */
 static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
                        const TValue *key, TValue *value, int raw,
-                       LuaTableWriter **busy) {
+                       LuaTableWriteRetry *retry) {
   LuaTableSlot slot;
   LuaTableWriter *writer;
   Node *node;
   uint64_t layout = sharedlayout(L, table, key, value);
   if (layout & 1) return 0;
-  if (!locateslot(table, key, rawtt(key), layout, &slot))
-    return sharedpartset(L, table, keypart(table, key), key, value, raw,
-                         layout, NULL, NULL) > 0;
+  if (!locateslot(table, key, rawtt(key), layout, &slot, 1)) return 0;
+  if (slot.part != NULL)
+    return sharedpartset(L, table, slot.part, key, value, raw, layout,
+                         retry != NULL ? &retry->part : NULL, NULL);
   if (slot.payload == NULL) return 0;
   node = slot.node;
   writer = luaH_claimwriter(L, table, slot.payload, layout);
   if (writer == NULL) {
     LuaTableWriter *row = luaH_writer(G(L), slot.payload);
-    if (busy != NULL &&
-        __atomic_load_n(&row->owner, __ATOMIC_SEQ_CST) == table) *busy = row;
+    if (retry != NULL &&
+        __atomic_load_n(&row->owner, __ATOMIC_SEQ_CST) == table)
+      retry->writer = row;
     return 0;
   }
   /* Key retirement is a layout operation. A missing value may also invoke
@@ -1868,7 +1917,7 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
   uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
   int tracing, done;
   if (sharing & LUA_OBJECT_SHARED)
-    return sharedset(L, t, key, value, raw, NULL);
+    return sharedset(L, t, key, value, raw, NULL) > 0;
   if (sharing != cast(uintptr_t, L)) return 0;
   sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
   if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
@@ -1898,28 +1947,25 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
 int luaH_setshared (lua_State *L, Table *table, const TValue *key,
                      TValue *value, int raw) {
   for (;;) {
-    LuaTableWriter *busy = NULL;
-    LuaHashPart *part, *blocked = NULL;
+    LuaTableWriteRetry retry = {NULL, NULL};
     int result;
     uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
     if (luaH_waitlayout(L, table)) continue;
-    part = keypart(table, key);
-    if (part != NULL)
-      result = sharedpartset(L, table, part, key, value, raw,
-                             sharedlayout(L, table, key, value), &blocked, NULL);
-    else result = sharedset(L, table, key, value, raw, &busy);
+    result = sharedset(L, table, key, value, raw, &retry);
     if (result > 0) return 1;
     if (result < 0) {
       LuaHashGrowth growth;
+      LuaHashPart *part = retry.part;
+      retry.part = NULL;
       preparegrowth(L, &growth, -1 - result);
       result = sharedpartset(L, table, part, key, value, raw,
-                             sharedlayout(L, table, key, value), &blocked, &growth);
+                             sharedlayout(L, table, key, value), &retry.part, &growth);
       finishgrowth(L, &growth);
       if (result > 0) return 1;
       if (result < 0) continue;  /* another writer changed the needed capacity */
     }
-    if (blocked != NULL) luaH_waitpart(L, table, blocked);
-    else if (busy != NULL) luaH_waitwriters(L, table, busy);
+    if (retry.part != NULL) luaH_waitpart(L, table, retry.part);
+    else if (retry.writer != NULL) luaH_waitwriters(L, table, retry.writer);
     else {
       if (luaH_waitlayout(L, table)) continue;
       if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence)
@@ -2145,51 +2191,18 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
     *tag = LUA_VABSTKEY;
     return 1;
   }
-  if (!luaH_readvalue(g, slot->payload, slot->tag, &value, sequence) ||
-      !sameversion(table, sequence)) return 0;
+  if (slot->part != NULL) {
+    luaH_readvalue(g, slot->payload, slot->tag, &value, 0);
+    if (!samepartversion(table, sequence, slot->part, slot->revision)) return 0;
+  }
+  else if (!luaH_readvalue(g, slot->payload, slot->tag, &value, sequence) ||
+           !sameversion(table, sequence)) return 0;
   if (slot->node != NULL) *tag = finishnodeget(&value, result);
   else {
     *tag = rawtt(&value);
     if (!tagisempty(*tag)) setobj(L, result, &value);
   }
   return 1;
-}
-
-static int __attribute__((noinline)) readpartition (
-    global_State *g, lua_State *L, Table *table, const TValue *key,
-    uint64_t layout, TValue *result, lu_byte *tag) {
-  LuaHashDirectory *directory = luaH_hashdir(
-    __atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
-  if (directory != NULL) {
-    unsigned index = hashpart(key);
-    LuaHashPart *part = &directory->parts[index];
-    const LuaHashPart *versioned = index != 0 ? part : NULL;
-    uint64_t revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
-    LuaTableSlot slot = {NULL, NULL, NULL};
-    lua_Integer integer;
-    TValue normalized, value;
-    lu_byte scalar;
-    Node *nodes;
-    if (revision & 1) return 0;
-    if (ttisfloat(key) && luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
-      setivalue(&normalized, integer);
-      key = &normalized;
-    }
-    scalar = ttisinteger(key) || ttisshrstring(key) ? rawtt(key) : 0;
-    nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-    if (!probehash(table, nodes, key, scalar, layout, &slot, versioned,
-                   revision)) return 0;
-    if (versioned == NULL) return readslot(g, L, table, &slot, layout, result, tag);
-    if (slot.payload == NULL) {
-      *tag = LUA_VABSTKEY;
-      return 1;
-    }
-    if (!luaH_readvalue(g, slot.payload, slot.tag, &value, 0) ||
-        !samepartversion(table, layout, part, revision)) return 0;
-    *tag = finishnodeget(&value, result);
-    return 1;
-  }
-  return 0;
 }
 
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
@@ -2200,10 +2213,8 @@ int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key
   uint64_t sequence;
   setsvalue(L, &index, key);
   if (!readsequence(L, table, &sequence)) return 0;
-  if (locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot)) {
-    if (!readslot(g, L, table, &slot, sequence, result, &tag)) return 0;
-  }
-  else if (!readpartition(g, L, table, &index, sequence, result, &tag)) return 0;
+  if (!locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot, 0) ||
+      !readslot(g, L, table, &slot, sequence, result, &tag)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }
@@ -2274,22 +2285,17 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
         break;
       continue;
     }
-    if (!locateslot(table, &rooted_key.value, rawtt(&rooted_key.value),
-                    sequence, &slot)) {
-      LuaHashPart *part;
-      if (readpartition(G(L), L, table, &rooted_key.value, sequence, &snapshot,
-                        &tag)) {
-        if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
-        goto done;
-      }
-      part = keypart(table, &rooted_key.value);
-      if (part != NULL) luaH_waitpart(L, table, part);
-      continue;
-    }
-    if (readslot(G(L), L, table, &slot, sequence, &snapshot, &tag)) {
+    if (locateslot(table, &rooted_key.value, rawtt(&rooted_key.value),
+                   sequence, &slot, 0) &&
+        readslot(G(L), L, table, &slot, sequence, &snapshot, &tag)) {
       if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
       goto done;
     }
+    if (slot.part != NULL) {
+      luaH_waitpart(L, table, slot.part);
+      continue;
+    }
+    if (slot.payload == NULL) continue;
     writer = luaH_claimwriter(L, table, slot.payload, sequence);
     if (writer != NULL) {
       /* A failed optimistic read needs the element guard, not ownership of
@@ -2344,10 +2350,8 @@ l_sinline int __attribute__((always_inline)) trygetshared (
   LuaTableSlot slot;
   uint64_t sequence;
   if (!readsequence(L, t, &sequence)) return 0;
-  if (l_likely(locateslot(t, key, type, sequence, &slot))) {
-    if (!readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
-  }
-  else if (!readpartition(G(L), L, t, key, sequence, res, tag)) return 0;
+  if (!locateslot(t, key, type, sequence, &slot, 0) ||
+      !readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
   *tag = finishread(L, t, res, *tag, 0, sequence);
   return 1;
 }

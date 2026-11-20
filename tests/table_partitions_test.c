@@ -98,6 +98,13 @@ static void check(lua_State *L, lua_Integer key, lua_Integer number) {
   lua_pop(L, 1);
 }
 
+static void check_sparse_value(lua_State *L) {
+  require(lua_rawgeti(L, 1, LUA_MAXINTEGER) == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 8002);
+  lua_pop(L, 2);
+}
+
 static int reject_insert(lua_State *L) {
   probe.deny_after = probe.deny_count;
   put(L, probe.denied_key, -probe.denied_key);
@@ -147,6 +154,15 @@ static void *grow_partition(void *unused) {
   lua_Integer key = -1024;
   unsigned inserted = 0;
   (void)unused;
+  /* A sparse positive key stays in the primary hash. Its existing slot
+   * can be updated while an unrelated partition still has a writer. */
+  put(probe.second, LUA_MAXINTEGER, 8001);
+  check(probe.second, LUA_MAXINTEGER, 8001);
+  lua_newtable(probe.second);
+  lua_pushinteger(probe.second, 8002);
+  lua_rawseti(probe.second, -2, 1);
+  lua_rawseti(probe.second, 1, LUA_MAXINTEGER);
+  check_sparse_value(probe.second);
   while (inserted < 400) {
     if (partition(key) == probe.part) {
       put(probe.second, key, -key);
@@ -251,6 +267,8 @@ int main(int argc, char **argv) {
   put(L, -257, 257);
   directory = luaH_hashdir(probe.table->node);
   require(directory != NULL);
+  put(L, LUA_MAXINTEGER, 8000);
+  require(probe.table->asize == 0);
   probe.first_part = &directory->parts[partition(-1)];
   probe.part = partition(-1) == 1 ? 2 : 1;
   oldsize = luaH_nodesize(luaH_hashnodes(probe.table, probe.part));
@@ -288,6 +306,10 @@ int main(int argc, char **argv) {
   require(pthread_join(first, NULL) == 0 && pthread_join(second, NULL) == 0);
   require(pthread_join(same, NULL) == 0 && probe.same_done);
   require(pthread_join(layout, NULL) == 0 && probe.layout_done);
+  lua_gc(L, LUA_GCCOLLECT);
+  check_sparse_value(L);
+  lua_pushnil(L);
+  lua_rawseti(L, 1, LUA_MAXINTEGER);
   require(lua_getmetatable(L, 1));
   lua_pop(L, 1);
   {
@@ -322,6 +344,8 @@ int main(int argc, char **argv) {
          "for i=1,200 do t[i]=i end; assert(#t==200 and t[-1]==7001); "
          "local mt={__newindex=function(o,k,v) rawset(o,k,v+1) end}; "
          "setmetatable(t,mt); t['missing']=9; assert(t.missing==10); "
+         "t[math.maxinteger]=7; assert(t[math.maxinteger]==8); "
+         "t[math.maxinteger]=9; assert(t[math.maxinteger]==9); "
          "mt.__newindex=nil; mt.__mode='v'; "
          "for i=1,200 do t['weak'..i]={i} end; "
          "local keep=t.weak1; collectgarbage('collect'); "
