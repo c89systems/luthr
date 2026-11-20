@@ -90,6 +90,10 @@ LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
                                  LuaNativeRoot *result);
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
 LUAI_FUNC void luaA_invalidatestringindex (lua_State *L, Table *mt);
+/* Admission retains the published index during a nonparking lookup. */
+l_sinline Table *luaA_stringindex (lua_State *L) {
+  return __atomic_load_n(&G(L)->string_index, __ATOMIC_ACQUIRE);
+}
 LUAI_FUNC void luaA_metafield (lua_State *L, const TValue *object, TString *key,
                               LuaNativeRoot *result, int event);
 /* Snapshot a primitive type's metafield without parking. The caller shades

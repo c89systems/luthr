@@ -400,7 +400,7 @@ int luaA_readtypefield (lua_State *L, int type, TString *key, TValue *result) {
   TValue value;
   Table *mt;
   if (type == LUA_TSTRING && key == g->tmname[TM_INDEX]) {
-    Table *index = __atomic_load_n(&g->string_index, __ATOMIC_ACQUIRE);
+    Table *index = luaA_stringindex(L);
     if (index != NULL) {
       sethvalue(L, result, index);
       return 1;

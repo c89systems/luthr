@@ -30,6 +30,7 @@ static __thread pthread_mutex_t *unexpected_mutex;
 static __thread pthread_barrier_t *metatable_read;
 static __thread Table *index_table;
 static __thread Table *finished_index;
+static __thread unsigned string_vm_reads;
 static unsigned access_calls, mutex_calls;
 static void *watched;
 static unsigned returned;
@@ -63,6 +64,8 @@ static int retry_lookup(TString *key) {
 int __real_luaH_trygetstr(lua_State *, Table *, TString *, TValue *, lu_byte *);
 int __wrap_luaH_trygetstr(lua_State *state, Table *table, TString *key,
                           TValue *result, lu_byte *tag) {
+  if (table == finished_index && isLua(state->ci))
+    string_vm_reads++;
   if (retry_lookup(key))
     return 0;
   return __real_luaH_trygetstr(state, table, key, result, tag);
@@ -320,21 +323,38 @@ static Table *set_string_method(lua_State *state, const char *value) {
   return methods;
 }
 
+static int method_identity(lua_State *state) {
+  lua_settop(state, 1);
+  return 1;
+}
+
 static void primitive_index(lua_State *state) {
   lua_pushliteral(state, "subject");
   finished_index = set_string_method(state, "resolved");
+  require(lua_getmetatable(state, 1) == 1);
+  require(lua_getfield(state, -1, "__index") == LUA_TTABLE);
+  lua_pushcfunction(state, method_identity);
+  lua_setfield(state, -2, "identity");
+  lua_pushinteger(state, 42);
+  lua_rawseti(state, -2, 2);
+  lua_pop(state, 2);
   require(lua_getfield(state, 1, "label") == LUA_TSTRING);
   require(strcmp(lua_tostring(state, -1), "resolved") == 0);
   require(lua_getfield(state, 1, "missing") == LUA_TNIL);
   lua_pop(state, 2);
-  require(luaL_loadstring(
-              state, "local s,k=...; return s.label,s[k],s.missing") == LUA_OK);
+  require(luaL_loadstring(state,
+                          "local s,k=...; "
+                          "return s.label,s[k],s.missing,s:identity(),s[2]") ==
+          LUA_OK);
   lua_pushvalue(state, 1);
   lua_pushliteral(state, "label");
-  require(lua_pcall(state, 2, 3, 0) == LUA_OK);
-  require(strcmp(lua_tostring(state, -3), "resolved") == 0);
-  require(strcmp(lua_tostring(state, -2), "resolved") == 0);
-  require(lua_isnil(state, -1));
+  require(lua_pcall(state, 2, 5, 0) == LUA_OK);
+  require(strcmp(lua_tostring(state, -5), "resolved") == 0);
+  require(strcmp(lua_tostring(state, -4), "resolved") == 0);
+  require(lua_isnil(state, -3));
+  require(strcmp(lua_tostring(state, -2), "subject") == 0);
+  require(lua_tointeger(state, -1) == 42);
+  require(string_vm_reads >= 2);
   finished_index = NULL;
 }
 
@@ -349,9 +369,17 @@ static void string_publication(lua_State *state) {
 static void *primitive_method_reader(void *argument) {
   lua_State *state = argument;
   unsigned i;
+  require(luaL_loadstring(state, "local subject=...; return subject.label") ==
+          LUA_OK);
   for (i = 0; i < 5000; i++) {
     const char *method;
-    require(lua_getfield(state, 1, "label") == LUA_TSTRING);
+    if (i % 8 == 0) {
+      lua_pushvalue(state, 2);
+      lua_pushvalue(state, 1);
+      require(lua_pcall(state, 1, 1, 0) == LUA_OK);
+      require(lua_type(state, -1) == LUA_TSTRING);
+    } else
+      require(lua_getfield(state, 1, "label") == LUA_TSTRING);
     method = lua_tostring(state, -1);
     require(strcmp(method, "first") == 0 || strcmp(method, "second") == 0);
     lua_pop(state, 1);

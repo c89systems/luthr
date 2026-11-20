@@ -1439,8 +1439,15 @@ l_sinline StkId directregister (StkId base, int reg) {
   int retry = ttistable(receiver) && \
     !read(L, hvalue(receiver), index, s2v(ra), &tag); \
   if (l_unlikely(retry || luaV_needsindex(tag))) { \
-    Protect(finishvmget(L, receiver, key, ra, upvalue, retry)); \
-    updatebase(ci); \
+    Table *methods = ttisstring(receiver) ? luaA_stringindex(L) : NULL; \
+    if (methods != NULL) { \
+      luaC_tracepointer(L, methods); \
+      if (!read(L, methods, index, s2v(ra), &tag)) tag = LUA_VABSTKEY; \
+    } \
+    if (retry || luaV_needsindex(tag)) { \
+      Protect(finishvmget(L, receiver, key, ra, upvalue, retry)); \
+      updatebase(ci); \
+    } \
   } \
 }
 

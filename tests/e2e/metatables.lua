@@ -169,6 +169,26 @@ yielded('write',key)
 local ok,result=coroutine.resume(co)
 assert(ok and result==true and coroutine.status(co)=='dead')
 
+-- A string method table can itself delegate to a yielding __index.
+local original_string_meta=debug.getmetatable('')
+local methods={}
+debug.setmetatable('', {__index=methods})
+setmetatable(methods, {__index=function(_,key)
+  assert(key=='inherited')
+  coroutine.yield('string method')
+  return function(receiver) return receiver end
+end})
+local method=coroutine.create(function()
+  local subject='receiver'
+  return subject:inherited()
+end)
+ok,result=coroutine.resume(method)
+assert(ok and result=='string method')
+collectgarbage('collect')
+ok,result=coroutine.resume(method)
+assert(ok and result=='receiver' and coroutine.status(method)=='dead')
+debug.setmetatable('',original_string_meta)
+
 -- A primitive lookup tracks both edits to its method table and replacement
 -- of that table. Turning the metatable weak also releases its index table.
 local original_string_mt=debug.getmetatable('')
