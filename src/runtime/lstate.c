@@ -545,7 +545,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   LX *l = fromstate(L1);
   lua_assert(L1->native_depth == 0 && L1->world_depth == 0);
   lua_assert(L1->storage_retired == NULL && L1->storage_bytes == 0);
-  luaF_closeupval(L1, L1->stack.p);  /* close all upvalues */
+  luaF_dropupvals(L1, 1);
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
   freestack(L, L1);

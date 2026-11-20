@@ -110,16 +110,15 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
     return;
   luaC_traceobject(L, obj2gco(thread));
   if (thread->stack.p != NULL) {
-    /* Cells, not their register shadows, own captured bindings. A shadow is a
-    ** temporary root only while an operation can still use it (including a
-    ** partial result at an allocation boundary). Do not retain an obsolete
-    ** referent merely because the owner has not read this local again. */
+    /* Open private bindings live on the stack. For shared bindings, a
+    ** register shadow is a root only while an operation can still use it. */
     upvalue = thread->openupval;
     for (slot = thread->top.p; slot > thread->stack.p;) {
       ptrdiff_t level = savestack(thread, --slot);
       while (upvalue != NULL && upvalue->level > level)
         upvalue = upvalue->open.next;
       if (upvalue == NULL || upvalue->level != level ||
+          luaF_localupval(thread, upvalue) ||
           luaV_shadowroot(thread, slot))
         luaC_tracevalue(L, s2v(slot));
     }
@@ -137,8 +136,10 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
     if (sharing->current != NULL) luaC_traceobject(L, sharing->current);
     if (sharing->pending != NULL) luaC_traceobject(L, sharing->pending);
   }
-  for (upvalue = thread->openupval; upvalue != NULL; upvalue = upvalue->open.next)
+  for (upvalue = thread->openupval; upvalue != NULL; upvalue = upvalue->open.next) {
+    lua_assert(!luaF_localupval(thread, upvalue) || uplevel(upvalue) < thread->top.p);
     luaC_traceobject(L, obj2gco(upvalue));
+  }
   for (proto = thread->building_protos; proto != NULL; proto = proto->build_next) {
     luaC_traceobject(L, obj2gco(proto));
     luaC_snapshotproto(L, proto);

@@ -715,10 +715,11 @@ typedef struct Proto {
 typedef struct UpVal {
   CommonHeader;
   lu_byte mutex_ready;
+  lu_byte reg;  /* register in the binding frame, while open */
   uintptr_t sharing;
   uint64_t sequence;
   GCObject *gclist;
-  TValue value;  /* stable shared cell, including while its local is live */
+  TValue value;  /* binding, or the owner thread while private and open */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */
   struct {
     struct UpVal *next;

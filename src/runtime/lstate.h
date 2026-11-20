@@ -192,7 +192,7 @@ struct CallInfo {
       const Instruction *savedpc;
       volatile l_signalT trap;  /* function is tracing lines/counts */
       int nextraargs;  /* # of extra arguments in vararg functions */
-      uint64_t captures;  /* conservative register set, indexed modulo 64 */
+      uint64_t captures;  /* shared bindings, conservatively indexed modulo 64 */
       const Instruction *rootpc;  /* operation whose shadows may be in use */
     } l;
     struct {  /* only for C functions */

@@ -2,6 +2,7 @@
 #define LUA_CORE
 #include "lprefix.h"
 #include "laccess.h"
+#include "lfunc.h"
 #include "lgc.h"
 #include "ltable.h"
 
@@ -16,6 +17,7 @@ static void enqueue (lua_State *L, GCObject *object, GCObject **pending) {
   /* The queue is a temporary root even for a graph reached through weak edges.
   ** Table ownership resolves the current weak cutoff before enqueueing them. */
   luaC_tracepointer(L, object);
+  if (object->tt == LUA_VUPVAL) luaF_publishupval(L, gco2upv(object));
   if (*pending != NULL) luaC_objbarrier(L, object, *pending);
   __atomic_store_n(state, cast(uintptr_t, *pending) | LUA_OBJECT_SHARED,
                     __ATOMIC_RELEASE);
@@ -46,8 +48,7 @@ void luaA_share (lua_State *L, GCObject *object) {
     if (roots.pending != NULL) luaC_tracepointer(L, roots.pending);
     __atomic_store_n(state, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
     if (current->tt == LUA_VUPVAL) {
-      /* No foreign mutator can reach this cell before publication. Collector
-      ** reads are non-mutating; stack binding metadata has its own mutex. */
+      /* Enqueue materialized an open binding before switching its storage. */
       value(L, &gco2upv(current)->value, &roots.pending);
     }
     else {

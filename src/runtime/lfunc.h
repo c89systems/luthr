@@ -8,7 +8,7 @@
 #define lfunc_h
 
 
-#include "lobject.h"
+#include "lgc.h"
 struct LuaNativeRoot;
 struct CallInfo;
 
@@ -54,10 +54,10 @@ LUAI_FUNC void luaF_initupvals (lua_State *L, LClosure *cl);
 LUAI_FUNC void luaF_setproto (lua_State *L, LClosure *cl, Proto *proto);
 LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
-/* Caller owns the private cell or its mutex. This publication kernel cannot
-** allocate, wait, move the stack or invoke Lua; collector barriers still apply. */
-LUAI_FUNC void luaF_writeownedupval (lua_State *L, UpVal *uv, const TValue *value);
-LUAI_FUNC int luaF_trycloseupval (lua_State *L);
+/* The caller owns the private cell or holds the shared cell's mutex. */
+LUAI_FUNC void luaF_writecell (lua_State *L, UpVal *uv, const TValue *value);
+LUAI_FUNC void luaF_publishupval (lua_State *L, UpVal *uv);
+LUAI_FUNC int luaF_dropupvals (lua_State *L, int wait);
 /* Register shadows belong to the executing frame. Shared cells are authoritative;
 ** refresh only operands that are read and publish only actual writes. A frame's
 ** filter may keep false positives after close, collection or register collisions. */
@@ -87,6 +87,18 @@ l_sinline int luaF_localupval (lua_State *L, UpVal *uv) {
   return __atomic_load_n(&uv->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L);
 }
 
+l_sinline TValue *luaF_privateslot (lua_State *L, UpVal *uv) {
+  lua_assert(uv->owner == NULL || uv->owner == L);
+  return upisopen(uv) ? s2v(cast(StkId, cast_charp(L->stack.p) + uv->level))
+                     : &uv->value;
+}
+
+l_sinline void luaF_writeprivate (lua_State *L, UpVal *uv, const TValue *value) {
+  lua_assert(luaF_localupval(L, uv));
+  if (upisopen(uv)) { setobj(L, luaF_privateslot(L, uv), value); }
+  else luaF_writecell(L, uv, value);
+}
+
 /* Acquiring either written component also observes its preceding odd
 ** sequence. An unchanged even sequence validates the whole value. */
 l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
@@ -107,8 +119,9 @@ l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
 ** participation. The contended load also holds admission and the stack gate. */
 l_sinline void luaF_loadupval (lua_State *L, UpVal *uv, TValue *value) {
   if (luaF_localupval(L, uv)) {
-    value->value_ = uv->value.value_;
-    value->tt_ = uv->value.tt_;
+    const TValue *slot = luaF_privateslot(L, uv);
+    value->value_ = slot->value_;
+    value->tt_ = slot->tt_;
   }
   else if (!luaF_tryloadshared(uv, value)) luaF_loadshared(uv, value);
 }

@@ -108,10 +108,11 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
   UpVal *uv = newupvalobject(L);
   UpVal *next = *prev;
   level = restorestack(L, offset);
-  uv->level = savestack(L, level);
-  setobj(L, &uv->value, s2v(level));
-  if (ttistable(&uv->value))
-    luaC_nurseryedge(L, obj2gco(uv), gcvalue(&uv->value));
+  uv->level = offset;
+  uv->reg = cast_byte(level - (L->ci->func.p + 1));
+  /* The stack snapshot owns the binding. A scanner can follow the owner
+  ** as an ordinary heap edge without borrowing a moving stack. */
+  setthvalue(L, &uv->value, L);
   uv->owner = L;
   uv->open.next = next;
   uv->open.previous = prev;
@@ -133,7 +134,7 @@ void luaF_loadshared (UpVal *uv, TValue *value) {
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
 }
 
-void luaF_writeownedupval (lua_State *L, UpVal *uv, const TValue *value) {
+void luaF_writecell (lua_State *L, UpVal *uv, const TValue *value) {
   uint64_t sequence;
   luaC_prewrite(L, &uv->value, value);
   sequence = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
@@ -144,10 +145,22 @@ void luaF_writeownedupval (lua_State *L, UpVal *uv, const TValue *value) {
   luaC_barrier(L, uv, value);
 }
 
+void luaF_publishupval (lua_State *L, UpVal *uv) {
+  if (upisopen(uv)) {
+    StkId slot = uplevel(uv);
+    StkId frame = slot - uv->reg - 1;
+    CallInfo *ci = L->ci;
+    lua_assert(luaF_localupval(L, uv) && uv->owner == L);
+    while (ci->func.p != frame) ci = ci->previous;
+    lua_assert(isLua(ci));
+    luaF_writecell(L, uv, s2v(slot));
+    ci->u.l.captures |= luaF_capturebit(uv->reg);
+  }
+}
+
 void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
   if (luaF_localupval(L, uv)) {
-    /* No allocation, wait, callback or safepoint can expose a partial store. */
-    luaF_writeownedupval(L, uv, value);
+    luaF_writeprivate(L, uv, value);
     return;
   }
   luaF_writecapture(L, uv, value);
@@ -162,7 +175,7 @@ void luaF_writecapture (lua_State *L, UpVal *uv, const TValue *value) {
   luaC_tracepointer(L, uv);
   luaA_sharevalue(L, &transfer.value);
   luaX_checksync(pthread_mutex_lock(&uv->mutex));
-  luaF_writeownedupval(L, uv, &transfer.value);
+  luaF_writecell(L, uv, &transfer.value);
   luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   luaR_poproot(L, &upvalue_root);
   luaR_poproot(L, &transfer);
@@ -174,7 +187,7 @@ void luaF_loadrange (lua_State *L, StkId first, int count) {
   ptrdiff_t to = from + cast(ptrdiff_t, count) * sizeof(StackValue);
   for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
     if (uv->level < from) break;
-    if (uv->level < to) {
+    if (uv->level < to && !luaF_localupval(L, uv)) {
       luaF_loadupval(L, uv, s2v(restorestack(L, uv->level)));
     }
   }
@@ -186,7 +199,7 @@ StkId luaF_loadlocal (lua_State *L, StkId slot) {
   for (uv = L->openupval; uv != NULL && uv->level >= level;
        uv = uv->open.next) {
     if (uv->level == level) {
-      luaF_loadupval(L, uv, s2v(slot));
+      if (!luaF_localupval(L, uv)) luaF_loadupval(L, uv, s2v(slot));
       break;
     }
   }
@@ -202,8 +215,8 @@ void luaF_storelocals (lua_State *L, StkId first, int count) {
     L->top.p = L->ci->top.p;
   for (uv = L->openupval; uv != NULL; uv = uv->open.next) {
     if (uv->level < from) break;
-    if (uv->level < to)
-      luaF_writeupval(L, uv, s2v(restorestack(L, uv->level)));
+    if (uv->level < to && !luaF_localupval(L, uv))
+      luaF_writecapture(L, uv, s2v(restorestack(L, uv->level)));
   }
   L->top.p = restorestack(L, top);
 }
@@ -257,7 +270,6 @@ UpVal *luaF_findupval (lua_State *L, StkId level) {
   UpVal **pp;
   UpVal *p;
   lua_assert(isLua(L->ci) && level > L->ci->func.p && level < L->ci->top.p);
-  L->ci->u.l.captures |= luaF_capturebit(level - (L->ci->func.p + 1));
   pp = &L->openupval;
   while ((p = *pp) != NULL && uplevel(p) >= level) {  /* search for it */
     lua_assert(!isdead(G(L), p));
@@ -373,21 +385,21 @@ void luaF_unlinkupval (UpVal *uv) {
 /*
 ** Close all upvalues up to the given stack level.
 */
-static void closeupval (UpVal *uv) {
-  lua_assert(uplevel(uv) < uv->owner->top.p);
-  s2v(uplevel(uv))->value_ = uv->value.value_;
-  s2v(uplevel(uv))->tt_ = uv->value.tt_;
+static void unlinkbinding (UpVal *uv) {
   luaF_unlinkupval(uv);
   uv->owner = NULL;
 }
 
-int luaF_trycloseupval (lua_State *L) {
+/* A retired stack needs no writeback. Any surviving closure has already
+** published its binding before it could outlive that stack. */
+int luaF_dropupvals (lua_State *L, int wait) {
   UpVal *uv;
   while ((uv = L->openupval) != NULL) {
-    int status = pthread_mutex_trylock(&uv->mutex);
+    int status = wait ? pthread_mutex_lock(&uv->mutex)
+                      : pthread_mutex_trylock(&uv->mutex);
     if (status == EBUSY) return 0;
     luaX_checksync(status);
-    closeupval(uv);
+    unlinkbinding(uv);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   }
   return 1;
@@ -396,11 +408,14 @@ int luaF_trycloseupval (lua_State *L) {
 void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
+    TValue *slot = s2v(uplevel(uv));
     luaX_checksync(pthread_mutex_lock(&uv->mutex));
-    /* Preserve the authoritative binding for to-be-closed/debug operands after
-    ** unlink. This also runs for dead threads: copy without inspecting the
-    ** referent, which may already be logically retired by this collection. */
-    closeupval(uv);
+    if (luaF_localupval(L, uv)) luaF_writecell(L, uv, slot);
+    else {  /* Keep to-be-closed and debug operands usable after unlink. */
+      slot->value_ = uv->value.value_;
+      slot->tt_ = uv->value.tt_;
+    }
+    unlinkbinding(uv);
     luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   }
 }

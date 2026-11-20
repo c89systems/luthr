@@ -65,7 +65,7 @@
         StkId ra = readRA(i);
         UpVal *uv = luaF_capturecell(cl, GETARG_B(i));
         if (luaF_localupval(L, uv))
-          luaF_writeownedupval(L, uv, s2v(ra));
+          luaF_writeprivate(L, uv, s2v(ra));
         else {
           savestate(L, ci);
           luaF_writecapture(L, uv, s2v(ra));
@@ -433,7 +433,7 @@
           pc++;
         else {
           setobj2s(L, ra, rb);
-          if (haslocalcaptures(L, ci)) {
+          if (haslocalcaptures(ci)) {
             savepc(ci);
             luaF_storelocals(L, ra, 1);
             updatebase(ci);
@@ -524,7 +524,7 @@
           L->top.p = base - 1;
           for (; l_unlikely(nres > 0); nres--)
             setnilvalue(s2v(L->top.p++));  /* all results are nil */
-          if (L->openupval != NULL)
+          if (isLua(L->ci) && L->ci->u.l.captures != 0)
             luaF_storelocals(L, base - 1, cast_int(L->top.p - (base - 1)));
         }
         goto ret;
@@ -549,7 +549,7 @@
             L->top.p = base;
             for (; l_unlikely(nres > 1); nres--)
               setnilvalue(s2v(L->top.p++));  /* complete missing results */
-            if (L->openupval != NULL)
+            if (isLua(L->ci) && L->ci->u.l.captures != 0)
               luaF_storelocals(L, base - 1, cast_int(L->top.p - (base - 1)));
           }
         }
@@ -572,7 +572,7 @@
             chgivalue(s2v(ra), l_castU2S(count - 1));  /* update counter */
             idx = intop(+, idx, step);  /* add step to index */
             chgivalue(s2v(ra + 2), idx);  /* update control variable */
-            if (haslocalcaptures(L, ci)) {
+            if (haslocalcaptures(ci)) {
               savepc(ci);
               luaF_storelocals(L, ra, 1);
               updatebase(ci);
@@ -584,7 +584,7 @@
         }
         else if (floatforloop(L, ra)) {  /* float loop */
           pc -= GETARG_Bx(i);  /* jump back */
-          if (haslocalcaptures(L, ci)) {
+          if (haslocalcaptures(ci)) {
             savepc(ci);
             luaF_storelocals(L, ra + 2, 1);
             updatebase(ci);
@@ -599,7 +599,7 @@
         savestate(L, ci);  /* in case of errors */
         if (forprep(L, ra))
           pc += GETARG_Bx(i) + 1;  /* skip the loop */
-        else if (haslocalcaptures(L, ci)) {
+        else if (haslocalcaptures(ci)) {
           savepc(ci);
           luaF_storelocals(L, ra, 3);
           updatebase(ci);
@@ -619,7 +619,7 @@
        setobj(L, &temp, s2v(ra + 3));
        setobjs2s(L, ra + 3, ra + 2);
        setobj2s(L, ra + 2, &temp);
-       if (haslocalcaptures(L, ci)) {
+       if (haslocalcaptures(ci)) {
          savepc(ci);
          luaF_storelocals(L, ra + 2, 2);
          updatebase(ci);

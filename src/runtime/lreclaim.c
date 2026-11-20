@@ -80,7 +80,7 @@ static void freeobj (lua_State *L, GCObject *o) {
 static void retirethreadlinks (lua_State *L, lua_State *thread) {
     lua_assert(thread != L && thread->native_depth == 0);
     luaM_releasecache(L, &thread->allocation);
-    luaF_closeupval(thread, thread->stack.p);
+    luaF_dropupvals(thread, 1);
     luaW_unregister(thread);
     if (thread->reclaim_pages) L->reclaim_pages = 1;
     /* An abandoned protected collection may leave private garbage behind. */
@@ -201,7 +201,7 @@ int luaC_tryretire (lua_State *L, GCObject *o) {
     busy = thread->native_depth != 0 || thread->reclaim_registered ||
            thread->reclaim_workers != 0;
     luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
-    if (busy || !luaF_trycloseupval(thread)) {
+    if (busy || !luaF_dropupvals(thread, 0)) {
       luaX_endreserve(thread, reservation);
       return SWEEP_RETRY;
     }

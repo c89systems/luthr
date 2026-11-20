@@ -1152,7 +1152,7 @@ void luaV_finishOp (lua_State *L) {
       break;
     }
   }
-  if (L->openupval != NULL)
+  if (ci->u.l.captures != 0)
     storeinstruction(L, ci, inst, ci->u.l.savedpc);
 }
 
@@ -1483,9 +1483,8 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
 
 /* Open cells are ordered by descending stack level. Captures in callers do
 ** not require register synchronization in an uncaptured executing frame. */
-#define haslocalcaptures(L,ci) \
-  (VM_CAPTURE && (L)->openupval != NULL && \
-   (L)->openupval->level > savestack(L, (ci)->func.p))
+#define haslocalcaptures(ci) \
+  (VM_CAPTURE && (ci)->u.l.captures != 0)
 
 /* fetch an instruction and prepare its execution */
 #define vmfetch()	{ \
@@ -1512,7 +1511,7 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
 }
 
 #define storeinstructionresults() { \
-  if (l_unlikely(haslocalcaptures(L, ci))) { \
+  if (l_unlikely(haslocalcaptures(ci))) { \
     savepc(ci); storeinstruction(L, ci, i, pc); updatebase(ci); \
   } \
 }

@@ -43,6 +43,7 @@ static __thread unsigned reader_ownership;
 static __thread unsigned write_calls;
 static const void *measured_function;
 static unsigned local_loads;
+static unsigned local_stores;
 static int collect_pending, collected_pending;
 static int collect_lookup, collected_lookup;
 static unsigned parallel_started, parallel_finished;
@@ -156,6 +157,8 @@ void __wrap_luaF_writecapture(lua_State *state, UpVal *cell,
 }
 
 void __wrap_luaF_storelocals(lua_State *state, StkId first, int count) {
+  if (isLua(state->ci) && ci_func(state->ci) == measured_function)
+    local_stores++;
   measured++;
   __real_luaF_storelocals(state, first, count);
   measured--;
@@ -420,6 +423,8 @@ static const char barriers[] =
 static const char operands[] =
     "local function work() "
     " local cell=17; local function read() return cell end; "
+    " local registry=debug.getregistry(); registry.capture_probe=read; "
+    " registry.capture_probe=nil; "
     " local sum=0; for i=1,20000 do sum=sum+i end; "
     " assert(read()==17); return sum+cell-17 "
     "end; select_frame(work); assert(work()==200010000)";
@@ -465,7 +470,9 @@ static const char operand_semantics[] =
 static const char shadow_roots[] =
     "local weak=setmetatable({}, {__mode='v'}); "
     "local value={}; weak[1]=value; "
-    "local function replace(v) value=v end; replace(nil); "
+    "local function replace(v) value=v end; "
+    "local registry=debug.getregistry(); registry.capture_probe=replace; "
+    "registry.capture_probe=nil; replace(nil); "
     "collectgarbage('collect'); collectgarbage('collect'); "
     "assert(weak[1]==nil, 'obsolete capture shadow retained a value'); "
     "assert(value==nil); ";
@@ -490,7 +497,9 @@ static const char snapshot_semantics[] =
 
 static const char lookup_roots[] =
     "local value={}; local weak=setmetatable({value},{__mode='v'}); "
-    "local function replace(v) value=v end; replace(nil); "
+    "local function replace(v) value=v end; "
+    "local registry=debug.getregistry(); registry.capture_probe=replace; "
+    "registry.capture_probe=nil; replace(nil); "
     "collectgarbage('collect'); collectgarbage('collect'); "
     "assert(weak[1]==nil); "
     "local source={payload={answer=46}}; value=source.payload; "
@@ -676,7 +685,10 @@ int main(int argc, char **argv) {
   } else if (strncmp(argv[1], "private_", 8) == 0) {
     if (strcmp(argv[1], "private_generational") == 0)
       lua_gc(state, LUA_GCGEN);
+    lua_pushcfunction(state, select_frame);
+    lua_setglobal(state, "select_frame");
     run(state,
+        "local function work() "
         "local value; local function read() return value end; "
         "local function write(v) value=v end; "
         "local values={false,true,math.mininteger,math.maxinteger,1.5,"
@@ -685,7 +697,23 @@ int main(int argc, char **argv) {
         "assert(rawequal(read(),values[i])) end; write(nil); "
         "assert(read()==nil); write({marker=round}); "
         "collectgarbage('step',1); assert(read().marker==round) end; "
-        "collectgarbage('collect'); assert(read().marker==48)");
+        "value={marker=49}; collectgarbage('collect'); "
+        "assert(value.marker==49 and read().marker==49); return read "
+        "end; select_frame(work); local read=work(); "
+        "collectgarbage('collect'); assert(read().marker==49)");
+    require(local_loads == 0 && local_stores == 0);
+    measured_function = NULL;
+    run(state, "local co=coroutine.create(function(...) "
+               "  local value={marker=select(1,...)}; "
+               "  local function read() return value end; "
+               "  value=setmetatable(value,{__add=function(old,n) "
+               "    coroutine.yield(read); return {marker=old.marker+n} end}); "
+               "  value=value+1; assert(value==read()); return read "
+               "end); local ok,read=coroutine.resume(co,51,0,0); "
+               "assert(ok and read().marker==51); collectgarbage('collect'); "
+               "local ok,result=coroutine.resume(co); "
+               "assert(ok and result==read and read().marker==52); "
+               "co=nil; collectgarbage('collect'); assert(read().marker==52)");
   } else if (strncmp(argv[1], "lowered_", 8) == 0)
     lowered(state, argv[1], &code);
   else if (strcmp(argv[1], "readers") == 0) {
