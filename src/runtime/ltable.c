@@ -883,20 +883,31 @@ lu_mem luaH_size (const Table *owner, Table *t) {
 }
 
 
-/* A dead inline table on a slab can return its entire storage without
-** invoking the host allocator or parking a sweep worker. */
-size_t luaH_inlineallocsize (Table *t) {
+/* Every external part at most this size comes from a pool. A sweep batch
+** never enters the host allocator while a collector could wait on it. */
+size_t luaH_pooledsize (Table *t) {
   size_t size = sizeof(*t) + t->inline_bytes;
-  if (luaH_size(t, t) != size) return 0;
+  if (t->asize != 0 && separate(t, t->array - t->asize)) {
+    size_t bytes = concretesize(t->asize);
+    if (bytes > LUA_ALLOC_MAX) return 0;
+    size += bytes;
+  }
+  if (!isdummy(t) && separate(t, hashbase(t))) {
+    size_t bytes = sizehash(t);
+    if (bytes > LUA_ALLOC_MAX) return 0;
+    size += bytes;
+  }
   lua_assert(t->access.depth == 0);
   return size;
 }
 
-l_mem luaH_freeinline (lua_State *L, Table *t) {
-  size_t size = luaH_inlineallocsize(t);
+l_mem luaH_freepooled (lua_State *L, Table *t) {
+  size_t size = luaH_pooledsize(t);
+  size_t header = sizeof(*t) + t->inline_bytes;
   lua_assert(luaMP_page(cast(LuaAllocBlock *, t) - 1) != NULL);
   if (size == 0) return 0;
-  luaM_freemem(L, t, size);
+  if (size != header) luaH_freeparts(L, t);
+  luaM_freemem(L, t, header);
   return cast(l_mem, size);
 }
 
@@ -908,11 +919,15 @@ void luaH_retire (lua_State *L, Table *t) {
   luaM_retire_(L, t, sizeof(*t) + t->inline_bytes);
 }
 
-void luaH_free (lua_State *L, Table *t) {
-  lua_assert(t->access.depth == 0);
+void luaH_freeparts (lua_State *L, Table *t) {
   freehash(L, t);
   if (t->asize != 0 && separate(t, t->array - t->asize))
     luaM_freemem(L, t->array - t->asize, concretesize(t->asize));
+}
+
+void luaH_free (lua_State *L, Table *t) {
+  lua_assert(t->access.depth == 0);
+  luaH_freeparts(L, t);
   luaM_freemem(L, t, sizeof(*t) + t->inline_bytes);
 }
 

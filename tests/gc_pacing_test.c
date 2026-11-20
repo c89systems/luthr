@@ -4,6 +4,7 @@
 #include <lgc.h>
 #include <lmem.h>
 #include <lstate.h>
+#include <ltable.h>
 #include <lualib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -316,15 +317,16 @@ static void sweep_growth(void) {
   lua_close(L);
 }
 
-static unsigned page_releases;
+static unsigned page_releases, watched_bin;
 
 void __real_luaM_releasepage(lua_State *, LuaAllocPage *, l_mem);
 void __wrap_luaM_releasepage(lua_State *L, LuaAllocPage *page, l_mem bytes) {
-  __atomic_fetch_add(&page_releases, 1, __ATOMIC_RELAXED);
+  if (page->bin == watched_bin)
+    __atomic_fetch_add(&page_releases, 1, __ATOMIC_RELAXED);
   __real_luaM_releasepage(L, page, bytes);
 }
 
-static void sweep_inline(void) {
+static void sweep_pooled(int separate_parts) {
   enum { SMALL_TABLES = 512, LARGE_ARRAY = 2048 };
   lua_State *L = luaL_newstate();
   global_State *g;
@@ -338,7 +340,19 @@ static void sweep_inline(void) {
   lua_pushinteger(L, 47);
   lua_rawseti(L, 1, 2);
   for (unsigned i = 0; i < SMALL_TABLES; i++) {
-    lua_createtable(L, 2, 0);
+    lua_createtable(L, separate_parts ? 0 : 2, 0);
+    if (separate_parts) {
+      Table *table = (Table *)lua_topointer(L, -1);
+      lua_lock(L);
+      luaH_resize(L, table, 2, 2);
+      require(table->inline_bytes == 0 &&
+              luaH_pooledsize(table) > sizeof(Table));
+      lua_unlock(L);
+    }
+    if (i == 0) {
+      const void *table = lua_topointer(L, -1);
+      watched_bin = luaMP_page((const LuaAllocBlock *)table - 1)->bin;
+    }
     lua_pop(L, 1);
   }
   lua_createtable(L, LARGE_ARRAY, 0);
@@ -911,8 +925,9 @@ int main(int argc, char **argv) {
     sweep_growth();
     return 0;
   }
-  if (strcmp(argv[1], "sweep_inline") == 0) {
-    sweep_inline();
+  if (strcmp(argv[1], "sweep_inline") == 0 ||
+      strcmp(argv[1], "sweep_pooled") == 0) {
+    sweep_pooled(strcmp(argv[1], "sweep_pooled") == 0);
     return 0;
   }
   if (strncmp(argv[1], "nursery_", 8) == 0) {

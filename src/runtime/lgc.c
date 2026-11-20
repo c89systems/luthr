@@ -1326,7 +1326,7 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   if (isdead(g, o)) {
     int retired;
     if (o->tt == LUA_VTABLE) {
-      l_mem size = luaH_freeinline(L, gco2t(o));
+      l_mem size = luaH_freepooled(L, gco2t(o));
       if (size != 0) {
         work->freed += size;
         return SWEEP_RETIRED;
@@ -1718,14 +1718,14 @@ static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
   }
 }
 
-/* A full, unowned page can be discarded without making its slots reusable.
-** Any live table, separate backing allocation, or other slot owner requires
-** the ordinary sweep. The page claim prevents allocator handoff meanwhile. */
+/* A full, unowned page of dead tables can be discarded in one operation.
+** Validate every slot and backing buffer before releasing any of them.
+** Any backing requiring the host allocator uses ordinary deferred sweep. */
 static int release_dead_page (lua_State *L, LuaSweepWork *work,
                               size_t stride, uintptr_t birth) {
   global_State *g = G(L);
   LuaAllocPage *page = work->page;
-  l_mem bytes = 0;
+  l_mem bytes = 0, headers = 0;
   unsigned count = 0;
   size_t offset;
   for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
@@ -1737,16 +1737,24 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
     if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth ||
         (work->kind == SWEEP_YOUNG && isold(obj2gco(table))) ||
         !iswhite(g, obj2gco(table))) return 0;
-    size = luaH_inlineallocsize(table);
+    size = luaH_pooledsize(table);
     if (size == 0) return 0;
     bytes += cast(l_mem, size);
+    headers += cast(l_mem, sizeof(*table) + table->inline_bytes);
     count++;
   }
   lua_assert(count != 0 && count == page->used);
+  if (headers != bytes) {
+    for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+         offset += stride) {
+      LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+      luaH_freeparts(L, cast(Table *, block + 1));
+    }
+  }
   work->page = NULL;
   work->count = count;
   work->freed = bytes;
-  luaM_releasepage(L, page, bytes);
+  luaM_releasepage(L, page, headers);
   return 1;
 }
 
