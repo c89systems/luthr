@@ -35,6 +35,16 @@ static int answer(lua_State *L) {
 static void small_table(lua_State *L, lua_State *other, int from_lua) {
   const Table *table;
   unsigned i;
+  lua_createtable(L, 0, 2);
+  table = lua_topointer(L, -1);
+  require(table != NULL && table->inline_bytes >= 2 * sizeof(Node));
+  budget(table, 128);
+  lua_pop(L, 1);
+  lua_createtable(L, 0, 4);
+  table = lua_topointer(L, -1);
+  require(table != NULL && table->inline_bytes >= 4 * sizeof(Node));
+  budget(table, 192);
+  lua_pop(L, 1);
   if (from_lua) {
     require(luaL_loadstring(L, "return {17, 42, 31, answer=43}") == LUA_OK);
     require(lua_pcall(L, 0, 1, 0) == LUA_OK);

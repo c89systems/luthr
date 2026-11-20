@@ -645,7 +645,7 @@ static void resurrected_weak(void) {
   luaW_start(L);
   lua_unlock(L);
   drain(L);
-  require(inner->weak_epoch == G(L)->trace_epoch && iswhite(G(L), child));
+  require(luaC_weakvalid(G(L), luaC_tablestate(inner)) && iswhite(G(L), child));
   /* A weak-value decision from before resurrection cannot erase this edge.
    * The read promotes it; completing the later cutoff must retain that root. */
   require(lua_getfield(L, 1, "child") == LUA_TTABLE);
@@ -658,6 +658,32 @@ static void resurrected_weak(void) {
   lua_unlock(L);
   require(lua_getfield(L, 1, "child") == LUA_TTABLE);
   finish(L);
+}
+
+static void weak_stamp_wrap(void) {
+  lua_State *L = newstate();
+  Table *table;
+  lua_gc(L, LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 1, 0);
+  lua_newtable(L);
+  lua_pushvalue(L, 2);
+  lua_rawseti(L, 1, 1);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_pop(L, 1);
+  table = (Table *)lua_topointer(L, 1);
+  lua_lock(L);
+  /* An old strong decision would otherwise look current after stamp wrap. */
+  G(L)->weak_stamp = UINT64_MAX - (LUA_WEAK_STAMP_STEP - 1);
+  luaC_settablestate(table, LUA_WEAK_STAMP_STEP);
+  lua_unlock(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
+  lua_close(L);
 }
 
 static void string_lookup(int cache) {
@@ -728,6 +754,10 @@ static void concurrent_collection(const char *kind) {
   require(collection.main != NULL);
   lua_gc(collection.main, LUA_GCSTOP);
   lua_gc(collection.main, LUA_GCINC);
+  /* The 1 MiB allocation after emergency recovery should fit the next idle
+   * allowance. This fixture observes the interrupted driver's completion. */
+  if (collection.emergency && !generational)
+    lua_gc(collection.main, LUA_GCPARAM, LUA_GCPPAUSE, 400);
   /* Leave an otherwise unreachable old dirty table on the remembered list.
    * Emergency marking may free it while the original controller is parked. */
   lua_newtable(collection.main);
@@ -1080,6 +1110,8 @@ int main(int argc, char **argv) {
     ephemerons();
   else if (strcmp(argv[1], "weak_retry") == 0)
     weak_retry();
+  else if (strcmp(argv[1], "weak_stamp_wrap") == 0)
+    weak_stamp_wrap();
   else if (strncmp(argv[1], "parallel_", 9) == 0)
     parallel_marking(argv[1]);
   else if (strncmp(argv[1], "weak", 4) == 0)

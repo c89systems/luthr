@@ -215,7 +215,8 @@ static void fast(lua_State *state) {
   }
   measuring = 0;
   require(access_calls == 0 && mutex_calls == 0);
-  require(table->sequence == sequence && table->access.owner == NULL);
+  require(table->sequence == sequence &&
+          luaA_lockowner(&table->access) == NULL);
   setivalue(&key, 1);
   setivalue(&value, 84);
   luaH_set(state, table, &key, &value);

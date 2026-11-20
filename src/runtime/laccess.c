@@ -26,6 +26,7 @@ static LuaObjectLock *objectlock (GCObject *object) {
 }
 
 enum { VERSION_ENTER_LOCAL, VERSION_ENTER_SHARED, VERSION_LEAVE };
+enum { ACCESS_OWNED = 1, ACCESS_BORROWED };
 
 l_sinline void version (GCObject *object, LuaObjectLock *lock, int transition) {
   if (object != NULL && lock == objectlock(object)) {
@@ -50,63 +51,60 @@ static int tryaccess (lua_State *, LuaObjectLock *, GCObject *);
 
 static int mutatoraccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
   if (object != NULL && lock == objectlock(object) && luaA_local(L, object)) {
-    void *token = luaX_token(L);
-    void *owner = __atomic_load_n(&lock->owner, __ATOMIC_RELAXED);
-    lua_assert(owner == NULL || owner == token);
-    if (owner == token) lock->depth++;
-    else {
-      __atomic_store_n(&lock->owner, token, __ATOMIC_RELEASE);
-      lock->depth = 1;
-      version(object, lock, VERSION_ENTER_LOCAL);
-    }
-    return 1;
+    uintptr_t token = cast(uintptr_t, luaX_token(L));
+    uintptr_t word = __atomic_load_n(&lock->word, __ATOMIC_RELAXED);
+    if ((word & ~LUA_OBJECT_WAITING) == token) return ACCESS_BORROWED;
+    lua_assert((word & ~LUA_OBJECT_WAITING) == 0 && !(token & LUA_OBJECT_WAITING));
+    __atomic_store_n(&lock->word, token | (word & LUA_OBJECT_WAITING),
+                     __ATOMIC_RELEASE);
+    version(object, lock, VERSION_ENTER_LOCAL);
+    return ACCESS_OWNED;
   }
   return tryaccess(L, lock, object);
 }
 
 static int tryaccess (lua_State *L, LuaObjectLock *lock, GCObject *object) {
-  void *token = luaX_token(L);
-  void *owner = __atomic_load_n(&lock->owner, __ATOMIC_SEQ_CST);
-  if (owner == token) {
-    lua_assert(lock->depth != 0);
-    lock->depth++;
-    return 1;
-  }
-  if (owner == NULL && __atomic_compare_exchange_n(&lock->owner, &owner,
-          token, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
-    lua_assert(lock->depth == 0);
-    lock->depth = 1;
+  uintptr_t token = cast(uintptr_t, luaX_token(L));
+  uintptr_t word = __atomic_load_n(&lock->word, __ATOMIC_SEQ_CST);
+  uintptr_t owner = word & ~LUA_OBJECT_WAITING;
+  lua_assert(!(token & LUA_OBJECT_WAITING));
+  if (owner == token) return ACCESS_BORROWED;
+  if (owner == 0 && __atomic_compare_exchange_n(&lock->word, &word,
+          token | (word & LUA_OBJECT_WAITING), 0, __ATOMIC_SEQ_CST,
+          __ATOMIC_RELAXED)) {
     version(object, lock, VERSION_ENTER_SHARED);
-    return 1;
+    return ACCESS_OWNED;
   }
   return 0;
 }
 
 int luaA_tryscan (lua_State *L, GCObject *object) {
-  if (!tryaccess(L, objectlock(object), object)) return 0;
-  if (object->tt == LUA_VTABLE && gco2t(object)->access.depth == 1 &&
+  int reservation = tryaccess(L, objectlock(object), object);
+  if (reservation == ACCESS_OWNED && object->tt == LUA_VTABLE &&
       !luaH_quiescewriters(L, gco2t(object), 0)) {
-    luaA_endscan(L, object);
+    luaA_endscan(L, object, reservation);
     return 0;
   }
-  return 1;
+  return reservation;
 }
 
-void luaA_endscan (lua_State *L, GCObject *object) {
+static void unlockwatched (lua_State *L, LuaObjectLock *lock) {
+  /* Either the release observes the waiter bit, or the observer's next
+  ** predicate check sees the released ownership. */
+  if (__atomic_exchange_n(&lock->word, 0, __ATOMIC_SEQ_CST) & LUA_OBJECT_WAITING) {
+    LuaWorld *world = &G(L)->world;
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    luaQ_wake(&world->changed, &world->waiters);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  }
+}
+
+void luaA_endscan (lua_State *L, GCObject *object, int reservation) {
   LuaObjectLock *lock = objectlock(object);
-  lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
-             luaX_token(L) && lock->depth != 0);
-  if (--lock->depth == 0) {
+  lua_assert(reservation != 0 && luaA_lockowner(lock) == luaX_token(L));
+  if (reservation == ACCESS_OWNED) {
     version(object, lock, VERSION_LEAVE);
-    __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
-    /* A scanner never parks with ownership. Existing mutator waiters need
-    ** the same notification handshake as an ordinary scoped release. */
-    if (__atomic_load_n(&lock->waiting, __ATOMIC_SEQ_CST) != 0) {
-      LuaWorld *world = &G(L)->world;
-      luaX_checksync(pthread_mutex_lock(&world->mutex));
-      luaQ_wake(&world->changed, &world->waiters);
-      luaX_checksync(pthread_mutex_unlock(&world->mutex));
-    }
+    unlockwatched(L, lock);
   }
 }
 
@@ -128,10 +126,11 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
       scope->saved_top = savestack(L, L->top.p);
       L->top.p = L->ci->top.p;  /* publish all registers before a possible wait */
     }
-    if (!mutatoraccess(L, lock, object)) {
+    scope->held = mutatoraccess(L, lock, object);
+    if (!scope->held) {
       luaX_checksync(pthread_mutex_lock(&world->mutex));
-      __atomic_fetch_add(&lock->waiting, 1, __ATOMIC_SEQ_CST);
-      if (luaW_stopped(world) || !tryaccess(L, lock, object)) {
+      luaA_watchlock(lock);
+      if (luaW_stopped(world) || !(scope->held = tryaccess(L, lock, object))) {
         /* Never acquire an unrelated object behind metadata ownership. */
         lua_assert(world->heap_depth == 0 ||
                    !luaX_isowner(L, &world->heap_owner));
@@ -142,17 +141,17 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
         luaQ_wake(&world->changed, &world->waiters);
         do {
           luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
-        } while (luaW_stopped(world) || !tryaccess(L, lock, object));
+          luaA_watchlock(lock);
+        } while (luaW_stopped(world) ||
+                 !(scope->held = tryaccess(L, lock, object)));
         luaW_resume(L);
         luaC_checksnapshot(L);
         L->object_waiting--;
         L->native_depth--;
       }
-      __atomic_fetch_sub(&lock->waiting, 1, __ATOMIC_SEQ_CST);
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
     }
-    scope->held = 1;
-    if (object != NULL && object->tt == LUA_VTABLE && lock->depth == 1)
+    if (object != NULL && object->tt == LUA_VTABLE && scope->held == ACCESS_OWNED)
       luaH_quiescewriters(L, gco2t(object), 1);
     if (object != NULL && object->tt == LUA_VTABLE && luaC_tracing(L))
       luaC_prepareweak(L, gco2t(object));
@@ -175,44 +174,23 @@ int luaA_trylock (lua_State *L, LuaObjectLock *lock) {
   return tryaccess(L, lock, NULL);
 }
 
-void luaA_endlock (lua_State *L, LuaObjectLock *lock) {
-  lua_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
-             luaX_token(L) && lock->depth != 0);
-  if (--lock->depth == 0) {
-    __atomic_store_n(&lock->owner, NULL, __ATOMIC_SEQ_CST);
-    if (__atomic_load_n(&lock->waiting, __ATOMIC_SEQ_CST) != 0) {
-      LuaWorld *world = &G(L)->world;
-      luaX_checksync(pthread_mutex_lock(&world->mutex));
-      luaQ_wake(&world->changed, &world->waiters);
-      luaX_checksync(pthread_mutex_unlock(&world->mutex));
-    }
-  }
+void luaA_endlock (lua_State *L, LuaObjectLock *lock, int reservation) {
+  lua_assert(reservation != 0 && luaA_lockowner(lock) == luaX_token(L));
+  if (reservation == ACCESS_OWNED) unlockwatched(L, lock);
 }
 
 static void releasescope (lua_State *L, LuaObjectScope *scope) {
-  if (scope->held) {
-    LuaWorld *world = &G(L)->world;
-    lua_assert(scope->lock->depth != 0 &&
-      __atomic_load_n(&scope->lock->owner, __ATOMIC_RELAXED) == luaX_token(L));
-    scope->held = 0;
-    if (--scope->lock->depth == 0) {
-      GCObject *object = iscollectable(&scope->root.value)
-        ? gcvalue(&scope->root.value) : NULL;
-      version(object, scope->lock, VERSION_LEAVE);
-      if (object != NULL && scope->lock == objectlock(object) &&
-          luaA_local(L, object)) {
-        __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_RELEASE);
-        return;
-      }
-      /* Order release/observer checks against the waiter's observer increment
-      ** and predicate recheck: either it sees unowned or this side wakes it. */
-      __atomic_store_n(&scope->lock->owner, NULL, __ATOMIC_SEQ_CST);
-      if (__atomic_load_n(&scope->lock->waiting, __ATOMIC_SEQ_CST) != 0) {
-        luaX_checksync(pthread_mutex_lock(&world->mutex));
-        luaQ_wake(&world->changed, &world->waiters);
-        luaX_checksync(pthread_mutex_unlock(&world->mutex));
-      }
-    }
+  int reservation = scope->held;
+  scope->held = 0;
+  lua_assert(!reservation || luaA_lockowner(scope->lock) == luaX_token(L));
+  if (reservation == ACCESS_OWNED) {
+    GCObject *object = iscollectable(&scope->root.value)
+      ? gcvalue(&scope->root.value) : NULL;
+    version(object, scope->lock, VERSION_LEAVE);
+    if (object != NULL && scope->lock == objectlock(object) && luaA_local(L, object))
+      __atomic_store_n(&scope->lock->word, 0, __ATOMIC_RELEASE);
+    else
+      unlockwatched(L, scope->lock);
   }
 }
 

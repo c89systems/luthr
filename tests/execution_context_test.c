@@ -79,9 +79,13 @@ static void owned(lua_State *state, int managed) {
   measuring = 1;
   for (i = 0; i < 2000; i++) {
     LuaObjectScope outer;
+    int reservation;
     luaA_begin(state, obj2gco(table), &outer);
-    require(luaA_tryscan(state, obj2gco(table)));
-    luaA_endscan(state, obj2gco(table));
+    reservation = luaA_tryscan(state, obj2gco(table));
+    require(reservation != 0);
+    luaA_endscan(state, obj2gco(table), reservation);
+    require(luaA_lockowner(&table->access) == luaX_token(state));
+    require(table->sequence & 1);
     setivalue(&value, i);
     luaH_assignowned(state, table, &key, &value, 1);
     require(luaH_getint(state, table, 1, &result) == LUA_VNUMINT);

@@ -285,7 +285,7 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
     uintptr_t flags = LUA_BLOCK_TABLE;
     lua_assert(page != NULL && offset == 0);
     if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
-    gco2t(o)->weak_link = collector ? 0 : L->nursery_epoch;
+    gco2t(o)->gcstate = collector ? 0 : L->nursery_epoch;
     if (!collector) {
       if (L->new_tables == NULL) luaW_trackpublisher(L);
       luaC_allocnext(o) = L->new_tables;
@@ -468,6 +468,30 @@ void luaC_waittrace (lua_State *L) {
   }
 }
 
+/* A packed weak stamp has fewer bits than the trace epoch. On wrap,
+** invalidate old caches at the existing quiescent trace boundary. */
+static void resetweakstamps (global_State *g) {
+  unsigned last = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
+  unsigned pool;
+  for (pool = luaMP_sizeclass(sizeof(Table)); pool <= last; pool++) {
+    LuaAllocPage *page;
+    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
+    for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
+      size_t offset;
+      if (page->state != LUA_PAGE_OPEN || page->table_epoch == 0) continue;
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+           offset += stride) {
+        LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+        Table *table = cast(Table *, block + 1);
+        if ((luaMP_header(block) & LUA_BLOCK_TABLE) &&
+            !(luaC_tablestate(table) & NURSERY_TAG))
+          luaC_settablestate(table, 0);
+      }
+    }
+  }
+  g->weak_stamp = LUA_WEAK_STAMP_STEP;
+}
+
 static void starttrace (lua_State *L, unsigned finish) {
   global_State *g = G(L);
   if ((g->gcstp & GCSTPCLS) && !g->gcemergency) return;
@@ -486,6 +510,8 @@ static void starttrace (lua_State *L, unsigned finish) {
   g->new_mark = cast_byte(g->major_mark | g->minor_mark |
     (finish == TRACE_GENERATIONAL || luaC_kind(g) == KGC_GENMAJOR ? G_OLD : 0));
   g->trace_epoch++;
+  g->weak_stamp += LUA_WEAK_STAMP_STEP;
+  if (l_unlikely(g->weak_stamp == 0)) resetweakstamps(g);
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
   g->trace_changes = 0;
@@ -723,19 +749,19 @@ static int cachemode (global_State *g, Table *h, const TValue *mode) {
     result = ((weakkey != NULL) << 1) | (weakvalue != NULL);
   }
   if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED)) {
-    __atomic_store_n(&h->gcweak, cast_byte(result), __ATOMIC_RELEASE);
-    h->weak_cleared = 0;
-    h->weak_initial_cutoff = cast_byte(__atomic_load_n(&g->trace_weakcutoff,
-                                                       __ATOMIC_RELAXED));
-    __atomic_store_n(&h->weak_epoch, g->trace_epoch, __ATOMIC_RELEASE);
+    unsigned cutoff = __atomic_load_n(&g->trace_weakcutoff, __ATOMIC_RELAXED);
+    uint64_t state = g->weak_stamp | cast(uint64_t, result << LUA_WEAK_MODE_SHIFT);
+    if (cutoff & 1) state |= LUA_WEAK_VALUES_LATE;
+    luaC_settablestate(h, state);
   }
   return result;
 }
 
 static int getmode (global_State *g, Table *h) {
-  if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED) &&
-      __atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == g->trace_epoch)
-    return h->gcweak;
+  if (__atomic_load_n(&g->trace_active, __ATOMIC_RELAXED)) {
+    uint64_t state = luaC_tablestate(h);
+    if (luaC_weakvalid(g, state)) return cast_int(luaC_weakmode(state));
+  }
   return cachemode(g, h, gfasttm(g, h->metatable, TM_MODE));
 }
 
@@ -744,11 +770,11 @@ static int getmode (global_State *g, Table *h) {
 static int preparemode (lua_State *L, Table *h) {
   TValue mode;
   Table *meta = h->metatable;
-  if (__atomic_load_n(&h->weak_epoch, __ATOMIC_ACQUIRE) == G(L)->trace_epoch)
+  if (luaC_weakvalid(G(L), luaC_tablestate(h)))
     return 1;
   if (meta == NULL) setnilvalue(&mode);
   else if (!luaH_readshortstr(G(L), NULL, meta, G(L)->tmname[TM_MODE], &mode)) {
-    if (__atomic_load_n(&meta->access.owner, __ATOMIC_ACQUIRE) != luaX_token(L))
+    if (luaA_lockowner(&meta->access) != luaX_token(L))
       return 0;
     /* A nested collection borrows this execution's stable partial image. */
     getmode(G(L), h);
@@ -883,6 +909,7 @@ static l_mem traverseLclosure (LuaTraceWork *work, LClosure *cl) {
 
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   global_State *g = G(L);
+  int reservation = 0;
   uintptr_t *sharing = luaA_sharing(o);
   if (sharing != NULL) {
     uintptr_t state = __atomic_load_n(sharing, __ATOMIC_ACQUIRE);
@@ -951,11 +978,11 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     int scanned = luaC_scanstrong(L, work, gco2t(o));
     if (scanned >= 0) return scanned;
   }
-  if (!luaW_iscollector(L) && !luaA_tryscan(L, o)) return 0;
+  if (!luaW_iscollector(L) && !(reservation = luaA_tryscan(L, o))) return 0;
   if (o->tt == LUA_VTABLE) {
     Table *table = gco2t(o);
-    if (!luaW_iscollector(L) && !preparemode(L, table)) {
-      luaA_endscan(L, o);
+    if (reservation && !preparemode(L, table)) {
+      luaA_endscan(L, o, reservation);
       return 0;
     }
     work->marked += luaC_objsize(o);
@@ -974,7 +1001,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
       default: lua_assert(0); break;
     }
   }
-  if (!luaW_iscollector(L)) luaA_endscan(L, o);
+  if (reservation) luaA_endscan(L, o, reservation);
   return 1;
 }
 
@@ -1035,19 +1062,20 @@ void luaC_polltrace (lua_State *L) {
 
 
 
-/* A claimed weak table retains its gclist for later weak phases. Retrying
-** object ownership uses a separate link, never its allocation membership. */
+/* A claimed weak table retains its gclist for later weak phases. Its
+** allocation link is idle here: the trace has published its cohort, and a
+** table born during tracing is black and cannot enter these weak lists. */
 static void deferweak (GCObject **head, GCObject **tail, GCObject *object) {
-  luaC_settablelink(gco2t(object), 0);
+  luaC_allocnext(object) = NULL;
   if (*tail != NULL)
-    luaC_settablelink(gco2t(*tail), object);
+    luaC_allocnext(*tail) = object;
   else *head = object;
   *tail = object;
 }
 
 static GCObject *takeweak (GCObject **head, GCObject **tail) {
   GCObject *object = *head;
-  *head = cast(GCObject *, luaC_tablelink(gco2t(object)));
+  *head = luaC_allocnext(object);
   if (*head == NULL) *tail = NULL;
   return object;
 }
@@ -1193,9 +1221,12 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     if (work->phase == TRACE_MARK) {
       if (!scantrace(L, work, object)) queuework(&work->deferred, object);
     }
-    else if (!quiescent && !luaA_tryscan(L, object))
-      deferweak(&work->retry, &work->retry_tail, object);
     else {
+      int reservation = quiescent ? 0 : luaA_tryscan(L, object);
+      if (!quiescent && reservation == 0) {
+        deferweak(&work->retry, &work->retry_tail, object);
+        continue;
+      }
       if (work->phase == TRACE_EPHEMERONS) {
         nw2black(object);
         if (traverseephemeron(work, gco2t(object), work->direction))
@@ -1203,7 +1234,7 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
       }
       else luaC_prepareweak(L, gco2t(object));
       work->scanned += luaC_objsize(object);
-      if (!quiescent) luaA_endscan(L, object);
+      if (reservation) luaA_endscan(L, object, reservation);
     }
   }
   /* Consume locally produced edges before returning to the shared queue. */
@@ -1231,7 +1262,7 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   publishwork(&work->ephemeron, &g->ephemeron);
   publishwork(&work->deferred, &g->trace_deferred);
   if (work->retry != NULL) {
-    luaC_settablelink(gco2t(work->retry_tail), plan->deferred);
+    luaC_allocnext(work->retry_tail) = plan->deferred;
     if (plan->deferred == NULL) plan->tail = work->retry_tail;
     plan->deferred = work->retry;
   }
@@ -1392,7 +1423,7 @@ static void checkSizes (lua_State *L, global_State *g) {
     if (target == tb->size) continue;
     /* A parked allocator may retain the old buckets. Retry that shard
     ** during the next cycle if it cannot shrink here. */
-    if (__atomic_load_n(&tb->access.owner, __ATOMIC_ACQUIRE) == NULL)
+    if (luaA_lockowner(&tb->access) == NULL)
       luaS_resize(L, tb, target);
     if (tb->size != target)
       __atomic_store_n(&g->shrink_strings, 1, __ATOMIC_RELAXED);
@@ -2423,8 +2454,8 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
 
 static void marknursery (lua_State *L, GCObject *object, GCObject **gray) {
   Table *t = gco2t(object);
-  if (luaC_nurserytable(L, t) && !(luaC_tablelink(t) & NURSERY_LIVE)) {
-    luaC_settablelink(t, luaC_tablelink(t) | NURSERY_LIVE);
+  if (luaC_nurserytable(L, t) && !(luaC_tablestate(t) & NURSERY_LIVE)) {
+    luaC_settablestate(t, luaC_tablestate(t) | NURSERY_LIVE);
     t->gclist = *gray;
     *gray = object;
   }
@@ -2459,7 +2490,7 @@ static void collectnursery (lua_State *L) {
       unsigned nodes = allocsizenode(t);
       if (t->asize >= remaining || nodes >= remaining - t->asize) return;
       remaining -= t->asize + nodes;
-      unpinned += (luaC_tablelink(t) & NURSERY_ROOT) == 0;
+      unpinned += (luaC_tablestate(t) & NURSERY_ROOT) == 0;
     }
   }
   if (unpinned < NURSERY_MIN_TABLES) return;
@@ -2472,7 +2503,7 @@ static void collectnursery (lua_State *L) {
     if (ttistable(s2v(slot))) marknursery(L, gcvalue(s2v(slot)), &gray);
   for (o = L->new_tables; o != NULL; o = luaC_allocnext(o))
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
-        (luaC_tablelink(gco2t(o)) & NURSERY_ROOT))
+        (luaC_tablestate(gco2t(o)) & NURSERY_ROOT))
       marknursery(L, o, &gray);
   while (gray != NULL) {
     Table *t = gco2t(gray);
@@ -2493,7 +2524,7 @@ static void collectnursery (lua_State *L) {
   while ((o = *link) != NULL) {
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
       Table *t = gco2t(o);
-      if (!(luaC_tablelink(t) & NURSERY_LIVE)) {
+      if (!(luaC_tablestate(t) & NURSERY_LIVE)) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, t) - 1;
         *link = luaC_allocnext(o);
         /* Freeing an external part can release admission. Detach the slot
@@ -2505,7 +2536,7 @@ static void collectnursery (lua_State *L) {
         L->nursery_tables--;
         continue;
       }
-      luaC_settablelink(t, luaC_tablelink(t) & ~cast(uintptr_t, NURSERY_LIVE));
+      luaC_settablestate(t, luaC_tablestate(t) & ~cast(uint64_t, NURSERY_LIVE));
     }
     link = luaC_alloclink(o);
   }

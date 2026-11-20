@@ -31,10 +31,7 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
 }
 
 l_sinline int luaH_strongaccess (lua_State *L, Table *table) {
-  if (!luaC_tracing(L)) return 1;
-  if (__atomic_load_n(&table->weak_epoch, __ATOMIC_ACQUIRE) == G(L)->trace_epoch)
-    return __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE) == 0;
-  return __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE) == NULL;
+  return !luaC_tracing(L) || luaC_strongtable(G(L), table);
 }
 
 LUAI_FUNC LuaTableWriter *luaH_claimwriter (lua_State *, Table *, Value *, uint64_t);

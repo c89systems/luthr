@@ -1,6 +1,7 @@
 /* Bounded visible writers, separate from layout ownership. See lua.h. */
 #define LUA_CORE
 #include "lprefix.h"
+#include "laccess.h"
 #include "ltableaccess.h"
 #include "ldo.h"
 
@@ -22,7 +23,7 @@ void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
   /* Same observer handshake as object ownership: a registering waiter either
   ** sees this departure, or this release sees its registration and wakes it. */
   if (__atomic_load_n(&writer->waiting, __ATOMIC_SEQ_CST) ||
-      __atomic_load_n(&table->access.waiting, __ATOMIC_SEQ_CST)) {
+      luaA_lockwatched(&table->access)) {
     LuaWorld *world = &G(L)->world;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
@@ -52,7 +53,7 @@ LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, Value *slot,
                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return NULL;
   /* A layout owner either sees the claimed row, or closes the even version
   ** before the claimant advertises itself. An odd version rejects new writers. */
-  if (__atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST) != NULL ||
+  if (luaA_lockowner(&table->access) != NULL ||
       !luaH_strongaccess(L, table) ||
       !advertise(table, layout, LUA_TABLE_ELEMENT_WRITES)) {
     luaH_releasewriter(L, table, writer);
@@ -95,7 +96,7 @@ static int writersbusy (lua_State *L, Table *table, LuaTableWriter *writer) {
 }
 
 static int layoutbusy (lua_State *L, Table *table, LuaTableWriter *writer) {
-  void *owner = __atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST);
+  void *owner = luaA_lockowner(&table->access);
   cast_void(writer);
   return owner != NULL && owner != luaX_token(L);
 }
@@ -104,14 +105,15 @@ static int layoutbusy (lua_State *L, Table *table, LuaTableWriter *writer) {
 static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
                        int (*busy)(lua_State *, Table *, LuaTableWriter *)) {
   LuaWorld *world = &G(L)->world;
-  unsigned *waiting = writer != NULL ? &writer->waiting : &table->access.waiting;
   ptrdiff_t saved_top = -1;
   if (isLua(L->ci) && L->top.p < L->ci->top.p) {
     saved_top = savestack(L, L->top.p);
     L->top.p = L->ci->top.p;
   }
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  __atomic_fetch_add(waiting, 1, __ATOMIC_SEQ_CST);
+  if (writer != NULL)
+    __atomic_fetch_add(&writer->waiting, 1, __ATOMIC_SEQ_CST);
+  else luaA_watchlock(&table->access);
   if (luaW_stopped(world) || busy(L, table, writer)) {
     lua_assert(world->heap_depth == 0 || !luaX_isowner(L, &world->heap_owner));
     L->native_depth++;
@@ -120,13 +122,15 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
     luaQ_wake(&world->changed, &world->waiters);
     do {
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+      if (writer == NULL) luaA_watchlock(&table->access);
     } while (luaW_stopped(world) || busy(L, table, writer));
     luaW_resume(L);
     luaC_checksnapshot(L);
     L->object_waiting--;
     L->native_depth--;
   }
-  __atomic_fetch_sub(waiting, 1, __ATOMIC_SEQ_CST);
+  if (writer != NULL)
+    __atomic_fetch_sub(&writer->waiting, 1, __ATOMIC_SEQ_CST);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   if (saved_top >= 0) L->top.p = restorestack(L, saved_top);
 }

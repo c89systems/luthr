@@ -693,6 +693,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCcyclelive = sizeof(global_State);
   g->gcstep_pending = 0;
   g->trace_active = g->trace_epoch = g->trace_busy = 0;
+  g->weak_stamp = 0;
   g->trace_weakcutoff = 0;
   memset(&g->trace_plan, 0, sizeof(g->trace_plan));
   g->trace_interrupt = 0;

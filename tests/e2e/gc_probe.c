@@ -602,8 +602,7 @@ void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
         abort();
       }
     }
-    for (object = work->retry; object != NULL;
-         object = (GCObject *)luaC_tablelink(gco2t(object)))
+    for (object = work->retry; object != NULL; object = luaC_allocnext(object))
       record->trace_retry_tables++;
   }
 }

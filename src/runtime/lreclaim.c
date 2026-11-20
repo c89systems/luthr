@@ -36,13 +36,13 @@ static void freeobj (lua_State *L, GCObject *o) {
       break;
     case LUA_VLCL: {
       LClosure *cl = gco2lcl(o);
-      lua_assert(cl->access.depth == 0);
+      lua_assert(luaA_lockowner(&cl->access) == NULL);
       luaM_freemem(L, cl, sizeLclosure(cl->nupvalues));
       break;
     }
     case LUA_VCCL: {
       CClosure *cl = gco2ccl(o);
-      lua_assert(cl->access.depth == 0);
+      lua_assert(luaA_lockowner(&cl->access) == NULL);
       luaM_freemem(L, cl, sizeCclosure(cl->nupvalues));
       break;
     }
@@ -164,13 +164,14 @@ int luaC_tryretire (lua_State *L, GCObject *o) {
   if (o->tt == LUA_VSHRSTR) {
     TString *string = gco2ts(o);
     stringtable *table = &G(L)->strt[string->hash % LUA_STRING_SHARDS];
-    if (!luaA_trylock(L, &table->access)) return SWEEP_RETRY;
+    int reservation = luaA_trylock(L, &table->access);
+    if (!reservation) return SWEEP_RETRY;
     if (!isdead(G(L), o)) {
-      luaA_endlock(L, &table->access);
+      luaA_endlock(L, &table->access, reservation);
       return SWEEP_LIVE;
     }
     luaS_remove(L, string);
-    luaA_endlock(L, &table->access);
+    luaA_endlock(L, &table->access, reservation);
   }
   else if (o->tt == LUA_VUPVAL) {
     UpVal *uv = gco2upv(o);

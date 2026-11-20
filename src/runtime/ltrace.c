@@ -230,13 +230,16 @@ static int weakdead (lua_State *L, GCObject *object) {
 void luaC_prepareweak (lua_State *L, Table *table) {
   unsigned cutoff = __atomic_load_n(&G(L)->trace_weakcutoff, __ATOMIC_ACQUIRE);
   unsigned pending, i;
-  if (cutoff == 0 || __atomic_load_n(&table->weak_epoch, __ATOMIC_ACQUIRE) !=
-                       G(L)->trace_epoch) return;
+  uint64_t state;
+  if (cutoff == 0) return;
+  state = luaC_tablestate(table);
+  if (!luaC_weakvalid(G(L), state)) return;
   /* Tables discovered through finalization have not participated in the first
   ** weak-value decision. Their values must wait for resurrection's strong
   ** closure, which precedes the later key/value cutoff. */
-  pending = ((cutoff & 2) ? cutoff : cutoff & ~table->weak_initial_cutoff);
-  pending = (pending & table->gcweak) & ~table->weak_cleared;
+  if (cutoff == 1 && (state & LUA_WEAK_VALUES_LATE)) return;
+  pending = (cutoff & luaC_weakmode(state)) &
+            ~cast_uint(state >> LUA_WEAK_CLEARED_SHIFT);
   if (pending == 0) return;
   if (pending & 1) {
     for (i = 0; i < table->asize; i++) {
@@ -257,5 +260,5 @@ void luaC_prepareweak (lua_State *L, Table *table) {
       if (keyiscollectable(node)) setdeadkey(node);
     }
   }
-  table->weak_cleared |= cast_byte(pending);
+  luaC_settablestate(table, state | (cast(uint64_t, pending) << LUA_WEAK_CLEARED_SHIFT));
 }

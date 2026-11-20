@@ -356,13 +356,34 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
 enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_STEP = 8 };
-#define luaC_tablelink(t) __atomic_load_n(&(t)->weak_link, __ATOMIC_RELAXED)
-#define luaC_settablelink(t,v) \
-  __atomic_store_n(&(t)->weak_link, cast(uintptr_t, v), __ATOMIC_RELAXED)
+enum {
+  LUA_WEAK_MODE_SHIFT = 1,
+  LUA_WEAK_CLEARED_SHIFT = 3,
+  LUA_WEAK_VALUES_LATE = 32,
+  LUA_WEAK_STAMP_STEP = 64
+};
+
+#define luaC_tablestate(t) __atomic_load_n(&(t)->gcstate, __ATOMIC_ACQUIRE)
+#define luaC_settablestate(t,v) __atomic_store_n(&(t)->gcstate, (v), __ATOMIC_RELEASE)
+
+l_sinline int luaC_weakvalid (global_State *g, uint64_t state) {
+  return (state & (~cast(uint64_t, LUA_WEAK_STAMP_STEP - 1) | NURSERY_TAG)) ==
+         g->weak_stamp;
+}
+
+l_sinline unsigned luaC_weakmode (uint64_t state) {
+  return (state & NURSERY_TAG) ? 0 : cast_uint(state >> LUA_WEAK_MODE_SHIFT) & 3;
+}
+
+l_sinline int luaC_strongtable (global_State *g, Table *table) {
+  uint64_t state = luaC_tablestate(table);
+  if (luaC_weakvalid(g, state)) return luaC_weakmode(state) == 0;
+  return __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE) == NULL;
+}
 
 l_sinline int luaC_nurserytable (lua_State *L, Table *t) {
   return __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L) &&
-         (luaC_tablelink(t) & ~cast(uintptr_t, NURSERY_ROOT | NURSERY_LIVE)) ==
+         (luaC_tablestate(t) & ~cast(uint64_t, NURSERY_ROOT | NURSERY_LIVE)) ==
            L->nursery_epoch;
 }
 
@@ -372,7 +393,7 @@ l_sinline void luaC_nurseryedge (lua_State *L, GCObject *owner, GCObject *value)
   if (value->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(value)) &&
       (owner->tt != LUA_VTABLE || !luaC_nurserytable(L, gco2t(owner)))) {
     Table *t = gco2t(value);
-    luaC_settablelink(t, luaC_tablelink(t) | NURSERY_ROOT);
+    luaC_settablestate(t, luaC_tablestate(t) | NURSERY_ROOT);
   }
 }
 

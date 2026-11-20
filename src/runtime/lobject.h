@@ -17,13 +17,16 @@
 #include "lgate.h"
 
 typedef struct LuaObjectLock {
-  void *owner;  /* atomic logical-execution token; NULL means unowned */
-  unsigned depth;
-  unsigned waiting;  /* atomic; only real contention reaches the world wait queue */
+  uintptr_t word;  /* aligned logical owner and a wait-queue notification bit */
 } LuaObjectLock;
 
-#define luaA_initlock(lock) \
-  ((lock)->owner = NULL, (lock)->depth = 0, (lock)->waiting = 0)
+#define LUA_OBJECT_WAITING cast(uintptr_t, 1)
+#define luaA_initlock(lock) ((lock)->word = 0)
+
+l_sinline void *luaA_lockowner (const LuaObjectLock *lock) {
+  return cast(void *, __atomic_load_n(&lock->word, __ATOMIC_SEQ_CST) &
+                      ~LUA_OBJECT_WAITING);
+}
 
 /*
 ** Extra types for collectable non-values
@@ -826,6 +829,7 @@ enum {
 typedef struct Table {
   CommonHeader;
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
+  lu_byte inline_bytes;  /* immutable tail allocation, retained across resize */
   unsigned int asize;  /* number of slots in 'array' array */
   uintptr_t sharing;
   uint64_t sequence;
@@ -834,12 +838,7 @@ typedef struct Table {
   Node *node;
   struct Table *metatable;
   GCObject *gclist;
-  uint64_t weak_epoch;
-  uintptr_t weak_link;  /* shared weak retry link, or tagged unpublished stamp */
-  lu_byte gcweak;  /* weakness selected for this collection cycle */
-  lu_byte weak_cleared;
-  lu_byte weak_initial_cutoff;
-  lu_byte inline_bytes;  /* immutable tail allocation, retained across resize */
+  uint64_t gcstate;  /* unpublished nursery stamp or frozen weak mode */
 } Table;
 
 

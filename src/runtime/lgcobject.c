@@ -28,8 +28,7 @@ int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
     uint64_t sequence = version != NULL
       ? __atomic_load_n(version, __ATOMIC_ACQUIRE) : 0;
     if (sequence & 1) {
-      if (access != NULL && __atomic_load_n(&access->owner, __ATOMIC_ACQUIRE) ==
-                            luaX_token(L)) return -1;
+      if (access != NULL && luaA_lockowner(access) == luaX_token(L)) return -1;
       return 0;
     }
     if (slots > 32) slots = 32;

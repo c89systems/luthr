@@ -521,6 +521,7 @@ typedef struct global_State {
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
+  uint64_t weak_stamp;  /* high bits of the tables' per-trace weak state */
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
   unsigned trace_ready;  /* atomic queued-work hint, independent of busy claims */
   unsigned barrier_ready;  /* atomic directory of nonempty barrier shards */

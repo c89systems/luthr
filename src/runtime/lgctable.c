@@ -26,13 +26,13 @@ static int snapshot (Table *table, Table *view, Table **metatable,
 static int strongmode (lua_State *L, Table *table, Table *metatable,
                        uint64_t sequence) {
   global_State *g = G(L);
-  if (__atomic_load_n(&table->weak_epoch, __ATOMIC_ACQUIRE) == g->trace_epoch)
-    return __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE) == 0 ? 1 : -1;
+  uint64_t state = luaC_tablestate(table);
+  if (luaC_weakvalid(g, state))
+    return luaC_weakmode(state) == 0 ? 1 : -1;
   if (metatable != NULL) {
     TValue mode;
     if (!luaH_readshortstr(g, NULL, metatable, g->tmname[TM_MODE], &mode)) {
-      return __atomic_load_n(&metatable->access.owner, __ATOMIC_ACQUIRE) ==
-             luaX_token(L) ? -1 : 0;
+      return luaA_lockowner(&metatable->access) == luaX_token(L) ? -1 : 0;
     }
     if (ttisstring(&mode)) {
       const char *text = getstr(tsvalue(&mode));
@@ -42,8 +42,7 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
   if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence) return 0;
   /* Only the claimed marker freezes this epoch. Publishing a strong mode
   ** cannot expose a weak cutoff; weak mode changes retain mutation ownership. */
-  __atomic_store_n(&table->gcweak, 0, __ATOMIC_RELEASE);
-  __atomic_store_n(&table->weak_epoch, g->trace_epoch, __ATOMIC_RELEASE);
+  luaC_settablestate(table, g->weak_stamp);
   return 1;
 }
 
@@ -77,7 +76,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     /* A nested collection can borrow its own suspended native operation.
     ** Its partial construction image is stable under that existing owner;
     ** waiting for this execution's odd sequence would wait on ourselves. */
-    if (__atomic_load_n(&table->access.owner, __ATOMIC_ACQUIRE) == luaX_token(L))
+    if (luaA_lockowner(&table->access) == luaX_token(L))
       return -1;
     return 0;
   }

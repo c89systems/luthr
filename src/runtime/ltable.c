@@ -844,10 +844,6 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
   luaA_initsharing(L, t);
   t->sequence = 0;
   t->metatable = NULL;
-  t->weak_epoch = 0;
-  t->gcweak = 0;
-  t->weak_cleared = 0;
-  t->weak_initial_cutoff = 0;
   t->inline_bytes = cast_byte(bytes);
   t->flags = maskflags;  /* table has no metamethod fields */
   t->array = NULL;
@@ -897,7 +893,7 @@ size_t luaH_pooledsize (Table *t) {
     if (bytes > LUA_ALLOC_MAX) return 0;
     size += bytes;
   }
-  lua_assert(t->access.depth == 0);
+  lua_assert(luaA_lockowner(&t->access) == NULL);
   return size;
 }
 
@@ -926,7 +922,7 @@ void luaH_freeparts (lua_State *L, Table *t) {
 }
 
 void luaH_free (lua_State *L, Table *t) {
-  lua_assert(t->access.depth == 0);
+  lua_assert(luaA_lockowner(&t->access) == NULL);
   luaH_freeparts(L, t);
   luaM_freemem(L, t, sizeof(*t) + t->inline_bytes);
 }
@@ -1714,7 +1710,7 @@ static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
   *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   return !(*sequence & 1) &&
     !(L != NULL && luaC_tracing(L) &&
-      __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE));
+      luaC_weakmode(luaC_tablestate(table)));
 }
 
 l_sinline int readslot (global_State *g, lua_State *L, Table *table,
@@ -1813,7 +1809,7 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
     if (!readsequence(L, table, &sequence) ||
         !locateslot(table, &rooted_key.value, rawtt(&rooted_key.value),
                     sequence, &slot)) {
-      if (__atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST) == luaX_token(L))
+      if (luaA_lockowner(&table->access) == luaX_token(L))
         break;
       continue;
     }
