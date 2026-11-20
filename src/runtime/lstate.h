@@ -585,6 +585,9 @@ typedef struct global_State {
   TString byte_strings[UCHAR_MAX + 1];  /* immutable storage owned by the VM */
   pthread_cond_t phase_changed;
   LuaWaiter *phase_waiters;  /* world.mutex, shared trace and sweep readiness */
+  uint64_t minor_request;  /* world.mutex; odd while an explicit driver owns it */
+  uint64_t minor_completed;  /* world.mutex; logical minor completions */
+  LuaWaiter *minor_waiters;  /* world.mutex, explicit minor requests */
 } global_State;
 
 

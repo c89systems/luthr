@@ -38,7 +38,7 @@ int luaW_init (global_State *g) {
   world->storage_grace = 0;
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
-  world->waiters = g->phase_waiters = NULL;
+  world->waiters = g->phase_waiters = g->minor_waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
@@ -76,7 +76,7 @@ void luaW_destroy (global_State *g) {
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
-             g->phase_waiters == NULL &&
+             g->phase_waiters == NULL && g->minor_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
              world->storage_bytes == 0 && world->storage_busy == 0 &&
              world->storage_workers == 0 &&
@@ -453,7 +453,8 @@ void luaW_waitcollector (lua_State *L, int reason) {
   if (reason == LUA_WAIT_RECLAIM)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   else if (!luaW_stopped(world))
-    luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
+    luaQ_wait(L, &world->mutex, &g->phase_changed,
+      reason == LUA_WAIT_MINOR ? &g->minor_waiters : &g->phase_waiters);
   while (luaW_stopped(world))
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   luaW_resume(L);

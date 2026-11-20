@@ -2740,37 +2740,96 @@ static void stepactive (lua_State *L) {
 }
 
 
-int luaC_userstep (lua_State *L, l_mem bytes) {
+typedef struct LuaUserStep {
+  uint64_t major, epoch;
+} LuaUserStep;
+
+static void userstep (lua_State *L, void *argument) {
   global_State *g = G(L);
-  uint64_t major = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE);
-  uint64_t epoch = g->trace_epoch;
-  LuaGCFrame frame;
-  if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
-  if (bytes > 0) {
-    chargestep(g, bytes);
-    if (!luaC_needstep(L)) return 0;
-  }
-  luaC_entergc(L, &frame);
+  LuaUserStep *step = argument;
   if (!luaC_tracing(L) && !luaC_sweeping(L)) {
     luaW_collectenter(L);
     /* Another admitted request may have started or completed this step
     ** while we waited. Keep the permit only when starting new work. */
-    if (!luaC_tracing(L) && !luaC_sweeping(L) && g->trace_epoch == epoch &&
-        __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) == major) {
+    if (!luaC_tracing(L) && !luaC_sweeping(L) && g->trace_epoch == step->epoch &&
+        __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) == step->major) {
       LuaWorldScope scope = luaW_scope(L);
       int concurrent = scope.collection == 0 && scope.heap == 1 &&
                        L->object_scopes == NULL;
       luaW_stop(L);
       luaW_heapleave(L);
       runstep(L, 0, concurrent, 1);
-      goto done;
+      return;
     }
     luaW_heapleave(L);
   }
   if (luaC_tracing(L) || luaC_sweeping(L)) stepactive(L);
- done:
+}
+
+/* world.mutex orders ownership, completion and wait registration. Odd
+** request numbers distinguish the current driver from an older caller
+** which may still be unwinding or running post-collection callbacks. */
+static void releaseminor (global_State *g) {
+  lua_assert(g->minor_request & 1);
+  g->minor_request++;
+  luaQ_wake(&g->phase_changed, &g->minor_waiters);
+}
+
+void luaC_publishminor (global_State *g) {
+  g->minor_completed++;
+  if (g->minor_request & 1) releaseminor(g);
+}
+
+static int joinminor (lua_State *L, uint64_t *request) {
+  global_State *g = G(L);
+  uint64_t completed;
+  int assist;
+  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  completed = g->minor_completed;
+  while (g->minor_completed == completed && luaC_kind(g) == KGC_GENMINOR &&
+         (!luaC_sweeping(L) || g->sweep_plan.kind == SWEEP_YOUNG)) {
+    if (!(g->minor_request & 1)) {
+      *request = ++g->minor_request;
+      break;
+    }
+    /* An abandoned request publishes no completion. Try again as a driver. */
+    luaW_waitcollector(L, LUA_WAIT_MINOR);
+  }
+  assist = g->minor_completed == completed;
+  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  return assist;
+}
+
+int luaC_userstep (lua_State *L, l_mem bytes) {
+  global_State *g = G(L);
+  LuaUserStep step = {__atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE),
+                      g->trace_epoch};
+  LuaGCFrame frame;
+  int status = LUA_OK;
+  if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
+  if (bytes > 0) {
+    chargestep(g, bytes);
+    if (!luaC_needstep(L)) return 0;
+  }
+  luaC_entergc(L, &frame);
+  if (luaC_kind(g) == KGC_GENMINOR && L->object_scopes == NULL &&
+      !luaW_ownsheap(L)) {
+    uint64_t request = 0;
+    if (joinminor(L, &request)) {
+      step.epoch = g->trace_epoch;
+      if (request == 0) userstep(L, &step);
+      else {
+        status = luaD_rawrunprotected(L, userstep, &step);
+        luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+        if (g->minor_request == request) releaseminor(g);
+        luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+      }
+    }
+  }
+  else userstep(L, &step);
   luaC_leavegc(L, &frame);
-  return __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) != major;
+  if (status != LUA_OK) luaD_throw(L, status);
+  return __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) != step.major;
 }
 
 

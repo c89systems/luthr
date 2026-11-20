@@ -212,6 +212,7 @@ static void publishfinish (lua_State *L) {
   }
   luaC_endsweep(L);
   __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
+  if (plan->kind == SWEEP_YOUNG) luaC_publishminor(g);
   luaQ_wake(&g->phase_changed, &g->phase_waiters);
 }
 

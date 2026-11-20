@@ -1,8 +1,10 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,9 +21,13 @@ static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   unsigned arrived[2], done;
-} fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, {0, 0}, 0};
+  int driver_parked, release_driver, finalized;
+} fixture = {.mutex = PTHREAD_MUTEX_INITIALIZER,
+             .changed = PTHREAD_COND_INITIALIZER};
 static __thread unsigned role;
 static __thread unsigned stops;
+enum { MINOR_NO_GATE, MINOR_UNWIND, MINOR_FINALIZER };
+static int minor_case;
 static void arrive(void);
 
 void __real_luaW_stop(lua_State *);
@@ -57,21 +63,53 @@ int __wrap_luaW_trycollectenter(lua_State *L) {
   return __real_luaW_trycollectenter(L);
 }
 
+lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
+lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
+  if (role == 1 && minor_case != MINOR_NO_GATE && !fixture.driver_parked) {
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    fixture.driver_parked = 1;
+    require(pthread_cond_broadcast(&fixture.changed) == 0);
+    while (!fixture.release_driver)
+      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+    if (minor_case == MINOR_UNWIND)
+      luaD_throw(L, LUA_ERRRUN);
+  }
+  return __real_luaC_tracebatch(L, limit);
+}
+
 struct request {
   lua_State *state;
   unsigned role, stops;
-  int phase;
+  int phase, status;
 };
+
+static void markdone(void) {
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  fixture.done = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+}
+
+static void protected_step(lua_State *L, void *argument) {
+  (void)argument;
+  require(luaC_userstep(L, 0) == 0);
+}
+
 static void *request(void *argument) {
   struct request *r = argument;
   role = r->role;
   if (r->phase == 5) {
     require(lua_gc(r->state, LUA_GCSTEP, (size_t)0) == 0);
     r->stops = stops;
+    if (role == 2)
+      markdone();
     return NULL;
   }
   lua_lock(r->state);
-  if (r->phase == 4) {
+  if (r->phase == 6)
+    r->status = luaD_rawrunprotected(r->state, protected_step, NULL);
+  else if (r->phase == 4) {
     luaC_checkGC(r->state);
   } else if (r->phase == 3)
     luaC_assistsweep(r->state);
@@ -83,13 +121,73 @@ static void *request(void *argument) {
     luaC_step(r->state);
   lua_unlock(r->state);
   r->stops = stops;
-  if (role == 2 || r->phase) {
-    require(pthread_mutex_lock(&fixture.mutex) == 0);
-    fixture.done = 1;
-    require(pthread_cond_broadcast(&fixture.changed) == 0);
-    require(pthread_mutex_unlock(&fixture.mutex) == 0);
-  }
+  if (role == 2 || (r->phase && r->phase != 6))
+    markdone();
   return NULL;
+}
+
+static int minor_finalizer(lua_State *L) {
+  (void)L;
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.done)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  fixture.finalized++;
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  return 0;
+}
+
+static void explicit_minor_followers(lua_State *L, int unwind) {
+  LuaWorld *world = &G(L)->world;
+  struct request driver = {0}, follower = {0};
+  pthread_t workers[2];
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  require(luaL_loadstring(L, "local h; for i=1,10000 do h={h} end; return h") ==
+          LUA_OK);
+  require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  if (!unwind) {
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushcfunction(L, minor_finalizer);
+    lua_setfield(L, -2, "__gc");
+    require(lua_setmetatable(L, -2));
+    lua_pop(L, 1);
+  }
+  driver.state = lua_newthread(L);
+  follower.state = lua_newthread(L);
+  driver.role = 1;
+  follower.role = 2;
+  follower.phase = 5;
+  driver.phase = unwind ? 6 : 5;
+  minor_case = unwind ? MINOR_UNWIND : MINOR_FINALIZER;
+  require(pthread_create(&workers[0], NULL, request, &driver) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.driver_parked)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_create(&workers[1], NULL, request, &follower) == 0);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  while (G(L)->minor_waiters == NULL) {
+    require(pthread_mutex_unlock(&world->mutex) == 0);
+    sched_yield();
+    require(pthread_mutex_lock(&world->mutex) == 0);
+  }
+  require(G(L)->minor_request & 1);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  fixture.release_driver = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(workers[0], NULL) == 0);
+  require(pthread_join(workers[1], NULL) == 0);
+  require(!luaC_tracing(L) && !luaC_sweeping(L) && !(G(L)->minor_request & 1));
+  require(G(L)->minor_waiters == NULL && fixture.done);
+  if (unwind)
+    require(driver.status == LUA_ERRRUN);
+  else
+    require(fixture.finalized == 1 && follower.stops == 0);
 }
 
 static void explicit_trace_slice(lua_State *L) {
@@ -328,6 +426,11 @@ int main(int argc, char **argv) {
   unsigned round;
   int explicit_step, stop, overdue;
   require(L != NULL && argc == 2);
+  if (strcmp(argv[1], "minor_unwind") == 0 ||
+      strcmp(argv[1], "minor_finalizer") == 0) {
+    explicit_minor_followers(L, strcmp(argv[1], "minor_unwind") == 0);
+    goto done;
+  }
   if (strcmp(argv[1], "explicit_trace_slice") == 0) {
     explicit_trace_slice(L);
     goto done;

@@ -426,6 +426,7 @@ LUAI_FUNC void luaC_fix (lua_State *L, GCObject *o);
 LUAI_FUNC void luaC_freeallobjects (lua_State *L);
 LUAI_FUNC void luaC_step (lua_State *L);
 LUAI_FUNC int luaC_userstep (lua_State *L, l_mem bytes);
+LUAI_FUNC void luaC_publishminor (global_State *g);
 LUAI_FUNC void luaC_runtilstate (lua_State *L, int state, int fast);
 LUAI_FUNC void luaC_fullgc (lua_State *L, int isemergency);
 enum { SWEEP_MAJOR, SWEEP_YOUNG, SWEEP_OLD };
