@@ -126,13 +126,11 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define GCSenteratomic	1
 #define GCSatomic	2
 #define GCSswpallgc	3
-#define GCSswpend	4
-#define GCScallfin	5
-#define GCSpause	6
+#define GCScallfin	4
+#define GCSpause	5
 
 
-#define issweepphase(g)  \
-	(GCSswpallgc <= (g)->gcstate && (g)->gcstate <= GCSswpend)
+#define issweepphase(g)  ((g)->gcstate == GCSswpallgc)
 
 
 /*

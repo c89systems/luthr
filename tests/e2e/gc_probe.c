@@ -165,7 +165,7 @@ void gc_probe_allocation(uint64_t live) {
   }
   if (luaC_tracing(host))
     peak = &record->mark_peak_bytes;
-  else if (g->gcstate >= GCSswpallgc && g->gcstate <= GCSswpend)
+  else if (issweepphase(g))
     peak = &record->sweep_peak_bytes;
   else if (luaC_hasreclaimers(host))
     peak = &record->reclaim_peak_bytes;

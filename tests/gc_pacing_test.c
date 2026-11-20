@@ -280,7 +280,8 @@ static void sweep_growth(void) {
   require(after_mark != NULL);
   luaW_stop(L);
   luaC_entergc(L, &frame);
-  luaC_runtilstate(L, GCSpause, 1);
+  luaC_waitsweep(L);
+  require(G(L)->gcstate == GCSpause);
   /* Both allocations happened after this cohort began. They remain charged,
    * but neither grants the next pause an unverified survival allowance. */
   require(gettotalbytes(G(L)) - G(L)->GCretired ==

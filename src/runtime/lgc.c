@@ -1565,6 +1565,15 @@ static void setidledebt (global_State *g) {
   luaP_idle(g);
 }
 
+static void finishincremental (lua_State *L, global_State *g) {
+  /* Allocations made after marking already consume the next cycle's
+  ** allowance. Only the swept cohort sets its live base. */
+  g->gcstate = GCSpause;
+  g->pacer.goal = applygcparam(g, PAUSE, g->GCcyclelive);
+  setidledebt(g);
+  L->reclaim_pages = 1;
+}
+
 
 /*
 ** Mark black 'OLD1' objects when starting a new young collection.
@@ -1734,8 +1743,17 @@ void luaC_endsweep (lua_State *L) {
   global_State *g = G(L);
   LuaSweepPlan *plan = &g->sweep_plan;
   if (plan->kind == SWEEP_MAJOR) {
-    g->gcstate = GCSswpend;
-    luaE_setdebt(g, 0);
+    lu_byte stopem = g->gcstopem;
+    g->gcstopem = 1;
+    checkSizes(L, g);
+    g->gcstopem = stopem;
+    /* The sweep already holds quiescence. Only pending finalizers need a
+    ** separate incremental step after publishing the surviving cohort. */
+    if (g->tobefnz != NULL && !g->gcemergency) {
+      g->gcstate = GCScallfin;
+      luaE_setdebt(g, 0);
+    }
+    else finishincremental(L, g);
     return;
   }
   /* Joining the lists also fills empty band heads with the following band. */
@@ -2178,13 +2196,8 @@ static l_mem singlestep (lua_State *L, int fast) {
       break;
     }
     case GCSswpallgc: {  /* sweep every allocation exactly once */
-      stepresult = sweepstep(L, g, fast) ? GCSWEEPMAX : stepinterrupted;
-      break;
-    }
-    case GCSswpend: {  /* finish sweeps */
-      checkSizes(L, g);
-      g->gcstate = GCScallfin;
-      stepresult = GCSWEEPMAX;
+      if (!sweepstep(L, g, fast)) stepresult = stepinterrupted;
+      else stepresult = g->gcstate == GCSpause ? step2pause : GCSWEEPMAX;
       break;
     }
     case GCScallfin: {  /* call finalizers */
@@ -2195,10 +2208,7 @@ static l_mem singlestep (lua_State *L, int fast) {
       }
       else {  /* no more finalizers or emergency mode or not enough stack
                  to run finalizers */
-        g->gcstate = GCSpause;  /* finish collection */
-        /* Allocations made after marking already consume the next cycle's
-        ** allowance. They must not enlarge its live base before being traced. */
-        g->pacer.goal = applygcparam(g, PAUSE, g->GCcyclelive);
+        finishincremental(L, g);
         stepresult = step2pause;
       }
       break;
@@ -2274,9 +2284,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
     else
       work2do -= stres;
   } while (fast || work2do > 0);
-  if (g->gcstate == GCSpause)
-    setidledebt(g);
-  else
+  if (g->gcstate != GCSpause)
     luaE_setdebt(g, stepsize);
 }
 
@@ -2413,10 +2421,8 @@ static void fullinc (lua_State *L, global_State *g) {
   /* finish any pending sweep phase to start a new cycle */
   luaC_runtilstate(L, GCSpause, 1);
   if (g->trace_interrupt != interrupted || g->gckind == KGC_GENMINOR) return;
-  luaC_runtilstate(L, GCScallfin, 1);  /* run up to finalizers */
-  if (g->trace_interrupt != interrupted || g->gckind == KGC_GENMINOR) return;
+  singlestep(L, 1);  /* begin exactly one fresh cycle */
   luaC_runtilstate(L, GCSpause, 1);  /* finish collection */
-  setidledebt(g);
 }
 
 /*
