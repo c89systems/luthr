@@ -668,6 +668,11 @@ LUAI_FUNC void luaE_retirethread (lua_State *L, lua_State *thread);
 LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);
+/* Two spare frames allow a finalizer and its nested call. */
+l_sinline CallInfo *luaE_cireserve (CallInfo *active) {
+  CallInfo *spare = active->next;
+  return spare != NULL ? spare->next : NULL;
+}
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
 LUAI_DDEC(__thread LuaThreadContext luaE_thread_context;)
 LUAI_FUNC uintptr_t luaE_initnativestack (void);

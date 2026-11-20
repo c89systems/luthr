@@ -155,6 +155,43 @@ static void retire(lua_State *parent, struct fixture *fixture) {
   require(pthread_join(thread, NULL) == 0);
 }
 
+static int one(lua_State *state) {
+  lua_pushinteger(state, 1);
+  return 1;
+}
+
+static int defer_trim(lua_State *state) {
+  luaX_lockstate(state);
+  /* Model a root snapshot whose trim reaches the owner after it unwinds. */
+  state->trace_trimmed = state->trace_snapshot ^ 1;
+  state->poll_remaining = 1;
+  luaX_unlockstate(state);
+  return 0;
+}
+
+static void reuse_frames(lua_State *state) {
+  luaL_openlibs(state);
+  lua_pushcfunction(state, one);
+  lua_setglobal(state, "one");
+  lua_pushcfunction(state, defer_trim);
+  lua_setglobal(state, "defer_trim");
+  int status = luaL_dostring(
+      state,
+      "collectgarbage('stop'); "
+      "local function call(n) "
+      "  if n==0 then local value=one(); return value end; "
+      "  return 1+call(n-1) "
+      "end; "
+      "assert(call(0)==1); defer_trim(); "
+      "local warm=collectgarbage('count'); assert(call(0)==1); "
+      "assert(collectgarbage('count')==warm, 'warm frame was discarded'); "
+      "assert(call(48)==49); local peak=collectgarbage('count'); "
+      "defer_trim(); assert(collectgarbage('count')<peak)");
+  if (status != LUA_OK)
+    fprintf(stderr, "%s\n", lua_tostring(state, -1));
+  require(status == LUA_OK);
+}
+
 int main(int argc, char **argv) {
   struct fixture fixture = {0};
   lua_State *state = luaL_newstate();
@@ -166,6 +203,8 @@ int main(int argc, char **argv) {
   current = &fixture;
   if (strncmp(argv[1], "fifo_", 5) == 0)
     fifo(state, &fixture);
+  else if (strncmp(argv[1], "reuse_", 6) == 0)
+    reuse_frames(state);
   else {
     require(strncmp(argv[1], "retire_", 7) == 0);
     fixture.mode = RETIRE;

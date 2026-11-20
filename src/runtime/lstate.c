@@ -114,15 +114,14 @@ static void freeCI (lua_State *owner, lua_State *L) {
 
 
 /*
-** free half of the CallInfo structures not in use by a thread,
-** keeping the first one.
+** Free half of the unused CallInfo structures beyond the reserve.
 */
 void luaE_shrinkCI (lua_State *L) {
-  CallInfo *ci = L->ci->next;  /* first free CallInfo */
+  CallInfo *ci = luaE_cireserve(L->ci);
   CallInfo *next;
   if (ci == NULL)
-    return;  /* no extra elements */
-  while ((next = ci->next) != NULL) {  /* two extra elements? */
+    return;
+  while ((next = ci->next) != NULL) {
     CallInfo *next2 = next->next;  /* next's next */
     ci->next = next2;  /* remove next from the list */
     L->nci--;

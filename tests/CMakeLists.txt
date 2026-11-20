@@ -132,7 +132,8 @@ set_target_properties(stack_admission_test PROPERTIES C_STANDARD 99)
 target_compile_options(stack_admission_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(stack_admission_test PRIVATE luthr_static Threads::Threads)
 target_link_options(stack_admission_test PRIVATE -Wl,--wrap=luaW_leave -Wl,--wrap=luaQ_wait)
-foreach(case IN ITEMS fifo_incremental fifo_generational retire_incremental retire_generational)
+foreach(case IN ITEMS fifo_incremental fifo_generational retire_incremental retire_generational
+    reuse_incremental reuse_generational)
   add_test(NAME stack_admission_${case} COMMAND stack_admission_test ${case})
   set_tests_properties(stack_admission_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
