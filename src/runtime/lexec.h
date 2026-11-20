@@ -142,9 +142,18 @@ LUAI_FUNC void luaQ_requesthandoff (lua_State *L);
 ** an attached C activation or this helper's API entry for state ownership.
 ** All borrowed Lua values must remain rooted across this migration point.
 ** Initialize the caller-local counter to zero. Does not charge bytecode fuel. */
-LUAI_FUNC void luaQ_work (lua_State *L, unsigned *work);
+enum { LUA_NATIVE_WORK_SLICE = 1024 };
+LUAI_FUNC void luaQ_workpoll (lua_State *L, unsigned *work, size_t amount);
 /* Charge a completed bounded chunk; the operation itself must be bounded. */
-LUAI_FUNC void luaQ_workn (lua_State *L, unsigned *work, size_t amount);
+l_sinline void luaQ_workn (lua_State *L, unsigned *work, size_t amount) {
+  if (l_unlikely(amount >= LUA_NATIVE_WORK_SLICE - *work))
+    luaQ_workpoll(L, work, amount);
+  else *work += cast_uint(amount);
+}
+
+l_sinline void luaQ_work (lua_State *L, unsigned *work) {
+  luaQ_workn(L, work, 1);
+}
 LUAI_FUNC void luaQ_setmanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC int luaQ_ismanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC void luaQ_setowner (LuaOwner *owner);

@@ -273,6 +273,33 @@ static void publication(lua_State *state) {
   require(other->stack_gate.context == NULL && other->stack_gate.word == 0);
 }
 
+static void count_poll(lua_State *state, void *context) {
+  unsigned *polls = context;
+  require(state->stack_gate.context != NULL);
+  (*polls)++;
+}
+
+static void native_work(lua_State *state) {
+  unsigned work = 0, polls = 0;
+  lua_gc(state, LUA_GCSTOP);
+  state->state_poll = count_poll;
+  state->state_poll_context = &polls;
+  for (unsigned i = 0; i < 1023; i++)
+    luaQ_work(state, &work);
+  require(work == 1023 && polls == 0);
+  luaQ_work(state, &work);
+  require(work == 0 && polls == 1);
+  luaQ_workn(state, &work, 2048 + 7);
+  require(work == 7 && polls == 3);
+  luaQ_workn(state, &work, 1016);
+  luaQ_workn(state, &work, 0);
+  require(work == 1023 && polls == 3);
+  luaQ_work(state, &work);
+  require(work == 0 && polls == 4);
+  state->state_poll = NULL;
+  state->state_poll_context = NULL;
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -286,6 +313,8 @@ int main(int argc, char **argv) {
     reservations(state, 1);
   else if (strcmp(argv[1], "publication") == 0)
     publication(state);
+  else if (strcmp(argv[1], "native_work") == 0)
+    native_work(state);
   else {
     require(strcmp(argv[1], "foreign") == 0);
     foreign(state);

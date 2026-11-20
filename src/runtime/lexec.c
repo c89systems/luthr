@@ -132,13 +132,9 @@ void luaQ_requesthandoff (lua_State *L) {
     execution->request_handoff(execution, L);
 }
 
-void luaQ_work (lua_State *L, unsigned *work) {
-  luaQ_workn(L, work, 1);
-}
-
-void luaQ_workn (lua_State *L, unsigned *work, size_t amount) {
-  while (amount >= 1024u - *work) {
-    amount -= 1024u - *work;
+void luaQ_workpoll (lua_State *L, unsigned *work, size_t amount) {
+  while (amount >= LUA_NATIVE_WORK_SLICE - *work) {
+    amount -= LUA_NATIVE_WORK_SLICE - *work;
     *work = 0;
     lua_lock(L);
     luaX_poll(L);
