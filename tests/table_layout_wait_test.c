@@ -24,8 +24,26 @@ static struct {
   Table *table;
   lua_Integer key;
   int layout_entered, layout_release, waiting, entered, release, completed;
+  int observed, register_wait;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
+
+static __thread pthread_mutex_t *delay_registration, *unexpected_mutex;
+
+int __real_pthread_mutex_lock(pthread_mutex_t *);
+int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
+  require(mutex != unexpected_mutex);
+  if (mutex == delay_registration) {
+    delay_registration = NULL;
+    require(__real_pthread_mutex_lock(&probe.mutex) == 0);
+    probe.observed = 1;
+    require(pthread_cond_broadcast(&probe.changed) == 0);
+    while (!probe.register_wait)
+      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
+  return __real_pthread_mutex_lock(mutex);
+}
 
 static void hold_writer(void) {
   require(pthread_mutex_lock(&probe.mutex) == 0);
@@ -111,6 +129,47 @@ static void *independent(void *unused) {
   return NULL;
 }
 
+static void *late_observer(void *state) {
+  lua_State *L = state;
+  lua_lock(L);
+  delay_registration = &G(L)->world.mutex;
+  require(luaH_waitlayout(L, probe.table));
+  require(delay_registration == NULL);
+  lua_unlock(L);
+  return NULL;
+}
+
+static void check_late_observer(lua_State *L) {
+  LuaObjectScope scope;
+  struct timespec deadline;
+  pthread_t observer;
+  TValue key, value;
+  require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+  deadline.tv_sec += 10;
+  lua_lock(L);
+  luaA_begin(L, (GCObject *)probe.table, &scope);
+  require(pthread_create(&observer, NULL, late_observer, probe.other) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!probe.observed)
+    require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
+            0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  /* Release the observed owner before the waiter can register. */
+  luaA_end(L, &scope);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  probe.register_wait = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_join(observer, NULL) == 0);
+  /* Subsequent slot writers can finish without acquiring VM admission. */
+  setivalue(&key, 2);
+  setivalue(&value, 22);
+  unexpected_mutex = &G(L)->world.mutex;
+  require(luaH_tryset(L, probe.table, &key, &value, 1));
+  unexpected_mutex = NULL;
+  lua_unlock(L);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   struct timespec deadline;
@@ -172,6 +231,7 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_join(a, NULL) == 0 && pthread_join(b, NULL) == 0 &&
           pthread_join(c, NULL) == 0);
+  check_late_observer(L);
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_rawgeti(L, 1, 2) == LUA_TNUMBER && lua_tointeger(L, -1) == 22);

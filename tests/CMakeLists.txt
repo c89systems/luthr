@@ -453,7 +453,7 @@ set_target_properties(table_layout_wait_test PROPERTIES C_STANDARD 99)
 target_compile_options(table_layout_wait_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(table_layout_wait_test PRIVATE luthr_static)
 target_link_options(table_layout_wait_test PRIVATE -Wl,--wrap=luaA_begin
-  -Wl,--wrap=luaH_elementstore -Wl,--wrap=luaQ_wait)
+  -Wl,--wrap=luaH_elementstore -Wl,--wrap=luaQ_wait -Wl,--wrap=pthread_mutex_lock)
 foreach(collector IN ITEMS incremental generational)
   add_test(NAME table_layout_wait_${collector}
     COMMAND table_layout_wait_test ${collector})
