@@ -133,17 +133,20 @@ static const TValue absentkey = {ABSTKEYCONSTANT};
 
 
 /*
-** Hash for integers. To allow a good hash, use the remainder operator
-** ('%'). If integer fits as a non-negative int, compute an int
-** remainder, which is faster. Otherwise, use an unsigned-integer
-** remainder, which uses all bits and ensures a non-negative result.
+** Negative integers are distributed across hash partitions. A second
+** remainder can share factors with partition selection and put consecutive
+** keys on one chain. Use a power-of-two mask and mix the high bits into it.
+** The high-bit term is constant over a run of adjacent low bits.
 */
-static unsigned hashint (unsigned size, lua_Integer i) {
+l_sinline unsigned hashint (unsigned size, lua_Integer i) {
   lua_Unsigned ui = l_castS2U(i);
-  if (ui <= cast_uint(INT_MAX))
-    return hashmod(size, cast_uint(ui));
-  else
-    return cast_uint(hashmod(size, ui));
+  if (i < 0) {
+    uint64_t bits = cast(uint64_t, ui);
+    uint64_t high = (bits >> 16) * UINT64_C(0x9e3779b97f4a7c15);
+    return lmod(cast_uint(bits ^ (high >> 32)), size);
+  }
+  if (ui <= cast_uint(INT_MAX)) return hashmod(size, cast_uint(ui));
+  return cast_uint(hashmod(size, ui));
 }
 
 

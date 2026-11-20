@@ -170,6 +170,50 @@ static void run(lua_State *L, const char *source) {
   require(status == LUA_OK);
 }
 
+static void check_integer_keys(lua_State *L, lua_Integer stride) {
+  const int count = 256 * (LUA_HASH_PARTS - 1);
+  Table *table;
+  int index;
+  lua_newtable(L);
+  index = lua_gettop(L);
+  lua_pushvalue(L, index);
+  lua_xmove(L, probe.second, 1);
+  lua_pop(probe.second, 1);
+  for (int i = 1; i <= count; ++i) {
+    lua_pushinteger(L, i);
+    lua_rawseti(L, index, -(lua_Integer)i * stride);
+  }
+  table = (Table *)lua_topointer(L, index);
+  require(luaH_hashparts(table) == LUA_HASH_PARTS);
+  /* A dense shard of regularly spaced keys should avoid long chains. */
+  for (unsigned part = 1; part < LUA_HASH_PARTS; ++part) {
+    const Node *nodes = luaH_hashnodes(table, part);
+    unsigned size = luaH_nodesize(nodes);
+    for (unsigned i = 0; i < size; ++i) {
+      const Node *node = nodes + i;
+      for (unsigned length = 1; gnext(node) != 0; ++length) {
+        require(length < 8);
+        node += gnext(node);
+      }
+    }
+  }
+  for (int i = 1; i <= count; ++i) {
+    require(lua_rawgeti(L, index, -(lua_Integer)i * stride) == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == i);
+    lua_pop(L, 1);
+  }
+  for (int i = 0; i < 512; ++i) {
+    lua_Integer key = LUA_MININTEGER + (lua_Integer)i * 0x100000000LL;
+    lua_pushinteger(L, i);
+    lua_rawseti(L, index, key);
+    lua_pushnumber(L, (lua_Number)key);
+    require(lua_rawget(L, index) == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == i);
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   LuaHashDirectory *directory;
@@ -296,6 +340,8 @@ int main(int argc, char **argv) {
   lua_pop(L, 1);
   lua_pushexternalstring(L, "external", 8, NULL, NULL);
   require(lua_rawget(L, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 1337);
+  check_integer_keys(L, 1);
+  check_integer_keys(L, 65537);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);
