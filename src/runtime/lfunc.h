@@ -53,8 +53,6 @@ LUAI_FUNC LClosure *luaF_newLclosure (lua_State *L, int nupvals);
 LUAI_FUNC void luaF_initupvals (lua_State *L, LClosure *cl);
 LUAI_FUNC void luaF_setproto (lua_State *L, LClosure *cl, Proto *proto);
 LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
-LUAI_FUNC void luaF_readupval (lua_State *L, UpVal *uv,
-                             struct LuaNativeRoot *value);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
 /* Caller owns the private cell or its mutex. This publication kernel cannot
 ** allocate, wait, move the stack or invoke Lua; collector barriers still apply. */
@@ -79,10 +77,42 @@ LUAI_FUNC void luaF_storelocals (lua_State *L, StkId first, int count);
 LUAI_FUNC StkId luaF_loadlocal (lua_State *L, StkId slot);
 LUAI_FUNC void luaF_getcapture (lua_State *L, LClosure *closure, int n,
                                struct LuaNativeRoot *capture);
-/* The VM selects a cell once. Reads retain that exact cell across waits and
-** later joins; private reads cannot wait. Writes require a non-private cell. */
-LUAI_FUNC void luaF_readcapture (lua_State *L, UpVal *uv,
-                                struct LuaNativeRoot *value);
+LUAI_FUNC void luaF_loadshared (UpVal *uv, TValue *value);
+
+l_sinline UpVal *luaF_capturecell (LClosure *closure, int n) {
+  return __atomic_load_n(&closure->upvals[n], __ATOMIC_ACQUIRE);
+}
+
+l_sinline int luaF_localupval (lua_State *L, UpVal *uv) {
+  return __atomic_load_n(&uv->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L);
+}
+
+/* Acquiring either written component also observes its preceding odd
+** sequence. An unchanged even sequence validates the whole value. */
+l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
+  uint64_t before = __atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE);
+  Value payload;
+  lu_byte tag;
+  if (before & 1) return 0;
+  __atomic_load(&uv->value.value_, &payload, __ATOMIC_ACQUIRE);
+  tag = __atomic_load_n(&uv->value.tt_, __ATOMIC_ACQUIRE);
+  if (__atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE) != before) return 0;
+  value->value_ = payload;
+  value->tt_ = tag;
+  return 1;
+}
+
+/* Participation protects the selected cell even if another execution joins
+** the closure. A borrowed operand must be consumed or rooted before leaving
+** participation. The contended load also holds admission and the stack gate. */
+l_sinline void luaF_loadupval (lua_State *L, UpVal *uv, TValue *value) {
+  if (luaF_localupval(L, uv)) {
+    value->value_ = uv->value.value_;
+    value->tt_ = uv->value.tt_;
+  }
+  else if (!luaF_tryloadshared(uv, value)) luaF_loadshared(uv, value);
+}
+
 LUAI_FUNC void luaF_writecapture (lua_State *L, UpVal *uv, const TValue *value);
 LUAI_FUNC void luaF_joincaptures (lua_State *L, LClosure *to, int target,
                                  LClosure *from, int source);

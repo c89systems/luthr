@@ -1816,11 +1816,8 @@ LUA_API const char *lua_getupvalue (lua_State *L, int funcindex, int n) {
   if (name) {
     GCObject *owner = gcvalue(&capture.value);
     if (owner->tt == LUA_VUPVAL) {
-      LuaNativeRoot snapshot;
-      luaR_pushroot(L, &snapshot);
-      luaF_readupval(L, gco2upv(owner), &snapshot);
-      setobj2s(L, L->top.p, &snapshot.value);
-      luaR_poproot(L, &snapshot);
+      luaF_loadupval(L, gco2upv(owner), s2v(L->top.p));
+      luaC_tracevalue(L, s2v(L->top.p));
     }
     else {
       LuaObjectScope scope;

@@ -98,7 +98,7 @@ target_link_libraries(capture_cells_test PRIVATE luthr_static)
 target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaH_getstr -Wl,--wrap=luaH_getshortstr
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
-  -Wl,--wrap=luaF_readcapture -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
+  -Wl,--wrap=luaF_loadshared -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
 foreach(case IN ITEMS independent readers access uncaptured operands semantics incremental generational
     private_incremental private_generational mixed_incremental mixed_generational
@@ -177,13 +177,15 @@ target_compile_options(table_read_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(table_read_test PRIVATE luthr_static)
 target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_
-  -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index)
+  -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index
+  -Wl,--wrap=luaH_trygetstr -Wl,--wrap=luaH_getstr)
 foreach(case IN ITEMS fast primitive batching overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational
     index_hit index_miss index_metatable_change
     mixed_incremental mixed_generational writes_incremental writes_generational
-    write_error_incremental write_error_generational retained_incremental retained_generational)
+    write_error_incremental write_error_generational retained_incremental retained_generational
+    captured_incremental captured_generational)
   add_test(NAME table_read_${case} COMMAND table_read_test ${case})
   set_tests_properties(table_read_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

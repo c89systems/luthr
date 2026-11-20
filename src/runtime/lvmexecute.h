@@ -56,24 +56,15 @@
       }
       vmcase(OP_GETUPVAL) {
         int b = GETARG_B(i);
-        UpVal *uv;
-        readRA(i);
-        uv = capturecell(cl, b);
-        if (!readprivatecapture(L, uv, s2v(RA(i)))) {
-          LuaNativeRoot value;
-          savestate(L, ci);
-          luaR_pushroot(L, &value);
-          luaF_readcapture(L, uv, &value);
-          updatebase(ci);
-          setobj2s(L, RA(i), &value.value);
-          luaR_poproot(L, &value);
-        }
+        StkId ra = readRA(i);
+        luaF_loadupval(L, luaF_capturecell(cl, b), s2v(ra));
+        luaC_tracevalue(L, s2v(ra));
         vmbreak;
       }
       vmcase(OP_SETUPVAL) {
         StkId ra = readRA(i);
-        UpVal *uv = capturecell(cl, GETARG_B(i));
-        if (privatecapture(L, uv))
+        UpVal *uv = luaF_capturecell(cl, GETARG_B(i));
+        if (luaF_localupval(L, uv))
           luaF_writeownedupval(L, uv, s2v(ra));
         else {
           savestate(L, ci);
@@ -83,26 +74,20 @@
         vmbreak;
       }
       vmcase(OP_GETTABUP) {
-        UpVal *uv;
-        StkId ra;
-        LuaNativeRoot snapshot;
-        TValue *upval = &snapshot.value;
-        TValue *rc = KC(i);
-        TString *key = tsvalue(rc);  /* key must be a short string */
-        lu_byte tag;
-        readRA(i);
-        savestate(L, ci);
-        luaR_pushroot(L, &snapshot);
-        uv = capturecell(cl, GETARG_B(i));
-        luaF_readcapture(L, uv, &snapshot);
-        updatebase(ci);
-        ra = RA(i);
-        luaV_fastget(upval, key, s2v(ra), luaH_getshortstr, tag);
-        updatebase(ci);
-        ra = RA(i);
-        if (luaV_needsindex(tag))
-          Protect(finishget(L, upval, rc, ra, GETARG_B(i) + 1u));
-        luaR_poproot(L, &snapshot);
+        StkId ra = readRA(i);
+        TValue receiver;
+        TValue *key = KC(i);  /* a short string */
+        unsigned upvalue = GETARG_B(i);
+        lu_byte tag = LUA_VABSTKEY;
+        int retry;
+        luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
+        luaC_tracevalue(L, &receiver);
+        retry = ttistable(&receiver) &&
+          !luaH_trygetstr(L, hvalue(&receiver), tsvalue(key), s2v(ra), &tag);
+        if (l_unlikely(retry || luaV_needsindex(tag))) {
+          Protect(finishcaptureget(L, &receiver, key, ra, upvalue + 1u, retry));
+          updatebase(ci);
+        }
         vmbreak;
       }
       vmcase(OP_GETTABLE) {
@@ -150,19 +135,13 @@
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
-        UpVal *uv;
-        LuaNativeRoot snapshot;
-        TValue *upval = &snapshot.value;
+        TValue receiver;
         TValue *rb = KB(i);
-        TValue *rc;
-        savestate(L, ci);
-        luaR_pushroot(L, &snapshot);
-        uv = capturecell(cl, GETARG_A(i));
-        luaF_readcapture(L, uv, &snapshot);
-        updatebase(ci);
-        rc = RKC(i);
-        Protect(settable(L, upval, rb, rc, GETARG_A(i) + 1u));
-        luaR_poproot(L, &snapshot);
+        TValue *rc = RKC(i);
+        unsigned upvalue = GETARG_A(i);
+        luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
+        luaC_tracevalue(L, &receiver);
+        Protect(settable(L, &receiver, rb, rc, upvalue + 1u));
         vmbreak;
       }
       vmcase(OP_SETTABLE) {

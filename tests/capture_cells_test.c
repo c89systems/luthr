@@ -51,8 +51,7 @@ int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaA_begin(lua_State *state, GCObject *object,
                        LuaObjectScope *scope);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
-void __real_luaF_readcapture(lua_State *state, UpVal *cell,
-                             LuaNativeRoot *value);
+void __real_luaF_loadshared(UpVal *cell, TValue *value);
 void __real_luaF_writecapture(lua_State *state, UpVal *cell,
                               const TValue *value);
 void __real_luaF_storelocals(lua_State *state, StkId first, int count);
@@ -137,12 +136,11 @@ void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
   measured--;
 }
 
-void __wrap_luaF_readcapture(lua_State *state, UpVal *cell,
-                             LuaNativeRoot *value) {
+void __wrap_luaF_loadshared(UpVal *cell, TValue *value) {
   measured++;
   read_calls++;
   reading++;
-  __real_luaF_readcapture(state, cell, value);
+  __real_luaF_loadshared(cell, value);
   reading--;
   measured--;
 }

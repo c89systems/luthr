@@ -10,6 +10,7 @@
 #include <ltablestorage.h>
 #include <ltm.h>
 #include <lua.h>
+#include <lualib.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -34,6 +35,32 @@ static void *watched;
 static unsigned returned;
 static __thread lua_State *relocating;
 static __thread unsigned relocations;
+static __thread int capture_retry;
+
+int __real_luaH_trygetstr(lua_State *, Table *, TString *, TValue *, lu_byte *);
+int __wrap_luaH_trygetstr(lua_State *state, Table *table, TString *key,
+                          TValue *result, lu_byte *tag) {
+  if (capture_retry == 1 && strisshr(key) &&
+      strcmp(getstr(key), "pending_capture") == 0) {
+    capture_retry = 2;
+    return 0; /* simulate a writer invalidating the optimistic snapshot */
+  }
+  return __real_luaH_trygetstr(state, table, key, result, tag);
+}
+
+lu_byte __real_luaH_getstr(lua_State *, Table *, TString *, TValue *);
+lu_byte __wrap_luaH_getstr(lua_State *state, Table *table, TString *key,
+                           TValue *result) {
+  if (capture_retry == 2) {
+    uintptr_t before = (uintptr_t)state->stack.p;
+    ptrdiff_t offset = savestack(state, (StkId)result);
+    capture_retry = 0;
+    require(luaD_reallocstack(state, stacksize(state) + 128, 1));
+    require((uintptr_t)state->stack.p != before);
+    result = s2v(restorestack(state, offset));
+  }
+  return __real_luaH_getstr(state, table, key, result);
+}
 
 static void rendezvous(pthread_barrier_t *barrier) {
   int result = pthread_barrier_wait(barrier);
@@ -949,6 +976,38 @@ static void write_error(lua_State *state, int generational) {
   }
 }
 
+static void captured_lookup(lua_State *state, int generational) {
+  struct moving_allocator allocator;
+  luaL_openlibs(state);
+  if (generational)
+    lua_gc(state, LUA_GCGEN);
+  allocator.original = lua_getallocf(state, &allocator.context);
+  lua_setallocf(state, move_realloc, &allocator);
+  capture_retry = 1;
+  require(luaL_dostring(
+              state,
+              "local lookup, alternate; "
+              "local weak=setmetatable({}, {__mode='v'}); "
+              "do local next_receiver={pending_capture=99}; "
+              "  alternate=function() return next_receiver end end; "
+              "do local receiver=setmetatable({marker=41}, {__index="
+              "  function(self) debug.upvaluejoin(lookup,1,alternate,1); "
+              "  coroutine.yield(self.marker); return self.marker+1 end}); "
+              "  weak[1]=receiver; "
+              "  lookup=function() return receiver.pending_capture end end; "
+              "local co=coroutine.create(lookup); "
+              "local ok, v=coroutine.resume(co); assert(ok and v==41); "
+              "collectgarbage('collect'); assert(weak[1] and lookup()==99); "
+              "ok, v=coroutine.resume(co); assert(ok and v==42); "
+              "collectgarbage('collect'); assert(weak[1]==nil); "
+              "local bad=17; "
+              "ok, v=pcall(function() return bad.field end); "
+              "assert(not ok and v:find(\"upvalue 'bad'\",1,true));") ==
+          LUA_OK);
+  require(capture_retry == 0);
+  lua_setallocf(state, allocator.original, allocator.context);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -956,6 +1015,8 @@ int main(int argc, char **argv) {
     retained_root(state, strcmp(argv[1], "retained_generational") == 0);
   else if (strncmp(argv[1], "write_error_", 12) == 0)
     write_error(state, strcmp(argv[1], "write_error_generational") == 0);
+  else if (strncmp(argv[1], "captured_", 9) == 0)
+    captured_lookup(state, strcmp(argv[1], "captured_generational") == 0);
   else if (strncmp(argv[1], "writes_", 7) == 0)
     writes(state, strcmp(argv[1], "writes_generational") == 0);
   else if (strcmp(argv[1], "mixed_incremental") == 0 ||

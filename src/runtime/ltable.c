@@ -1960,17 +1960,28 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   return getrooted(L, t, &index, res);
 }
 
+int luaH_trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
+                      lu_byte *tag) {
+  uint64_t sequence;
+  if (luaA_localtable(L, t)) {
+    *tag = finishread(L, t, res, rawgetstr(t, key, res), 1, 0);
+    return 1;
+  }
+  if (!readsequence(L, t, &sequence)) return 0;
+  if (!strisshr(key) || !readshortstr(G(L), t, key, res, tag, sequence)) {
+    TValue index;
+    setsvalue(L, &index, key);
+    if (!optimistic(L, t, &index, res, tag, sequence)) return 0;
+  }
+  *tag = finishread(L, t, res, *tag, 0, sequence);
+  return 1;
+}
+
 lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   lu_byte tag;
   TValue index;
-  uint64_t sequence;
-  if (luaA_localtable(L, t))
-    return finishread(L, t, res, rawgetstr(t, key, res), 1, 0);
+  if (luaH_trygetstr(L, t, key, res, &tag)) return tag;
   setsvalue(L, &index, key);
-  if (readsequence(L, t, &sequence) &&
-     ((strisshr(key) && readshortstr(G(L), t, key, res, &tag, sequence)) ||
-      optimistic(L, t, &index, res, &tag, sequence)))
-    return finishread(L, t, res, tag, 0, sequence);
   return getrooted(L, t, &index, res);
 }
 
