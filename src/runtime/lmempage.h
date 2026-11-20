@@ -16,7 +16,7 @@ typedef struct LuaAllocPage LuaAllocPage;
 typedef union LuaAllocBlock LuaAllocBlock;
 union LuaAllocBlock {
   struct {
-    uintptr_t page;  /* aligned page identity, with logical-retirement bit */
+    uintptr_t page;  /* aligned page identity and allocation flags */
     union {
       LuaAllocBlock *next;  /* free blocks only */
       struct GCObject *object;  /* live allocation membership */
@@ -36,10 +36,11 @@ struct LuaAllocPage {
   uintptr_t remote;  /* atomic returned blocks, with notification ownership bit */
   LuaAllocBlock *notified;  /* first return stays allocated until its notice is claimed */
   size_t bytes;
+  uint64_t table_epoch;  /* zero until first table, then last eligible sweep */
   unsigned used;  /* owner allocations, less returns collected in batches */
   unsigned bin;
   unsigned pool;
-  unsigned retiring;  /* no owner/available/notification references remain */
+  unsigned state;  /* protected by the allocation pool mutex */
 };
 
 #define LUA_PAGE_NOTIFIED cast(uintptr_t, 1)
@@ -76,6 +77,7 @@ LUAI_FUNC void luaMC_join (struct LuaAllocationCache *cache);
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
     * sizeof(LuaAllocBlock))
 #define LUA_ALLOC_MAX 512
+#define LUA_ALLOC_PAGE_MAX 65536
 
 l_sinline size_t luaMP_binbytes (unsigned bin) {
   static const unsigned short sizes[LUA_ALLOC_BINS] =
@@ -94,9 +96,24 @@ l_sinline unsigned luaMP_sizeclass (size_t bytes) {
   lua_assert(bytes <= LUA_ALLOC_MAX);
   return bins[(bytes + 15) / 16];
 }
-#define luaMP_retired(b) (((b)->block.page & 1u) != 0)
+enum { LUA_PAGE_OPEN, LUA_PAGE_RETURNING, LUA_PAGE_SWEEPING };
+enum { LUA_BLOCK_RETIRED = 1, LUA_BLOCK_TABLE = 2, LUA_BLOCK_NEW = 4,
+       LUA_BLOCK_PARITY = 8, LUA_BLOCK_BIRTH = LUA_BLOCK_NEW | LUA_BLOCK_PARITY,
+       LUA_BLOCK_FLAGS = LUA_BLOCK_RETIRED | LUA_BLOCK_TABLE | LUA_BLOCK_BIRTH };
+#define luaMP_header(b) __atomic_load_n(&(b)->block.page, __ATOMIC_ACQUIRE)
+#define luaMP_retired(b) ((luaMP_header(b) & LUA_BLOCK_RETIRED) != 0)
+#define luaMP_pageof(header) cast(LuaAllocPage *, (header) & ~cast(uintptr_t, LUA_BLOCK_FLAGS))
 #define luaMP_page(b) \
-  cast(LuaAllocPage *, (b)->block.page & ~cast(uintptr_t, 1))
+  luaMP_pageof(luaMP_header(b))
+
+l_sinline uintptr_t luaMP_birth (uint64_t epoch) {
+  return LUA_BLOCK_NEW | ((epoch & 1) ? LUA_BLOCK_PARITY : 0);
+}
+
+l_sinline void luaMP_young (LuaAllocPage *page, uint64_t epoch) {
+  if (__atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED) != epoch)
+    __atomic_store_n(&page->table_epoch, epoch, __ATOMIC_RELAXED);
+}
 
 /* No allocation or safepoint. Keep the page private and remain admitted until
 ** initialization and publication finish; collection then sees complete pages. */

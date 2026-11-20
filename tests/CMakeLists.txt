@@ -206,7 +206,8 @@ set_target_properties(gc_pacing_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_pacing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_pacing_test PRIVATE luthr_static)
 target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
-  -Wl,--wrap=luaC_sweepbatch -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
+  -Wl,--wrap=luaC_sweepbatch -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop
+  -Wl,--wrap=luaM_free_)
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
     managed_function_incremental managed_function_generational
@@ -217,7 +218,8 @@ foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     unavailable_generational sweep_growth sweep_inline stopped_incremental
     stopped_generational unwind_incremental unwind_generational
     closing_incremental closing_generational closing_pending_incremental
-    closing_pending_generational nursery_incremental nursery_generational nursery_progress)
+    closing_pending_generational nursery_incremental nursery_generational nursery_progress
+    nursery_backing)
   add_test(NAME gc_pacing_${case} COMMAND gc_pacing_test ${case})
   set_tests_properties(gc_pacing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
@@ -521,7 +523,7 @@ set_target_properties(gc_epochs_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_epochs_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_epochs_test PRIVATE luthr_static)
 target_link_options(gc_epochs_test PRIVATE -Wl,--wrap=luaC_scansweep)
-foreach(case IN ITEMS live live_generational modes rotations weak_age)
+foreach(case IN ITEMS live live_generational modes rotations weak_age mature_page)
   add_test(NAME gc_epochs_${case} COMMAND gc_epochs_test ${case})
   set_tests_properties(gc_epochs_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

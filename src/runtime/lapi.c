@@ -1579,8 +1579,7 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       luaE_setdebt(g, 0);
       g->gcstp = 0;  /* (other bits must be zero here) */
       __atomic_store_n(&g->sweep_workers, luaC_sweeping(L) &&
-        g->sweep_plan.phase == SWEEP_OBJECTS &&
-        g->sweep_plan.next != g->sweep_plan.limit, __ATOMIC_RELEASE);
+        luaC_sweepready(g), __ATOMIC_RELEASE);
       break;
     }
     case LUA_GCCOLLECT: {

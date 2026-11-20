@@ -75,14 +75,14 @@ static void publish_batches(lua_State *L, int generational) {
   lua_pushinteger(first_publisher, 42);
   lua_rawseti(first_publisher, 1, 1);
   lua_lock(second_publisher);
-  require(first_publisher->new_objects != NULL);
+  require(first_publisher->new_tables != NULL);
   luaH_resize(second_publisher, table, 64, 0);
   require(second_publisher->new_objects == NULL &&
           second_publisher->storage_retired != NULL);
   observed = second_publisher;
   luaW_stop(second_publisher);
   require(published == 3 && unrelated == 0);
-  require(first_publisher->new_objects == NULL &&
+  require(first_publisher->new_tables == NULL &&
           second_publisher->storage_retired == NULL);
   observed = NULL;
   luaW_start(second_publisher);

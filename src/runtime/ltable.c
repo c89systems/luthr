@@ -836,15 +836,14 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
 */
 
 
-enum { INLINE_TABLE_LIMIT = 192 };
-_Static_assert(sizeof(Table) <= INLINE_TABLE_LIMIT &&
-               INLINE_TABLE_LIMIT <= UCHAR_MAX, "inline table size");
+_Static_assert(sizeof(Table) <= LUA_TABLE_INLINE_LIMIT &&
+               LUA_TABLE_INLINE_LIMIT <= UCHAR_MAX, "inline table size");
 _Static_assert(sizeof(Table) % _Alignof(Value) == 0 &&
                sizeof(Table) % _Alignof(Node) == 0 &&
                sizeof(Value) % _Alignof(Node) == 0, "inline table alignment");
 
 Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
-  const size_t limit = INLINE_TABLE_LIMIT - sizeof(Table);
+  const size_t limit = LUA_TABLE_INLINE_LIMIT - sizeof(Table);
   size_t bytes = 0, arraybytes = 0;
   int lsize = -1;
   GCObject *o;

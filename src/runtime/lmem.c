@@ -143,7 +143,6 @@ static void account (lua_State *L, l_mem change) {
 }
 
 #define ALLOC_PAGE_MIN 1024
-#define ALLOC_PAGE_MAX 65536
 
 int luaM_initpools (lua_State *L) {
   global_State *g = G(L);
@@ -210,7 +209,7 @@ static LuaAllocBlock *takeblock (LuaAllocPage *page) {
   if (head == NULL) return NULL;
   page->local = head->block.link.next;
   page->used++;
-  head->block.page = cast(uintptr_t, page);  /* clear the prior retire credit */
+  __atomic_store_n(&head->block.page, cast(uintptr_t, page), __ATOMIC_RELAXED);
   return head;
 }
 
@@ -266,6 +265,11 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
     int empty;
     memset(&borrow, 0, sizeof(borrow));
     luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+    if (page->state == LUA_PAGE_SWEEPING) {
+      luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+      luaMP_publish(g, page);
+      continue;
+    }
     if (!complete && page->owner != NULL) {
       luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
       luaMP_publish(g, page);
@@ -300,7 +304,7 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
           page->available_next->available_previous = page->available_previous;
         page->available_previous = NULL;
       }
-      page->retiring = 1;
+      page->state = LUA_PAGE_RETURNING;
     }
     else if (page->owner == NULL && page->local != NULL &&
              page->available_previous == NULL)
@@ -353,6 +357,8 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
     LuaAllocPage *page = pages[i];
     unsigned pool = page->pool;
     luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+    if (pool < LUA_ALLOC_BINS && g->sweep_plan.pages[pool] == page)
+      g->sweep_plan.pages[pool] = page->next;
     *page->previous = page->next;
     if (page->next != NULL) page->next->previous = page->previous;
     luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
@@ -383,7 +389,7 @@ static void reclaimpages (lua_State *L, int complete) {
       unsigned pool;
       for (pool = 0; pool < LUA_ALLOC_POOLS; pool++)
         for (page = g->allocation_pages[pool]; page != NULL; page = page->next)
-          if (!page->retiring) luaMP_notify(g, page);
+          if (page->state == LUA_PAGE_OPEN) luaMP_notify(g, page);
     }
   }
   for (;;) {
@@ -507,15 +513,20 @@ l_noret luaM_toobig (lua_State *L) {
 void luaM_free_ (lua_State *L, void *block, size_t osize) {
   LuaAllocBlock *allocation;
   LuaAllocPage *page;
+  uintptr_t header;
   int exclusive, retired;
   lua_assert((osize == 0) == (block == NULL));
   if (block == NULL) return;
   exclusive = !completestate(G(L)) || luaW_iscollector(L);
   allocation = cast(LuaAllocBlock *, block) - 1;
-  retired = luaMP_retired(allocation);
-  page = luaMP_page(allocation);
+  header = luaMP_header(allocation);
+  retired = (header & LUA_BLOCK_RETIRED) != 0;
+  page = luaMP_pageof(header);
   if (page != NULL) {
     LuaAllocationCache *cache = allocationcache(L);
+    if (header & LUA_BLOCK_TABLE)
+      __atomic_store_n(&allocation->block.page, cast(uintptr_t, page),
+                       __ATOMIC_RELAXED);
     /* The allocation consumer's lease protects its local list. Its returned
     ** block needs no remote notice or page-reclamation pass. Empty pages still
     ** notify reclamation so idle caches release their backing storage. */
@@ -561,11 +572,15 @@ void luaM_retire_ (lua_State *L, void *memory, size_t size) {
   global_State *g = G(L);
   LuaAllocBlock *block;
   LuaGCFrame *frame;
+  uintptr_t header;
   if (memory == NULL) { lua_assert(size == 0); return; }
   lua_assert(!completestate(g) || luaW_iscollector(L) || luaC_sweeping(L));
   block = cast(LuaAllocBlock *, memory) - 1;
-  lua_assert(!luaMP_retired(block));
-  block->block.page |= 1u;
+  header = luaMP_header(block);
+  lua_assert(!(header & LUA_BLOCK_RETIRED));
+  __atomic_store_n(&block->block.page,
+    (header & ~cast(uintptr_t, LUA_BLOCK_FLAGS)) | LUA_BLOCK_RETIRED,
+    __ATOMIC_RELAXED);
   frame = luaC_gcframe();
   if (frame != NULL && frame->global == g && frame->batch) {
     lua_assert(frame->retired_bytes <= MAX_LMEM - cast(l_mem, size));
@@ -624,10 +639,11 @@ static void preparepage (LuaAllocPage *page,
   page->available_next = NULL;
   page->available_previous = NULL;
   page->dirty_next = NULL;
-  page->retiring = 0;
+  page->state = LUA_PAGE_OPEN;
   page->owner = NULL;
   page->used = 0;
   page->bytes = bytes;
+  page->table_epoch = 0;
 }
 
 /* Caller owns the pool mutex. */
@@ -674,10 +690,10 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
     cache->growth_epoch = cache->global->trace_epoch;
   }
   bytes = minimum << cache->growth[pool];
-  if (bytes > ALLOC_PAGE_MAX) bytes = ALLOC_PAGE_MAX;
-  while (bytes < requested && bytes < ALLOC_PAGE_MAX) {
+  if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
+  while (bytes < requested && bytes < LUA_ALLOC_PAGE_MAX) {
     bytes *= 2;
-    if (bytes > ALLOC_PAGE_MAX) bytes = ALLOC_PAGE_MAX;
+    if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
     cache->growth[pool]++;
   }
   return bytes < minimum ? minimum : bytes;
@@ -692,8 +708,8 @@ static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
   if (page != NULL) {
     size_t grown;
     if (page->local != NULL || luaMP_remote(page) != NULL) return page;
-    grown = page->bytes <= ALLOC_PAGE_MAX / 2
-      ? page->bytes * 2 : ALLOC_PAGE_MAX;
+    grown = page->bytes <= LUA_ALLOC_PAGE_MAX / 2
+      ? page->bytes * 2 : LUA_ALLOC_PAGE_MAX;
     if (grown > *bytes) *bytes = grown;
     abandonpage(L, pool);
   }
@@ -713,7 +729,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   size_t bytes;
   if (minimum < ALLOC_PAGE_MIN) minimum = ALLOC_PAGE_MIN;
   bytes = growcache(L, allocationcache(L), pool, minimum, page == NULL ? 0
-    : page->bytes <= ALLOC_PAGE_MAX / 2 ? page->bytes * 2 : ALLOC_PAGE_MAX);
+    : page->bytes <= LUA_ALLOC_PAGE_MAX / 2 ? page->bytes * 2 : LUA_ALLOC_PAGE_MAX);
   if (page != NULL) abandonpage(L, pool);
   assistpages(L);  /* reuse abandoned capacity before growing backing storage */
   page = reusecache(L, pool, minimum, &bytes, epoch);

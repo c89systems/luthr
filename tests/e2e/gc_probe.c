@@ -651,17 +651,16 @@ void __wrap_luaC_scansweep(lua_State *L, LuaSweepWork *work) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
   unsigned active = __atomic_add_fetch(&sweepers, 1, __ATOMIC_ACQ_REL);
+  if (record != NULL && record->sweep_peak_workers < active)
+    record->sweep_peak_workers = active;
+  __real_luaC_scansweep(L, work);
+  __atomic_fetch_sub(&sweepers, 1, __ATOMIC_ACQ_REL);
   if (record != NULL) {
-    if (record->sweep_peak_workers < active)
-      record->sweep_peak_workers = active;
     record->sweep_records += work->count;
     if (L->world_depth != 0)
       record->sweep_paused_records += work->count;
-  }
-  __real_luaC_scansweep(L, work);
-  __atomic_fetch_sub(&sweepers, 1, __ATOMIC_ACQ_REL);
-  if (record != NULL)
     record->sweep_scan_ns += now() - started;
+  }
 }
 
 void __wrap_luaC_pollsweep(lua_State *L) {

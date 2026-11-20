@@ -9,6 +9,41 @@
 #include <string.h>
 #include "lgc.h"
 #include "lscheduler.h"
+#include "ltable.h"
+
+/* A page remains in the allocator directory until backing storage returns.
+** The pool mutex protects both cursor advancement and the claim against that
+** return. Limits bound skipped descriptors as well as ordinary list claims. */
+static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
+  LuaSweepPlan *plan = &g->sweep_plan;
+  unsigned inspected = 0;
+  while (plan->page_pool <= plan->page_limit && inspected < limit) {
+    unsigned pool = plan->page_pool;
+    luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+    while (plan->pages[pool] != NULL && inspected < limit) {
+      LuaAllocPage *page = plan->pages[pool];
+      uint64_t tables = __atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED);
+      plan->pages[pool] = page->next;
+      inspected++;
+      if (page->state == LUA_PAGE_OPEN && tables != 0 &&
+          (plan->kind != SWEEP_YOUNG || tables >= plan->epoch)) {
+        page->state = LUA_PAGE_SWEEPING;
+        work->page = page;
+        break;
+      }
+    }
+    if (plan->pages[pool] == NULL) plan->page_pool++;
+    luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+    if (work->page != NULL) break;
+  }
+  work->count = inspected;
+}
+
+int luaC_sweepready (global_State *g) {
+  LuaSweepPlan *plan = &g->sweep_plan;
+  return plan->phase == SWEEP_OBJECTS &&
+    (plan->next != plan->limit || plan->page_pool <= plan->page_limit);
+}
 
 void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   global_State *g = G(L);
@@ -19,6 +54,10 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   memset(plan, 0, sizeof(*plan));
   plan->epoch = epoch;
   plan->kind = kind;
+  plan->page_pool = luaMP_sizeclass(sizeof(Table));
+  plan->page_limit = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
+  for (unsigned pool = plan->page_pool; pool <= plan->page_limit; pool++)
+    plan->pages[pool] = g->allocation_pages[pool];
   g->new_mark = cast_byte(g->major_mark | g->minor_mark);
   plan->base_marked = marked;
   plan->next = g->allgc;
@@ -35,12 +74,14 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
     g->grayagain = g->weak = g->allweak = g->ephemeron = NULL;
   }
   else if (kind == SWEEP_OLD) {
+    LuaSweepWork work = {0};
     int result;
     g->gckind = KGC_GENMINOR;
-    result = luaC_sweepobject(L, main, kind, &plan->addedold, &plan->promoted);
+    result = luaC_sweepobject(L, main, kind, &work);
     if (result == SWEEP_WATCH) {
-      *luaC_graylink(main) = g->grayagain;
-      g->grayagain = main;
+      plan->watch.head = main;
+      plan->watch.tail = luaC_graylink(main);
+      *plan->watch.tail = NULL;
     }
   }
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
@@ -74,7 +115,13 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
   LuaSweepPlan *plan = &g->sweep_plan;
   unsigned region;
   if (!luaC_sweeping(L)) return;
-  if (plan->next == plan->limit && plan->retry[0] == NULL &&
+  if (plan->phase == SWEEP_OBJECTS && plan->next == plan->limit) {
+    takepage(g, work, limit);
+    if (work->count == 0 && plan->table_retry != NULL)
+      take(work, &plan->table_retry, NULL, NULL, limit, 0);
+    work->tables = work->count != 0;
+  }
+  if (work->count == 0 && plan->next == plan->limit && plan->retry[0] == NULL &&
       plan->retry[1] == NULL && plan->busy == 0 &&
       plan->phase == SWEEP_OBJECTS)
     plan->phase = SWEEP_THREADS;
@@ -114,9 +161,7 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
     take(work, &plan->gray[plan->gray_index], NULL, NULL, limit, 1);
   }
   if (work->count != 0) plan->busy++;
-  __atomic_store_n(&g->sweep_workers,
-    plan->phase == SWEEP_OBJECTS && plan->next != plan->limit,
-    __ATOMIC_RELEASE);
+  __atomic_store_n(&g->sweep_workers, luaC_sweepready(g), __ATOMIC_RELEASE);
 }
 
 static void publish (lua_State *L, LuaSweepWork *work) {
@@ -129,19 +174,21 @@ static void publish (lua_State *L, LuaSweepWork *work) {
     plan->live[region] = work->live;
   }
   if (work->retry != NULL) {
-    *work->retry_tail = plan->retry[region];
-    plan->retry[region] = work->retry;
+    GCObject **retry = work->tables ? &plan->table_retry : &plan->retry[region];
+    *work->retry_tail = *retry;
+    *retry = work->retry;
   }
   if (work->threads != NULL) {
     *work->threads_tail = plan->threads;
     plan->threads = work->threads;
   }
   if (work->watch.head != NULL) {
-    *work->watch.tail = g->grayagain;
-    g->grayagain = work->watch.head;
+    /* Keep promoted and filtered owners separate from the gray input. */
+    *work->watch.tail = plan->watch.head;
+    if (plan->watch.head == NULL) plan->watch.tail = work->watch.tail;
+    plan->watch.head = work->watch.head;
   }
   plan->addedold += work->addedold;
-  plan->promoted |= work->promoted;
   lua_assert(plan->busy != 0);
   plan->busy--;
   luaQ_wake(&g->world.changed, &g->world.waiters);
@@ -174,6 +221,10 @@ static void finish (lua_State *L) {
     *plan->tail[1] = plan->limit;
     *plan->tail[0] = plan->live[1];
     *plan->append = plan->live[0];
+    if (plan->watch.head != NULL) {
+      *plan->watch.tail = g->grayagain;
+      g->grayagain = plan->watch.head;
+    }
     __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
     luaC_endsweep(L);
   }
@@ -185,7 +236,7 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
   LuaGCFrame frame;
   LuaWorld *world = &G(L)->world;
   int done;
-  unsigned previous;
+  unsigned previous, scanned;
   if (!luaC_sweeping(L) || limit == 0) return 0;
   luaC_entergc(L, &frame);
   frame.batch = 1;
@@ -196,20 +247,28 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance) {
   done = G(L)->sweep_plan.phase == SWEEP_DONE;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   if (!previous && luaC_workerready(G(L))) luaSC_notifygc(G(L));
+  scanned = work.count;
   if (work.count != 0) {
     luaC_scansweep(L, &work);
+    if (work.count != 0) scanned = work.count;
+    if (work.page != NULL) {
+      unsigned pool = work.page->pool;
+      luaX_checksync(pthread_mutex_lock(&G(L)->allocation_mutex[pool]));
+      work.page->state = LUA_PAGE_OPEN;
+      luaX_checksync(pthread_mutex_unlock(&G(L)->allocation_mutex[pool]));
+    }
     frame.batch = 0;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaC_publishretired(L, &frame);
     publish(L, &work);
-    luaP_work(G(L), cast(lu_mem, work.count) * sizeof(GCObject));
+    luaP_work(G(L), cast(lu_mem, scanned) * sizeof(GCObject));
     done = G(L)->sweep_plan.phase == SWEEP_DONE;
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
   frame.batch = 0;
   if (done && advance) finish(L);
   luaC_leavegc(L, &frame);
-  return cast(lu_mem, work.count) * sizeof(GCObject);
+  return cast(lu_mem, scanned) * sizeof(GCObject);
 }
 
 lu_mem luaC_sweepbatch (lua_State *L, unsigned limit) {

@@ -65,11 +65,8 @@ void luaC_advancetrace (lua_State *L) {
       break;
     }
     if (plan->next != NULL || plan->deferred != NULL ||
-        plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL) break;
+        plan->pending != NULL || plan->finalizers != NULL) break;
     switch (plan->phase) {
-      case TRACE_OLD:
-        plan->phase = plan->pending != NULL ? TRACE_PENDING : TRACE_MARK;
-        break;
       case TRACE_PENDING:
         plan->phase = TRACE_MARK;
         break;

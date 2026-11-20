@@ -95,7 +95,6 @@ static void starttrace (lua_State *L, unsigned finish);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
 static void atomic2gen (lua_State *L, global_State *g);
 static int checkmajorminor (lua_State *L, global_State *g);
-static unsigned markold (global_State *g, unsigned limit);
 
 
 
@@ -237,6 +236,7 @@ void luaC_fix (lua_State *L, GCObject *o) {
   global_State *g = G(L);
   GCObject **link;
   GCObject *previous = NULL;
+  lua_assert(o->tt != LUA_VTABLE);
   luaW_heapenter(L);
   link = &L->new_objects;
   while (*link != NULL && *link != o) {
@@ -278,8 +278,23 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   o->next = NULL;
   collector = luaW_iscollector(L);
   if (tt == LUA_VTABLE) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
+    LuaAllocPage *page = luaMP_page(block);
+    uint64_t epoch = g->sweep_plan.epoch;
+    uintptr_t flags = LUA_BLOCK_TABLE;
+    lua_assert(page != NULL && offset == 0);
+    if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
     gco2t(o)->weak_link = collector ? 0 : L->nursery_epoch;
-    if (!collector) L->nursery_tables++;
+    if (!collector) {
+      if (L->new_tables == NULL) luaW_trackpublisher(L);
+      luaC_allocnext(o) = L->new_tables;
+      L->new_tables = o;
+      L->nursery_tables++;
+    }
+    __atomic_store_n(&block->block.page, cast(uintptr_t, page) | flags,
+                     __ATOMIC_RELEASE);
+    luaMP_young(page, epoch + 1);
+    return o;
   }
   if (collector) {
     (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
@@ -457,7 +472,14 @@ static void starttrace (lua_State *L, unsigned finish) {
   if ((g->gcstp & GCSTPCLS) && !g->gcemergency) return;
   lua_assert(L->world_depth != 0 && !luaC_tracing(L) && !luaC_sweeping(L));
   g->markminor = finish == TRACE_YOUNG;
-  if (g->markminor) g->minor_mark ^= bitmask(MINORBIT);
+  if (g->markminor) {
+    g->minor_mark ^= bitmask(MINORBIT);
+    /* The preceding sweep left queued roots for the new epoch. Make them
+    ** available alongside stack roots at the initial trace boundary. */
+    lua_assert(g->gray == NULL);
+    g->gray = g->grayagain;
+    g->grayagain = NULL;
+  }
   else g->major_mark = g->major_mark == MAJORBITS
     ? bitmask(MAJOR0BIT) : cast_byte(g->major_mark + bitmask(MAJOR0BIT));
   g->new_mark = cast_byte(g->major_mark | g->minor_mark |
@@ -471,7 +493,6 @@ static void starttrace (lua_State *L, unsigned finish) {
   __atomic_store_n(&g->trace_workers, 0, __ATOMIC_RELAXED);
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
-  g->trace_plan.old = g->trace_plan.old_limit = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
   g->trace_plan.pending = g->tobefnz;
   g->trace_plan.finalizers = NULL;
@@ -1039,12 +1060,12 @@ void luaC_readytrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
   unsigned ready = g->gray != NULL || plan->next != NULL ||
-    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL;
+    plan->pending != NULL || plan->finalizers != NULL;
   __atomic_store_n(&g->trace_workers, ready, __ATOMIC_RELEASE);
   __atomic_store_n(&g->trace_ready,
     g->gray != NULL || g->trace_deferred != NULL ||
     plan->next != NULL || plan->deferred != NULL ||
-    plan->old != NULL || plan->pending != NULL || plan->finalizers != NULL,
+    plan->pending != NULL || plan->finalizers != NULL,
     __ATOMIC_RELEASE);
 }
 
@@ -1110,17 +1131,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   work->global = g;
   if (!luaC_tracing(L)) return;
   luaC_drainbarriers(L);
-  if (plan->phase == TRACE_OLD) {
-    work->scanned += markold(g, limit) * sizeof(GCObject);
-    /* Complete this bounded metadata walk before any old thread's gray
-    ** payload can be claimed and put back on its watched-thread list. */
-    if (plan->old == NULL)
-      __atomic_store_n(&plan->phase,
-        plan->pending != NULL ? TRACE_PENDING : TRACE_MARK, __ATOMIC_RELEASE);
-    luaC_readytrace(L);
-    return;
-  }
-  else if (plan->phase == TRACE_PENDING)
+  if (plan->phase == TRACE_PENDING)
     work->scanned += pendingfinalizers(g, limit) * sizeof(GCObject);
   else if (plan->phase == TRACE_FINALIZERS)
     work->scanned += discoverfinalizers(g, limit) * sizeof(GCObject);
@@ -1291,16 +1302,21 @@ static void trimstacks (lua_State *L) {
 ** Generational ages advance with a CAS that preserves mutator barriers.
 */
 int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
-                       l_mem *addedold, unsigned *promoted) {
-  static const lu_byte nextage[] = {
-    G_SURVIVAL, G_OLD1, G_TOUCHED0, G_OLD, G_OLD, G_TOUCHED1, G_TOUCHED2
-  };
+                       LuaSweepWork *work) {
   global_State *g = G(L);
   lu_byte marked, changed;
   l_mem bytes = 0;
-  int watching = 0;
+  int watching, promoted;
   if (isdead(g, o)) {
-    int retired = luaC_tryretire(L, o);
+    int retired;
+    if (o->tt == LUA_VTABLE) {
+      l_mem size = luaH_freeinline(L, gco2t(o));
+      if (size != 0) {
+        work->freed += size;
+        return SWEEP_RETIRED;
+      }
+    }
+    retired = luaC_tryretire(L, o);
     if (retired != SWEEP_LIVE) return retired;
   }
   if (kind == SWEEP_MAJOR) return SWEEP_LIVE;
@@ -1318,24 +1334,23 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   }
   do {
     unsigned age = marked & AGEBITS;
-    unsigned next = kind == SWEEP_YOUNG ? nextage[age]
-      : age == G_TOUCHED0 || age >= G_TOUCHED1 ? age : G_OLD;
-    watching = 0;
+    unsigned next = age;
+    int edges = novariant(o->tt) != LUA_TSTRING;
+    promoted = kind == SWEEP_YOUNG && age == G_SURVIVAL;
+    if (promoted) next = edges ? G_TOUCHED1 : G_OLD;
+    else if (kind == SWEEP_YOUNG && age == G_NEW) next = G_SURVIVAL;
+    else if (kind == SWEEP_OLD && age <= G_SURVIVAL) next = G_OLD;
+    /* Changing age and claiming the remembered link are one operation.
+    ** Mutators can update the age, and must leave our claimed link alone. */
+    watching = ((promoted && edges) ||
+                (o->tt == LUA_VTHREAD && next > G_SURVIVAL)) &&
+               !testbit(marked, QUEUEDBIT);
     changed = cast_byte((marked & ~AGEBITS) | next);
-    if (o->tt == LUA_VTHREAD && next > G_SURVIVAL &&
-        !testbit(changed, QUEUEDBIT)) {
-      changed = cast_byte(changed | bitmask(QUEUEDBIT));
-      watching = 1;
-    }
+    if (watching) changed |= bitmask(QUEUEDBIT);
     if (changed == marked) break;
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-  if (kind == SWEEP_YOUNG && (changed & AGEBITS) == G_OLD1) {
-    /* A builder born black can promote before its first size snapshot. Its
-    ** next-cycle scan is mandatory even when its accounted size is zero. */
-    *promoted = 1;
-    *addedold += bytes;
-  }
+  if (promoted) work->addedold += bytes;
   return watching ? SWEEP_WATCH : SWEEP_LIVE;
 }
 
@@ -1483,6 +1498,9 @@ void luaC_publish (lua_State *L) {
           g->sweep_plan.append = luaC_alloclink(thread->new_objects_tail);
         g->allgc = thread->new_objects;
         thread->new_objects = thread->new_objects_tail = NULL;
+      }
+      if (thread->new_tables != NULL) {
+        thread->new_tables = NULL;
         thread->nursery_tables = 0;
         thread->nursery_epoch += NURSERY_STEP;
       }
@@ -1503,7 +1521,8 @@ void luaC_publish (lua_State *L) {
     for (participant = g->world.participants; participant != NULL;
          participant = participant->next) {
       lua_State *owner = participant->thread;
-      lua_assert(owner->new_objects == NULL && owner->storage_retired == NULL &&
+      lua_assert(owner->new_objects == NULL && owner->new_tables == NULL &&
+                 owner->storage_retired == NULL &&
                  owner->allocation_debt == 0 && owner->reclaim_credit == 0);
     }
   }
@@ -1584,37 +1603,6 @@ static void finishincremental (lua_State *L, global_State *g) {
 
 
 /*
-** Mark black 'OLD1' objects when starting a new young collection.
-** Gray objects are already in some gray list, and so will be visited in
-** the atomic step.
-*/
-static unsigned markold (global_State *g, unsigned limit) {
-  LuaTracePlan *plan = &g->trace_plan;
-  unsigned count = 0;
-  while (plan->old != NULL && plan->old != plan->old_limit && count < limit) {
-    GCObject *p = plan->old;
-    plan->old = luaC_allocnext(p);
-    count++;
-    {
-      lu_byte marked = getmarked(p), changed;
-      while ((marked & AGEBITS) == G_OLD1) {
-        unsigned age = novariant(p->tt) == LUA_TSTRING ? G_OLD : G_TOUCHED1;
-        changed = cast_byte((marked & ~AGEBITS) | age |
-                             bitmask(QUEUEDBIT));
-        if (__atomic_compare_exchange_n(&p->marked, &marked, changed, 0,
-                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-          if (!testbit(marked, QUEUEDBIT)) luaC_linktrace(g, p);
-          break;
-        }
-      }
-    }
-  }
-  if (plan->old == plan->old_limit) plan->old = NULL;
-  return count;
-}
-
-
-/*
 ** Finish a young-generation collection.
 */
 static void finishgencycle (lua_State *L, global_State *g) {
@@ -1635,7 +1623,7 @@ static void finishgencycle (lua_State *L, global_State *g) {
 static void minor2inc (global_State *g, lu_byte kind) {
   g->GCmajorminor = g->GCmarked;  /* number of live bytes */
   g->gckind = kind;
-  g->reallyold = g->old1 = g->survival = NULL;
+  g->old1 = g->survival = NULL;
   g->finobjold1 = g->finobjsur = NULL;
   g->gcstate = GCSpause;  /* the next major rotates its stamp in constant time */
   /* set a debt equal to the step size */
@@ -1654,20 +1642,6 @@ static int checkminormajor (global_State *g) {
   if (limit == 0)
     return 0;  /* special case: 'minormajor' 0 stops major collections */
   return (g->GCmarked >= limit);
-}
-
-/*
-** Start a young collection by publishing 'OLD1' work. Its payloads and
-** subsequent phases use the same shared slices as a major collection.
-*/
-static void startyoungcollection (lua_State *L, global_State *g) {
-  lua_assert(g->gcstate == GCSpropagate);
-  starttrace(L, TRACE_YOUNG);
-  if (g->firstold1) {  /* are there regular OLD1 objects? */
-    g->trace_plan.old = g->firstold1;
-    g->trace_plan.old_limit = g->reallyold;
-    g->firstold1 = NULL;  /* no more OLD1 objects (for now) */
-  }
 }
 
 static void finishyoung (lua_State *L, global_State *g, l_mem marked) {
@@ -1700,10 +1674,72 @@ int luaC_sweepgray (GCObject *o) {
   return keep;
 }
 
+static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
+                        uintptr_t header) {
+  GCObject *object = cast(GCObject *, block + 1);
+  int result = luaC_sweepobject(L, object, work->kind, work);
+  if (result == SWEEP_RETRY) {
+    if (work->retry == NULL) work->retry_tail = luaC_alloclink(object);
+    luaC_allocnext(object) = work->retry;
+    work->retry = object;
+  }
+  else if (result != SWEEP_RETIRED) {
+    if (getage(object) <= G_SURVIVAL)
+      luaMP_young(luaMP_pageof(header), G(L)->sweep_plan.epoch + 1);
+    if (header & LUA_BLOCK_BIRTH)
+      __atomic_store_n(&block->block.page, header & ~cast(uintptr_t, LUA_BLOCK_BIRTH),
+                       __ATOMIC_RELAXED);
+    if (result == SWEEP_WATCH) queuework(&work->watch, object);
+  }
+}
+
+static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
+  global_State *g = G(L);
+  if (work->page != NULL) {
+    LuaAllocPage *page = work->page;
+    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(page->bin);
+    uintptr_t birth = luaMP_birth(g->sweep_plan.epoch);
+    unsigned count = 0;
+    size_t offset;
+    for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+         offset += stride) {
+      LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+      uintptr_t header = luaMP_header(block);
+      if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth)
+        continue;
+      if (work->kind == SWEEP_YOUNG && isold(cast(GCObject *, block + 1)))
+        continue;
+      sweeptable(L, work, block, header);
+      count++;
+    }
+    work->count = count;
+  }
+  else {
+    GCObject *object = work->next;
+    while (object != NULL) {
+      GCObject *next = luaC_allocnext(object);
+      LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
+      sweeptable(L, work, block, luaMP_header(block));
+      object = next;
+    }
+    if (work->next == NULL) work->count = 0;
+  }
+  if (work->freed != 0) {
+    /* Freeing a slot already credits heap debt. Settle the frozen cohort's
+    ** estimate before publishing the batch, alongside deferred retirement. */
+    if (!(g->gcstp & GCSTPCLS))
+      __atomic_fetch_sub(&g->GCcyclelive, work->freed, __ATOMIC_RELAXED);
+    luaM_flushdebt(L, L);
+  }
+}
+
 void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   GCObject *object = work->next;
-  l_mem freed = 0;
+  if (work->tables) {
+    sweep_table_batch(L, work);
+    return;
+  }
   if (work->phase == SWEEP_GRAY) {
     while (object != NULL) {
       GCObject *next = *luaC_graylink(object);
@@ -1717,16 +1753,6 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
   while ((object = *work->tail) != NULL) {
     GCObject *next = luaC_allocnext(object);
     int result;
-    if (object->tt == LUA_VTABLE && isdead(g, object)) {
-      l_mem size = luaH_freeinline(L, gco2t(object));
-      if (size != 0) {
-        /* The detached batch owns this link. The allocator may reuse the
-        ** table as soon as it is returned, so only use the saved successor. */
-        *work->tail = next;
-        freed += size;
-        continue;
-      }
-    }
     if (work->phase == SWEEP_OBJECTS && object->tt == LUA_VTHREAD &&
         isdead(g, object)) {
       *work->tail = next;
@@ -1735,8 +1761,7 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
       work->threads = object;
       continue;
     }
-    result = luaC_sweepobject(L, object, work->kind, &work->addedold,
-                              &work->promoted);
+    result = luaC_sweepobject(L, object, work->kind, work);
     if (result == SWEEP_RETRY) {
       *work->tail = next;
       if (work->phase == SWEEP_THREADS) {
@@ -1756,13 +1781,6 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
       work->tail = luaC_alloclink(object);
       if (result == SWEEP_WATCH) queuework(&work->watch, object);
     }
-  }
-  if (freed != 0) {
-    /* Ordinary free already credits the heap debt. Update this cohort's live
-    ** estimate before publishing the batch, just as for deferred retirement. */
-    if (!(g->gcstp & GCSTPCLS))
-      __atomic_fetch_sub(&g->GCcyclelive, freed, __ATOMIC_RELAXED);
-    luaM_flushdebt(L, L);
   }
 }
 
@@ -1786,9 +1804,6 @@ void luaC_endsweep (lua_State *L) {
   /* Joining the lists also fills empty band heads with the following band. */
   g->survival = plan->live[0];
   g->old1 = plan->kind == SWEEP_YOUNG ? plan->live[1] : plan->live[0];
-  g->reallyold = plan->kind == SWEEP_YOUNG ? plan->limit : NULL;
-  g->firstold1 = plan->kind == SWEEP_YOUNG && plan->promoted
-    ? plan->live[0] : NULL;
   g->finobjsur = plan->finhead;
   g->finobjold1 = plan->kind == SWEEP_YOUNG ? plan->finsurvival : plan->finhead;
   if (plan->kind == SWEEP_YOUNG) {
@@ -1920,6 +1935,26 @@ static void deletelist (lua_State *L, GCObject *p, GCObject *limit, int fixed) {
   }
 }
 
+static void retire_table_pages (lua_State *L) {
+  global_State *g = G(L);
+  unsigned last = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
+  unsigned pool;
+  for (pool = luaMP_sizeclass(sizeof(Table)); pool <= last; pool++) {
+    LuaAllocPage *page;
+    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
+    for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
+      size_t offset;
+      if (__atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED) == 0) continue;
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+           offset += stride) {
+        LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
+        if (luaMP_header(block) & LUA_BLOCK_TABLE)
+          luaC_retireobject(L, cast(GCObject *, block + 1));
+      }
+    }
+  }
+}
+
 
 /*
 ** Call all finalizers of the objects in the given Lua state, and
@@ -1942,6 +1977,7 @@ void luaC_freeallobjects (lua_State *L) {
   separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
   callallpendingfinalizers(L);
+  retire_table_pages(L);
   deletelist(L, g->allgc, obj2gco(mainthread(g)), 0);
   lua_assert(g->finobj == NULL);  /* no new finalizers */
   luaC_reclaim(L);  /* external callbacks precede fixed DLL handle destruction */
@@ -1960,8 +1996,7 @@ void luaC_initialtrace (lua_State *L) {
   lua_assert(g->ephemeron == NULL && g->weak == NULL);
   lua_assert(!iswhite(g, mainthread(g)));
   g->gcstate = GCSatomic;
-  g->trace_plan.phase = g->trace_plan.old != NULL ? TRACE_OLD
-    : g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
+  g->trace_plan.phase = g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK;
   markobject(g, L);  /* mark running thread */
   marknativeframes(g);
   /* registry and global metatables may be changed by API */
@@ -2329,8 +2364,8 @@ static void marknursery (lua_State *L, GCObject *object, GCObject **gray) {
   }
 }
 
-/* The admitted stack owns this unpublished cohort. A global stop publishes
-** the whole list before any shared collector can access its table headers. */
+/* The admitted stack owns these nursery links. Quiescence detaches them
+** before the shared collector can reuse a table's allocation prefix. */
 static void collectnursery (lua_State *L) {
   enum { NURSERY_MIN_TABLES = 32, NURSERY_SCAN_LIMIT = 16384,
          NURSERY_SCANS_PER_CYCLE = 16 };
@@ -2351,7 +2386,7 @@ static void collectnursery (lua_State *L) {
   slots = cast_sizet(L->stack_last.p - L->stack.p) + EXTRA_STACK;
   if (slots >= NURSERY_SCAN_LIMIT) return;
   remaining = NURSERY_SCAN_LIMIT - slots;
-  for (o = L->new_objects; o != NULL; o = luaC_allocnext(o)) {
+  for (o = L->new_tables; o != NULL; o = luaC_allocnext(o)) {
     if (--remaining == 0) return;
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
       Table *t = gco2t(o);
@@ -2369,7 +2404,7 @@ static void collectnursery (lua_State *L) {
     return;
   for (slot = L->stack.p; slot < L->top.p; slot++)
     if (ttistable(s2v(slot))) marknursery(L, gcvalue(s2v(slot)), &gray);
-  for (o = L->new_objects; o != NULL; o = luaC_allocnext(o))
+  for (o = L->new_tables; o != NULL; o = luaC_allocnext(o))
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
         (luaC_tablelink(gco2t(o)) & NURSERY_ROOT))
       marknursery(L, o, &gray);
@@ -2388,13 +2423,17 @@ static void collectnursery (lua_State *L) {
       if (ttistable(gval(node))) marknursery(L, gcvalue(gval(node)), &gray);
     }
   }
-  link = &L->new_objects;
-  L->new_objects_tail = NULL;
+  link = &L->new_tables;
   while ((o = *link) != NULL) {
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
       Table *t = gco2t(o);
       if (!(luaC_tablelink(t) & NURSERY_LIVE)) {
+        LuaAllocBlock *block = cast(LuaAllocBlock *, t) - 1;
         *link = luaC_allocnext(o);
+        /* Freeing an external part can release admission. Detach the slot
+        ** from the shared sweep directory before any such free. */
+        __atomic_store_n(&block->block.page, cast(uintptr_t, luaMP_page(block)),
+                         __ATOMIC_RELAXED);
         o->next = dead;
         dead = o;
         L->nursery_tables--;
@@ -2402,7 +2441,6 @@ static void collectnursery (lua_State *L) {
       }
       luaC_settablelink(t, luaC_tablelink(t) & ~cast(uintptr_t, NURSERY_LIVE));
     }
-    L->new_objects_tail = o;
     link = luaC_alloclink(o);
   }
   if (dead == NULL) return;
@@ -2512,7 +2550,8 @@ void luaC_step (lua_State *L) {
       l_mem budget = applygcparam(g, STEPMUL,
                         applygcparam(g, STEPSIZE, 100));
       uint64_t epoch;
-      startyoungcollection(L, g);
+      lua_assert(g->gcstate == GCSpropagate);
+      starttrace(L, TRACE_YOUNG);
       epoch = g->trace_epoch;
       if (automatic) {
         luaC_advancetrace(L);

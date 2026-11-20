@@ -106,7 +106,7 @@ static void unlinkpublisher (lua_State *L) {
   shard = publishershard(L);
   luaX_checksync(pthread_mutex_lock(&shard->mutex));
   previous = __atomic_load_n(&L->publish_previous, __ATOMIC_RELAXED);
-  lua_assert(previous != NULL && L->new_objects == NULL &&
+  lua_assert(previous != NULL && L->new_objects == NULL && L->new_tables == NULL &&
              L->storage_retired == NULL);
   *previous = L->publish_next;
   if (L->publish_next != NULL)

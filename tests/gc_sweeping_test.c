@@ -22,6 +22,7 @@
   } while (0)
 
 enum { OBJECTS = 4096 };
+static _Thread_local size_t sweep_limit;
 static struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -72,7 +73,14 @@ void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
   struct fixture *test = fixture;
   GCObject *object;
-  int candidate = 0;
+  int candidate = work->page != NULL && test != NULL && test->revive == NULL;
+  if (work->page != NULL) {
+    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(work->page->bin);
+    size_t cells = (work->page->bytes - LUA_ALLOC_PAGE_HEADER) / stride;
+    require(work->page->bytes <= LUA_ALLOC_PAGE_MAX);
+    if (cells > sweep_limit)
+      sweep_limit = cells;
+  }
   for (object = work->next; object != NULL;
        object = work->phase == SWEEP_GRAY ? *luaC_graylink(object)
                                           : luaC_allocnext(object))
@@ -91,9 +99,9 @@ void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
     }
     require(pthread_mutex_unlock(&test->mutex) == 0);
   }
+  __real_luaC_scansweep(state, work);
   if (test != NULL && state == test->worker)
     test->scanned += work->count;
-  __real_luaC_scansweep(state, work);
 }
 
 void __real_luaC_reclaim(lua_State *);
@@ -117,9 +125,9 @@ lu_mem __wrap_luaC_sweepbatch(lua_State *state, unsigned limit) {
   if (test != NULL && state == test->worker && test->entered &&
       !test->release && test->helpers >= 8)
     return 0; /* Keep the cohort pending while its first scanner is parked. */
+  sweep_limit = limit < LUA_TRACE_BATCH ? limit : LUA_TRACE_BATCH;
   worked = __real_luaC_sweepbatch(state, limit);
-  require(worked <= (limit < LUA_TRACE_BATCH ? limit : LUA_TRACE_BATCH) *
-                        sizeof(GCObject));
+  require(worked <= sweep_limit * sizeof(GCObject));
   if (test != NULL && state == test->worker && worked != 0)
     test->helpers++;
   return worked;
@@ -246,7 +254,6 @@ static int empty_bands(lua_State *state) {
     if (i == 1) {
       require(G(state)->sweep_plan.tail[0] == &G(state)->sweep_plan.live[0]);
       require(G(state)->survival == G(state)->old1);
-      require(G(state)->firstold1 != NULL);
     }
     lua_unlock(state);
   }

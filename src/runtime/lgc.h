@@ -52,7 +52,7 @@ typedef struct LuaGCFrame {
 } LuaGCFrame;
 
 enum {
-  TRACE_INIT, TRACE_OLD, TRACE_PENDING, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
+  TRACE_INIT, TRACE_PENDING, TRACE_MARK, TRACE_EPHEMERONS, TRACE_VALUES, TRACE_FINALIZERS,
   TRACE_CLEAR, TRACE_VERIFY
 };
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
@@ -73,11 +73,6 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
 /* A batch owns its payloads until it publishes every list and counter. It
 ** must not yield or park while these private references are outstanding. */
 #define LUA_TRACE_BATCH 64
-typedef struct LuaTraceList {
-  GCObject *head;
-  GCObject **tail;
-} LuaTraceList;
-
 typedef struct LuaTraceWork {
   global_State *global;
   LuaTraceList gray, grayagain, weak, allweak, ephemeron, deferred;
@@ -90,11 +85,12 @@ typedef struct LuaTraceWork {
 } LuaTraceWork;
 
 typedef struct LuaSweepWork {
+  LuaAllocPage *page;
   GCObject *next, *live, **tail;
   GCObject *retry, **retry_tail, *threads, **threads_tail;
   LuaTraceList watch;
-  l_mem addedold;
-  unsigned count, kind, phase, region, promoted;
+  l_mem addedold, freed;
+  unsigned count, kind, phase, region, tables;
 } LuaSweepWork;
 
 LUAI_FUNC LuaGCFrame *luaC_gcframe (void);
@@ -183,10 +179,9 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define G_NEW		0	/* created in current cycle */
 #define G_SURVIVAL	1	/* created in previous cycle */
 #define G_TOUCHED0	2	/* old owner written during concurrent marking */
-#define G_OLD1		3	/* first full cycle as old */
-#define G_OLD		4	/* really old object (not to be visited) */
-#define G_TOUCHED1	5	/* old object touched this cycle */
-#define G_TOUCHED2	6	/* old object touched in previous cycle */
+#define G_OLD		3	/* old object (not to be visited) */
+#define G_TOUCHED1	4	/* old object to scan in two minor cycles */
+#define G_TOUCHED2	5	/* old object to scan in one minor cycle */
 
 #define AGEBITS		7  /* all age bits (111) */
 
@@ -232,8 +227,8 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 
 
 /*
-** New and survival objects are young. Survivals promote to OLD1, whose
-** outgoing edges are scanned in two subsequent young collections. A child
+** New and survival objects are young. Promotion remembers objects with
+** outgoing edges for two subsequent young collections. A child
 ** born during the parent's sweep lies outside that frozen cohort and needs
 ** both scans before it matures. A major selected for generational execution
 ** stamps its objects and allocations old during marking. The quiescent switch
@@ -412,6 +407,7 @@ enum { SWEEP_RETRY, SWEEP_LIVE, SWEEP_RETIRED, SWEEP_WATCH };
 #define luaC_sweeping(L) \
   __atomic_load_n(&G(L)->sweep_plan.active, __ATOMIC_ACQUIRE)
 LUAI_FUNC void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked);
+LUAI_FUNC int luaC_sweepready (global_State *g);
 LUAI_FUNC lu_mem luaC_sweepbatch (lua_State *L, unsigned limit);
 LUAI_FUNC lu_mem luaC_sweeppayload (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_scansweep (lua_State *L, LuaSweepWork *work);
@@ -419,7 +415,7 @@ LUAI_FUNC void luaC_waitsweep (lua_State *L);
 LUAI_FUNC void luaC_pollsweep (lua_State *L);
 LUAI_FUNC void luaC_assistsweep (lua_State *L);
 LUAI_FUNC int luaC_sweepobject (lua_State *L, GCObject *object, unsigned kind,
-                              l_mem *addedold, unsigned *promoted);
+                              LuaSweepWork *work);
 LUAI_FUNC void luaC_endsweep (lua_State *L);
 LUAI_FUNC int luaC_tryretire (lua_State *L, GCObject *object);
 /* Publish a complete private batch while holding world.mutex. */

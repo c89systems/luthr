@@ -26,12 +26,11 @@ typedef struct CallInfo CallInfo;
 
 
 /*
-** Some notes about garbage-collected objects: All objects in Lua must
-** be kept somehow accessible until being freed, so all objects always
-** belong to an allocation list using the allocator prefix link:
+** Garbage-collected objects are discoverable until retirement:
 **
-** 'allgc': published allocations, including finalizable objects;
-** each coroutine's 'new_objects': allocations awaiting publication.
+** 'allgc': published non-table objects, including finalizable objects;
+** table allocation membership is recorded in allocator pages.
+** Each coroutine retains unpublished objects and a private table nursery.
 ** 'sweep_plan': the detached cohort, survivors, and retries of an active sweep;
 ** claimed batches remain owned until publication, with no safepoint between.
 **
@@ -46,27 +45,16 @@ typedef struct CallInfo CallInfo;
 ** that particular generation; that generation goes until the next mark.
 **
 ** 'allgc' -> 'survival': new objects;
-** 'survival' -> 'old': objects that survived one collection;
-** 'old1' -> 'reallyold': objects that became old in last collection;
-** 'reallyold' -> NULL: objects old for more than one cycle.
+** 'survival' -> 'old1': objects that survived one collection;
+** 'old1' -> NULL: objects old enough to skip in a young sweep.
 **
 ** 'finobj' -> 'finobjsur': new objects marked for finalization;
 ** 'finobjsur' -> 'finobjold1': survived   """";
 ** 'finobjold1' -> NULL: old objects, skipped by minor discovery.
 **
 ** Registration can put older objects at the head of the finalizer index.
-** Allocation membership remains stable. Barriers can age young objects as
-** OLD0, which then become OLD1. However, a list never contains
-** elements younger than their main ages.
-**
-** The generational collector also uses a pointer 'firstold1', which
-** conservatively bounds the first OLD1 object. It is used to optimize
-** 'markold'. (Potentially OLD1 objects can be anywhere between 'allgc'
-** and 'reallyold', but often the list has no OLD1 objects or they are
-** after 'old1'.) Note the difference between it and 'old1':
-** 'firstold1': no OLD1 objects before this point; there can be all
-**   ages after it.
-** 'old1': no objects younger than OLD1 after this point.
+** Allocation membership remains stable. Newly promoted objects and older
+** objects written by mutators use the same remembered-object queue.
 */
 
 /*
@@ -398,6 +386,7 @@ struct lua_State {
   uint64_t assist_epoch;
   GCObject *new_objects;
   GCObject *new_objects_tail;
+  GCObject *new_tables;  /* scratch links in table allocation prefixes */
   uintptr_t nursery_epoch;
   size_t nursery_tables;
   l_mem allocation_debt;
@@ -422,11 +411,15 @@ typedef struct LX {
 /*
 ** 'global state', shared by all threads of this state
 */
+typedef struct LuaTraceList {
+  GCObject *head;
+  GCObject **tail;
+} LuaTraceList;
+
 /* Collection cursors belong to the VM, never to a driver's suspended C stack.
 ** A helper can therefore finish a phase while its original caller is parked. */
 typedef struct LuaTracePlan {
   GCObject *again;
-  GCObject *old, *old_limit;
   GCObject *next;
   GCObject *deferred;
   GCObject *tail;
@@ -451,15 +444,19 @@ typedef struct LuaTracePlan {
 ** Newly published allocations stay in allgc, before the append anchor. */
 typedef struct LuaSweepPlan {
   GCObject *next, *middle, *limit;
+  struct LuaAllocPage *pages[LUA_ALLOC_BINS];
+  unsigned page_pool, page_limit;
   GCObject *live[2], **tail[2];
   GCObject *retry[2];
+  GCObject *table_retry;
   GCObject *threads;
   GCObject *gray[4];
+  LuaTraceList watch;  /* remembered work for the next trace */
   GCObject *finhead, *finsurvival;
   GCObject **append;
   l_mem addedold, base_marked;
   uint64_t epoch;
-  unsigned active, busy, kind, region, phase, gray_index, finishing, promoted;
+  unsigned active, busy, kind, region, phase, gray_index, finishing;
 } LuaSweepPlan;
 
 #define LUA_BARRIER_SHARDS 16
@@ -549,7 +546,7 @@ typedef struct global_State {
   lu_byte gcstopem;  /* stops emergency collections */
   lu_byte gcstp;  /* control whether GC is running */
   lu_byte gcemergency;  /* true if this is an emergency collection */
-  GCObject *allgc;  /* list of all collectable objects */
+  GCObject *allgc;  /* shared list of non-table allocations */
   GCObject *finobj;  /* list of collectable objects with finalizers */
   GCObject *gray;  /* list of gray objects */
   GCObject *grayagain;  /* list of objects to be traversed atomically */
@@ -561,9 +558,7 @@ typedef struct global_State {
   GCObject *fixedgc;  /* list of objects not to be collected */
   /* fields for generational collector */
   GCObject *survival;  /* start of objects that survived one GC cycle */
-  GCObject *old1;  /* start of old1 objects */
-  GCObject *reallyold;  /* objects more than one cycle old ("really old") */
-  GCObject *firstold1;  /* first OLD1 object in the list (if any) */
+  GCObject *old1;  /* start of the old allocation band */
   GCObject *finobjsur;  /* list of survival objects with finalizers */
   GCObject *finobjold1;  /* list of old1 objects with finalizers */
   lua_CFunction panic;  /* to be called in unprotected errors */

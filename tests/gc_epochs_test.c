@@ -16,17 +16,56 @@
   } while (0)
 
 static unsigned records[3], unchanged;
+static LuaAllocPage *watched_page;
+static unsigned page_visits;
 static int inspecting;
+
+struct slot_mark {
+  uintptr_t header;
+  lu_byte mark;
+};
+
+static void check_page_marks(lua_State *state, LuaAllocPage *page,
+                             struct slot_mark *marks, int save) {
+  size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(page->bin);
+  size_t count = (page->bytes - LUA_ALLOC_PAGE_HEADER) / stride;
+  for (size_t i = 0; i < count; i++) {
+    LuaAllocBlock *cell =
+        (LuaAllocBlock *)((char *)page + LUA_ALLOC_PAGE_HEADER + i * stride);
+    uintptr_t header = luaMP_header(cell);
+    if (save)
+      marks[i].header = header;
+    else
+      require(marks[i].header == header);
+    if (header & LUA_BLOCK_TABLE) {
+      GCObject *object = (GCObject *)(cell + 1);
+      require(!isdead(G(state), object));
+      if (save)
+        marks[i].mark = getmarked(object);
+      else {
+        require(marks[i].mark == getmarked(object));
+        unchanged++;
+      }
+    }
+  }
+}
 
 void __real_luaC_scansweep(lua_State *, LuaSweepWork *);
 void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
   GCObject *objects[LUA_TRACE_BATCH], *links[LUA_TRACE_BATCH];
   lu_byte marks[LUA_TRACE_BATCH];
+  struct slot_mark *page_marks = NULL;
   unsigned count = 0, i;
-  if (inspecting) {
-    records[work->kind] += work->count;
-    if (inspecting == 2 && work->phase == SWEEP_OBJECTS &&
-        (work->kind == SWEEP_MAJOR || work->kind == SWEEP_OLD)) {
+  if (watched_page != NULL && work->page == watched_page)
+    page_visits++;
+  if (inspecting == 2 && work->phase == SWEEP_OBJECTS &&
+      (work->kind == SWEEP_MAJOR || work->kind == SWEEP_OLD)) {
+    if (work->page != NULL) {
+      page_marks = malloc(work->page->bytes / sizeof(LuaAllocBlock) *
+                          sizeof(*page_marks));
+      require(page_marks != NULL);
+      check_page_marks(state, work->page, page_marks, 1);
+    } else {
       GCObject *object;
       for (object = work->next; object != NULL;
            object = luaC_allocnext(object)) {
@@ -40,6 +79,12 @@ void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
     }
   }
   __real_luaC_scansweep(state, work);
+  if (inspecting)
+    records[work->kind] += work->count;
+  if (page_marks != NULL) {
+    check_page_marks(state, work->page, page_marks, 0);
+    free(page_marks);
+  }
   for (i = 0; i < count; i++) {
     require(getmarked(objects[i]) == marks[i]);
     require(luaC_allocnext(objects[i]) == links[i]);
@@ -106,6 +151,34 @@ static void modes(lua_State *state) {
   inspecting = 0;
   require(records[SWEEP_MAJOR] == 0 && records[SWEEP_OLD] >= 2048);
   execute(state, "for i=1,2048 do assert(root[i][1]==i) end");
+}
+
+static void mature_page(lua_State *state) {
+  GCObject *table;
+  LuaAllocBlock *young;
+  lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_createtable(state, 4, 0);
+  lua_pushinteger(state, 43);
+  lua_rawseti(state, -2, 1);
+  table = (GCObject *)lua_topointer(state, -1);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(getage(table) == G_OLD);
+  watched_page = luaMP_page((LuaAllocBlock *)table - 1);
+  require(watched_page != NULL);
+  page_visits = 0;
+  minor(state);
+  minor(state);
+  require(page_visits == 0);
+  lua_createtable(state, 4, 0);
+  young = (LuaAllocBlock *)lua_topointer(state, -1) - 1;
+  require(luaMP_page(young) == watched_page);
+  lua_pop(state, 1);
+  minor(state);
+  require(page_visits == 1 && !(luaMP_header(young) & LUA_BLOCK_TABLE));
+  watched_page = NULL;
+  require(lua_rawgeti(state, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 43);
 }
 
 static void *release_string(void *context, void *pointer, size_t old,
@@ -187,6 +260,8 @@ int main(int argc, char **argv) {
     live(state, strcmp(argv[1], "live_generational") == 0);
   else if (strcmp(argv[1], "modes") == 0)
     modes(state);
+  else if (strcmp(argv[1], "mature_page") == 0)
+    mature_page(state);
   else if (strcmp(argv[1], "rotations") == 0) {
     rotations(state);
     return 0;

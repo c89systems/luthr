@@ -28,6 +28,25 @@ enum step_mode {
 };
 static unsigned unavailable_batches, scan_batches, sweep_batches;
 static unsigned interrupt_assist, stops;
+static void *nursery_backing;
+static LuaAllocBlock *nursery_slot;
+static lua_State *nursery_peer;
+
+void __real_luaM_free_(lua_State *, void *, size_t);
+void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
+  if (nursery_backing != NULL && block == nursery_backing) {
+    LuaWorldScope scope;
+    nursery_backing = NULL;
+    require(!(luaMP_header(nursery_slot) & LUA_BLOCK_TABLE));
+    /* Run a collector with the nursery owner withdrawn, as an allocator
+     * wait can do while its dead tables still have backing to return. */
+    scope = luaW_detach(L);
+    require(lua_gc(nursery_peer, LUA_GCCOLLECT) == 0);
+    luaW_attach(L, scope);
+  }
+  __real_luaM_free_(L, block, size);
+}
+
 lu_mem __real_luaC_sweepbatch(lua_State *, unsigned);
 lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit) {
   sweep_batches++;
@@ -598,6 +617,12 @@ static void cohort_promotion(void) {
   lua_newtable(L);
   parent = (GCObject *)lua_topointer(L, -1);
   lua_setglobal(L, "parent");
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, -2);
+  lua_setglobal(L, "weak_parent");
   young_cycle(L);
   require(getage(parent) == G_SURVIVAL);
   require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
@@ -612,12 +637,20 @@ static void cohort_promotion(void) {
   lua_setfield(L, -2, "value");
   lua_setfield(L, -2, "child");
   lua_pop(L, 1);
+  require(lua_getglobal(L, "weak_parent") == LUA_TTABLE);
+  lua_newtable(L);
+  lua_setfield(L, -2, "child");
+  lua_pop(L, 1);
   lua_lock(L);
   luaC_waitsweep(L);
-  require(getage(parent) == G_OLD1 && getage(child) == G_NEW);
+  require(getage(parent) == G_TOUCHED1 && isgray(parent));
+  require(getage(child) == G_NEW);
   lua_unlock(L);
   young_cycle(L);
   require(getage(child) == G_SURVIVAL);
+  require(lua_getglobal(L, "weak_parent") == LUA_TTABLE);
+  require(lua_getfield(L, -1, "child") == LUA_TNIL);
+  lua_pop(L, 2);
   young_cycle(L);
   require(lua_getglobal(L, "parent") == LUA_TTABLE);
   require(lua_getfield(L, -1, "child") == LUA_TTABLE);
@@ -754,6 +787,35 @@ static void nursery(int generational) {
 
 static unsigned nursery_finalizers;
 
+static void nursery_backing_wait(void) {
+  lua_State *L = luaL_newstate();
+  Table *table;
+  require(L != NULL);
+  lua_gc(L, LUA_GCINC);
+  nursery_peer = lua_newthread(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_lock(L);
+  luaE_setdebt(G(L), MAX_LMEM);
+  __atomic_store_n(&G(L)->pacer.debt, MAX_LMEM, __ATOMIC_RELAXED);
+  lua_unlock(L);
+
+  lua_createtable(L, 256, 0);
+  table = (Table *)lua_topointer(L, -1);
+  nursery_slot = (LuaAllocBlock *)table - 1;
+  nursery_backing = table->array - table->asize;
+  lua_pop(L, 1);
+  for (unsigned i = 0; i < 64; i++) {
+    lua_newtable(L);
+    lua_pop(L, 1);
+  }
+  lua_lock(L);
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  lua_unlock(L);
+  require(nursery_backing == NULL);
+  lua_close(L);
+}
+
 static int nursery_finalize(lua_State *L) {
   require(lua_type(L, 1) == LUA_TUSERDATA);
   nursery_finalizers++;
@@ -843,7 +905,9 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (strncmp(argv[1], "nursery_", 8) == 0) {
-    if (strcmp(argv[1], "nursery_progress") == 0)
+    if (strcmp(argv[1], "nursery_backing") == 0)
+      nursery_backing_wait();
+    else if (strcmp(argv[1], "nursery_progress") == 0)
       nursery_progress();
     else
       nursery(strstr(argv[1], "generational") != NULL);
