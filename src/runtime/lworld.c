@@ -39,7 +39,7 @@ int luaW_init (global_State *g) {
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
   world->waiters = g->phase_waiters = g->minor_waiters = g->trace_waiters = NULL;
-  world->resume_waiters = NULL;
+  world->resume_waiters = world->rendezvous_waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
@@ -52,8 +52,10 @@ int luaW_init (global_State *g) {
   }
   status = pthread_cond_init(&world->resumed, NULL);
   if (status != 0) goto failed_changed;
-  status = pthread_cond_init(&g->phase_changed, NULL);
+  status = pthread_cond_init(&world->rendezvous, NULL);
   if (status != 0) goto failed_resumed;
+  status = pthread_cond_init(&g->phase_changed, NULL);
+  if (status != 0) goto failed_rendezvous;
   status = pthread_mutex_init(&g->trace_mutex, NULL);
   if (status != 0) goto failed_phase;
   status = pthread_cond_init(&g->trace_changed, NULL);
@@ -74,6 +76,8 @@ int luaW_init (global_State *g) {
   luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
  failed_phase:
   luaX_checksync(pthread_cond_destroy(&g->phase_changed));
+ failed_rendezvous:
+  luaX_checksync(pthread_cond_destroy(&world->rendezvous));
  failed_resumed:
   luaX_checksync(pthread_cond_destroy(&world->resumed));
  failed_changed:
@@ -88,7 +92,7 @@ void luaW_destroy (global_State *g) {
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
-             world->resume_waiters == NULL &&
+             world->resume_waiters == NULL && world->rendezvous_waiters == NULL &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
              g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
@@ -102,6 +106,7 @@ void luaW_destroy (global_State *g) {
   luaX_checksync(pthread_cond_destroy(&g->trace_changed));
   luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
   luaX_checksync(pthread_cond_destroy(&g->phase_changed));
+  luaX_checksync(pthread_cond_destroy(&world->rendezvous));
   luaX_checksync(pthread_cond_destroy(&world->resumed));
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
@@ -205,9 +210,19 @@ static void withdraw (lua_State *L) {
   UNUSED(previous);
 }
 
+/* One metadata owner waits for either the preceding batch to reenter or
+** the current batch to withdraw. Only a completed predicate needs a wake. */
+static void notifyrendezvous (LuaWorld *world) {
+  if (world->rendezvous_waiters != NULL &&
+      (luaW_stopped(world) ? luaW_activecount(world) == 0
+                           : world->entry_waiting == 0))
+    luaQ_wake(&world->rendezvous, &world->rendezvous_waiters);
+}
+
 void luaW_deactivate (lua_State *L) {
   luaM_publishdebt(L);
   withdraw(L);
+  notifyrendezvous(&G(L)->world);
 }
 
 void luaW_resume (lua_State *L) {
@@ -231,11 +246,11 @@ static void __attribute__((noinline)) awaitentry (lua_State *L, LuaWorld *world)
   withdraw(L);  /* an unadmitted entrant cannot publish the stopped record */
   if (luaW_stopped(world)) {
     world->entry_waiting++;
-    luaQ_wake(&world->changed, &world->waiters);
+    notifyrendezvous(world);
     luaW_waitresume(L);
     luaW_resume(L);
     if (--world->entry_waiting == 0)
-      luaQ_wake(&world->changed, &world->waiters);
+      notifyrendezvous(world);
   }
   else luaW_resume(L);
   luaC_checksnapshot(L);
@@ -275,7 +290,11 @@ void luaW_leave (LuaWorld *world, unsigned flags) {
   ** record may be gone; notification uses only the retained VM directory. */
   if ((flags & LUA_GATE_WAITING) || (luaW_control(world) & requests)) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
-    luaQ_wake(&world->changed, &world->waiters);
+    notifyrendezvous(world);
+    if ((flags & LUA_GATE_WAITING) ||
+        (!(flags & LUA_GATE_STACK) &&
+         (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
+      luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
 }
@@ -299,7 +318,7 @@ void luaW_stop (lua_State *L) {
     luaW_deactivate(L);
     luaQ_wake(&world->changed, &world->waiters);
     do {
-      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+      luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
     } while (world->entry_waiting != 0);
     luaW_resume(L);
     luaC_checksnapshot(L);
@@ -319,7 +338,7 @@ void luaW_stop (lua_State *L) {
   luaQ_wake(&world->changed, &world->waiters);
   luaW_deactivate(L);
   while (luaW_activecount(world) != 0)
-    luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+    luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaC_publish(L);
@@ -474,7 +493,7 @@ void luaW_waitcollector (lua_State *L, int reason) {
     ? __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) : 0;
   lua_assert(L->native_depth != 0);
   luaW_deactivate(L);
-  if (reason == LUA_WAIT_RECLAIM || (luaW_control(world) & LUA_WORLD_REQUESTS))
+  if (reason == LUA_WAIT_RECLAIM || (luaW_control(world) & LUA_WORLD_STORAGE_WAIT))
     luaQ_wake(&world->changed, &world->waiters);
   if (reason == LUA_WAIT_TRACE) {
     /* Withdraw before taking the work lock, and recheck before parking.

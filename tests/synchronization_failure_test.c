@@ -128,8 +128,9 @@ static int facade_case(const char *name) {
 static int run_case(const char *name) {
   static const char *const conditions[] = {
       "allocator_condition",    "world_condition",
-      "world_resume_condition", "world_phase_condition",
-      "world_trace_condition",  "pool_condition"};
+      "world_resume_condition", "world_rendezvous_condition",
+      "world_phase_condition",  "world_trace_condition",
+      "pool_condition"};
   lua_State *state;
   int status = LUA_OK;
   int failed = 0;

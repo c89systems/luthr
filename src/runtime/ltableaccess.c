@@ -184,7 +184,7 @@ static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
     L->object_waiting++;
     luaW_deactivate(L);
     if (part == NULL ||
-        (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT)))
+        (luaW_control(world) & LUA_WORLD_STORAGE_WAIT))
       luaQ_wake(&world->changed, &world->waiters);
     for (;;) {
       luaW_waitresume(L);

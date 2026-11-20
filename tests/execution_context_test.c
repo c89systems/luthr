@@ -253,9 +253,11 @@ static void publication(lua_State *state) {
   require(!other->root_waiting);
   require(pthread_create(&entrant, NULL, publication_entry, other) == 0);
   require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
-  while (!other->root_waiting)
-    luaQ_wait(state, &G(state)->world.mutex, &G(state)->world.changed,
-              &G(state)->world.waiters);
+  while (!other->root_waiting) {
+    require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
+    sched_yield();
+    require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
+  }
   require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
   /* Binding a gate while stopped grants no permission to touch the frozen
    * allocation record. The collector alone publishes it below. */

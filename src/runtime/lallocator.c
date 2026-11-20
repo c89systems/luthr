@@ -52,7 +52,7 @@ void luaAL_enter (lua_State *L) {
     lua_assert(L->world_depth == 0);
     L->native_depth++;
     luaW_deactivate(L);
-    if (luaW_control(world) & LUA_WORLD_REQUESTS)
+    if (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)
       luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     luaX_checksync(pthread_mutex_lock(&allocator->mutex));

@@ -28,10 +28,10 @@ enum {
 
 typedef struct LuaWorld {
   pthread_mutex_t mutex;
-  pthread_cond_t changed, resumed;
+  pthread_cond_t changed, resumed, rendezvous;
   LuaOwner collector;
   LuaOwner heap_owner;
-  LuaWaiter *waiters, *resume_waiters;
+  LuaWaiter *waiters, *resume_waiters, *rendezvous_waiters;
   struct LuaHeapWaiter *heap_head;
   struct LuaHeapWaiter **heap_tail;
   LuaParticipation *participants;
