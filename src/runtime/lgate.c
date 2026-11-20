@@ -91,7 +91,7 @@ l_sinline void leavegate (lua_State *L) {
   ** collector can reclaim L; only the world directory is still accessible. */
   uintptr_t previous = __atomic_fetch_and(&L->stack_gate.word, LUA_GATE_WAITING,
                                            __ATOMIC_SEQ_CST);
-  luaW_leave(world, previous & LUA_GATE_WAITING);
+  luaW_leave(world, previous & LUA_GATE_FLAGS);
 }
 
 static void release (lua_State *L, void *token) {
@@ -135,7 +135,7 @@ static void *lockstate (lua_State *L, LuaThreadContext *thread,
   void *token = execution != NULL ? cast(void *, execution)
                                   : cast(void *, &thread->native);
   if (execution != NULL) luaQ_entermanaged(L, execution);
-  reserve(L, context, token, LUA_GATE_ACTIVE);
+  reserve(L, context, token, LUA_GATE_MANAGED);
   luaW_enter(L);
   return token;
 }
@@ -209,6 +209,21 @@ static int attachedapi (lua_State *L, NativeStackContext *context) {
 /* Entry tokens carry the obligations of this scope on their low bits. */
 enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
 
+/* Enter the storage epoch before borrowing any table buffers. A grace
+** scan that still sees a stack-only gate covers only older retirements
+** than the control word sampled after this promotion. */
+static void managestack (lua_State *L, NativeStackContext *context) {
+  LuaStackGate *gate = &L->stack_gate;
+  /* The caller owns the stack-only gate. Change its mode in one
+  ** transaction while preserving any concurrent waiter registration. */
+  uintptr_t old = __atomic_fetch_xor(&gate->word, LUA_GATE_ACTIVE,
+                                    __ATOMIC_SEQ_CST);
+  lua_assert((old & LUA_GATE_ACTIVE) == LUA_GATE_STACK);
+  UNUSED(old);
+  gate->context = context;
+  luaW_enter(L);
+}
+
 l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
   LuaThreadContext *thread = &luaE_thread_context;
   NativeStackContext *context = thread->override != NULL
@@ -224,7 +239,7 @@ l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
                                                        : cast(void *, &thread->native));
     uintptr_t expected = 0;
     if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
-          owner | LUA_GATE_ACTIVE, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+          owner | LUA_GATE_STACK, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
       /* A stop either observes this active reservation or precedes the
       ** check below. A stack-only scope borrows no table storage. */
       if (l_likely(!luaW_stopped(&G(L)->world))) {
@@ -235,8 +250,7 @@ l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
         return owner | LUA_VALUE_STACK;
       }
       if (execution == NULL) {  /* the host already owns the stack */
-        L->stack_gate.context = context;
-        luaW_enter(L);
+        managestack(L, context);
         return owner;
       }
       /* Managed capacity can park. Release before asking for a slot. */
@@ -282,8 +296,7 @@ int luaX_valuecall (lua_State *L, uintptr_t owner) {
       luaX_valueleave(L, owner);
       return 0;
     }
-    L->stack_gate.context = context;
-    luaW_enter(L);
+    managestack(L, context);
   }
   if (owner != 0) preparecall(L, L->stack_gate.context->execution);
   return 1;

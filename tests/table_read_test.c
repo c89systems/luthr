@@ -556,6 +556,52 @@ static void batching(lua_State *state) {
   require(world->storage_bytes == 0);
 }
 
+struct stack_reader {
+  lua_State *child;
+  pthread_barrier_t admitted;
+};
+
+static void *hold_stack(void *context) {
+  struct stack_reader *reader = context;
+  uintptr_t stack;
+  /* Model a value API preempted between admission and the first stack
+   * access. GC still sees an active root owner during both barriers. */
+  stack = luaX_valueenter(reader->child, 1);
+  rendezvous(&reader->admitted);
+  rendezvous(&reader->admitted);
+  luaX_valueleave(reader->child, stack);
+  require(lua_type(reader->child, 1) == LUA_TTABLE);
+  return NULL;
+}
+
+static void stack_grace(lua_State *state) {
+  LuaWorld *world = &G(state)->world;
+  struct stack_reader reader;
+  pthread_t thread;
+  Table *table;
+  lua_gc(state, LUA_GCSTOP);
+  lua_createtable(state, 8, 8192);
+  reader.child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, reader.child, 1);
+  require(pthread_barrier_init(&reader.admitted, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, hold_stack, &reader) == 0);
+  rendezvous(&reader.admitted);
+
+  require(luaW_active(&reader.child->participation) == 1);
+  luaX_lockstate(state);
+  table = hvalue(s2v(state->stack.p + 1));
+  luaH_resize(state, table, 8, 16384);
+  luaHS_publishpending(state);
+  require(__atomic_load_n(&world->storage_bytes, __ATOMIC_RELAXED) >= 65536);
+  luaHS_reclaim(state, LUAHS_ASSIST);
+  require(__atomic_load_n(&world->storage_bytes, __ATOMIC_RELAXED) == 0);
+  luaX_unlockstate(state);
+  rendezvous(&reader.admitted);
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&reader.admitted) == 0);
+}
+
 static void *reader(void *argument) {
   lua_State *state = argument;
   reading = 1;
@@ -1185,6 +1231,8 @@ int main(int argc, char **argv) {
                           strcmp(argv[1], "primitive_generational") == 0);
   else if (strcmp(argv[1], "batching") == 0)
     batching(state);
+  else if (strcmp(argv[1], "stack_grace") == 0)
+    stack_grace(state);
   else if (strcmp(argv[1], "overlap") == 0)
     retirement(state, 0, 2, 0);
   else if (strcmp(argv[1], "inline_overlap") == 0)

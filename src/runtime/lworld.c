@@ -182,7 +182,7 @@ unsigned luaW_active (const LuaParticipation *participant) {
 
 void luaW_activate (lua_State *L) {
   uintptr_t previous = __atomic_fetch_or(
-    &L->admission->thread->stack_gate.word, LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
+    &L->admission->thread->stack_gate.word, LUA_GATE_MANAGED, __ATOMIC_SEQ_CST);
   lua_assert(luaX_gateowner(previous) != NULL && !(previous & LUA_GATE_ACTIVE));
   UNUSED(previous);
 }
@@ -197,7 +197,7 @@ static void withdraw (lua_State *L) {
   previous = __atomic_fetch_and(&L->admission->thread->stack_gate.word,
                                 ~cast(uintptr_t, LUA_GATE_ACTIVE),
                                 __ATOMIC_SEQ_CST);
-  lua_assert(previous & LUA_GATE_ACTIVE);
+  lua_assert((previous & LUA_GATE_ACTIVE) == LUA_GATE_MANAGED);
   UNUSED(previous);
 }
 
@@ -260,10 +260,12 @@ int luaW_tryenter (lua_State *L) {
   return 1;
 }
 
-void luaW_leave (LuaWorld *world, int queued) {
+void luaW_leave (LuaWorld *world, unsigned flags) {
+  unsigned requests = (flags & LUA_GATE_STACK) ? LUA_WORLD_STOPPED
+                                              : LUA_WORLD_REQUESTS;
   /* The releasing gate has already withdrawn. Its state and participation
   ** record may be gone; notification uses only the retained VM directory. */
-  if (queued || (luaW_control(world) & LUA_WORLD_REQUESTS)) {
+  if ((flags & LUA_GATE_WAITING) || (luaW_control(world) & requests)) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));

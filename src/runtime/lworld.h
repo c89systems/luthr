@@ -77,8 +77,8 @@ LUAI_FUNC void luaW_deactivate (lua_State *L);
 LUAI_FUNC void luaW_enter (lua_State *L);
 LUAI_FUNC int luaW_tryenter (lua_State *L);
 /* Global notification after the gate's final release publication. No state or
-** participant record remains borrowed; queued means resource waiters exist. */
-LUAI_FUNC void luaW_leave (LuaWorld *world, int queued);
+** participant record remains borrowed; flags describe the released gate. */
+LUAI_FUNC void luaW_leave (LuaWorld *world, unsigned flags);
 /* The gate word is the authoritative admission; no independently retired
 ** counter can overlap its next owner. Safe while the directory is retained. */
 LUAI_FUNC unsigned luaW_active (const LuaParticipation *participant);

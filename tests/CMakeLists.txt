@@ -182,7 +182,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index
   -Wl,--wrap=luaH_tryget -Wl,--wrap=luaH_trygetstr -Wl,--wrap=luaH_get
   -Wl,--wrap=lua_setmetatable)
-foreach(case IN ITEMS fast primitive batching overlap retirement pressure failure hash_failure resume
+foreach(case IN ITEMS fast primitive batching stack_grace overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     index_hit index_miss index_metatable_change

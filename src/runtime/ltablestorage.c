@@ -101,7 +101,9 @@ static uint64_t minimum (LuaWorld *world) {
   uint64_t grace = __atomic_load_n(&world->storage_grace, __ATOMIC_ACQUIRE);
   for (participant = world->participants; participant != NULL;
        participant = participant->next) {
-    if (luaW_active(participant)) {
+    uintptr_t gate = __atomic_load_n(&participant->thread->stack_gate.word,
+                                     __ATOMIC_SEQ_CST);
+    if (gate & LUA_GATE_MANAGED) {
       uint64_t epoch = __atomic_load_n(&participant->storage_epoch, __ATOMIC_SEQ_CST);
       if (after(grace, epoch)) epoch = grace;
       if (after(result, epoch)) result = epoch;

@@ -67,7 +67,7 @@ static struct {
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
 uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
-void __real_luaW_leave(LuaWorld *world, int queued);
+void __real_luaW_leave(LuaWorld *world, unsigned flags);
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
                            size_t size);
@@ -181,7 +181,7 @@ uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
   return owner;
 }
 
-void __wrap_luaW_leave(LuaWorld *world, int queued) {
+void __wrap_luaW_leave(LuaWorld *world, unsigned flags) {
   if (role == 1) {
     require(pthread_mutex_lock(&handoff->mutex) == 0);
     handoff->retiring = 1;
@@ -191,7 +191,7 @@ void __wrap_luaW_leave(LuaWorld *world, int queued) {
     require(pthread_mutex_unlock(&handoff->mutex) == 0);
   }
   measured++;
-  __real_luaW_leave(world, queued);
+  __real_luaW_leave(world, flags);
   measured--;
 }
 

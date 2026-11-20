@@ -11,12 +11,16 @@
 
 struct LuaGateWaiter;
 
-/* The atomic word holds the aligned owner token and two low bits. An owner
-** can withdraw collector participation while retaining the stack. WAITING
-** reserves an unowned gate for its FIFO head. */
+/* The atomic word holds the aligned owner token and admission flags.
+** Stack-only and managed owners both participate in root rendezvous.
+** Only managed owners can borrow retired table storage. An owner can
+** withdraw admission while retaining the stack. WAITING reserves an
+** unowned gate for its FIFO head. */
 enum {
-  LUA_GATE_ACTIVE = 1,
+  LUA_GATE_MANAGED = 1,
   LUA_GATE_WAITING = 2,
+  LUA_GATE_STACK = 4,
+  LUA_GATE_ACTIVE = LUA_GATE_MANAGED | LUA_GATE_STACK,
   LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING
 };
 
