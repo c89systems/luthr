@@ -79,6 +79,7 @@ void luaP_init (global_State *g) {
   LuaGCPacer *p = &g->pacer;
   p->trigger = p->hard = p->debt = p->start = 0;
   p->expected = p->work = p->previous = 0;
+  p->nursery_scans = 0;
   p->parallelism = 0;
   p->goal = cast(l_mem, sizeof(global_State));
   luaP_idle(g);
@@ -93,6 +94,7 @@ void luaP_begin (global_State *g) {
   p->expected = cast(lu_mem, add(p->start, p->start));
   if (p->previous > p->expected) p->expected = p->previous;
   p->work = 0;
+  __atomic_store_n(&p->nursery_scans, 0, __ATOMIC_RELAXED);
 }
 
 void luaP_account (global_State *g, l_mem change) {

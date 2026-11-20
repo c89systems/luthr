@@ -217,7 +217,7 @@ foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     unavailable_generational sweep_growth stopped_incremental
     stopped_generational unwind_incremental unwind_generational
     closing_incremental closing_generational closing_pending_incremental
-    closing_pending_generational)
+    closing_pending_generational nursery_incremental nursery_generational nursery_progress)
   add_test(NAME gc_pacing_${case} COMMAND gc_pacing_test ${case})
   set_tests_properties(gc_pacing_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

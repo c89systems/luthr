@@ -398,6 +398,8 @@ struct lua_State {
   uint64_t assist_epoch;
   GCObject *new_objects;
   GCObject *new_objects_tail;
+  uintptr_t nursery_epoch;
+  size_t nursery_tables;
   l_mem allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
   struct lua_State *publish_next;

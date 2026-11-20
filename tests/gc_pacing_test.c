@@ -4,6 +4,7 @@
 #include <lgc.h>
 #include <lmem.h>
 #include <lstate.h>
+#include <lualib.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -646,6 +647,97 @@ static void marking_edges(void) {
 
 static int identity(lua_State *L) { return lua_gettop(L); }
 
+static int saved_table(lua_State *L) {
+  lua_pushvalue(L, lua_upvalueindex(1));
+  return 1;
+}
+
+static int retain_table(lua_State *L) {
+  lua_pushcclosure(L, saved_table, 1);
+  return 1;
+}
+
+static int move_table(lua_State *L) {
+  lua_State *other = lua_tothread(L, lua_upvalueindex(1));
+  require(other != NULL);
+  lua_xmove(L, other, 1);
+  return 0;
+}
+
+static void nursery(int generational) {
+  lua_State *L = luaL_newstate();
+  lua_State *other;
+  unsigned before;
+  require(L != NULL);
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_newtable(L);
+  other = lua_newthread(L);
+  require(
+      luaL_loadstring(
+          L,
+          "local old, make, move = ...; "
+          "old.edge={{23}}; old[{39}]=true; "
+          "local c=make({71}); "
+          "local function bind(x) return function() return x[1] end end; "
+          "local read=bind({27}); local root={left={37}}; "
+          "local obj=setmetatable({}, {__index={word=19}}); "
+          "move({{89}}); "
+          "for i=1,2048 do local discarded={i,tag=true} end; "
+          "local seen; for k in pairs(old) do "
+          "if type(k)=='table' then seen=k[1] end end; "
+          "return old.edge[1][1]+seen+c()[1]+read()+root.left[1]+obj.word") ==
+      LUA_OK);
+  lua_pushvalue(L, 1);
+  lua_pushcfunction(L, retain_table);
+  lua_pushvalue(L, 2);
+  lua_pushcclosure(L, move_table, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_lock(L);
+  luaE_setdebt(G(L), 32768);
+  __atomic_store_n(&G(L)->pacer.debt, 65536, __ATOMIC_RELAXED);
+  lua_unlock(L);
+  before = stops;
+  require(lua_pcall(L, 3, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 216);
+  require(stops == before);
+  require(lua_rawgeti(other, 1, 1) == LUA_TTABLE);
+  require(lua_rawgeti(other, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(other, -1) == 89);
+  lua_close(L);
+}
+
+static unsigned nursery_finalizers;
+
+static int nursery_finalize(lua_State *L) {
+  require(lua_type(L, 1) == LUA_TUSERDATA);
+  nursery_finalizers++;
+  return 0;
+}
+
+static void nursery_progress(void) {
+  lua_State *L = luaL_newstate();
+  require(L != NULL);
+  lua_gc(L, LUA_GCINC);
+  lua_newuserdatauv(L, 1, 0);
+  lua_newtable(L);
+  lua_pushcfunction(L, nursery_finalize);
+  lua_setfield(L, -2, "__gc");
+  lua_setmetatable(L, -2);
+  require(
+      luaL_loadstring(L, "for i=1,25000 do local discarded={i,tag=true} end") ==
+      LUA_OK);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_remove(L, 1);
+  lua_lock(L);
+  luaE_setdebt(G(L), 32768);
+  __atomic_store_n(&G(L)->pacer.debt, 65536, __ATOMIC_RELAXED);
+  lua_unlock(L);
+  require(lua_pcall(L, 0, 0, 0) == LUA_OK);
+  require(nursery_finalizers == 1);
+  lua_close(L);
+}
+
 static void managed_function(int generational) {
   lua_State *L = luaL_newstate();
   unsigned before;
@@ -699,6 +791,13 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "sweep_growth") == 0) {
     sweep_growth();
+    return 0;
+  }
+  if (strncmp(argv[1], "nursery_", 8) == 0) {
+    if (strcmp(argv[1], "nursery_progress") == 0)
+      nursery_progress();
+    else
+      nursery(strstr(argv[1], "generational") != NULL);
     return 0;
   }
   if (strncmp(argv[1], "bounded_", 8) == 0 ||

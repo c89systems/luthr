@@ -15,6 +15,7 @@ typedef struct LuaGCPacer {
   lu_mem expected;
   lu_mem work;  /* atomic shared credit: scans and sweeps already completed */
   lu_mem previous;
+  unsigned nursery_scans;  /* atomic quota shared by all local collectors */
   unsigned parallelism;  /* observed simultaneous admissions, under quiescence */
 } LuaGCPacer;
 

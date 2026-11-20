@@ -110,6 +110,8 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
   level = restorestack(L, offset);
   uv->level = savestack(L, level);
   setobj(L, &uv->value, s2v(level));
+  if (ttistable(&uv->value))
+    luaC_nurseryedge(L, obj2gco(uv), gcvalue(&uv->value));
   uv->owner = L;
   uv->open.next = next;
   uv->open.previous = prev;

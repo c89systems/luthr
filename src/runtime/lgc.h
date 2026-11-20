@@ -355,11 +355,33 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 /* more often than not, 'pre'/'pos' are empty */
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
+enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_STEP = 8 };
+#define luaC_tablelink(t) __atomic_load_n(&(t)->weak_link, __ATOMIC_RELAXED)
+#define luaC_settablelink(t,v) \
+  __atomic_store_n(&(t)->weak_link, cast(uintptr_t, v), __ATOMIC_RELAXED)
+
+l_sinline int luaC_nurserytable (lua_State *L, Table *t) {
+  return __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L) &&
+         (luaC_tablelink(t) & ~cast(uintptr_t, NURSERY_ROOT | NURSERY_LIVE)) ==
+           L->nursery_epoch;
+}
+
+/* Remember incoming edges from objects that survive independently of this
+** unpublished cohort. Edges inside the cohort will be traced locally. */
+l_sinline void luaC_nurseryedge (lua_State *L, GCObject *owner, GCObject *value) {
+  if (value->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(value)) &&
+      (owner->tt != LUA_VTABLE || !luaC_nurserytable(L, gco2t(owner)))) {
+    Table *t = gco2t(value);
+    luaC_settablelink(t, luaC_tablelink(t) | NURSERY_ROOT);
+  }
+}
 
 static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
+  /* The shared trace publishes all newborns before local work can resume. */
   if (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE)) return 1;
+  luaC_nurseryedge(L, owner, value);
   if (G(L)->gckind != KGC_GENMINOR) return 0;
   marked = getmarked(owner);
   if ((marked & AGEBITS) <= G_SURVIVAL) return 0;

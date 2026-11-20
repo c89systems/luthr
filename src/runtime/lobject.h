@@ -832,7 +832,7 @@ typedef struct Table {
   struct Table *metatable;
   GCObject *gclist;
   uint64_t weak_epoch;
-  GCObject *weaknext;  /* retry ownership, independent of the weak lists */
+  uintptr_t weak_link;  /* shared weak retry link, or tagged unpublished stamp */
   lu_byte gcweak;  /* weakness selected for this collection cycle */
   lu_byte weak_cleared;
   lu_byte weak_initial_cutoff;

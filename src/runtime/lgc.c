@@ -270,12 +270,18 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   global_State *g = G(L);
   char *p;
   GCObject *o;
+  int collector;
   p = cast_charp(luaM_newobject(L, novariant(tt), sz));
   o = cast(GCObject *, p + offset);
   setmarked(o, luaC_newmark(g));
   o->tt = tt;
   o->next = NULL;
-  if (luaW_iscollector(L)) {
+  collector = luaW_iscollector(L);
+  if (tt == LUA_VTABLE) {
+    gco2t(o)->weak_link = collector ? 0 : L->nursery_epoch;
+    if (!collector) L->nursery_tables++;
+  }
+  if (collector) {
     (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
     if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
       g->sweep_plan.append = &(cast(LuaAllocBlock *, p) - 1)->block.link.object;
@@ -1010,16 +1016,16 @@ void luaC_polltrace (lua_State *L) {
 /* A claimed weak table retains its gclist for later weak phases. Retrying
 ** object ownership uses a separate link, never its allocation membership. */
 static void deferweak (GCObject **head, GCObject **tail, GCObject *object) {
-  gco2t(object)->weaknext = NULL;
+  luaC_settablelink(gco2t(object), 0);
   if (*tail != NULL)
-    gco2t(*tail)->weaknext = object;
+    luaC_settablelink(gco2t(*tail), object);
   else *head = object;
   *tail = object;
 }
 
 static GCObject *takeweak (GCObject **head, GCObject **tail) {
   GCObject *object = *head;
-  *head = gco2t(object)->weaknext;
+  *head = cast(GCObject *, luaC_tablelink(gco2t(object)));
   if (*head == NULL) *tail = NULL;
   return object;
 }
@@ -1198,7 +1204,7 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   publishwork(&work->ephemeron, &g->ephemeron);
   publishwork(&work->deferred, &g->trace_deferred);
   if (work->retry != NULL) {
-    gco2t(work->retry_tail)->weaknext = plan->deferred;
+    luaC_settablelink(gco2t(work->retry_tail), plan->deferred);
     if (plan->deferred == NULL) plan->tail = work->retry_tail;
     plan->deferred = work->retry;
   }
@@ -1477,6 +1483,8 @@ void luaC_publish (lua_State *L) {
           g->sweep_plan.append = luaC_alloclink(thread->new_objects_tail);
         g->allgc = thread->new_objects;
         thread->new_objects = thread->new_objects_tail = NULL;
+        thread->nursery_tables = 0;
+        thread->nursery_epoch += NURSERY_STEP;
       }
       luaHS_publishpending(thread);
       __atomic_store_n(&thread->publish_previous, NULL, __ATOMIC_RELAXED);
@@ -2293,6 +2301,104 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
 #define luai_tracegc(L,f)		((void)0)
 #endif
 
+static void marknursery (lua_State *L, GCObject *object, GCObject **gray) {
+  Table *t = gco2t(object);
+  if (luaC_nurserytable(L, t) && !(luaC_tablelink(t) & NURSERY_LIVE)) {
+    luaC_settablelink(t, luaC_tablelink(t) | NURSERY_LIVE);
+    t->gclist = *gray;
+    *gray = object;
+  }
+}
+
+/* The admitted stack owns this unpublished cohort. A global stop publishes
+** the whole list before any shared collector can access its table headers. */
+static void collectnursery (lua_State *L) {
+  enum { NURSERY_MIN_TABLES = 32, NURSERY_SCAN_LIMIT = 16384,
+         NURSERY_SCANS_PER_CYCLE = 16 };
+  global_State *g = G(L);
+  GCObject *gray = NULL, *dead = NULL, *o, **link;
+  StkId slot;
+  size_t remaining, slots, unpinned = 0;
+  if (L->nursery_tables < NURSERY_MIN_TABLES ||
+      L->openupval != NULL || L->native_roots != NULL ||
+      L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
+      g->tobefnz != NULL || luaW_stopped(&g->world) ||
+      g->gcparams[LUA_GCPSTEPSIZE] == 0 || g->gcparams[LUA_GCPSTEPMUL] == 0 ||
+      __atomic_load_n(&g->pacer.nursery_scans, __ATOMIC_RELAXED) >=
+        NURSERY_SCANS_PER_CYCLE)
+    return;
+  /* Bound both directory walks, the stack cleanup, and every possible edge
+  ** visit before changing any local mark state. Large cohorts use shared GC. */
+  slots = cast_sizet(L->stack_last.p - L->stack.p) + EXTRA_STACK;
+  if (slots >= NURSERY_SCAN_LIMIT) return;
+  remaining = NURSERY_SCAN_LIMIT - slots;
+  for (o = L->new_objects; o != NULL; o = luaC_allocnext(o)) {
+    if (--remaining == 0) return;
+    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
+      Table *t = gco2t(o);
+      unsigned nodes = allocsizenode(t);
+      if (t->asize >= remaining || nodes >= remaining - t->asize) return;
+      remaining -= t->asize + nodes;
+      unpinned += (luaC_tablelink(t) & NURSERY_ROOT) == 0;
+    }
+  }
+  if (unpinned < NURSERY_MIN_TABLES) return;
+  /* Even if private churn repays its own debt, automatic shared tracing
+  ** must still discover dead public objects, weak edges and finalizers. */
+  if (__atomic_fetch_add(&g->pacer.nursery_scans, 1, __ATOMIC_RELAXED) >=
+        NURSERY_SCANS_PER_CYCLE)
+    return;
+  for (slot = L->stack.p; slot < L->top.p; slot++)
+    if (ttistable(s2v(slot))) marknursery(L, gcvalue(s2v(slot)), &gray);
+  for (o = L->new_objects; o != NULL; o = luaC_allocnext(o))
+    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
+        (luaC_tablelink(gco2t(o)) & NURSERY_ROOT))
+      marknursery(L, o, &gray);
+  while (gray != NULL) {
+    Table *t = gco2t(gray);
+    unsigned i;
+    gray = t->gclist;
+    if (t->metatable != NULL) marknursery(L, obj2gco(t->metatable), &gray);
+    for (i = 0; i < t->asize; i++)
+      if (*getArrTag(t, i) == ctb(LUA_VTABLE))
+        marknursery(L, getArrVal(t, i)->gc, &gray);
+    for (i = 0; i < allocsizenode(t); i++) {
+      Node *node = gnode(t, i);
+      if (isempty(gval(node))) continue;
+      if (keytt(node) == ctb(LUA_VTABLE)) marknursery(L, gckey(node), &gray);
+      if (ttistable(gval(node))) marknursery(L, gcvalue(gval(node)), &gray);
+    }
+  }
+  link = &L->new_objects;
+  L->new_objects_tail = NULL;
+  while ((o = *link) != NULL) {
+    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
+      Table *t = gco2t(o);
+      if (!(luaC_tablelink(t) & NURSERY_LIVE)) {
+        *link = luaC_allocnext(o);
+        o->next = dead;
+        dead = o;
+        L->nursery_tables--;
+        continue;
+      }
+      luaC_settablelink(t, luaC_tablelink(t) & ~cast(uintptr_t, NURSERY_LIVE));
+    }
+    L->new_objects_tail = o;
+    link = luaC_alloclink(o);
+  }
+  if (dead == NULL) return;
+  /* Obsolete registers must not expose dangling pointers when a later
+  ** safepoint widens top. Detach all dead objects before a backing free waits. */
+  for (slot = L->top.p; slot < L->stack_last.p + EXTRA_STACK; slot++)
+    setnilvalue2s(slot);
+  do {
+    o = dead;
+    dead = o->next;
+    luaH_free(L, gco2t(o));
+  } while (dead != NULL);
+  luaM_flushdebt(L, L);
+}
+
 /*
 ** Performs a basic GC step while collection is enabled. Explicit API steps
 ** temporarily enable collection while already owning the collector.
@@ -2336,6 +2442,11 @@ void luaC_step (lua_State *L) {
       (L->object_scopes != NULL || luaW_scope(L).heap != 0)) return;
   if ((!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
+  if (automatic) {
+    collectnursery(L);
+    if (!gcrunning(g) || luaC_tracing(L) || luaC_sweeping(L) ||
+        (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
+  }
   if (L->world_depth == 0 && luaC_needassist(L))
     luaC_assistreclaim(L);
   if (L->world_depth == 0) {
