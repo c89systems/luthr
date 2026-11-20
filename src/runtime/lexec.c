@@ -319,19 +319,30 @@ int luaQ_waitstopfifo (lua_State *L, pthread_mutex_t *mutex, LuaWaitQueue *queue
   return waitstop(L, mutex, NULL, &queue->head, queue);
 }
 
-void luaQ_wakewaiter (LuaWaiter *waiter) {
-  lua_assert(waiter->link != NULL && waiter->execution != NULL);
+void luaQ_takewaiter (LuaWaiter *waiter) {
+  lua_assert(waiter->link != NULL && waiter->queue != NULL &&
+             waiter->execution != NULL);
   unlinkwaiter(waiter);
+}
+
+void luaQ_wakewaiter (LuaWaiter *waiter) {
+  lua_assert(waiter->link == NULL && waiter->execution != NULL);
   waiter->execution->wake(waiter->execution, waiter);
 }
 
 void luaQ_interrupt (LuaStopWait *wait) {
   LuaWaiter *waiter = &wait->waiter;
   luaX_checksync(pthread_mutex_lock(wait->mutex));
+  if (wait->changed == NULL) {  /* FIFO scheduler wait with a single notifier */
+    int selected = waiter->link != NULL;
+    if (selected) luaQ_takewaiter(waiter);
+    luaX_checksync(pthread_mutex_unlock(wait->mutex));
+    if (selected) luaQ_wakewaiter(waiter);
+    return;
+  }
   if (waiter->link != NULL) {
     unlinkwaiter(waiter);
-    if (wait->changed != NULL)
-      luaX_checksync(pthread_cond_broadcast(wait->changed));
+    luaX_checksync(pthread_cond_broadcast(wait->changed));
     if (waiter->execution != NULL)
       waiter->execution->wake(waiter->execution, waiter);
   }

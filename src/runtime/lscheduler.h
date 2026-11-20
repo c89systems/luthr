@@ -45,8 +45,8 @@ struct LuaScheduledTask {
   unsigned home, polls;
   unsigned dispatches, handoffs, migrations, parks, early_wakes;
   unsigned native_reuses;
-  int nargs, reason, native, complete, notified, published;
-  int native_pending, native_notified, external;
+  int nargs, reason, complete, notified, published;
+  int native, native_pending, native_notified, external;  /* permit and routing */
 };
 
 struct LuaCarrier {

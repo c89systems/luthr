@@ -181,6 +181,9 @@ LUAI_FUNC int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex,
 /* The resource transfers ownership to head before waking it. */
 LUAI_FUNC int luaQ_waitstopfifo (lua_State *L, pthread_mutex_t *mutex,
                                 LuaWaitQueue *queue);
+/* Selection under the resource mutex transfers the only right to wake.
+** The scheduler keeps the selected waiter alive until wake is called. */
+LUAI_FUNC void luaQ_takewaiter (LuaWaiter *waiter);
 LUAI_FUNC void luaQ_wakewaiter (LuaWaiter *waiter);
 /* Called with a request-side borrow; no world mutex remains held. */
 LUAI_FUNC void luaQ_interrupt (LuaStopWait *wait);

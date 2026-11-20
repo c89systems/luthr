@@ -807,22 +807,37 @@ static void wait_for_permit(struct fixture *f, unsigned id) {
   }
 }
 
-static void *cancel_admission(void *context) {
-  require(luaTK_requeststop(context) == LUA_OK);
-  return NULL;
-}
-
 enum { FIFO_ADMISSION, CANCEL_GRANT, COMPETITIVE_ADMISSION };
+
+static int hold_second_permit(lua_State *L) {
+  struct fixture *f = fixture;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->seen[5] = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->admission_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  lua_pushinteger(L, 66);
+  return 1;
+}
 
 static void native_fifo(struct fixture *f, int mode) {
   LuaScheduler *s = &f->scheduler;
-  pthread_t requester;
   int cancel_grant = mode == CANCEL_GRANT;
   int competitive = mode == COMPETITIVE_ADMISSION;
   f->admission_fifo = 1;
   f->cancel_grant = cancel_grant;
   f->pause_hold = competitive;
-  initlimits(f, 2, 1);
+  initlimits(f, 2, competitive ? 2 : 1);
+  if (competitive) {
+    lua_pushcfunction(f->main, hold_second_permit);
+    lua_setglobal(f->main, "hold_second_permit");
+    submit(f, 5, "return hold_second_permit()", 0);
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (!f->seen[5])
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
   lua_pushcfunction(f->main, block_binding);
   lua_setglobal(f->main, "block_binding");
   submit(f, 0, "return block_binding(...)", 0);
@@ -842,22 +857,21 @@ static void native_fifo(struct fixture *f, int mode) {
   if (cancel_grant) {
     while (!f->admission_paused)
       require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
-    require(pthread_create(&requester, NULL, cancel_admission,
-                           &f->tasks[1].root) == 0);
-    /* A grant is assigned, but its waiter cannot run before this stop. */
-    while (!__atomic_load_n(&f->tasks[1].root.stop_requested, __ATOMIC_ACQUIRE))
-      sched_yield();
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+    /* Cancel after selection and before the scheduler wake. The request
+     * must finish even while the notifier is held at that boundary. */
+    require(luaTK_requeststop(&f->tasks[1].root) == LUA_OK);
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    require(f->seen[1] == 0);
     f->admission_release = 1;
     require(pthread_cond_broadcast(&f->changed) == 0);
   }
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  if (cancel_grant)
-    require(pthread_join(requester, NULL) == 0);
   require(collect(f, 0, LUA_OK) == 500500);
   if (competitive) {
     /* Task 1 was notified before saving its context. A running task can
      * claim that free permit, and returning it needs no second notice. */
-    require(luaSC_nativeactive(s) == 0);
+    require(luaSC_nativeactive(s) == 1);
     submit(f, 4, "return block_binding(...)", 4);
     require(collect(f, 4, LUA_OK) == 500500 && f->seen[4] == 2);
     wait_for_permit(f, 2);
@@ -873,12 +887,88 @@ static void native_fifo(struct fixture *f, int mode) {
     require(collect(f, 1, LUA_OK) == 500500);
   require(collect(f, 2, LUA_OK) == 500500);
   require(collect(f, 3, LUA_OK) == 500500);
+  if (competitive) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    f->admission_release = 1;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+    require(collect(f, 5, LUA_OK) == 66);
+  }
   require(f->seen[0] == 1 &&
           f->seen[1] == (cancel_grant ? 0u : 2u + (unsigned)competitive));
   require(f->seen[2] == 3u + (unsigned)competitive - (unsigned)cancel_grant &&
           f->seen[3] == 4u + (unsigned)competitive - (unsigned)cancel_grant);
   require(s->native == 0 && s->native_waiters.head == NULL &&
-          s->native_notices == 0 && s->native_peak == 1);
+          s->native_notices == 0 && s->native_peak == (competitive ? 2u : 1u));
+  finish(f);
+}
+
+static int short_native_call(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_Integer id = lua_tointeger(L, 1);
+  require(id >= 0 && id < TASKS);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->seen[id] = ++f->native_entered;
+  luaQ_wake(&f->changed, &f->waiters);
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->native_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 1;
+}
+
+static int wait_for_native_peer(lua_State *L) {
+  struct fixture *f = fixture;
+  LuaWorldScope depth = luaW_suspendapi();
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->seen[1])
+    luaQ_wait(L, &f->mutex, &f->changed, &f->waiters);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  luaW_restoreapi(depth);
+  lua_pushinteger(L, 77);
+  return 1;
+}
+
+static int poll_for_native_peer(lua_State *L) {
+  struct fixture *f = fixture;
+  LuaScheduledTask *task = luaQ_current()->context;
+  /* This poll ends the native burst even though no task switch is due. */
+  task->polls = 2;
+  luaQ_poll(L);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->seen[1])
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  lua_pushinteger(L, 77);
+  return 1;
+}
+
+static void native_burst(struct fixture *f, int polling) {
+  LuaScheduler *s = &f->scheduler;
+  initlimits(f, 2, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "wait_for_native_peer",
+          polling ? poll_for_native_peer : wait_for_native_peer);
+  lua_pushcfunction(f->main, short_native_call);
+  lua_setglobal(f->main, "short_native_call");
+  submit(f, 0,
+         "local f=short_native_call; f(0); f(4); return wait_for_native_peer()",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->seen[0])
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "return short_native_call(...)", 1);
+  wait_for_permit(f, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 77 && f->tasks[0].parks == !polling);
+  require(collect(f, 1, LUA_OK) == 1);
+  require(f->seen[0] == 1 && f->seen[4] == 2 && f->seen[1] == 3);
+  require(s->native == 0 && s->native_waiters.head == NULL &&
+          s->native_peak == 1);
   finish(f);
 }
 
@@ -1141,6 +1231,10 @@ int main(int argc, char **argv) {
     native_fifo(f, CANCEL_GRANT);
   else if (strcmp(argv[1], "native_competitive") == 0)
     native_fifo(f, COMPETITIVE_ADMISSION);
+  else if (strcmp(argv[1], "native_burst_parking") == 0)
+    native_burst(f, 0);
+  else if (strcmp(argv[1], "native_burst_poll") == 0)
+    native_burst(f, 1);
   else if (strcmp(argv[1], "startup_failures") == 0)
     startup_failures(f);
   else if (strcmp(argv[1], "idle_notifications") == 0)
