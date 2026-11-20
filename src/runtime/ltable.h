@@ -147,6 +147,7 @@ LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);
 LUAI_FUNC lu_mem luaH_size (const Table *owner, Table *layout);
+LUAI_FUNC l_mem luaH_freeinline (lua_State *L, Table *t);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);

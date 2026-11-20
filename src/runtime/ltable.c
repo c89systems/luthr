@@ -35,6 +35,7 @@
 #include "ldo.h"
 #include "lgc.h"
 #include "lmem.h"
+#include "lmempage.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "lstring.h"
@@ -907,6 +908,18 @@ lu_mem luaH_size (const Table *owner, Table *t) {
 /*
 ** Frees a table.
 */
+/* A dead inline table on a slab can return its entire storage without
+** invoking the host allocator or parking a sweep worker. */
+l_mem luaH_freeinline (lua_State *L, Table *t) {
+  size_t size = sizeof(*t) + t->inline_bytes;
+  if (luaMP_page(cast(LuaAllocBlock *, t) - 1) == NULL ||
+      luaH_size(t, t) != size)
+    return 0;
+  lua_assert(t->access.depth == 0);
+  luaM_freemem(L, t, size);
+  return cast(l_mem, size);
+}
+
 void luaH_retire (lua_State *L, Table *t) {
   if (!isdummy(t) && separate(t, hashbase(t)))
     luaM_retire_(L, hashbase(t), sizehash(t));

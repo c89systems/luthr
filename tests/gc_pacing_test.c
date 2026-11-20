@@ -297,6 +297,51 @@ static void sweep_growth(void) {
   lua_close(L);
 }
 
+static void sweep_inline(void) {
+  enum { SMALL_TABLES = 512, LARGE_ARRAY = 2048 };
+  lua_State *L = luaL_newstate();
+  global_State *g;
+  LuaGCFrame frame;
+  l_mem before;
+  require(L != NULL);
+  lua_gc(L, LUA_GCINC);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 2, 0);
+  lua_pushinteger(L, 47);
+  lua_rawseti(L, 1, 2);
+  for (unsigned i = 0; i < SMALL_TABLES; i++) {
+    lua_createtable(L, 2, 0);
+    lua_pop(L, 1);
+  }
+  lua_createtable(L, LARGE_ARRAY, 0);
+  lua_pop(L, 1);
+  lua_gc(L, LUA_GCRESTART);
+
+  lua_lock(L);
+  g = G(L);
+  g->pacer.goal = MAX_LMEM;
+  luaE_setdebt(g, 0);
+  luaC_step(L);
+  luaC_waittrace(L);
+  require(luaC_sweeping(L));
+  luaW_stop(L);
+  luaC_entergc(L, &frame);
+  before = gettotalbytes(g);
+  luaC_waitsweep(L);
+  require(before - gettotalbytes(g) >= SMALL_TABLES * (l_mem)sizeof(Table));
+  require(g->GCretired >= LARGE_ARRAY * (l_mem)sizeof(Value));
+  require(gettotalbytes(g) - g->GCretired == g->GCcyclelive);
+  luaC_leavegc(L, &frame);
+  luaW_start(L);
+  luaC_reclaim(L);
+  lua_unlock(L);
+
+  require(lua_rawgeti(L, 1, 2) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 47);
+  lua_close(L);
+}
+
 struct closing_heap {
   size_t live;
   unsigned deny, failures, finalized, completed;
@@ -791,6 +836,10 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "sweep_growth") == 0) {
     sweep_growth();
+    return 0;
+  }
+  if (strcmp(argv[1], "sweep_inline") == 0) {
+    sweep_inline();
     return 0;
   }
   if (strncmp(argv[1], "nursery_", 8) == 0) {

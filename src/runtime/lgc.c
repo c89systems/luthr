@@ -1701,7 +1701,9 @@ int luaC_sweepgray (GCObject *o) {
 }
 
 void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
+  global_State *g = G(L);
   GCObject *object = work->next;
+  l_mem freed = 0;
   if (work->phase == SWEEP_GRAY) {
     while (object != NULL) {
       GCObject *next = *luaC_graylink(object);
@@ -1715,8 +1717,18 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
   while ((object = *work->tail) != NULL) {
     GCObject *next = luaC_allocnext(object);
     int result;
+    if (object->tt == LUA_VTABLE && isdead(g, object)) {
+      l_mem size = luaH_freeinline(L, gco2t(object));
+      if (size != 0) {
+        /* The detached batch owns this link. The allocator may reuse the
+        ** table as soon as it is returned, so only use the saved successor. */
+        *work->tail = next;
+        freed += size;
+        continue;
+      }
+    }
     if (work->phase == SWEEP_OBJECTS && object->tt == LUA_VTHREAD &&
-        isdead(G(L), object)) {
+        isdead(g, object)) {
       *work->tail = next;
       if (work->threads == NULL) work->threads_tail = luaC_alloclink(object);
       luaC_allocnext(object) = work->threads;
@@ -1744,6 +1756,13 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
       work->tail = luaC_alloclink(object);
       if (result == SWEEP_WATCH) queuework(&work->watch, object);
     }
+  }
+  if (freed != 0) {
+    /* Ordinary free already credits the heap debt. Update this cohort's live
+    ** estimate before publishing the batch, just as for deferred retirement. */
+    if (!(g->gcstp & GCSTPCLS))
+      __atomic_fetch_sub(&g->GCcyclelive, freed, __ATOMIC_RELAXED);
+    luaM_flushdebt(L, L);
   }
 }
 

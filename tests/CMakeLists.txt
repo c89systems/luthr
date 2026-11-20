@@ -214,7 +214,7 @@ foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     borrowed_incremental borrowed_generational bounded_incremental
     bounded_generational idle_incremental idle_generational
     pressure_incremental pressure_generational unavailable_incremental
-    unavailable_generational sweep_growth stopped_incremental
+    unavailable_generational sweep_growth sweep_inline stopped_incremental
     stopped_generational unwind_incremental unwind_generational
     closing_incremental closing_generational closing_pending_incremental
     closing_pending_generational nursery_incremental nursery_generational nursery_progress)

@@ -231,10 +231,9 @@ int main(int argc, char **argv) {
     require(luaL_dostring(fixture.main,
                           "local head; for i=1,50000 do head={head} end; "
                           "retained_chain=head") == LUA_OK);
-  /* Preserve traversal order: this newest object enters the first private
-   * batch, with coroutine, capture, prototype and string garbage still queued.
-   */
-  lua_newtable(fixture.main);
+  /* Separate storage puts the newest table on the deferred destruction queue,
+   * ahead of the coroutine, capture, prototype and string garbage. */
+  lua_createtable(fixture.main, 128, 0);
   fixture.target = (void *)lua_topointer(fixture.main, -1);
   lua_pop(fixture.main, 1);
   if (fixture.assist)

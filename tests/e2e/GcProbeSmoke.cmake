@@ -49,7 +49,6 @@ foreach(runtime IN ITEMS upstream shared control profile)
 endforeach()
 set(body_total 0)
 set(records_total 0)
-set(object_total 0)
 set(trace_total 0)
 set(marked_total 0)
 set(roots_total 0)
@@ -98,7 +97,6 @@ foreach(path IN LISTS gc_profile_paths)
     endif()
     math(EXPR body_total "${body_total} + ${collector_body_ns}")
     math(EXPR records_total "${records_total} + ${barrier_records}")
-    math(EXPR object_total "${object_total} + ${object_reclaim_ns}")
     math(EXPR trace_total "${trace_total} + ${trace_ns}")
     math(EXPR marked_total "${marked_total} + ${trace_work_bytes}")
     math(EXPR roots_total "${roots_total} + ${root_snapshot_ns}")
@@ -111,13 +109,15 @@ foreach(path IN LISTS gc_profile_paths)
     endif()
   endforeach()
 endforeach()
-if(body_total EQUAL 0 OR records_total EQUAL 0 OR object_total EQUAL 0 OR
+if(body_total EQUAL 0 OR records_total EQUAL 0 OR
     trace_total EQUAL 0 OR marked_total EQUAL 0 OR roots_total EQUAL 0 OR
     stopped_total EQUAL 0 OR workers_peak EQUAL 0 OR swept_total EQUAL 0)
-  message(FATAL_ERROR "Probe did not observe tracing, roots, stops and reclamation")
+  message(FATAL_ERROR "Probe did not observe tracing, roots, stops and sweeping")
 endif()
+# Drop a table with separate backing so this control must also exercise the
+# deferred destruction probe. Inline tables can return their slabs in sweep.
 file(WRITE "${output_dir}/explicit.lua"
-  "return function() local t={}; for i=1,512 do t[i]={i} end; collectgarbage('collect'); return 1 end,function() end,function() end,1\n")
+  "return function() local t={}; for i=1,512 do t[i]=i end; t=nil; collectgarbage('collect'); return 1 end,function() end,function() end,1\n")
 execute_process(COMMAND "${profile}" "${output_dir}/explicit.lua" explicit
   incremental 2 1 8 256 1 0 0 stopped RESULT_VARIABLE result
   OUTPUT_VARIABLE output ERROR_VARIABLE error)
@@ -128,6 +128,10 @@ string(STRIP "${output}" output)
 string(JSON body GET "${output}" gc_collector_body_ns)
 if(body EQUAL 0)
   message(FATAL_ERROR "Explicit full collection was mislabeled as disabled dispatch")
+endif()
+string(JSON reclaimed GET "${output}" gc_object_reclaim_calls)
+if(reclaimed EQUAL 0)
+  message(FATAL_ERROR "Explicit full collection did not observe deferred destruction")
 endif()
 file(WRITE "${output_dir}/poll.lua"
   "return function() collectgarbage('stop'); local head; for i=1,20000 do head={head} end; collectgarbage('restart'); collectgarbage('step',0); local sum=0; for i=1,200000 do sum=sum+i end; assert(head and sum==20000100000); return 1 end,function() end,function() end,1\n")
