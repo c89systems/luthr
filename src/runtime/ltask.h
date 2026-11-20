@@ -2,7 +2,7 @@
 #ifndef ltask_h
 #define ltask_h
 
-#include "lexec.h"
+#include "lstate.h"
 
 struct global_State;
 enum { LUA_TK_PENDING = -1, LUA_TK_INVALID = -2,
@@ -27,6 +27,18 @@ typedef struct LuaTaskRoot {
   int stop_delivered;  /* atomic diagnostic, not completion acknowledgment */
   int shutdown_notified;  /* world mutex; claims at most one shutdown notice */
 } LuaTaskRoot;
+
+/* Probe without delivering. The caller owns the current admission. */
+l_sinline LuaTaskRoot *luaTK_pendingstop (lua_State *L) {
+  LuaExecution *execution = luaX_execution(L);
+  LuaTaskRoot *task;
+  if (execution == NULL || L->errorJmp == NULL ||
+      L->errorJmp != execution->protected) return NULL;
+  task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
+  if (task == NULL || task->global != G(L) ||
+      !__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return NULL;
+  return task;
+}
 
 /* The record and execution are initially zeroed and outlive all entered calls,
 ** including collection. Immutable global/thread/execution pointers remain as

@@ -1,5 +1,6 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <lbuiltin.h>
 #include <ldo.h>
 #include <ltask.h>
 #include <lualib.h>
@@ -48,6 +49,24 @@ static void notify(struct fixture *test) {
 }
 static void waitfor(struct fixture *test) {
   require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
+}
+int __real_luaD_tryleaf(lua_State *, StkId, int, int);
+int __wrap_luaD_tryleaf(lua_State *state, StkId func, int nargs, int wanted) {
+  struct fixture *test = active;
+  int observe = state == test->roots[0].thread && test->armed &&
+                fvalue(s2v(func)) == luaB_mathabs &&
+                strstr(test->mode, "leaf_return") != NULL;
+  int result = __real_luaD_tryleaf(state, func, nargs, wanted);
+  if (observe && result >= 0) {
+    test->armed = 0;
+    lock(test);
+    test->entered = 1;
+    notify(test);
+    while (!test->release)
+      waitfor(test);
+    unlock(test);
+  }
+  return result;
 }
 int __real_lua_resume(lua_State *, lua_State *, int, int *);
 int __wrap_lua_resume(lua_State *state, lua_State *from, int nargs,
@@ -149,6 +168,7 @@ static void poll(LuaExecution *execution, lua_State *state) {
   /* Collection can poll while the resource's constructor is still running.
    * Request cancellation only after Lua has registered the close variable. */
   if (test->armed && test->started != 0 &&
+      strstr(test->mode, "leaf_return") == NULL &&
       (strstr(test->mode, "parser") == NULL ||
        (!isLua(state->ci) && state->native_roots != NULL))) {
     LuaWorldScope scope;
@@ -253,6 +273,7 @@ static void create_tasks(struct fixture *test) {
             "end "
             "end,handler) end end; "
             "local n=0; if leaf then local abs=math.abs; "
+            "n=abs(-1); after_leaf=true; "
             "while true do n=abs(-n-1) end end; "
             "while true do n=n+1 end end") == LUA_OK);
     lua_pushvalue(state, -2);
@@ -444,6 +465,7 @@ static void *run(void *context) {
   int continuation = strstr(test->mode, "continuation") != NULL;
   int denial = strstr(test->mode, "oom") != NULL;
   int late = strstr(test->mode, "late") != NULL;
+  int leaf_return = strstr(test->mode, "leaf_return") != NULL;
   require(pthread_mutex_init(&test->mutex, NULL) == 0);
   require(pthread_cond_init(&test->changed, NULL) == 0);
   if (strstr(test->mode, "facade")) {
@@ -495,6 +517,8 @@ static void *run(void *context) {
   lua_setglobal(state, "xcatching");
   lua_pushboolean(state, strstr(test->mode, "leaf") != NULL);
   lua_setglobal(state, "leaf");
+  lua_pushboolean(state, 0);
+  lua_setglobal(state, "after_leaf");
   lua_pushboolean(state, strstr(test->mode, "cleanup_error") != NULL);
   lua_setglobal(state, "cleanup_fail");
   execute(state, "pending='--'..string.rep(' ',8192)..'\\nreturn 42'; "
@@ -521,7 +545,10 @@ static void *run(void *context) {
     while (yielding ? !test->yielded : !test->entered)
       waitfor(test);
     unlock(test);
-    collect_peer(test);
+    /* The leaf-return probe still owns admission. Wait to drive other Lua
+     * work until it has returned to the interpreter. */
+    if (!leaf_return)
+      collect_peer(test);
     if (denial)
       test->deny = 1;
     request_stop(test);
@@ -560,7 +587,8 @@ static void *run(void *context) {
       require(test->failures == 0);
       test->deny = 0;
     }
-    gc(test);
+    if (!leaf_return)
+      gc(test);
     require((late || test->finalized == 0) && test->closed == 0);
     if (denial)
       test->deny = 1;
@@ -578,6 +606,12 @@ static void *run(void *context) {
           test->results[0] >= 1);
   require(__atomic_load_n(&test->roots[0].stop_delivered, __ATOMIC_ACQUIRE) ==
           !late);
+  if (leaf_return) {
+    lua_getglobal(state, "after_leaf");
+    require(!lua_toboolean(state, -1));
+    lua_pop(state, 1);
+    collect_peer(test);
+  }
   if (denial) {
     require(test->failures == 0);
     test->deny = 0;

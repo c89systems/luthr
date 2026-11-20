@@ -139,14 +139,9 @@ void luaTK_throwstop (lua_State *L) {
 }
 
 void luaTK_checkstop (lua_State *L) {
-  LuaExecution *execution = luaX_execution(L);
-  LuaTaskRoot *task;
+  LuaTaskRoot *task = luaTK_pendingstop(L);
   int deliver;
-  if (execution == NULL || L->errorJmp == NULL ||
-      L->errorJmp != execution->protected) return;
-  task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
-  if (task == NULL || task->global != G(L)) return;
-  if (!__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return;
+  if (task == NULL) return;
   luaX_checksync(pthread_mutex_lock(&task->global->world.mutex));
   deliver = __atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE) &&
             task->phase == LUA_TASK_RUNNING && L->close_active == 0;

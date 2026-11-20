@@ -447,10 +447,25 @@
         CallInfo *newci;
         int b = GETARG_B(i);
         int nresults = GETARG_C(i) - 1;
-        if (b != 0)  /* fixed number of arguments? */
-          L->top.p = ra + b;  /* top signals number of arguments */
-        /* else previous instruction set top */
-        readrange(ra, cast_int(L->top.p - ra));
+        if (b == 0)  /* previous instruction set top */
+          b = cast_int(L->top.p - ra);
+        readrange(ra, b);
+        if (checktag(s2v(ra), LUA_VBCF)) {
+          if (luaD_tryleaf(L, ra, b - 1, nresults) < 0) {
+            L->top.p = ra + b;
+            savepc(ci);
+            luaD_callleaffallback(L, ra, nresults);
+          }
+          else if (l_unlikely(luaTK_pendingstop(L) != NULL ||
+                              (L->policy != NULL && luaCP_exhausted(L)))) {
+            savepc(ci);
+            luaTK_checkstop(L);
+            luaCP_checklimit(L);
+          }
+          updatetrap(ci);
+          vmbreak;
+        }
+        L->top.p = ra + b;
         savepc(ci);  /* in case of errors */
         if ((newci = luaD_precall(L, ra, nresults)) == NULL)
           updatetrap(ci);  /* C call; nothing else to be done */

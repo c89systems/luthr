@@ -26,6 +26,7 @@
 #include "lgc.h"
 #include "lobject.h"
 #include "lopcodes.h"
+#include "lpolicy.h"
 #include "lstate.h"
 #include "lroots.h"
 #include "lstring.h"

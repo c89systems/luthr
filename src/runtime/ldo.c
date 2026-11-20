@@ -892,24 +892,24 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
   return 1;
 }
 
-/* An eligible builtin finishes in its caller's frame. The probe leaves all
-** arguments intact for the C fallback. */
-static int __attribute__((noinline)) precallbuiltin (lua_State *L, StkId func,
-                                                     unsigned status) {
+/* An eligible builtin finishes in its caller's frame. Its caller delivers
+** pending errors after publishing that frame. */
+int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   lua_CFunction f = fvalue(s2v(func));
-  int wanted = get_nresults(status);
-  int nargs = cast_int(L->top.p - func) - 1;
   int n, forward = 0;
   TValue value;
   lua_assert(luaB_isleaf(f));
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
-    return precallC(L, func, status, f, 1);
+    return -1;
   n = leafresult(L, func, f, nargs, &value, &forward);
   if (n < 0 || l_unlikely(gethookmask(L)))
-    return precallC(L, func, status, f, 1);
-  if (forward) moveresults(L, func, n, status & CIST_NRESULTS);
+    return -1;
+  if (forward) {
+    L->top.p = func + 1 + nargs;
+    moveresults(L, func, n, cast_uint(wanted + 1));
+  }
   else {
     int i;
     if (wanted == LUA_MULTRET) wanted = n;
@@ -917,14 +917,24 @@ static int __attribute__((noinline)) precallbuiltin (lua_State *L, StkId func,
     for (i = n; i < wanted; i++) setnilvalue2s(func + i);
     L->top.p = func + wanted;
   }
-  luaTK_checkstop(L);
-  luaCP_checklimit(L);
   return n;
 }
 
+void luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
+  lua_assert(checktag(s2v(func), LUA_VBCF));
+  precallC(L, func, cast_uint(wanted + 1), fvalue(s2v(func)), 1);
+}
+
 l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
-  if (checktag(s2v(func), LUA_VBCF))
-    return precallbuiltin(L, func, status);
+  if (checktag(s2v(func), LUA_VBCF)) {
+    int n = luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1,
+                        get_nresults(status));
+    if (n >= 0) {
+      luaTK_checkstop(L);
+      luaCP_checklimit(L);
+      return n;
+    }
+  }
   return precallC(L, func, status, fvalue(s2v(func)), 1);
 }
 
