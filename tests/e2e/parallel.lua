@@ -81,6 +81,7 @@ local function prepare()
   elseif kind=='shared_hash' then
     for i=1,n*tasks do shared[-i]=0 end
   elseif kind=='shared_growth' then
+    shared={}
     for id=1,tasks do shared[-id]=0 end
   end
 end

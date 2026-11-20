@@ -58,15 +58,18 @@ void luaA_share (lua_State *L, GCObject *object) {
       switch (current->tt) {
         case LUA_VTABLE: {
           Table *table = gco2t(current);
+          unsigned p, parts = luaH_hashparts(table);
           enqueue(L, cast(GCObject *, table->metatable), &roots.pending);
           for (i = 0; i < table->asize; i++)
             if (*getArrTag(table, i) & BIT_ISCOLLECTABLE)
               enqueue(L, getArrVal(table, i)->gc, &roots.pending);
-          for (i = 0; i < allocsizenode(table); i++) {
-            Node *node = gnode(table, i);
-            if (!isempty(gval(node))) {
-              if (keyiscollectable(node)) enqueue(L, gckey(node), &roots.pending);
-              value(L, gval(node), &roots.pending);
+          for (p = 0; p < parts; ++p) {
+            Node *node = luaH_hashnodes(table, p), *end = node + luaH_nodesize(node);
+            for (; node < end; ++node) {
+              if (!isempty(gval(node))) {
+                if (keyiscollectable(node)) enqueue(L, gckey(node), &roots.pending);
+                value(L, gval(node), &roots.pending);
+              }
             }
           }
           break;

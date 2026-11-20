@@ -107,8 +107,6 @@ static int checkmajorminor (lua_State *L, global_State *g);
 /*
 ** one after last element in a hash array
 */
-#define gnodelast(h)	gnode(h, cast_sizet(sizenode(h)))
-
 
 l_mem luaC_objsize (GCObject *o) {
   lu_mem res;
@@ -631,18 +629,21 @@ static void blacken (LuaTraceWork *work, GCObject *o) {
 */
 static void traverseweakvalue (LuaTraceWork *work, Table *h) {
   global_State *g = work->global;
-  Node *n, *limit = gnodelast(h);
+  unsigned p, parts = luaH_hashparts(h);
   /* if there is array part, assume it may have white values (it is not
      worth traversing it now just to check) */
   int hasclears = (h->asize > 0);
-  for (n = gnode(h, 0); n < limit; n++) {  /* traverse hash part */
-    if (isempty(gval(n)))  /* entry is empty? */
-      clearkey(n);  /* clear its key */
-    else {
-      lua_assert(!keyisnil(n));
-      tracekey(work, n);
-      if (!hasclears && iscleared(work, gcvalueN(gval(n))))
-        hasclears = 1;  /* table will have to be cleared */
+  for (p = 0; p < parts; ++p) {
+    Node *n = luaH_hashnodes(h, p), *limit = n + luaH_nodesize(n);
+    for (; n < limit; n++) {
+      if (isempty(gval(n)))
+        clearkey(n);
+      else {
+        lua_assert(!keyisnil(n));
+        tracekey(work, n);
+        if (!hasclears && iscleared(work, gcvalueN(gval(n))))
+          hasclears = 1;
+      }
     }
   }
   if (luaC_state(g) == GCSpropagate)
@@ -688,22 +689,24 @@ static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
   global_State *g = work->global;
   int hasclears = 0;  /* true if table has white keys */
   int hasww = 0;  /* true if table has entry "white-key -> white-value" */
-  unsigned int i;
-  unsigned int nsize = sizenode(h);
+  unsigned p, parts = luaH_hashparts(h);
   int marked = traversearray(work, h);  /* traverse array part */
   /* Alternate direction between convergence rounds to shorten long chains. */
-  for (i = 0; i < nsize; i++) {
-    Node *n = inv ? gnode(h, nsize - 1 - i) : gnode(h, i);
-    if (isempty(gval(n)))  /* entry is empty? */
-      clearkey(n);  /* clear its key */
-    else if (iscleared(work, gckeyN(n))) {  /* key is not marked (yet)? */
-      hasclears = 1;  /* table must be cleared */
-      if (valiswhite(g,gval(n)))  /* value not marked yet? */
-        hasww = 1;  /* white-white entry */
-    }
-    else if (valiswhite(g,gval(n))) {  /* value not marked yet? */
-      marked = 1;
-      markwork(work, gcvalue(gval(n)));
+  for (p = 0; p < parts; ++p) {
+    Node *nodes = luaH_hashnodes(h, inv ? parts - 1 - p : p);
+    unsigned i, size = luaH_nodesize(nodes);
+    for (i = 0; i < size; i++) {
+      Node *n = nodes + (inv ? size - 1 - i : i);
+      if (isempty(gval(n)))
+        clearkey(n);
+      else if (iscleared(work, gckeyN(n))) {
+        hasclears = 1;
+        if (valiswhite(g, gval(n))) hasww = 1;
+      }
+      else if (valiswhite(g, gval(n))) {
+        marked = 1;
+        markwork(work, gcvalue(gval(n)));
+      }
     }
   }
   /* link table into proper list */
@@ -720,15 +723,18 @@ static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
 
 
 static void traversestrongtable (LuaTraceWork *work, Table *h) {
-  Node *n, *limit = gnodelast(h);
+  unsigned p, parts = luaH_hashparts(h);
   traversearray(work, h);
-  for (n = gnode(h, 0); n < limit; n++) {  /* traverse hash part */
-    if (isempty(gval(n)))  /* entry is empty? */
-      clearkey(n);  /* clear its key */
-    else {
-      lua_assert(!keyisnil(n));
-      tracekey(work, n);
-      tracevalue(work, gval(n));
+  for (p = 0; p < parts; ++p) {
+    Node *n = luaH_hashnodes(h, p), *limit = n + luaH_nodesize(n);
+    for (; n < limit; n++) {
+      if (isempty(gval(n)))
+        clearkey(n);
+      else {
+        lua_assert(!keyisnil(n));
+        tracekey(work, n);
+        tracevalue(work, gval(n));
+      }
     }
   }
   genlink(work, obj2gco(h));
@@ -805,7 +811,7 @@ static l_mem traversetable (LuaTraceWork *work, Table *h) {
         linkwork(&work->allweak, obj2gco(h));
       break;
   }
-  return cast(l_mem, 1 + 2*sizenode(h) + h->asize);
+  return 1 + 2 * luaH_hashsize(h) + h->asize;
 }
 
 

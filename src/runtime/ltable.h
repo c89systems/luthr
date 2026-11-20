@@ -32,6 +32,42 @@
 LUAI_DDEC(const Node luaH_dummynode;)
 #define isdummy(t)		((t)->node == &luaH_dummynode)
 
+/* The tag distinguishes a directory from a single node image without
+** expanding every small table. Once installed, the directory stays put. */
+#define LUA_HASH_PARTS 16
+typedef struct LuaHashPart {
+  Node *nodes;
+  uint64_t version;
+} LuaHashPart;
+
+typedef struct LuaHashDirectory {
+  LuaHashPart parts[LUA_HASH_PARTS];
+} LuaHashDirectory;
+
+l_sinline LuaHashDirectory *luaH_hashdir (const Node *image) {
+  uintptr_t address = cast(uintptr_t, image);
+  return address & 1 ? cast(LuaHashDirectory *, address & ~cast(uintptr_t, 1))
+                     : NULL;
+}
+
+l_sinline unsigned luaH_nodesize (const Node *nodes) {
+  return nodes == &luaH_dummynode ? 0 : twoto(nodes->u.lsize);
+}
+
+l_sinline unsigned luaH_hashparts (const Table *table) {
+  return luaH_hashdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE))
+         != NULL ? LUA_HASH_PARTS : 1;
+}
+
+l_sinline Node *luaH_hashnodes (const Table *table, unsigned index) {
+  Node *image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  LuaHashDirectory *directory = luaH_hashdir(image);
+  return directory == NULL ? image :
+    __atomic_load_n(&directory->parts[index].nodes, __ATOMIC_ACQUIRE);
+}
+
+LUAI_FUNC l_mem luaH_hashsize (const Table *);
+
 
 
 /* allocated size for hash nodes */

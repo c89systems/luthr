@@ -56,19 +56,22 @@ void luaC_leavegc (lua_State *L, LuaGCFrame *frame) {
 }
 
 void luaC_traceview (lua_State *L, const Table *view) {
-  unsigned i;
+  unsigned i, p, parts;
   if (!luaC_tracing(L)) return;
   for (i = 0; i < view->asize; i++) {
     lu_byte tag = *getArrTag(view, i);
     if (tag & BIT_ISCOLLECTABLE)
       luaC_traceobject(L, getArrVal(view, i)->gc);
   }
-  if (view->node == NULL || isdummy(view)) return;
-  for (i = 0; i < sizenode(view); i++) {
-    Node *node = gnode(view, i);
-    if (!isempty(gval(node))) {
-      if (keyiscollectable(node)) luaC_traceobject(L, gckey(node));
-      luaC_tracevalue(L, gval(node));
+  if (view->node == NULL) return;
+  parts = luaH_hashparts(view);
+  for (p = 0; p < parts; ++p) {
+    Node *nodes = luaH_hashnodes(view, p), *end = nodes + luaH_nodesize(nodes);
+    for (; nodes < end; ++nodes) {
+      if (!isempty(gval(nodes))) {
+        if (keyiscollectable(nodes)) luaC_traceobject(L, gckey(nodes));
+        luaC_tracevalue(L, gval(nodes));
+      }
     }
   }
 }
@@ -230,7 +233,7 @@ static int weakdead (lua_State *L, GCObject *object) {
 ** every later insertion shades both referents before publishing its entry. */
 void luaC_prepareweak (lua_State *L, Table *table) {
   unsigned cutoff = __atomic_load_n(&G(L)->trace_weakcutoff, __ATOMIC_ACQUIRE);
-  unsigned pending, i;
+  unsigned pending, i, p, parts;
   uint64_t state;
   if (cutoff == 0) return;
   state = luaC_tablestate(table);
@@ -250,15 +253,18 @@ void luaC_prepareweak (lua_State *L, Table *table) {
         __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
     }
   }
-  for (i = 0; i < sizenode(table); i++) {
-    Node *node = gnode(table, i);
-    if (isempty(gval(node))) continue;
-    if (((pending & 1) && iscollectable(gval(node)) &&
-         weakdead(L, gcvalue(gval(node)))) ||
-        ((pending & 2) && keyiscollectable(node) &&
-         weakdead(L, gckey(node)))) {
-      setempty(gval(node));
-      if (keyiscollectable(node)) setdeadkey(node);
+  parts = luaH_hashparts(table);
+  for (p = 0; p < parts; ++p) {
+    Node *node = luaH_hashnodes(table, p), *end = node + luaH_nodesize(node);
+    for (; node < end; ++node) {
+      if (isempty(gval(node))) continue;
+      if (((pending & 1) && iscollectable(gval(node)) &&
+           weakdead(L, gcvalue(gval(node)))) ||
+          ((pending & 2) && keyiscollectable(node) &&
+           weakdead(L, gckey(node)))) {
+        setempty(gval(node));
+        if (keyiscollectable(node)) setdeadkey(node);
+      }
     }
   }
   luaC_settablestate(table, state | (cast(uint64_t, pending) << LUA_WEAK_CLEARED_SHIFT));
