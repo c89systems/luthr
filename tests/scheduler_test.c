@@ -38,7 +38,7 @@ struct fixture {
   lua_State *metadata_peer;
   unsigned metadata_held, metadata_queued, metadata_released;
   size_t live;
-  time_t poll_time;
+  uint64_t poll_time_ns;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
 static struct fixture *fixture;
@@ -54,11 +54,13 @@ static pthread_t idle_host;
 
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
-  if (clock == CLOCK_MONOTONIC && fixture != NULL && luaQ_current() != NULL &&
-      fixture->poll_time != 0) {
-    time->tv_sec = fixture->poll_time;
-    time->tv_nsec = 0;
-    return 0;
+  if (clock == CLOCK_MONOTONIC && fixture != NULL && luaQ_current() != NULL) {
+    uint64_t ns = __atomic_load_n(&fixture->poll_time_ns, __ATOMIC_RELAXED);
+    if (ns != 0) {
+      time->tv_sec = (time_t)(ns / 1000000000);
+      time->tv_nsec = (long)(ns % 1000000000);
+      return 0;
+    }
   }
   return __real_clock_gettime(clock, time);
 }
@@ -304,7 +306,7 @@ static int metadata_need(lua_State *L) {
 static void metadata_progress(struct fixture *f, unsigned quantum_polls) {
   lua_State *owner, *peer;
   if (quantum_polls == 0)
-    f->poll_time = 1; /* require a requested handoff */
+    f->poll_time_ns = 1; /* require a requested handoff */
   init(f, 1);
   f->scheduler.config.quantum_polls = quantum_polls;
   managed(f->main, "metadata_owner", metadata_owner);
@@ -364,31 +366,52 @@ static int finalize(lua_State *L) {
   return 0;
 }
 
+static int mark_running(lua_State *L) {
+  struct fixture *f = fixture;
+  (void)L;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->waiting = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 0;
+}
+
 static int poll_slice(lua_State *L) {
   struct fixture *f = fixture;
+  uint64_t slice_ns = (uint64_t)luaL_checkinteger(L, 1);
   lua_lock(L);
   while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) == 0)
     luaX_pollrequests(L);
-  /* Collector polls can occur many times while the clock stays within
-   * one slice. The ready peer runs at the first safepoint after expiry. */
+  /* Repeated polls keep the current task until its slice expires. */
   for (unsigned i = 0; i < 16; i++)
     luaQ_poll(L);
+  __atomic_fetch_add(&f->poll_time_ns, slice_ns - 1, __ATOMIC_RELAXED);
+  luaQ_poll(L);
   require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
-  f->poll_time++;
+  __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
   require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 1);
   lua_unlock(L);
   return 0;
 }
 
-static void timed_slice(struct fixture *f) {
-  f->poll_time = 1;
+static void timed_slice(struct fixture *f, int continuation) {
+  f->poll_time_ns = 1;
   init(f, 1);
   f->scheduler.config.quantum_polls = 0;
   lua_gc(f->main, LUA_GCSTOP);
   managed(f->main, "poll_slice", poll_slice);
   managed(f->main, "started", started);
-  submit(f, 0, "poll_slice(); return 10", 0);
+  managed(f->main, "mark_running", mark_running);
+  submit(f, 0,
+         continuation
+             ? "coroutine.yield(); mark_running(); poll_slice(...); return 10"
+             : "mark_running(); poll_slice(...); return 10",
+         continuation ? 10000000 : 250000);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->waiting == 0)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
   submit(f, 1, "started(...); return 20", 1);
   require(collect(f, 0, LUA_OK) == 10);
   require(collect(f, 1, LUA_OK) == 20);
@@ -676,24 +699,18 @@ static void native_saturation(struct fixture *f, int cancel) {
   finish(f);
 }
 
-static int mark_running(lua_State *L) {
-  struct fixture *f = fixture;
-  (void)L;
-  require(pthread_mutex_lock(&f->mutex) == 0);
-  f->waiting = 1;
-  require(pthread_cond_broadcast(&f->changed) == 0);
-  require(pthread_mutex_unlock(&f->mutex) == 0);
-  return 0;
-}
-
 static int callback_done(lua_State *L) {
   lua_pushboolean(
       L, __atomic_load_n(&fixture->native_callback_done, __ATOMIC_ACQUIRE));
   return 1;
 }
 
-static void callback_progress(struct fixture *f) {
+static void callback_progress(struct fixture *f, int timed) {
+  if (timed)
+    f->poll_time_ns = 1; /* native return must progress with a frozen slice */
   init(f, 1);
+  if (timed)
+    f->scheduler.config.quantum_polls = 0;
   managed(f->main, "mark_running", mark_running);
   managed(f->main, "callback_done", callback_done);
   lua_pushcfunction(f->main, block_binding);
@@ -875,7 +892,9 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "timed_metadata_progress") == 0)
     metadata_progress(f, 0);
   else if (strcmp(argv[1], "timed_slice") == 0)
-    timed_slice(f);
+    timed_slice(f, 0);
+  else if (strcmp(argv[1], "timed_continuation_slice") == 0)
+    timed_slice(f, 1);
   else if (strcmp(argv[1], "early_incremental") == 0)
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)
@@ -899,7 +918,9 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "idle_affinity") == 0)
     idle_affinity(f);
   else if (strcmp(argv[1], "callback_progress") == 0)
-    callback_progress(f);
+    callback_progress(f, 0);
+  else if (strcmp(argv[1], "timed_callback_progress") == 0)
+    callback_progress(f, 1);
   else if (strcmp(argv[1], "parked") == 0)
     parked_wait(f, 0);
   else if (strcmp(argv[1], "cancel_parked") == 0)

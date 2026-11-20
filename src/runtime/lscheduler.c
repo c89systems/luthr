@@ -12,7 +12,11 @@
 #include <time.h>
 
 enum { SC_READY, SC_RESOURCE, SC_DONE };
-enum { DEFAULT_SLICE_NS = 2000000 };
+enum {
+  DEFAULT_SLICE_NS = 2 * 1000 * 1000,
+  FIRST_SERIAL_SLICE_NS = 250 * 1000,
+  SERIAL_SLICE_NS = 10 * 1000 * 1000
+};
 
 static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
@@ -465,15 +469,17 @@ static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduler *s = task->scheduler;
   LuaWorldScope depth;
   int timed = task->polls == 0;  /* requests set polls to 1 in either mode */
-  unsigned publishing;
+  int serial = s->config.slots == 1;
+  unsigned publishing, reentry;
   flushrouting(s);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
   /* Read publication before the runnable predicate: observing its completion
   ** also publishes the recipient's queue entry to the following load. */
   publishing = __atomic_load_n(&s->pending_ready, __ATOMIC_ACQUIRE);
+  reentry = __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE);
   if (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 &&
-      __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0 &&
+      reentry == 0 &&
       __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) {
     /* A notified waiter cannot enter the runnable queue until its outgoing
     ** context is saved. Keep the handoff prompt across that publication gap. */
@@ -481,12 +487,17 @@ static void poll (LuaExecution *execution, lua_State *L) {
       task->polls = 1;
     return;
   }
-  if (timed) {
+  /* A native return needs prompt access to the sole managed slot. */
+  if (timed && (!serial || reentry == 0)) {
     uint64_t now = monotonicns();
-    /* Allocation and GC can reach safepoints much more often than the VM
-    ** instruction poll. Give short tasks time to finish their live graphs. */
-    if (task->slice_deadline == 0)
-      task->slice_deadline = now + DEFAULT_SLICE_NS;
+    if (task->slice_deadline == 0) {
+      unsigned slice = DEFAULT_SLICE_NS;
+      /* On one worker, give each queued task a quick start. Then give
+      ** longer tasks enough time to finish and retire their live graphs. */
+      if (serial)
+        slice = task->dispatches == 1 ? FIRST_SERIAL_SLICE_NS : SERIAL_SLICE_NS;
+      task->slice_deadline = now + slice;
+    }
     if (now < task->slice_deadline) return;
   }
   task->slice_deadline = 0;
