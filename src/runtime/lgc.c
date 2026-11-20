@@ -538,14 +538,13 @@ static void starttrace (lua_State *L, unsigned finish) {
 
 static void endtrace (lua_State *L) {
   global_State *g = G(L);
-  LuaWorld *world = &g->world;
   lua_assert(L->world_depth != 0 &&
              !__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE));
   __atomic_store_n(&g->trace_active, 0, __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  luaQ_wake(&g->phase_changed, &g->phase_waiters);
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  luaQ_wake(&g->trace_changed, &g->trace_waiters);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
 }
 
 
@@ -2198,7 +2197,7 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
         if (luaC_tracing(L) && g->trace_epoch == epoch &&
             __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) &&
             !luaC_markready(g))
-          luaW_waitcollector(L, LUA_WAIT_PHASE);
+          luaW_waitcollector(L, LUA_WAIT_TRACE);
         boundary = luaC_tracing(L) && g->trace_epoch == epoch &&
           !luaC_tracepending(g) &&
           __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) == 0;

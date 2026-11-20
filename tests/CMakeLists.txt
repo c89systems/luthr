@@ -276,6 +276,7 @@ target_link_options(gc_availability_test PRIVATE -Wl,--wrap=luaC_tracebatch
   -Wl,--wrap=luaW_waitcollector
   -Wl,--wrap=luaW_trycollectenter)
 foreach(case IN ITEMS defer_incremental defer_generational publish_incremental publish_generational
+    queue_incremental queue_generational
     remote_incremental remote_generational
     busy_incremental busy_generational parked_incremental parked_generational
     pressure_incremental pressure_generational)

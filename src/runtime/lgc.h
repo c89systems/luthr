@@ -457,7 +457,7 @@ LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
 /* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
 LUAI_FUNC void luaC_publishbarrier (lua_State *, GCObject *, int back);
-/* World metadata owns shared work-list publication. */
+/* Shared list publication owns the active collector's queue or quiescence. */
 LUAI_FUNC void luaC_linktrace (global_State *, GCObject *);
 /* Private work-list inspection; caller owns quiescent collection. */
 LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);

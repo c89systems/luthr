@@ -40,14 +40,17 @@ static void clearing (global_State *g, unsigned phase) {
 void luaC_advancetrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
+  int deferred;
   /* Several helpers may observe the same empty queue. Metadata admission
   ** orders phase requests; recheck after it, before stopping every worker. */
   if (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0) return;
   if (!luaW_trycollectenter(L)) return;
-  if (!luaC_tracing(L) || plan->finish == 0 ||
-      __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) != 0 ||
-      (luaC_tracephase(g) != TRACE_INIT &&
-       luaC_tracepending(g))) {
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  deferred = !luaC_tracing(L) || plan->finish == 0 ||
+    __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) != 0 ||
+    (luaC_tracephase(g) != TRACE_INIT && luaC_tracepending(g));
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  if (deferred) {
     luaW_heapleave(L);
     return;
   }

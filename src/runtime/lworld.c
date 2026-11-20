@@ -38,7 +38,7 @@ int luaW_init (global_State *g) {
   world->storage_grace = 0;
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
-  world->waiters = g->phase_waiters = g->minor_waiters = NULL;
+  world->waiters = g->phase_waiters = g->minor_waiters = g->trace_waiters = NULL;
   world->heap_head = NULL;
   world->heap_tail = &world->heap_head;
   status = pthread_mutex_init(&world->mutex, NULL);
@@ -55,19 +55,29 @@ int luaW_init (global_State *g) {
     luaX_checksync(pthread_mutex_destroy(&world->mutex));
     return status;
   }
+  status = pthread_mutex_init(&g->trace_mutex, NULL);
+  if (status != 0) goto failed_phase;
+  status = pthread_cond_init(&g->trace_changed, NULL);
+  if (status != 0) goto failed_trace_mutex;
   for (i = 0; i < LUA_PUBLISH_SHARDS; i++) {
     g->publishers[i].head = NULL;
     status = pthread_mutex_init(&g->publishers[i].mutex, NULL);
     if (status != 0) {
       while (i-- > 0)
         luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
-      luaX_checksync(pthread_cond_destroy(&g->phase_changed));
-      luaX_checksync(pthread_cond_destroy(&world->changed));
-      luaX_checksync(pthread_mutex_destroy(&world->mutex));
-      return status;
+      goto failed_trace;
     }
   }
   return 0;
+ failed_trace:
+  luaX_checksync(pthread_cond_destroy(&g->trace_changed));
+ failed_trace_mutex:
+  luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
+ failed_phase:
+  luaX_checksync(pthread_cond_destroy(&g->phase_changed));
+  luaX_checksync(pthread_cond_destroy(&world->changed));
+  luaX_checksync(pthread_mutex_destroy(&world->mutex));
+  return status;
 }
 
 void luaW_destroy (global_State *g) {
@@ -77,6 +87,7 @@ void luaW_destroy (global_State *g) {
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
+             g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
              world->storage_bytes == 0 && world->storage_busy == 0 &&
              world->storage_workers == 0 &&
@@ -85,6 +96,8 @@ void luaW_destroy (global_State *g) {
     lua_assert(g->publishers[i].head == NULL);
     luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
   }
+  luaX_checksync(pthread_cond_destroy(&g->trace_changed));
+  luaX_checksync(pthread_mutex_destroy(&g->trace_mutex));
   luaX_checksync(pthread_cond_destroy(&g->phase_changed));
   luaX_checksync(pthread_cond_destroy(&world->changed));
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
@@ -446,11 +459,24 @@ static unsigned heapdepth (lua_State *L) {
 void luaW_waitcollector (lua_State *L, int reason) {
   global_State *g = G(L);
   LuaWorld *world = &g->world;
+  uint64_t epoch = reason == LUA_WAIT_TRACE
+    ? __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) : 0;
   lua_assert(L->native_depth != 0);
   luaW_deactivate(L);
   if (reason == LUA_WAIT_RECLAIM || (luaW_control(world) & LUA_WORLD_REQUESTS))
     luaQ_wake(&world->changed, &world->waiters);
-  if (reason == LUA_WAIT_RECLAIM)
+  if (reason == LUA_WAIT_TRACE) {
+    /* Withdraw before taking the work lock, and recheck before parking.
+    ** A later cycle cannot inherit this wait across the unlocked interval. */
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+    if (__atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) == epoch &&
+        __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) && !luaC_markready(g))
+      luaQ_wait(L, &g->trace_mutex, &g->trace_changed, &g->trace_waiters);
+    luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+  }
+  else if (reason == LUA_WAIT_RECLAIM)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
   else if (!luaW_stopped(world))
     luaQ_wait(L, &world->mutex, &g->phase_changed,

@@ -195,24 +195,24 @@ lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   int notify;
   if (!luaC_tracing(L) || limit == 0) return 0;
   if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
-  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
   previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);
   luaC_claimtrace(L, &work, limit);
   notify = !previous && luaC_workerready(g);
   if (work.count == 0) luaP_work(G(L), work.scanned);
-  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
   if (notify) luaSC_notifygc(g);
   if (work.count == 0) return work.scanned;
   luaC_scantrace(L, &work, limit);
-  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
   previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);
   luaC_publishtrace(L, &work);
   notify = !previous && luaC_workerready(g);
   luaP_work(G(L), cast(lu_mem, work.marked) + work.scanned);
   /* Even an empty last batch lets an assist advance the phase. */
   if (luaC_markready(g) || __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) == 0)
-    luaQ_wake(&g->phase_changed, &g->phase_waiters);
-  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+    luaQ_wake(&g->trace_changed, &g->trace_waiters);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
   if (notify) luaSC_notifygc(g);
   return cast(lu_mem, work.marked) + work.scanned;
 }

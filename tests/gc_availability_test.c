@@ -3,6 +3,7 @@
 #include <lgc.h>
 #include <lstate.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,29 +17,47 @@
   } while (0)
 
 static __thread unsigned batches, phase_entries;
-static __thread int pause_scan, observe_wait;
+static __thread int pause_scan, pause_batch, observe_wait;
 static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  int entered, release, waiting;
-} scanner = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0, 0};
+  int entered, release, waiting, published;
+} scanner = {.mutex = PTHREAD_MUTEX_INITIALIZER,
+             .changed = PTHREAD_COND_INITIALIZER};
+static void hold_batch(void) {
+  require(pthread_mutex_lock(&scanner.mutex) == 0);
+  scanner.entered = 1;
+  require(pthread_cond_broadcast(&scanner.changed) == 0);
+  while (!scanner.release)
+    require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
+  require(pthread_mutex_unlock(&scanner.mutex) == 0);
+}
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
   if (pause_scan) {
     pause_scan = 0;
-    require(pthread_mutex_lock(&scanner.mutex) == 0);
-    scanner.entered = 1;
-    require(pthread_cond_broadcast(&scanner.changed) == 0);
-    while (!scanner.release)
-      require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
-    require(pthread_mutex_unlock(&scanner.mutex) == 0);
+    hold_batch();
   }
   __real_luaC_scantrace(L, work, limit);
 }
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
 lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
+  lu_mem work;
+  int holding = pause_batch;
   batches++;
-  return __real_luaC_tracebatch(L, limit);
+  if (holding) {
+    pause_batch = 0;
+    hold_batch();
+  }
+  work = __real_luaC_tracebatch(L, limit);
+  if (holding) {
+    require(work != 0);
+    require(pthread_mutex_lock(&scanner.mutex) == 0);
+    scanner.published = 1;
+    require(pthread_cond_broadcast(&scanner.changed) == 0);
+    require(pthread_mutex_unlock(&scanner.mutex) == 0);
+  }
+  return work;
 }
 int __real_luaW_trycollectenter(lua_State *);
 int __wrap_luaW_trycollectenter(lua_State *L) {
@@ -48,7 +67,7 @@ int __wrap_luaW_trycollectenter(lua_State *L) {
 
 void __real_luaW_waitcollector(lua_State *, int);
 void __wrap_luaW_waitcollector(lua_State *L, int reason) {
-  if (observe_wait && reason == LUA_WAIT_PHASE) {
+  if (observe_wait && reason == LUA_WAIT_TRACE) {
     require(pthread_mutex_lock(&scanner.mutex) == 0);
     scanner.waiting = 1;
     require(pthread_cond_broadcast(&scanner.changed) == 0);
@@ -62,13 +81,14 @@ struct request {
   GCObject *published;
   unsigned batches, phase_entries;
   lu_mem debt;
-  int pressure, resume, pause, observe_wait;
+  int pressure, resume, pause, hold, observe_wait;
 };
 
 static void *assist(void *argument) {
   struct request *r = argument;
   unsigned i;
   pause_scan = r->pause;
+  pause_batch = r->hold;
   observe_wait = r->observe_wait;
   lua_lock(r->state);
   r->state->assist_epoch = G(r->state)->world.work_epoch;
@@ -87,18 +107,25 @@ static void *assist(void *argument) {
   return NULL;
 }
 
-static void check_phase_wait(lua_State *L) {
-  LuaWorld *world = &G(L)->world;
+static void check_trace_wait(lua_State *L) {
+  global_State *g = G(L);
+  LuaWorld *world = &g->world;
   LuaWaiter *waiter;
   require(pthread_mutex_lock(&scanner.mutex) == 0);
   while (!scanner.waiting)
     require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
   require(pthread_mutex_unlock(&scanner.mutex) == 0);
   require(pthread_mutex_lock(&world->mutex) == 0);
-  waiter = G(L)->phase_waiters;
-  require(waiter != NULL);
+  require(pthread_mutex_lock(&g->trace_mutex) == 0);
+  while (g->trace_waiters == NULL) {
+    require(pthread_mutex_unlock(&g->trace_mutex) == 0);
+    sched_yield();
+    require(pthread_mutex_lock(&g->trace_mutex) == 0);
+  }
+  waiter = g->trace_waiters;
   luaQ_wake(&world->changed, &world->waiters);
-  require(G(L)->phase_waiters == waiter && G(L)->trace_busy == 1);
+  require(g->trace_waiters == waiter && g->trace_busy == 1);
+  require(pthread_mutex_unlock(&g->trace_mutex) == 0);
   require(pthread_mutex_unlock(&world->mutex) == 0);
 }
 
@@ -112,9 +139,10 @@ int main(int argc, char **argv) {
   int publish, remote, busy, parked;
   require(argc == 2 && L != NULL);
   remote = strncmp(argv[1], "remote_", 7) == 0;
+  r.hold = strncmp(argv[1], "queue_", 6) == 0;
   parked = strncmp(argv[1], "parked_", 7) == 0;
   busy = parked || strncmp(argv[1], "busy_", 5) == 0;
-  publish = busy || remote || strncmp(argv[1], "publish_", 8) == 0;
+  publish = busy || remote || r.hold || strncmp(argv[1], "publish_", 8) == 0;
   r.pressure = strncmp(argv[1], "pressure_", 9) == 0;
   lua_gc(L, strstr(argv[1], "generational") != NULL ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
@@ -152,6 +180,24 @@ int main(int argc, char **argv) {
     r.published = late;
   r.pause = busy;
   require(pthread_create(&worker, NULL, assist, &r) == 0);
+  if (r.hold) {
+    LuaWorld *world = &G(L)->world;
+    require(pthread_mutex_lock(&scanner.mutex) == 0);
+    while (!scanner.entered)
+      require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
+    require(pthread_mutex_unlock(&scanner.mutex) == 0);
+    /* The helper is admitted. Claiming and publishing its payload batch
+     * must progress while this thread owns the admission mutex. */
+    require(pthread_mutex_lock(&world->mutex) == 0);
+    require(pthread_mutex_lock(&scanner.mutex) == 0);
+    scanner.release = 1;
+    require(pthread_cond_broadcast(&scanner.changed) == 0);
+    while (!scanner.published)
+      require(pthread_cond_wait(&scanner.changed, &scanner.mutex) == 0);
+    require(pthread_mutex_unlock(&scanner.mutex) == 0);
+    require(pthread_mutex_unlock(&world->mutex) == 0);
+    r.hold = 0;
+  }
   if (busy) {
     pthread_t observer;
     require(pthread_mutex_lock(&scanner.mutex) == 0);
@@ -168,7 +214,7 @@ int main(int argc, char **argv) {
     }
     require(pthread_create(&observer, NULL, assist, &other) == 0);
     if (parked)
-      check_phase_wait(L);
+      check_trace_wait(L);
     else {
       require(pthread_join(observer, NULL) == 0);
       require(other.batches == 0 && other.phase_entries == 0 &&
@@ -183,7 +229,7 @@ int main(int argc, char **argv) {
       lua_unlock(L);
       require(pthread_join(observer, NULL) == 0);
       require(pthread_join(worker, NULL) == 0);
-      require(!luaC_tracing(L) && G(L)->phase_waiters == NULL);
+      require(!luaC_tracing(L) && G(L)->trace_waiters == NULL);
       goto intact;
     }
   }
