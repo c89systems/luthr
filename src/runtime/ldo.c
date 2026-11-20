@@ -848,35 +848,75 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   return n;
 }
 
-/* An eligible builtin finishes in its caller's frame. Hooks, captured
-** results, coercions and allocating calls need the regular C activation. */
+/* A successful probe returns zero or one computed value, or forwards a
+** suffix of the arguments. It never rewrites a live slot or parks. */
+static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
+                       TValue *value, int *forward) {
+  const TValue *first = s2v(func + 1);
+  int bytes = f == luaB_strbyte;
+  if (bytes || f == luaB_strsub)
+    return luaB_leafrange(L, func, nargs, bytes, value);
+  if (f == luaB_assert) {
+    if (l_isfalse(first)) return -1;
+    *forward = 1;
+    return nargs;
+  }
+  if (f == luaB_select) {
+    lua_Integer index;
+    if (ttisstring(first) && getstr(tsvalue(first))[0] == '#') {
+      setivalue(value, nargs - 1);
+      return 1;
+    }
+    if (!tointegerns(first, &index)) return -1;
+    index = luaB_selectindex(index, nargs);
+    if (index < 1) return -1;
+    *forward = 1;
+    return nargs - cast_int(index);
+  }
+  if (f == luaB_rawget) {
+    lu_byte tag;
+    if (nargs < 2 || !ttistable(first) ||
+        !luaH_tryget(L, hvalue(first), s2v(func + 2), value, &tag)) return -1;
+    if (tagisempty(tag)) setnilvalue(value);
+    return 1;
+  }
+  if (f == luaB_rawequal) {
+    if (nargs < 2) return -1;
+    if (luaV_rawequalobj(first, s2v(func + 2))) { setbtvalue(value); }
+    else { setbfvalue(value); }
+    return 1;
+  }
+  lua_assert(f == luaB_mathabs);
+  if (!ttisinteger(first)) return -1;
+  setivalue(value, luaB_absinteger(ivalue(first)));
+  return 1;
+}
+
+/* An eligible builtin finishes in its caller's frame. The probe leaves all
+** arguments intact for the C fallback. */
 static int __attribute__((noinline)) precallbuiltin (lua_State *L, StkId func,
                                                      unsigned status) {
   lua_CFunction f = fvalue(s2v(func));
   int wanted = get_nresults(status);
-  int nargs, n;
+  int nargs = cast_int(L->top.p - func) - 1;
+  int n, forward = 0;
   TValue value;
   lua_assert(luaB_isleaf(f));
-  if (!isLua(L->ci) || wanted > 1 || gethookmask(L) ||
+  if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
+      (wanted > 1 && wanted > L->ci->top.p - func) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
     return precallC(L, func, status, f, 1);
-  nargs = cast_int(L->top.p - func) - 1;
-  if (f == luaB_mathabs) {
-    if (nargs < 1 || !ttisinteger(s2v(func + 1)))
-      return precallC(L, func, status, f, 1);
-    setivalue(&value, luaB_absinteger(ivalue(s2v(func + 1))));
-    n = 1;
-  }
-  else
-    n = luaB_leafrange(L, func, nargs, f == luaB_strbyte, &value);
+  n = leafresult(L, func, f, nargs, &value, &forward);
   if (n < 0 || l_unlikely(gethookmask(L)))
     return precallC(L, func, status, f, 1);
-  if (wanted == LUA_MULTRET) wanted = n;
-  if (wanted != 0) {
-    if (n != 0) { setobj2s(L, func, &value); }
-    else { setnilvalue2s(func); }
+  if (forward) moveresults(L, func, n, status & CIST_NRESULTS);
+  else {
+    int i;
+    if (wanted == LUA_MULTRET) wanted = n;
+    if (wanted != 0 && n != 0) { setobj2s(L, func, &value); }
+    for (i = n; i < wanted; i++) setnilvalue2s(func + i);
+    L->top.p = func + wanted;
   }
-  L->top.p = func + wanted;
   luaTK_checkstop(L);
   luaCP_checklimit(L);
   return n;

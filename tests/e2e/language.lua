@@ -17,6 +17,48 @@ equal(packed.n,3)
 local a,b,c = table.unpack(packed,1,3)
 assert(a==nil and b==42 and c==nil)
 
+do
+  local token = {}
+  local function tailassert(...)
+    return assert(...)
+  end
+  local results = table.pack(tailassert(token,nil,42,nil))
+  assert(results.n==4 and results[1]==token and results[2]==nil and
+         results[3]==42 and results[4]==nil)
+  local x,y,z = assert(true,42)
+  assert(x==true and y==42 and z==nil)
+  local callable = setmetatable({}, {__call=assert})
+  x,y = callable(42)
+  assert(x==callable and y==42)
+  local failed, err = pcall(function() assert(false,token) end)
+  assert(not failed and rawequal(err,token))
+  assert(not pcall(function() assert() end))
+  assert(select('#suffix',token,nil,42)==3)
+  results = table.pack(select(-2,token,nil,42))
+  assert(results.n==2 and results[1]==nil and results[2]==42)
+  assert(select('2',token,42)==42 and select('#',select(100,token))==0)
+  assert(not pcall(function() select(0,token) end))
+  local t = setmetatable({[1]=token},mt)
+  assert(rawequal(rawget(t,1.0),token) and rawget(t,'missing')==nil)
+  assert(rawequal(1,1.0) and not rawequal({},{}))
+  x,y = rawequal(t,t)
+  assert(x==true and y==nil)
+  x,y = string.byte('')
+  assert(x==nil and y==nil)
+  assert(not pcall(function() rawget(false,1) end))
+  assert(not pcall(function() rawequal(token) end))
+
+  local target, events = assert, {}
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func == target then
+      events[#events+1] = event
+    end
+  end,'cr')
+  local observed = target(token)
+  debug.sethook()
+  assert(observed==token and table.concat(events,',')=='call,return')
+end
+
 local closed, marker = {}, {}
 local function resource(id)
   return setmetatable({}, {__close=function(_,err)

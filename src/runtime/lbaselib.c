@@ -25,6 +25,7 @@
 #include "lpolicy.h"
 #include "lapi.h"
 #include "lauxowned.h"
+#include "lbuiltin.h"
 #include "lvm.h"
 
 
@@ -154,7 +155,7 @@ static int luaB_setmetatable (lua_State *L) {
 }
 
 
-static int luaB_rawequal (lua_State *L) {
+int luaB_rawequal (lua_State *L) {
   luaL_checkany(L, 1);
   luaL_checkany(L, 2);
   lua_pushboolean(L, lua_rawequal(L, 1, 2));
@@ -171,7 +172,7 @@ static int luaB_rawlen (lua_State *L) {
 }
 
 
-static int luaB_rawget (lua_State *L) {
+int luaB_rawget (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);
   luaL_checkany(L, 2);
   lua_settop(L, 2);
@@ -471,7 +472,7 @@ static int luaB_dofile (lua_State *L) {
 }
 
 
-static int luaB_assert (lua_State *L) {
+int luaB_assert (lua_State *L) {
   if (l_likely(lua_toboolean(L, 1)))  /* condition is true? */
     return lua_gettop(L);  /* return all arguments */
   else {  /* error */
@@ -484,16 +485,14 @@ static int luaB_assert (lua_State *L) {
 }
 
 
-static int luaB_select (lua_State *L) {
+int luaB_select (lua_State *L) {
   int n = lua_gettop(L);
   if (lua_type(L, 1) == LUA_TSTRING && *lua_tostring(L, 1) == '#') {
     lua_pushinteger(L, n-1);
     return 1;
   }
   else {
-    lua_Integer i = luaL_checkinteger(L, 1);
-    if (i < 0) i = n + i;
-    else if (i > n) i = n;
+    lua_Integer i = luaB_selectindex(luaL_checkinteger(L, 1), n);
     luaL_argcheck(L, 1 <= i, 1, "index out of range");
     return n - (int)i;
   }
