@@ -108,20 +108,13 @@ typedef union {
 ** When the original hash value is good, hashing by a power of 2
 ** avoids the cost of '%'.
 */
-#define hashpow2(t,n)		(gnode(t, lmod((n), sizenode(t))))
+#define hashstr(t,str)		(gnode(t, lmod((str)->hash, sizenode(t))))
 
 /*
 ** for other types, it is better to avoid modulo by power of 2, as
 ** they can have many 2 factors.
 */
-#define hashmod(t,n)	(gnode(t, ((n) % ((sizenode(t)-1u)|1u))))
-
-
-#define hashstr(t,str)		hashpow2(t, (str)->hash)
-#define hashboolean(t,p)	hashpow2(t, p)
-
-
-#define hashpointer(t,p)	hashmod(t, point2uint(p))
+#define hashmod(size,n)	((n) % (((size) - 1u) | 1u))
 
 
 /*
@@ -144,12 +137,12 @@ static const TValue absentkey = {ABSTKEYCONSTANT};
 ** remainder, which is faster. Otherwise, use an unsigned-integer
 ** remainder, which uses all bits and ensures a non-negative result.
 */
-static Node *hashint (const Table *t, lua_Integer i) {
+static unsigned hashint (unsigned size, lua_Integer i) {
   lua_Unsigned ui = l_castS2U(i);
   if (ui <= cast_uint(INT_MAX))
-    return gnode(t, cast_int(ui) % cast_int((sizenode(t)-1) | 1));
+    return hashmod(size, cast_uint(ui));
   else
-    return hashmod(t, ui);
+    return cast_uint(hashmod(size, ui));
 }
 
 
@@ -187,41 +180,23 @@ static unsigned l_hashfloat (lua_Number n) {
 ** returns the 'main' position of an element in a table (that is,
 ** the index of its hash value).
 */
-static Node *mainpositionTV (const Table *t, const TValue *key) {
+static unsigned mainindex (unsigned size, const TValue *key) {
   switch (ttypetag(key)) {
-    case LUA_VNUMINT: {
-      lua_Integer i = ivalue(key);
-      return hashint(t, i);
-    }
-    case LUA_VNUMFLT: {
-      lua_Number n = fltvalue(key);
-      return hashmod(t, l_hashfloat(n));
-    }
-    case LUA_VSHRSTR: {
-      TString *ts = tsvalue(key);
-      return hashstr(t, ts);
-    }
-    case LUA_VLNGSTR: {
-      TString *ts = tsvalue(key);
-      return hashpow2(t, luaS_hashlongstr(ts));
-    }
-    case LUA_VFALSE:
-      return hashboolean(t, 0);
-    case LUA_VTRUE:
-      return hashboolean(t, 1);
-    case LUA_VLIGHTUSERDATA: {
-      void *p = pvalue(key);
-      return hashpointer(t, p);
-    }
-    case LUA_VLCF: case LUA_VMCF: {
-      lua_CFunction f = fvalue(key);
-      return hashpointer(t, f);
-    }
-    default: {
-      GCObject *o = gcvalue(key);
-      return hashpointer(t, o);
-    }
+    case LUA_VNUMINT: return hashint(size, ivalue(key));
+    case LUA_VNUMFLT: return hashmod(size, l_hashfloat(fltvalue(key)));
+    case LUA_VSHRSTR: return lmod(tsvalue(key)->hash, size);
+    case LUA_VLNGSTR: return lmod(luaS_hashlongstr(tsvalue(key)), size);
+    case LUA_VFALSE: return 0;
+    case LUA_VTRUE: return lmod(1u, size);
+    case LUA_VLIGHTUSERDATA: return hashmod(size, point2uint(pvalue(key)));
+    case LUA_VLCF: case LUA_VMCF: return hashmod(size, point2uint(fvalue(key)));
+    default: return hashmod(size, point2uint(gcvalue(key)));
   }
+}
+
+
+l_sinline Node *mainpositionTV (const Table *t, const TValue *key) {
+  return gnode(t, mainindex(sizenode(t), key));
 }
 
 
@@ -251,39 +226,43 @@ l_sinline Node *mainpositionfromnode (const Table *t, Node *nd) {
 ** anything.  (In particular, 'next' will return some other valid item
 ** on the table or nil.)
 */
-static int equalkey (const TValue *k1, const Node *n2, int deadok) {
-  if (rawtt(k1) != keytt(n2)) {  /* not the same variants? */
-    if (keyisshrstr(n2) && ttislngstring(k1)) {
+static int equalkeybits (const TValue *k1, lu_byte tag, Value bits, int deadok) {
+  if (rawtt(k1) != tag) {  /* not the same variants? */
+    if (tag == ctb(LUA_VSHRSTR) && ttislngstring(k1)) {
       /* an external string can be equal to a short-string key */
-      return luaS_eqstr(tsvalue(k1), keystrval(n2));
+      return luaS_eqstr(tsvalue(k1), gco2ts(gcvalueraw(bits)));
     }
-    else if (tagislcf(keytt(n2)) && ttislcf(k1))
-      return fvalue(k1) == fvalueraw(keyval(n2));
-    else if (deadok && keyisdead(n2) && iscollectable(k1)) {
+    else if (tagislcf(tag) && ttislcf(k1))
+      return fvalue(k1) == fvalueraw(bits);
+    else if (deadok && tag == LUA_TDEADKEY && iscollectable(k1)) {
       /* a collectable value can be equal to a dead key */
-      return gcvalue(k1) == gcvalueraw(keyval(n2));
+      return gcvalue(k1) == gcvalueraw(bits);
    }
    else
      return 0;  /* otherwise, different variants cannot be equal */
   }
   else {  /* equal variants */
-    switch (keytt(n2)) {
+    switch (tag) {
       case LUA_VNIL: case LUA_VFALSE: case LUA_VTRUE:
         return 1;
       case LUA_VNUMINT:
-        return (ivalue(k1) == keyival(n2));
+        return ivalue(k1) == ivalueraw(bits);
       case LUA_VNUMFLT:
-        return luai_numeq(fltvalue(k1), fltvalueraw(keyval(n2)));
+        return luai_numeq(fltvalue(k1), fltvalueraw(bits));
       case LUA_VLIGHTUSERDATA:
-        return pvalue(k1) == pvalueraw(keyval(n2));
+        return pvalue(k1) == pvalueraw(bits);
       case LUA_VLCF: case LUA_VMCF: case LUA_VBCF:
-        return fvalue(k1) == fvalueraw(keyval(n2));
+        return fvalue(k1) == fvalueraw(bits);
       case ctb(LUA_VLNGSTR):
-        return luaS_eqstr(tsvalue(k1), keystrval(n2));
+        return luaS_eqstr(tsvalue(k1), gco2ts(gcvalueraw(bits)));
       default:
-        return gcvalue(k1) == gcvalueraw(keyval(n2));
+        return gcvalue(k1) == gcvalueraw(bits);
     }
   }
+}
+
+l_sinline int equalkey (const TValue *k1, const Node *n2, int deadok) {
+  return equalkeybits(k1, keytt(n2), keyval(n2), deadok);
 }
 
 
@@ -1052,7 +1031,7 @@ static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
 
 
 static const TValue *getintfromhash (Table *t, lua_Integer key) {
-  Node *n = hashint(t, key);
+  Node *n = gnode(t, hashint(sizenode(t), key));
   lua_assert(!ikeyinarray(t, key));
   for (;;) {  /* check whether 'key' is somewhere in the chain */
     if (keyisinteger(n) && keyival(n) == key)
@@ -1328,61 +1307,93 @@ typedef struct LuaTableSlot {
   Value *payload;
   lu_byte *tag;
   Node *node;
-  uint64_t sequence;
 } LuaTableSlot;
 
-/* No storage pointer from this snapshot survives a wait. Admission retains
-** old buffers; validate header and key bits before comparing candidates. */
-static int locateslot (Table *table, const TValue *key, LuaTableSlot *slot) {
-  Table view;
-  TValue normalized;
-  Node *node = NULL;
-  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
-  unsigned k, steps;
-  if (layout & 1) return 0;
-  slot->payload = NULL;
-  slot->node = NULL;
-  slot->sequence = layout;
-  view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-  view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
-  view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
-  if (ttisnil(key)) return 0;
-  if (ttisfloat(key)) {
-    lua_Integer integer;
-    if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
-      setivalue(&normalized, integer);
-      key = &normalized;
-    }
-  }
-  k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
-  if (k != 0) {
-    slot->payload = getArrVal(&view, k - 1);
-    slot->tag = getArrTag(&view, k - 1);
-  }
-  else {
-    node = mainpositionTV(&view, key);
-    for (steps = 0; steps < sizenode(&view); steps++) {
-      Node snapshot;
-      ptrdiff_t next;
-      __atomic_load(&node->u.key_val, &snapshot.u.key_val, __ATOMIC_ACQUIRE);
-      snapshot.u.key_tt = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
-      snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
-      if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != layout) return 0;
-      if (equalkey(key, &snapshot, 0)) {
+static int sameversion (Table *table, uint64_t sequence) {
+  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence;
+}
+
+/* Admission retains the image and its immutable capacity. Compare scalar
+** and interned keys as raw bits. Validate before comparing a candidate that
+** might require dereferencing it, and bound every link to the retained image. */
+l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
+                            uint64_t layout, LuaTableSlot *slot) {
+  Node *base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  unsigned size = twoto(base->u.lsize);
+  unsigned index, steps;
+  if (scalar == LUA_VNUMINT) index = hashint(size, ivalue(key));
+  else if (scalar == ctb(LUA_VSHRSTR)) index = lmod(tsvalue(key)->hash, size);
+  else index = mainindex(size, key);
+  for (steps = 0; steps < size; steps++) {
+    Node *node = base + index;
+    lu_byte tag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
+    int next;
+    if (!scalar || tag == scalar) {
+      Value bits;
+      int match;
+      __atomic_load(&node->u.key_val, &bits, __ATOMIC_ACQUIRE);
+      if (scalar == LUA_VNUMINT)
+        match = ivalueraw(bits) == ivalue(key);
+      else if (scalar == ctb(LUA_VSHRSTR))
+        match = memcmp(&bits, &val_(key).gc, sizeof(bits.gc)) == 0;
+      else {
+        if (!sameversion(table, layout)) return 0;
+        match = equalkeybits(key, tag, bits, 0);
+      }
+      if (match) {
+        if (!sameversion(table, layout)) return 0;
         slot->payload = &node->u.value_;
         slot->tag = &node->u.tt_;
         slot->node = node;
-        break;
+        return 1;
       }
-      if (snapshot.u.next == 0) return 0;
-      next = node - view.node + snapshot.u.next;
-      if (next < 0 || cast(size_t, next) >= sizenode(&view)) return 0;
-      node = view.node + next;
     }
-    if (slot->payload == NULL) return 0;
+    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (!sameversion(table, layout)) return 0;
+    if (next == 0) return 1;
+    index += cast_uint(next);
+    if (index >= size) return 0;
   }
-  return 1;
+  return 0;
+}
+
+l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
+                             LuaTableSlot *slot) {
+  unsigned asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
+  unsigned k = checkrange(ivalue(key), asize);
+  if (k != 0) {
+    Value *array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
+    if (!sameversion(table, layout)) return 0;
+    slot->payload = array - k;
+    slot->tag = cast(lu_byte *, array) + sizeof(unsigned) + k - 1;
+    return 1;
+  }
+  return findhashslot(table, key, LUA_VNUMINT, layout, slot);
+}
+
+static int __attribute__((noinline)) locategeneric (
+    Table *table, const TValue *key, uint64_t layout, LuaTableSlot *slot) {
+  lua_Integer integer;
+  if (ttisnil(key)) return 1;
+  if (ttisfloat(key) && luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
+    TValue normalized;
+    setivalue(&normalized, integer);
+    return locateinteger(table, &normalized, layout, slot);
+  }
+  return findhashslot(table, key, 0, layout, slot);
+}
+
+/* One probe serves shared reads, existing-slot writes and their retries.
+** Success with a NULL payload is a miss. No slot survives a safepoint. */
+l_sinline int __attribute__((always_inline)) locateslot (
+    Table *table, const TValue *key, lu_byte type, uint64_t layout,
+    LuaTableSlot *slot) {
+  slot->payload = NULL;
+  slot->node = NULL;
+  if (type == LUA_VNUMINT) return locateinteger(table, key, layout, slot);
+  if (type == ctb(LUA_VSHRSTR))
+    return findhashslot(table, key, ctb(LUA_VSHRSTR), layout, slot);
+  return locategeneric(table, key, layout, slot);
 }
 
 /* Keep the shared snapshot's frame out of ordinary private assignments. */
@@ -1392,12 +1403,15 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   LuaTableSlot slot;
   LuaTableWriter *writer;
   Node *node;
+  uint64_t layout;
   if (luaW_stopped(&G(L)->world) ||
       (gettableflags(table) & LUA_TABLE_STRING_INDEX) ||
-      !published(key) || !published(value) || !luaH_strongaccess(L, table) ||
-      !locateslot(table, key, &slot)) return 0;
+      !published(key) || !published(value) || !luaH_strongaccess(L, table)) return 0;
+  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  if ((layout & 1) || !locateslot(table, key, rawtt(key), layout, &slot) ||
+      slot.payload == NULL) return 0;
   node = slot.node;
-  writer = luaH_claimwriter(L, table, slot.payload, slot.sequence);
+  writer = luaH_claimwriter(L, table, slot.payload, layout);
   if (writer == NULL) {
     LuaTableWriter *row = luaH_writer(G(L), slot.payload);
     if (busy != NULL &&
@@ -1409,7 +1423,7 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   if ((!raw && tagisempty(*slot.tag) && table->metatable != NULL) ||
       (node != NULL && ttisnil(value) && keyiscollectable(node)) ||
       (*slot.tag != rawtt(value) &&
-       !luaH_beginsplit(table, writer, slot.payload, slot.sequence))) {
+       !luaH_beginsplit(table, writer, slot.payload, layout))) {
     luaH_releasewriter(L, table, writer);
     return 0;
   }
@@ -1686,52 +1700,34 @@ static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
       __atomic_load_n(&table->gcweak, __ATOMIC_ACQUIRE));
 }
 
-static int sameversion (Table *table, uint64_t sequence) {
-  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence;
-}
-
-/* Admission retains the hash image and its immutable capacity. Before
-** validating the layout, follow only bounded links and compare raw key bits.
-** Read each mutable component with acquire ordering so that observing a
-** structural write also observes its preceding odd sequence. */
-static int readshortstr (global_State *g, Table *table, TString *key,
-                         TValue *result, lu_byte *tag, uint64_t sequence) {
-  Node *base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  unsigned size = twoto(base->u.lsize);
-  unsigned index = lmod(key->hash, size), steps;
-  for (steps = 0; steps < size; steps++) {
-    const Node *node = base + index;
-    Value candidate;
-    int next;
-    lu_byte keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
-    if (keytag == ctb(LUA_VSHRSTR)) {
-      TValue value;
-      __atomic_load(&node->u.key_val, &candidate, __ATOMIC_ACQUIRE);
-      if (memcmp(&candidate, &key, sizeof(key)) == 0) {
-        if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, sequence) ||
-            !sameversion(table, sequence)) return 0;
-        *tag = finishnodeget(&value, result);
-        return 1;
-      }
-    }
-    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
-    if (next == 0) {
-      if (!sameversion(table, sequence)) return 0;
-      *tag = LUA_VABSTKEY;
-      return 1;
-    }
-    index += cast_uint(next);
-    if (index >= size || !sameversion(table, sequence)) return 0;
+l_sinline int readslot (global_State *g, lua_State *L, Table *table,
+                        const LuaTableSlot *slot, uint64_t sequence,
+                        TValue *result, lu_byte *tag) {
+  TValue value;
+  if (slot->payload == NULL) {
+    *tag = LUA_VABSTKEY;
+    return 1;
   }
-  return 0;
+  if (!luaH_readvalue(g, slot->payload, slot->tag, &value, sequence) ||
+      !sameversion(table, sequence)) return 0;
+  if (slot->node != NULL) *tag = finishnodeget(&value, result);
+  else {
+    *tag = rawtt(&value);
+    if (!tagisempty(*tag)) setobj(L, result, &value);
+  }
+  return 1;
 }
 
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
                        TValue *result) {
+  LuaTableSlot slot;
+  TValue index;
   lu_byte tag;
   uint64_t sequence;
+  setsvalue(L, &index, key);
   if (!readsequence(L, table, &sequence) ||
-      !readshortstr(g, table, key, result, &tag, sequence)) return 0;
+      !locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot) ||
+      !readslot(g, L, table, &slot, sequence, result, &tag)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }
@@ -1771,88 +1767,6 @@ unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, un
   return found;
 }
 
-static int readinteger (lua_State *L, Table *table, lua_Integer key,
-                        TValue *result, lu_byte *tag, uint64_t sequence) {
-  Value *array;
-  TValue value;
-  unsigned asize, k;
-  asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
-  k = checkrange(key, asize);
-  if (k == 0) return 0;  /* the general view handles hash integer keys */
-  array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-  if (!sameversion(table, sequence)) return 0;
-  if (!luaH_readvalue(G(L), array - k,
-        cast(lu_byte *, array) + sizeof(unsigned) + k - 1, &value, sequence)) return 0;
-  if (!sameversion(table, sequence)) return 0;
-  *tag = rawtt(&value);
-  if (!tagisempty(*tag)) setobj(L, result, &value);
-  return 1;
-}
-
-/* An optimistic operation has no safepoint, allocator, or ownership update.
-** Its admission epoch retains replaced buffers. Every loaded component is
-** atomic; an acquire of a writer's component observes its preceding odd
-** sequence. Validate key snapshots before they can dereference pointers. */
-static int optimistic (lua_State *L, Table *table, const TValue *key,
-                        TValue *result, lu_byte *tag, uint64_t sequence) {
-  Table view;
-  TValue normalized;
-  unsigned k, steps;
-  Node *node;
-  view.array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-  view.asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
-  view.node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
-    return 0;
-  if (ttisnil(key)) { *tag = LUA_VABSTKEY; return 1; }
-  if (ttisfloat(key)) {
-    lua_Integer integer;
-    if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
-      setivalue(&normalized, integer);
-      key = &normalized;
-    }
-  }
-  k = ttisinteger(key) ? ikeyinarray(&view, ivalue(key)) : 0;
-  if (k != 0) {
-    TValue value;
-    if (!luaH_readvalue(G(L), getArrVal(&view, k - 1), getArrTag(&view, k - 1),
-                        &value, sequence)) return 0;
-    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
-      return 0;
-    *tag = rawtt(&value);
-    if (!tagisempty(*tag)) setobj(L, result, &value);
-    return 1;
-  }
-  node = mainpositionTV(&view, key);
-  for (steps = 0; steps < sizenode(&view); steps++) {
-    Node snapshot;
-    __atomic_load(&node->u.key_val, &snapshot.u.key_val, __ATOMIC_ACQUIRE);
-    snapshot.u.key_tt = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
-    snapshot.u.next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
-    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
-      return 0;
-    if (equalkey(key, &snapshot, 0)) {
-      if (!luaH_readvalue(G(L), &node->u.value_, &node->u.tt_, gval(&snapshot), sequence) ||
-          !sameversion(table, sequence)) return 0;
-      *tag = finishnodeget(gval(&snapshot), result);
-      return 1;
-    }
-    if (snapshot.u.next == 0) {
-      *tag = LUA_VABSTKEY;
-      return 1;
-    }
-    /* A validated link belongs to this image. Keep arithmetic inside its
-    ** allocation even if a writer begins immediately after validation. */
-    {
-      ptrdiff_t index = node - view.node;
-      ptrdiff_t next = index + snapshot.u.next;
-      if (next < 0 || cast(size_t, next) >= sizenode(&view)) return 0;
-      node = view.node + next;
-    }
-  }
-  return 0;
-}
-
 /* Keep roots and parking out of private read frames. A caller's result may
 ** name a Lua register, so rebase it after waits which can relocate the stack. */
 static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
@@ -1879,17 +1793,18 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
     uint64_t sequence;
     if (!luaH_strongaccess(L, table)) break;
     if (luaH_waitlayout(L, table)) continue;
-    if (readsequence(L, table, &sequence) &&
-        optimistic(L, table, &rooted_key.value, &snapshot, &tag, sequence)) {
-      if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
-      goto done;
-    }
-    if (!locateslot(table, &rooted_key.value, &slot)) {
+    if (!readsequence(L, table, &sequence) ||
+        !locateslot(table, &rooted_key.value, rawtt(&rooted_key.value),
+                    sequence, &slot)) {
       if (__atomic_load_n(&table->access.owner, __ATOMIC_SEQ_CST) == luaX_token(L))
         break;
       continue;
     }
-    writer = luaH_claimwriter(L, table, slot.payload, slot.sequence);
+    if (readslot(G(L), L, table, &slot, sequence, &snapshot, &tag)) {
+      if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
+      goto done;
+    }
+    writer = luaH_claimwriter(L, table, slot.payload, sequence);
     if (writer != NULL) {
       /* A failed optimistic read needs the element guard, not ownership of
       ** every element. Root the stable value before releasing that guard. */
@@ -1937,20 +1852,25 @@ static lu_byte finishread (lua_State *L, Table *t, TValue *res, lu_byte tag,
   return LUA_VABSTKEY;
 }
 
+l_sinline int __attribute__((always_inline)) trygetshared (
+    lua_State *L, Table *t, const TValue *key, lu_byte type, TValue *res,
+    lu_byte *tag) {
+  LuaTableSlot slot;
+  uint64_t sequence;
+  if (!readsequence(L, t, &sequence) ||
+      !locateslot(t, key, type, sequence, &slot) ||
+      !readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
+  *tag = finishread(L, t, res, *tag, 0, sequence);
+  return 1;
+}
+
 int luaH_tryget (lua_State *L, Table *t, const TValue *key, TValue *res,
                  lu_byte *tag) {
-  uint64_t sequence;
   if (luaA_localtable(L, t)) {
     *tag = finishread(L, t, res, luaH_getowned(t, key, res), 1, 0);
     return 1;
   }
-  if (!readsequence(L, t, &sequence)) return 0;
-  if (!(ttisshrstring(key) && readshortstr(G(L), t, tsvalue(key), res, tag, sequence)) &&
-      !(ttisinteger(key) && readinteger(L, t, ivalue(key), res, tag, sequence)) &&
-      !optimistic(L, t, key, res, tag, sequence))
-    return 0;
-  *tag = finishread(L, t, res, *tag, 0, sequence);
-  return 1;
+  return trygetshared(L, t, key, rawtt(key), res, tag);
 }
 
 /* Complete mutator operations. Encoded slots never cross an unlock. */
@@ -1963,17 +1883,12 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
 int luaH_trygetint (lua_State *L, Table *t, lua_Integer key, TValue *res,
                      lu_byte *tag) {
   TValue index;
-  uint64_t sequence;
   if (luaA_localtable(L, t)) {
     *tag = finishread(L, t, res, rawgetint(t, key, res), 1, 0);
     return 1;
   }
-  if (!readsequence(L, t, &sequence)) return 0;
   setivalue(&index, key);
-  if (!readinteger(L, t, key, res, tag, sequence) &&
-      !optimistic(L, t, &index, res, tag, sequence)) return 0;
-  *tag = finishread(L, t, res, *tag, 0, sequence);
-  return 1;
+  return trygetshared(L, t, &index, LUA_VNUMINT, res, tag);
 }
 
 lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
@@ -1986,19 +1901,14 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
 
 int luaH_trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
                       lu_byte *tag) {
-  uint64_t sequence;
+  TValue index;
   if (luaA_localtable(L, t)) {
     *tag = finishread(L, t, res, rawgetstr(t, key, res), 1, 0);
     return 1;
   }
-  if (!readsequence(L, t, &sequence)) return 0;
-  if (!strisshr(key) || !readshortstr(G(L), t, key, res, tag, sequence)) {
-    TValue index;
-    setsvalue(L, &index, key);
-    if (!optimistic(L, t, &index, res, tag, sequence)) return 0;
-  }
-  *tag = finishread(L, t, res, *tag, 0, sequence);
-  return 1;
+  setsvalue(L, &index, key);
+  return trygetshared(L, t, &index, strisshr(key) ? ctb(LUA_VSHRSTR) :
+                      ctb(LUA_VLNGSTR), res, tag);
 }
 
 lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {

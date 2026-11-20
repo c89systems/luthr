@@ -800,12 +800,14 @@ static void *mixed_writer(void *argument) {
     }
     lua_pushvalue(state, -1);
     lua_setfield(state, 1, "value");
+    lua_pushvalue(state, -1);
+    lua_rawseti(state, 1, -1);
     lua_rawseti(state, 1, 1);
     if (i % 31 == 0) {
       Table *table;
       luaX_lockstate(state);
       table = hvalue(s2v(state->stack.p + 1));
-      luaH_resize(state, table, i % 62 ? 8 : 32, i % 62 ? 2 : 64);
+      luaH_resize(state, table, i % 62 ? 8 : 32, i % 62 ? 8 : 64);
       luaX_unlockstate(state);
     }
     if (i % 113 == 0)
@@ -831,6 +833,17 @@ static void *mixed_reader(void *argument) {
     lua_pop(state, 1);
     lua_rawgeti(state, 1, 1);
     check_value(state, test->marker);
+    lua_rawgeti(state, 1, -1);
+    check_value(state, test->marker);
+    lua_pushnumber(state, -64.0);
+    require(lua_gettable(state, 1) == LUA_TNUMBER);
+    require(lua_tointeger(state, -1) == 42);
+    lua_pop(state, 1);
+    require(lua_rawgeti(state, 1, -127) == LUA_TNIL);
+    lua_pop(state, 1);
+    require(lua_rawgeti(state, 1, 16) == LUA_TNUMBER);
+    require(lua_tointeger(state, -1) == 84);
+    lua_pop(state, 1);
   }
   return NULL;
 }
@@ -858,7 +871,7 @@ static void mixed(lua_State *state, int generational) {
   lua_pushinteger(state, LUA_MAXINTEGER);
   lua_setfield(state, 1, "value");
   /* Exercise both a collision-chain hit and a miss while both capacities
-   * are in use. These keys share a bucket at either two or 64 nodes. */
+   * are in use. These keys share a bucket at either eight or 64 nodes. */
   bucket = short_bucket(state, "value");
   for (i = 0;; i++) {
     snprintf(test.collision, sizeof(test.collision), "collision-%u", i);
@@ -874,6 +887,14 @@ static void mixed(lua_State *state, int generational) {
   lua_setfield(state, 1, test.collision);
   lua_pushinteger(state, LUA_MININTEGER);
   lua_rawseti(state, 1, 1);
+  /* Differences of 63 produce the same integer bucket at both capacities. */
+  lua_pushinteger(state, LUA_MININTEGER);
+  lua_rawseti(state, 1, -1);
+  lua_pushinteger(state, 42);
+  lua_rawseti(state, 1, -64);
+  /* This key moves between the array and hash as the writer resizes. */
+  lua_pushinteger(state, 84);
+  lua_rawseti(state, 1, 16);
   memset(value, 'z', sizeof(value));
   lua_pushlstring(state, value, sizeof(value));
   lua_newtable(state);
