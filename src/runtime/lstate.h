@@ -672,13 +672,20 @@ l_sinline LuaExecution *luaX_execution (lua_State *L) {
 }
 
 l_sinline LuaThreadContext *luaX_hostcontext (lua_State *L) {
-  return L->stack_gate.host != NULL ? L->stack_gate.host : &luaE_thread_context;
+  NativeStackContext *context = L->stack_gate.context;
+  if (context != NULL && context->execution == NULL) {
+    /* An unmanaged owner token names the host's first member, even when
+    ** an override supplies the logical stack context. */
+    uintptr_t word = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+    return cast(LuaThreadContext *, luaX_gateowner(word));
+  }
+  return &luaE_thread_context;
 }
 
 l_sinline void *luaX_token (lua_State *L) {
-  return L->stack_gate.context != NULL
-    ? __atomic_load_n(&L->stack_gate.owner.token, __ATOMIC_RELAXED)
-    : luaQ_ownertoken();
+  uintptr_t word = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+  void *owner = luaX_gateowner(word);
+  return owner != NULL ? owner : luaQ_ownertoken();
 }
 
 l_sinline int luaX_isowner (lua_State *L, const LuaOwner *owner) {

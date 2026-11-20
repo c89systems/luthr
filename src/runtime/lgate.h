@@ -11,19 +11,26 @@
 
 struct LuaGateWaiter;
 
-/* The same word owns the stack and publishes managed participation. A queued
-** gate stays unavailable to fresh callers until its FIFO head takes it. */
-enum { LUA_GATE_HELD = 1, LUA_GATE_ACTIVE = 2, LUA_GATE_WAITING = 4 };
+/* The atomic word holds the aligned owner token and two low bits. An owner
+** can withdraw collector participation while retaining the stack. WAITING
+** reserves an unowned gate for its FIFO head. */
+enum {
+  LUA_GATE_ACTIVE = 1,
+  LUA_GATE_WAITING = 2,
+  LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING
+};
 
 typedef struct LuaStackGate {
-  LuaOwner owner;
+  uintptr_t word;
   struct NativeStackContext *context;  /* current reservation's logical stack */
-  struct LuaThreadContext *host;  /* unmanaged reservation only; never migrates */
   struct LuaGateWaiter *head;
   struct LuaGateWaiter **tail;
-  unsigned status;  /* atomic ownership, participation and waiter handshake */
   int ready;
 } LuaStackGate;
+
+l_sinline void *luaX_gateowner (uintptr_t word) {
+  return cast(void *, word & ~cast(uintptr_t, LUA_GATE_FLAGS));
+}
 
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);

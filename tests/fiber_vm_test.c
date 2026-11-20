@@ -131,7 +131,7 @@ static void poll(lua_State *state, void *user) {
   struct task *task = user;
   if (luaX_context(state) != &task->fiber.native ||
       luaX_execution(state) != &task->fiber.execution ||
-      state->stack_gate.host != NULL)
+      luaX_token(state) != &task->fiber.execution)
     abort();
   verify_rounding(task->rounding);
   if (!migratable(state)) {
@@ -159,7 +159,7 @@ static void poll(lua_State *state, void *user) {
   luaW_attach(state, task->world);
   if (state->luthr_stack_context != &task->fiber.native ||
       luaX_context(state) != &task->fiber.native ||
-      state->stack_gate.host != NULL)
+      luaX_token(state) != &task->fiber.execution)
     abort();
   verify_rounding(task->rounding);
 }

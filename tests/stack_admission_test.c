@@ -63,8 +63,8 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
   }
   __real_luaQ_wait(state, mutex, changed, waiters);
   if (measured && role == 1 && !fixture->paused &&
-      (__atomic_load_n(&state->stack_gate.status, __ATOMIC_ACQUIRE) &
-       LUA_GATE_HELD) == 0) {
+      __atomic_load_n(&state->stack_gate.word, __ATOMIC_ACQUIRE) ==
+          LUA_GATE_WAITING) {
     /* Delay the selected recipient after wakeup, before it can claim its
      * reservation. A fresh API caller must queue behind it and its successor.
      */
@@ -109,6 +109,7 @@ static void fifo(lua_State *parent, struct fixture *fixture) {
   }
   luaX_unlockstate(fixture->state);
   wait_flag(fixture, &fixture->paused);
+  require(luaX_tryreserve(fixture->state) == 0);
   calls[2].fixture = fixture;
   calls[2].role = 3;
   require(pthread_create(&threads[2], NULL, invoke, &calls[2]) == 0);
@@ -137,6 +138,8 @@ static void retire(lua_State *parent, struct fixture *fixture) {
   wait_flag(fixture, &fixture->paused);
   /* The departing API has released its gate and admission. Its delayed
    * notification must not dereference the now unreachable coroutine again. */
+  require(__atomic_load_n(&fixture->state->stack_gate.word, __ATOMIC_ACQUIRE) ==
+          0);
   lua_pop(parent, 1);
   lua_gc(parent, LUA_GCCOLLECT);
   lua_rawgeti(parent, 1, 1);

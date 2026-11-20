@@ -68,7 +68,10 @@ static void owned(lua_State *state, int managed) {
   luaX_lockstate(state);
   require(luaX_context(state) == &native);
   require(luaX_execution(state) == (managed ? &execution : NULL));
-  require(state->stack_gate.host == (managed ? NULL : &luaE_thread_context));
+  require(luaX_token(state) ==
+          (managed ? (void *)&execution : (void *)&luaE_thread_context.native));
+  if (!managed)
+    require(luaX_hostcontext(state) == &luaE_thread_context);
   table = hvalue(s2v(state->top.p - 1));
   setivalue(&key, 1);
   luaC_entergc(state, &frame);
@@ -92,7 +95,7 @@ static void owned(lua_State *state, int managed) {
   require(lookups == 0 && configurations >= 2000);
   luaC_leavegc(state, &frame);
   luaX_unlockstate(state);
-  require(state->stack_gate.context == NULL && state->stack_gate.host == NULL);
+  require(state->stack_gate.context == NULL && state->stack_gate.word == 0);
   luaCP_end(&scope);
   luaX_lockstate(state);
   luaCP_bind(state, NULL);
@@ -118,10 +121,10 @@ static void reservations(lua_State *state, int paired) {
   require(reservation == (paired ? 2 : 1));
   require(luaX_context(other) == &native &&
           luaX_execution(other) == &execution);
-  require(luaX_token(other) == luaX_token(state));
-  require(other->stack_gate.host == NULL);
+  require(luaX_token(other) == &execution && luaX_token(state) == &execution);
   luaX_endreserve(other, reservation);
   require((other->stack_gate.context != NULL) == paired);
+  require((other->stack_gate.word != 0) == paired);
   require(luaX_execution(state) == &execution);
   if (paired)
     luaX_unlockpair(other, state);
@@ -207,16 +210,17 @@ static void foreign(lua_State *state) {
   require(execution.native_depth == 0 && test.native_leaves == 1);
   luaE_setnativestackcontext(previous);
   require(pthread_create(&second, NULL, second_owner, &test) == 0);
-  while ((__atomic_load_n(&state->stack_gate.status, __ATOMIC_ACQUIRE) &
+  while ((__atomic_load_n(&state->stack_gate.word, __ATOMIC_ACQUIRE) &
           LUA_GATE_WAITING) == 0)
     sched_yield();
+  require(luaX_tryreserve(state) == 0);
   require(pthread_mutex_lock(&test.mutex) == 0);
   test.release = 1;
   require(pthread_cond_broadcast(&test.changed) == 0);
   require(pthread_mutex_unlock(&test.mutex) == 0);
   require(pthread_join(first, NULL) == 0);
   require(pthread_join(second, NULL) == 0);
-  require(state->stack_gate.context == NULL && state->stack_gate.host == NULL);
+  require(state->stack_gate.context == NULL && state->stack_gate.word == 0);
   lua_pushinteger(state, 42);
   require(lua_tointeger(state, -1) == 42);
   require(pthread_cond_destroy(&test.changed) == 0);
@@ -266,7 +270,7 @@ static void publication(lua_State *state) {
   luaX_unlockstate(state);
   require(pthread_join(entrant, NULL) == 0);
   require(lua_tointeger(other, -1) == 42);
-  require(other->stack_gate.context == NULL && other->stack_gate.host == NULL);
+  require(other->stack_gate.context == NULL && other->stack_gate.word == 0);
 }
 
 int main(int argc, char **argv) {

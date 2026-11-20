@@ -154,26 +154,27 @@ unsigned luaW_activecount (LuaWorld *world) {
 }
 
 unsigned luaW_active (const LuaParticipation *participant) {
-  return (__atomic_load_n(&participant->thread->stack_gate.status,
+  return (__atomic_load_n(&participant->thread->stack_gate.word,
                            __ATOMIC_SEQ_CST) & LUA_GATE_ACTIVE) != 0;
 }
 
 void luaW_activate (lua_State *L) {
-  unsigned previous = __atomic_fetch_or(
-    &L->admission->thread->stack_gate.status, LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
-  lua_assert((previous & (LUA_GATE_HELD | LUA_GATE_ACTIVE)) == LUA_GATE_HELD);
+  uintptr_t previous = __atomic_fetch_or(
+    &L->admission->thread->stack_gate.word, LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
+  lua_assert(luaX_gateowner(previous) != NULL && !(previous & LUA_GATE_ACTIVE));
   UNUSED(previous);
 }
 
 static void withdraw (lua_State *L) {
-  unsigned previous;
+  uintptr_t previous;
   /* Every withdrawal here holds world.mutex and retains its stack gate.
   ** A scanner may borrow these stable roots under that mutex, including
   ** when the owner cannot resume until a collection finishes. */
   L->root_waiting = 1;
   if (L->stack_peer != NULL) L->stack_peer->root_waiting = 1;
-  previous = __atomic_fetch_and(&L->admission->thread->stack_gate.status,
-                                ~LUA_GATE_ACTIVE, __ATOMIC_SEQ_CST);
+  previous = __atomic_fetch_and(&L->admission->thread->stack_gate.word,
+                                ~cast(uintptr_t, LUA_GATE_ACTIVE),
+                                __ATOMIC_SEQ_CST);
   lua_assert(previous & LUA_GATE_ACTIVE);
   UNUSED(previous);
 }
