@@ -366,7 +366,7 @@ target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
   -Wl,--wrap=luaC_scanstrong -Wl,--wrap=luaH_tracechunk -Wl,--wrap=luaC_traceedges
   -Wl,--wrap=luaC_finishstrong -Wl,--undefined=luaC_scanstrong)
 foreach(collector IN ITEMS incremental generational)
-  foreach(case IN ITEMS array metatable relocate pause first_write)
+  foreach(case IN ITEMS array metatable relocate pause first_write first_write_small)
     add_test(NAME gc_table_scan_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector})
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES

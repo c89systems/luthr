@@ -1014,16 +1014,26 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
 }
 
 
-lu_mem luaH_size (const Table *owner, Table *t) {
+l_sinline lu_mem hashbytes (const Table *owner, Node *nodes) {
+  return (nodes != &luaH_dummynode && separate(owner, hashbase(nodes)))
+    ? sizehash(nodes) : 0;
+}
+
+/* The caller holds the layout or provides a validated snapshot. */
+lu_mem luaH_size (const Table *owner, const Table *layout) {
   lu_mem sz = cast(lu_mem, sizeof(Table) + owner->inline_bytes);
-  unsigned i, parts = luaH_hashparts(t);
-  if (t->asize != 0 && separate(owner, t->array - t->asize))
-    sz += concretesize(t->asize);
-  if (parts > 1) sz += sizeof(LuaHashDirectory);
-  for (i = 0; i < parts; ++i) {
-    Node *nodes = luaH_hashnodes(t, i);
-    if (luaH_nodesize(nodes) != 0 && separate(owner, hashbase(nodes)))
-      sz += sizehash(nodes);
+  Node *image = layout->node;
+  LuaHashDirectory *directory = luaH_hashdir(image);
+  if (layout->asize != 0 && separate(owner, layout->array - layout->asize))
+    sz += concretesize(layout->asize);
+  if (directory == NULL) sz += hashbytes(owner, image);
+  else {
+    unsigned i;
+    sz += sizeof(*directory);
+    for (i = 0; i < LUA_HASH_PARTS; ++i) {
+      Node *nodes = __atomic_load_n(&directory->parts[i].nodes, __ATOMIC_ACQUIRE);
+      sz += hashbytes(owner, nodes);
+    }
   }
   return sz;
 }
@@ -2221,8 +2231,9 @@ int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key
 
 /* These are raw pointer representations until the caller validates the table
 ** sequence. Empty keys are retired by writers; scanning never edits storage. */
-unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, unsigned count,
-                         int hash, GCObject **edges) {
+l_sinline unsigned __attribute__((always_inline)) tracechunk (
+    global_State *g, const Table *view, unsigned first, unsigned count,
+    int hash, GCObject **edges) {
   unsigned i, found = 0;
   for (i = first; i < first + count; i++) {
     const Node *node = hash ? gnode(view, i) : NULL;
@@ -2252,6 +2263,16 @@ unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first, un
       return UINT_MAX;
   }
   return found;
+}
+
+unsigned luaH_tracechunk (global_State *g, const Table *view, unsigned first,
+                           unsigned count, int hash, GCObject **edges) {
+  /* Select the slot layout once when there are no split writes to validate. */
+  if (g == NULL) {
+    if (hash) return tracechunk(NULL, view, first, count, 1, edges);
+    else return tracechunk(NULL, view, first, count, 0, edges);
+  }
+  return tracechunk(g, view, first, count, hash, edges);
 }
 
 /* Keep roots and parking out of private read frames. A caller's result may

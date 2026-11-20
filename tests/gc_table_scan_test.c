@@ -205,7 +205,8 @@ int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   pthread_t marker, writer;
   struct timespec deadline;
-  unsigned i;
+  unsigned i, array_size;
+  int small;
   require((argc == 2 || argc == 3) && L != NULL);
   lua_gc(L, strstr(argv[1], "generational") ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCCOLLECT);
@@ -215,11 +216,14 @@ int main(int argc, char **argv) {
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
+  small = strncmp(argv[1], "first_write_small", 17) == 0;
+  array_size = small ? 2 : 128;
   probe.marker = lua_newthread(L);
   probe.writer = lua_newthread(L);
-  lua_createtable(L, probe.relocate || probe.fields ? 0 : 128,
+  lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
                   probe.relocate ? 64
                   : probe.fields ? 8
+                  : small        ? 2
                                  : 0);
   probe.table = (Table *)lua_topointer(L, -1);
   if (probe.relocate) {
@@ -248,11 +252,17 @@ int main(int argc, char **argv) {
     probe.removed = (GCObject *)lua_topointer(L, -1);
     lua_setfield(L, 3, "deleted");
   } else {
-    for (i = 1; i <= 128; i++) {
+    for (i = 1; i <= array_size; i++) {
       lua_newtable(L);
       lua_pushinteger(L, 42);
       lua_rawseti(L, -2, 1);
       lua_rawseti(L, 3, i);
+    }
+    if (small) {
+      lua_newtable(L);
+      lua_pushinteger(L, 44);
+      lua_rawseti(L, -2, 1);
+      lua_setfield(L, 3, "child");
     }
     if (strncmp(argv[1], "metatable", 9) == 0) {
       lua_newtable(L);
@@ -341,6 +351,11 @@ int main(int argc, char **argv) {
   if (probe.first_write) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TNUMBER);
     require(lua_tointeger(probe.writer, -1) == LUA_MININTEGER);
+    if (small) {
+      require(lua_getfield(probe.writer, probe.index, "child") == LUA_TTABLE);
+      require(lua_rawgeti(probe.writer, -1, 1) == LUA_TNUMBER);
+      require(lua_tointeger(probe.writer, -1) == 44);
+    }
   } else if (probe.fields) {
     require(lua_getfield(probe.writer, probe.index, "deleted") == LUA_TNIL);
     lua_pop(probe.writer, 1);

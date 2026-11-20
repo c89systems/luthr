@@ -192,7 +192,7 @@ LUAI_FUNC Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize);
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);
-LUAI_FUNC lu_mem luaH_size (const Table *owner, Table *layout);
+LUAI_FUNC lu_mem luaH_size (const Table *owner, const Table *layout);
 /* A dead table and its buffers can be freed by a sweep worker if all are
 ** pooled. Returning those blocks cannot enter the host allocator. */
 LUAI_FUNC size_t luaH_pooledsize (Table *t);

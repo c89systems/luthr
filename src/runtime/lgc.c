@@ -89,7 +89,8 @@ static lu_mem sweepwork (lua_State *L, lu_mem budget, int complete);
 static void waitcollection (lua_State *L);
 static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
-static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object);
+static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object,
+                       int quiescent);
 static void starttrace (lua_State *L, unsigned finish);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
 static void atomic2gen (lua_State *L, global_State *g);
@@ -912,7 +913,8 @@ static l_mem traverseLclosure (LuaTraceWork *work, LClosure *cl) {
 ** of the number of slots traversed.
 */
 
-static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
+static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o,
+                       int quiescent) {
   global_State *g = G(L);
   int reservation = 0;
   uintptr_t *sharing = luaA_sharing(o);
@@ -927,7 +929,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     lua_State *thread = gco2th(o);
     if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) !=
         g->trace_epoch) {
-      int reservation = luaW_iscollector(L) ? 2 : luaX_tryreserve(thread);
+      int reservation = quiescent ? 2 : luaX_tryreserve(thread);
       if (reservation == 0) {
         if (!luaC_snapshotparked(L, thread)) return 0;
       }
@@ -944,7 +946,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
   if (o->tt == LUA_VPROTO) {
     Proto *proto = gco2p(o);
     lua_State *builder = __atomic_load_n(&proto->builder, __ATOMIC_ACQUIRE);
-    int reservation = builder != NULL && !luaW_iscollector(L)
+    int reservation = builder != NULL && !quiescent
       ? luaX_tryreserve(builder) : 2;
     if (reservation == 0) {
       /* Even a cached snapshot needs stable ownership while consuming its
@@ -965,25 +967,25 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o) {
     else if (builder != NULL) luaX_endreserve(builder, reservation);
     return 1;
   }
-  if (!luaW_iscollector(L) && (o->tt == LUA_VUPVAL || o->tt == LUA_VLCL ||
+  if (!quiescent && (o->tt == LUA_VUPVAL || o->tt == LUA_VLCL ||
       o->tt == LUA_VCCL || o->tt == LUA_VUSERDATA)) {
     int scanned = luaC_scanvalues(L, work, o);
     if (scanned >= 0) return scanned;
   }
   if (o->tt == LUA_VUPVAL) {
     UpVal *upvalue = gco2upv(o);
-    lua_assert(luaW_iscollector(L));
+    lua_assert(quiescent);
     tracevalue(work, &upvalue->value);
     work->marked += sizeof(UpVal);
     blacken(work, o);
     genlink(work, o);
     return 1;
   }
-  if (o->tt == LUA_VTABLE && !luaW_iscollector(L)) {
+  if (o->tt == LUA_VTABLE && !quiescent) {
     int scanned = luaC_scanstrong(L, work, gco2t(o));
     if (scanned >= 0) return scanned;
   }
-  if (!luaW_iscollector(L) && !(reservation = luaA_tryscan(L, o))) return 0;
+  if (!quiescent && !(reservation = luaA_tryscan(L, o))) return 0;
   if (o->tt == LUA_VTABLE) {
     Table *table = gco2t(o);
     if (reservation && !preparemode(L, table)) {
@@ -1224,7 +1226,8 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   for (index = 0; index < work->count; index++, attempted++) {
     GCObject *object = work->objects[index];
     if (work->phase == TRACE_MARK) {
-      if (!scantrace(L, work, object)) queuework(&work->deferred, object);
+      if (!scantrace(L, work, object, quiescent))
+        queuework(&work->deferred, object);
     }
     else {
       int reservation = quiescent ? 0 : luaA_tryscan(L, object);
@@ -1246,7 +1249,8 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   while (work->gray.head != NULL && attempted++ < limit) {
     GCObject *object = work->gray.head;
     work->gray.head = *luaC_graylink(object);
-    if (!scantrace(L, work, object)) queuework(&work->deferred, object);
+    if (!scantrace(L, work, object, quiescent))
+      queuework(&work->deferred, object);
   }
 }
 
