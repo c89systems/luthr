@@ -172,18 +172,28 @@ void *luaQ_ownertoken (void) {
 ** The wait callback handles notification before outgoing context publication.
 ** Reacquire execution capacity without retaining the predicate mutex. */
 static void linkwaiter (LuaWaiter *waiter, LuaExecution *execution,
-                        LuaWaiter **waiters) {
+                        LuaWaiter **waiters, LuaWaitQueue *queue) {
   waiter->execution = execution;
-  waiter->next = *waiters;
-  waiter->link = waiters;
-  if (waiter->next != NULL) waiter->next->link = &waiter->next;
-  *waiters = waiter;
+  waiter->queue = queue;
+  if (queue != NULL) {
+    lua_assert(execution != NULL);
+    waiter->next = NULL;
+    waiter->link = queue->tail != NULL ? queue->tail : &queue->head;
+    queue->tail = &waiter->next;
+  }
+  else {
+    waiter->next = *waiters;
+    waiter->link = waiters;
+    if (waiter->next != NULL) waiter->next->link = &waiter->next;
+  }
+  *waiter->link = waiter;
 }
 
 static void unlinkwaiter (LuaWaiter *waiter) {
   if (waiter->link != NULL) {
     *waiter->link = waiter->next;
     if (waiter->next != NULL) waiter->next->link = waiter->link;
+    else if (waiter->queue != NULL) waiter->queue->tail = waiter->link;
     waiter->link = NULL;
   }
 }
@@ -221,7 +231,7 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
   LuaWaiter waiter;
   linkwaiter(&waiter,
     execution != NULL && execution->wait != NULL && execution->wake != NULL
-      ? execution : NULL, waiters);
+      ? execution : NULL, waiters, NULL);
   if (waiter.execution != NULL)
     waitregistered(L, mutex, changed, &waiter);
   else {
@@ -233,8 +243,8 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
   }
 }
 
-int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
-                    LuaWaiter **waiters) {
+static int waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
+                     LuaWaiter **waiters, LuaWaitQueue *queue) {
   LuaExecution *execution = luaQ_current();
   LuaTaskRoot *task;
   LuaWorld *world;
@@ -268,7 +278,7 @@ int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed
   task->stop_wait = &wait;
   linkwaiter(&wait.waiter,
     execution->wait != NULL && execution->wake != NULL ? execution : NULL,
-    waiters);
+    waiters, queue);
   if (!same) luaX_checksync(pthread_mutex_unlock(&world->mutex));
   waitregistered(L, mutex, changed, &wait.waiter);
   if (!same) luaX_checksync(pthread_mutex_lock(&world->mutex));
@@ -290,8 +300,29 @@ int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed
   }
   return stopped;
  ordinary:
-  luaQ_wait(L, mutex, changed, waiters);
+  if (queue == NULL)
+    luaQ_wait(L, mutex, changed, waiters);
+  else {
+    LuaWaiter waiter;
+    linkwaiter(&waiter, execution, waiters, queue);
+    waitregistered(L, mutex, changed, &waiter);
+  }
   return 0;
+}
+
+int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
+                    LuaWaiter **waiters) {
+  return waitstop(L, mutex, changed, waiters, NULL);
+}
+
+int luaQ_waitstopfifo (lua_State *L, pthread_mutex_t *mutex, LuaWaitQueue *queue) {
+  return waitstop(L, mutex, NULL, &queue->head, queue);
+}
+
+void luaQ_wakewaiter (LuaWaiter *waiter) {
+  lua_assert(waiter->link != NULL && waiter->execution != NULL);
+  unlinkwaiter(waiter);
+  waiter->execution->wake(waiter->execution, waiter);
 }
 
 void luaQ_interrupt (LuaStopWait *wait) {
@@ -299,7 +330,8 @@ void luaQ_interrupt (LuaStopWait *wait) {
   luaX_checksync(pthread_mutex_lock(wait->mutex));
   if (waiter->link != NULL) {
     unlinkwaiter(waiter);
-    luaX_checksync(pthread_cond_broadcast(wait->changed));
+    if (wait->changed != NULL)
+      luaX_checksync(pthread_cond_broadcast(wait->changed));
     if (waiter->execution != NULL)
       waiter->execution->wake(waiter->execution, waiter);
   }

@@ -202,7 +202,7 @@ luthr_lua_scheduler_snapshot(luthr_lua_scheduler *scheduler,
   snapshot.quota_milli_cpus =
       (unsigned long)scheduler->capacity.effective_milli;
   snapshot.runnable = __atomic_load_n(&engine->runnable, __ATOMIC_ACQUIRE);
-  snapshot.native_active = __atomic_load_n(&engine->native, __ATOMIC_ACQUIRE);
+  snapshot.native_active = luaSC_nativeactive(engine);
   check(pthread_mutex_lock(&engine->mutex));
   snapshot.callbacks_active = engine->callbacks_active;
   snapshot.tasks = scheduler->handles;

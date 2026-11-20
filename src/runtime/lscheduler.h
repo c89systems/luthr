@@ -44,8 +44,9 @@ struct LuaScheduledTask {
   uint64_t slice_deadline;  /* set at the first contended poll */
   unsigned home, polls;
   unsigned dispatches, handoffs, migrations, parks, early_wakes;
+  unsigned native_reuses;
   int nargs, reason, native, complete, notified, published;
-  int native_pending, external;
+  int native_pending, native_notified, external;
 };
 
 struct LuaCarrier {
@@ -68,9 +69,9 @@ struct LuaScheduler {
   pthread_cond_t changed;
   pthread_cond_t reentry_changed;
   pthread_mutex_t native_mutex;
-  pthread_cond_t native_changed;
-  LuaWaiter *native_waiters;
-  unsigned native, native_peak, native_waiting;  /* atomic permit accounting */
+  LuaWaitQueue native_waiters;
+  uint64_t native;  /* atomic permit count above the low queue bit */
+  unsigned native_notices, native_peak;
   LuaExecutionSlot *slots;
   LuaCarrier *carriers;
   LuaCarrier *idle;
@@ -95,6 +96,7 @@ struct LuaScheduler {
 ** outside managed executions and with no state gate held. Native calls keep
 ** their physical stack; queued tasks never own a carrier. */
 LUAI_FUNC int luaSC_init (lua_State *, LuaScheduler *, const LuaSchedulerConfig *);
+LUAI_FUNC unsigned luaSC_nativeactive (const LuaScheduler *);
 LUAI_FUNC int luaSC_submit (LuaScheduler *, LuaScheduledTask *, lua_State *, int);
 /* Completion is acknowledged only after the final outgoing context is saved.
 ** Waiting doesn't join an opaque native activation or discard its outcome. */

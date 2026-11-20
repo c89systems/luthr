@@ -99,8 +99,14 @@ typedef struct LuaOwner {
 typedef struct LuaWaiter {
   struct LuaWaiter *next;
   struct LuaWaiter **link;  /* predicate mutex; NULL after notification */
+  struct LuaWaitQueue *queue;  /* set for FIFO waits */
   LuaExecution *execution;
 } LuaWaiter;
+
+typedef struct LuaWaitQueue {
+  LuaWaiter *head;
+  LuaWaiter **tail;
+} LuaWaitQueue;
 
 typedef struct LuaStopWait {
   LuaWaiter waiter;
@@ -172,6 +178,10 @@ LUAI_FUNC void luaQ_wait (lua_State *L, pthread_mutex_t *mutex,
 ** resource lease before delivery (or return STOPPED to a quiescent driver). */
 LUAI_FUNC int luaQ_waitstop (lua_State *L, pthread_mutex_t *mutex,
                             pthread_cond_t *changed, LuaWaiter **waiters);
+/* The resource transfers ownership to head before waking it. */
+LUAI_FUNC int luaQ_waitstopfifo (lua_State *L, pthread_mutex_t *mutex,
+                                LuaWaitQueue *queue);
+LUAI_FUNC void luaQ_wakewaiter (LuaWaiter *waiter);
 /* Called with a request-side borrow; no world mutex remains held. */
 LUAI_FUNC void luaQ_interrupt (LuaStopWait *wait);
 LUAI_FUNC void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters);
