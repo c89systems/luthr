@@ -15,7 +15,7 @@ typedef struct LuaSchedulerConfig {
   unsigned slots;
   unsigned carriers;
   unsigned native_limit;
-  unsigned quantum_polls;
+  unsigned quantum_polls;  /* zero selects an elapsed-time slice */
   unsigned callback_limit;
 } LuaSchedulerConfig;
 
@@ -41,6 +41,7 @@ struct LuaScheduledTask {
   LuaWaiter *waiter;
   LuaCarrier *carrier;  /* current dispatch; changes only after publication */
   LuaCarrier *affinity;  /* atomic reservation while pinned/inside opaque C */
+  uint64_t slice_deadline;  /* set at the first contended poll */
   unsigned home, polls;
   unsigned dispatches, handoffs, migrations, parks, early_wakes;
   int nargs, reason, native, complete, notified, published;

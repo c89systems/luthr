@@ -12,6 +12,7 @@
 #include <time.h>
 
 enum { SC_READY, SC_RESOURCE, SC_DONE };
+enum { DEFAULT_SLICE_NS = 2000000 };
 
 static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
@@ -453,13 +454,20 @@ static void requesthandoff (LuaExecution *execution, lua_State *L) {
   }
 }
 
+static uint64_t monotonicns (void) {
+  struct timespec now;
+  luaX_checksync(clock_gettime(CLOCK_MONOTONIC, &now));
+  return cast(uint64_t, now.tv_sec) * 1000000000 + cast(uint64_t, now.tv_nsec);
+}
+
 static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   LuaWorldScope depth;
+  int timed = task->polls == 0;  /* requests set polls to 1 in either mode */
   unsigned publishing;
   flushrouting(s);
-  if (--task->polls != 0) return;
+  if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
   /* Read publication before the runnable predicate: observing its completion
   ** also publishes the recipient's queue entry to the following load. */
@@ -473,6 +481,15 @@ static void poll (LuaExecution *execution, lua_State *L) {
       task->polls = 1;
     return;
   }
+  if (timed) {
+    uint64_t now = monotonicns();
+    /* Allocation and GC can reach safepoints much more often than the VM
+    ** instruction poll. Give short tasks time to finish their live graphs. */
+    if (task->slice_deadline == 0)
+      task->slice_deadline = now + DEFAULT_SLICE_NS;
+    if (now < task->slice_deadline) return;
+  }
+  task->slice_deadline = 0;
   depth = luaW_detach(L);
   releaseslot(task);  /* a requested handoff retires trusted helper capacity too */
   task->handoffs++;
@@ -592,6 +609,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
     __atomic_fetch_sub(&s->runnable, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&slot->owner, task, __ATOMIC_RELEASE);
     bindslot(task, slot);
+    task->slice_deadline = 0;
     task->home = index;
     carrier->cursor = (index + 1) % s->config.slots;
     return task;
@@ -737,7 +755,7 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
   pthread_condattr_t attributes;
   if (s->ready || luaQ_current() != NULL || config == NULL ||
       config->slots == 0 || config->native_limit == 0 ||
-      config->quantum_polls == 0 || config->carriers < config->slots ||
+      config->carriers < config->slots ||
       config->native_limit > config->carriers - config->slots ||
       luaM_testsize(config->slots, sizeof(*s->slots)) ||
       luaM_testsize(config->carriers, sizeof(*s->carriers))) return EINVAL;
@@ -896,7 +914,6 @@ int luaSC_submit (LuaScheduler *s, LuaScheduledTask *task, lua_State *L,
     if (status == LUA_OK) {
       task->scheduler = s;
       task->nargs = nargs;
-      task->polls = s->config.quantum_polls;
       task->home = s->next_home++ % s->config.slots;
       task->registered_next = s->tasks;
       task->registered_link = &s->tasks;

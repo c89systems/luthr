@@ -21,7 +21,7 @@ typedef struct luthr_lua_scheduler_config {
   unsigned carrier_limit;
   unsigned native_limit;
   unsigned callback_limit;
-  unsigned quantum_instructions;
+  unsigned quantum_instructions; /* zero uses an elapsed-time slice */
 } luthr_lua_scheduler_config;
 
 /* NULL options snapshot the owning facade's defaults, or unrestricted defaults

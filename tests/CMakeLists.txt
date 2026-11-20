@@ -70,10 +70,10 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaQ_wait
   -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=pthread_mutex_init
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
-  -Wl,--wrap=mprotect -Wl,--wrap=munmap)
+  -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime)
 foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational
     native native_reentry shutdown yield saturation cancel_admission startup_failures callback_progress
-    parked cancel_parked idle_notifications idle_affinity metadata_progress)
+    parked cancel_parked idle_notifications idle_affinity metadata_progress timed_metadata_progress timed_slice)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
   set_tests_properties(scheduler_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

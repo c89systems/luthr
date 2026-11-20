@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #define TASKS 12
 #define require(c)                                                             \
@@ -37,6 +38,7 @@ struct fixture {
   lua_State *metadata_peer;
   unsigned metadata_held, metadata_queued, metadata_released;
   size_t live;
+  time_t poll_time;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
 static struct fixture *fixture;
@@ -49,6 +51,17 @@ static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
 static pthread_t idle_host;
+
+int __real_clock_gettime(clockid_t, struct timespec *);
+int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
+  if (clock == CLOCK_MONOTONIC && fixture != NULL && luaQ_current() != NULL &&
+      fixture->poll_time != 0) {
+    time->tv_sec = fixture->poll_time;
+    time->tv_nsec = 0;
+    return 0;
+  }
+  return __real_clock_gettime(clock, time);
+}
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
@@ -288,10 +301,12 @@ static int metadata_need(lua_State *L) {
   return 0;
 }
 
-static void metadata_progress(struct fixture *f) {
+static void metadata_progress(struct fixture *f, unsigned quantum_polls) {
   lua_State *owner, *peer;
+  if (quantum_polls == 0)
+    f->poll_time = 1; /* require a requested handoff */
   init(f, 1);
-  f->scheduler.config.quantum_polls = 1000000;
+  f->scheduler.config.quantum_polls = quantum_polls;
   managed(f->main, "metadata_owner", metadata_owner);
   managed(f->main, "metadata_need", metadata_need);
   lua_pushboolean(f->main, 0);
@@ -347,6 +362,37 @@ static int finalize(lua_State *L) {
   (void)L;
   __atomic_fetch_add(&fixture->finalized, 1, __ATOMIC_RELAXED);
   return 0;
+}
+
+static int poll_slice(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_lock(L);
+  while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) == 0)
+    luaX_pollrequests(L);
+  /* Collector polls can occur many times while the clock stays within
+   * one slice. The ready peer runs at the first safepoint after expiry. */
+  for (unsigned i = 0; i < 16; i++)
+    luaQ_poll(L);
+  require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
+  f->poll_time++;
+  luaQ_poll(L);
+  require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 1);
+  lua_unlock(L);
+  return 0;
+}
+
+static void timed_slice(struct fixture *f) {
+  f->poll_time = 1;
+  init(f, 1);
+  f->scheduler.config.quantum_polls = 0;
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "poll_slice", poll_slice);
+  managed(f->main, "started", started);
+  submit(f, 0, "poll_slice(); return 10", 0);
+  submit(f, 1, "started(...); return 20", 1);
+  require(collect(f, 0, LUA_OK) == 10);
+  require(collect(f, 1, LUA_OK) == 20);
+  finish(f);
 }
 
 static void fairness(struct fixture *f, unsigned slots, int generational) {
@@ -825,7 +871,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "no_requests") == 0)
     no_requests(f);
   else if (strcmp(argv[1], "metadata_progress") == 0)
-    metadata_progress(f);
+    metadata_progress(f, 1000000);
+  else if (strcmp(argv[1], "timed_metadata_progress") == 0)
+    metadata_progress(f, 0);
+  else if (strcmp(argv[1], "timed_slice") == 0)
+    timed_slice(f);
   else if (strcmp(argv[1], "early_incremental") == 0)
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)

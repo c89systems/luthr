@@ -123,7 +123,7 @@ luthr_lua_scheduler_new(luthr_lua_state *state,
       requested.callback_limit ? requested.callback_limit : selected.slots;
   selected.quantum_polls = requested.quantum_instructions
                                ? (requested.quantum_instructions - 1) / 1024 + 1
-                               : 4;
+                               : 0;
   scheduler->completion = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (scheduler->completion < 0) {
     release(L, scheduler, sizeof(*scheduler));
