@@ -371,7 +371,7 @@ foreach(collector IN ITEMS incremental generational)
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
   endforeach()
-  foreach(case IN ITEMS array metatable)
+  foreach(case IN ITEMS array metatable fields)
     add_test(NAME gc_table_scan_private_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector} private)
     set_tests_properties(gc_table_scan_private_${case}_${collector} PROPERTIES

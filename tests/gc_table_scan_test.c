@@ -24,9 +24,9 @@ static struct {
   pthread_cond_t changed;
   lua_State *marker, *writer;
   Table *table;
-  GCObject *child;
+  GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write;
+      remember, first_write, fields;
   uint64_t initial_layout;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -159,6 +159,13 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 123);
     lua_rawset(L, probe.index);
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
+  } else if (probe.fields) {
+    lua_pushnil(L);
+    lua_setfield(L, probe.index, "deleted");
+    lua_newtable(L);
+    lua_pushinteger(L, 84);
+    lua_rawseti(L, -2, 1);
+    lua_setfield(L, probe.index, "replaced");
   } else {
     /* Change GC tags to full-width scalar bits and force a replacement image
      * while the marker retains the old one. The old image must remain usable.
@@ -207,9 +214,13 @@ int main(int argc, char **argv) {
   probe.pause = strncmp(argv[1], "pause", 5) == 0;
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
+  probe.fields = strncmp(argv[1], "fields", 6) == 0;
   probe.marker = lua_newthread(L);
   probe.writer = lua_newthread(L);
-  lua_createtable(L, probe.relocate ? 0 : 128, probe.relocate ? 64 : 0);
+  lua_createtable(L, probe.relocate || probe.fields ? 0 : 128,
+                  probe.relocate ? 64
+                  : probe.fields ? 8
+                                 : 0);
   probe.table = (Table *)lua_topointer(L, -1);
   if (probe.relocate) {
     require(sizenode(probe.table) == 64);
@@ -228,6 +239,14 @@ int main(int argc, char **argv) {
       lua_pushinteger(L, i);
       lua_rawset(L, 3);
     }
+  } else if (probe.fields) {
+    require(argc == 3);
+    lua_newtable(L);
+    probe.child = (GCObject *)lua_topointer(L, -1);
+    lua_setfield(L, 3, "replaced");
+    lua_newtable(L);
+    probe.removed = (GCObject *)lua_topointer(L, -1);
+    lua_setfield(L, 3, "deleted");
   } else {
     for (i = 1; i <= 128; i++) {
       lua_newtable(L);
@@ -276,6 +295,10 @@ int main(int argc, char **argv) {
   while (!probe.entered)
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
+  if (probe.fields) {
+    require(iswhite(G(L), probe.child));
+    require(iswhite(G(L), probe.removed));
+  }
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_create(&writer, NULL, write_values, NULL) == 0);
   if (probe.pause) {
@@ -290,8 +313,10 @@ int main(int argc, char **argv) {
   while (!probe.written)
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
-  if (probe.relocate)
+  if (probe.relocate || probe.fields)
     require(!iswhite(G(L), probe.child));
+  if (probe.fields)
+    require(!iswhite(G(L), probe.removed));
   if (probe.pause) {
     require(probe.chunks == 1);
     probe.pause_release = 1;
@@ -316,6 +341,12 @@ int main(int argc, char **argv) {
   if (probe.first_write) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TNUMBER);
     require(lua_tointeger(probe.writer, -1) == LUA_MININTEGER);
+  } else if (probe.fields) {
+    require(lua_getfield(probe.writer, probe.index, "deleted") == LUA_TNIL);
+    lua_pop(probe.writer, 1);
+    require(lua_getfield(probe.writer, probe.index, "replaced") == LUA_TTABLE);
+    require(lua_rawgeti(probe.writer, -1, 1) == LUA_TNUMBER);
+    require(lua_tointeger(probe.writer, -1) == 84);
   } else if (!probe.relocate) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);

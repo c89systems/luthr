@@ -1806,6 +1806,56 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   return 1;
 }
 
+/* Under the private table's mutation boundary, shade the displaced edge
+** here. The common assignment barrier shades the incoming value before
+** reopening the layout to the concurrent marker. */
+l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
+                               TValue *value, int raw, int tracing) {
+  unsigned index = keyinarray(table, key);
+  int result;
+  if (index != 0) {
+    lu_byte *tag = getArrTag(table, index - 1);
+    if (tagisempty(*tag) && !raw && table->metatable != NULL) return 0;
+    if (tracing && (*tag & BIT_ISCOLLECTABLE))
+      luaC_traceobject(L, getArrVal(table, index - 1)->gc);
+    fval2arr(table, index - 1, tag, value);
+    return 1;
+  }
+  if (ttisshrstring(key)) {
+    TString *name = tsvalue(key);
+    Node *position = hashstr(table->node, name);
+    const TValue *slot = findshortstr(position, name);
+    if (isempty(slot) && !raw && table->metatable != NULL) return 0;
+    if (isabstkey(slot)) {
+      if (ttisnil(value)) return 1;
+      if (!insertat(L, table->node, key, value, position)) return 0;
+      luaC_barrierback(L, obj2gco(table), key);
+      return 1;
+    }
+    /* Replacing a value leaves its key in place. Deletion removes both. */
+    if (tracing) {
+      if (ttisnil(value)) luaC_traceobject(L, obj2gco(name));
+      luaC_tracevalue(L, slot);
+    }
+    if (isempty(slot) && !ttisnil(value))
+      luaC_barrierback(L, obj2gco(table), key);
+    setnodevalue(NULL, nodefromval(slot), value);
+    return 1;
+  }
+  result = rawpset(L, table, key, value);
+  if (result == HOK) return 1;
+  if (!raw && table->metatable != NULL) return 0;
+  if (result == HNOTFOUND) {
+    if (ttisnil(key) || ttisfloat(key) || isextstr(key)) return 0;
+    if (!ttisnil(value)) {
+      if (!insertkey(L, table->node, key, value)) return 0;
+      luaC_barrierback(L, obj2gco(table), key);
+    }
+  }
+  else rawfinishset(L, table, key, value, result);
+  return 1;
+}
+
 /* The current gate is the private graph's only mutator. With no allocation,
 ** wait or callback, its live operands need no additional native root records.
 ** The collector only reads strong storage and validates our sequence. */
@@ -1813,8 +1863,7 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
                  int raw) {
   uint64_t sequence;
   uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
-  Node *position = NULL;
-  int hres, tracing, field, done = 1;
+  int tracing, done;
   if (sharing & LUA_OBJECT_SHARED)
     return sharedset(L, t, key, value, raw, NULL);
   if (sharing != cast(uintptr_t, L)) return 0;
@@ -1828,28 +1877,7 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
     if (!luaH_strongaccess(L, t)) return 0;
     __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
   }
-  field = ttisshrstring(key);
-  if (field) {
-    TString *name = tsvalue(key);
-    position = hashstr(t->node, name);
-    if (tracing) luaC_traceobject(L, obj2gco(name));
-    hres = finishnodeset(L, t, findshortstr(position, name), value);
-  }
-  else hres = rawpset(L, t, key, value);
-  if (hres != HOK) {
-    if ((!raw && t->metatable != NULL) ||
-        (!field && hres == HNOTFOUND &&
-         (ttisnil(key) || ttisfloat(key) || isextstr(key)))) done = 0;
-    else if (hres == HNOTFOUND) {
-      luaC_tracevalue(L, value);
-      if (!ttisnil(value)) {
-        done = field ? insertat(L, t->node, key, value, position)
-                     : insertkey(L, t->node, key, value);
-        if (done) luaC_barrierback(L, obj2gco(t), key);
-      }
-    }
-    else rawfinishset(L, t, key, value, hres);  /* existing array/hash storage */
-  }
+  done = privatestoreslot(L, t, key, value, raw, tracing);
   if (done) {
     settableflags(t, gettableflags(t) & cast_byte(~maskflags));
     luaC_barrierback(L, obj2gco(t), value);
