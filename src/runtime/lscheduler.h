@@ -66,6 +66,7 @@ struct LuaScheduler {
   LuaSchedulerConfig config;
   pthread_mutex_t mutex;
   pthread_cond_t changed;
+  pthread_cond_t reentry_changed;
   pthread_mutex_t native_mutex;
   pthread_cond_t native_changed;
   LuaWaiter *native_waiters;
@@ -76,7 +77,6 @@ struct LuaScheduler {
   unsigned runnable;  /* atomic; no-request polls only read this word */
   unsigned pending_ready;  /* atomic notifications awaiting context publication */
   unsigned reentry_waiting;  /* atomic native-return/callback progress request */
-  unsigned routing_request;  /* deferred notification from nonblocking unpin */
   unsigned external_yields;  /* atomic fairness request from provider threads */
   unsigned handoff_epoch;  /* scheduler mutex; saved-context publication */
   unsigned callbacks_active, callbacks_peak;

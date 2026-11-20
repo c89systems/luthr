@@ -73,7 +73,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime)
 foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational
     native native_reentry shutdown yield saturation cancel_admission startup_failures callback_progress
-    timed_callback_progress parked cancel_parked idle_notifications idle_affinity metadata_progress
+    timed_callback_progress simultaneous_reentry parked cancel_parked idle_notifications idle_affinity metadata_progress
     timed_metadata_progress timed_slice timed_continuation_slice)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
   set_tests_properties(scheduler_${case}

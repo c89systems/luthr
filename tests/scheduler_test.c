@@ -210,8 +210,8 @@ void __wrap_luaCT_pause(LuaFiber *fiber) {
   __real_luaCT_pause(fiber);
 }
 
-static void init(struct fixture *f, unsigned slots) {
-  LuaSchedulerConfig config = {slots, slots + 1, 1, 1, 1};
+static void initlimits(struct fixture *f, unsigned slots, unsigned native) {
+  LuaSchedulerConfig config = {slots, slots + native, native, 1, 1};
   fixture = f;
   f->main = luaL_newstate();
   require(f->main != NULL);
@@ -223,12 +223,14 @@ static void init(struct fixture *f, unsigned slots) {
     require(pthread_cond_init(&f->idle_changed, NULL) == 0);
   }
   require(luaSC_init(f->main, &f->scheduler, &config) == 0);
-  require(f->scheduler.created == slots + 1);
+  require(f->scheduler.created == config.carriers);
   if (slots == 2) {
     f->parallel_check = 1;
     require(pthread_barrier_init(&f->parallel, NULL, 2) == 0);
   }
 }
+
+static void init(struct fixture *f, unsigned slots) { initlimits(f, slots, 1); }
 
 static void finish(struct fixture *f) {
   require(luaSC_destroy(f->main, &f->scheduler) == 0);
@@ -759,6 +761,45 @@ static void callback_progress(struct fixture *f, int timed) {
   finish(f);
 }
 
+static int hold_for_native_returns(lua_State *L) {
+  mark_running(L);
+  while (__atomic_load_n(&fixture->scheduler.reentry_waiting,
+                         __ATOMIC_ACQUIRE) != 2)
+    sched_yield();
+  return 0;
+}
+
+static void simultaneous_reentry(struct fixture *f) {
+  initlimits(f, 1, 2);
+  managed(f->main, "hold_for_native_returns", hold_for_native_returns);
+  lua_pushcfunction(f->main, block_binding);
+  lua_setglobal(f->main, "block_binding");
+  submit(f, 0, "return block_binding()", 0);
+  submit(f, 1, "return block_binding()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered != 2)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  submit(f, 2, "hold_for_native_returns(); return 42", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 3, "return 43", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  require(collect(f, 0, LUA_OK) == 500500);
+  require(collect(f, 1, LUA_OK) == 500500);
+  require(collect(f, 2, LUA_OK) == 42);
+  require(collect(f, 3, LUA_OK) == 43);
+  require(f->scheduler.native_peak == 2 && f->scheduler.reentry_waiting == 0);
+  finish(f);
+}
+
 static void *backing(void *context, void *block, size_t old, size_t size) {
   struct fixture *f = context;
   void *replacement;
@@ -860,7 +901,7 @@ static void startup_failures(struct fixture *f) {
     require(f->main->l_G->scheduler == NULL &&
             f->main->l_G->slot_caches == NULL);
   }
-  for (i = 0; i < 2 + config.carriers; i++) {
+  for (i = 0; i < 3 + config.carriers; i++) {
     fail_condition = (int)i;
     require(luaSC_init(f->main, &f->scheduler, &config) == EAGAIN);
     require(f->main->l_G->scheduler == NULL &&
@@ -944,6 +985,8 @@ int main(int argc, char **argv) {
     callback_progress(f, 0);
   else if (strcmp(argv[1], "timed_callback_progress") == 0)
     callback_progress(f, 1);
+  else if (strcmp(argv[1], "simultaneous_reentry") == 0)
+    simultaneous_reentry(f);
   else if (strcmp(argv[1], "parked") == 0)
     parked_wait(f, 0);
   else if (strcmp(argv[1], "cancel_parked") == 0)

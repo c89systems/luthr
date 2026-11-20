@@ -195,21 +195,24 @@ static void bindslot (LuaScheduledTask *task, LuaExecutionSlot *slot) {
   task->fiber.execution.allocation_cache = &slot->allocation;
 }
 
+/* A slot has become available. Give a blocked native return first access.
+** Task completion, saved contexts and other host predicates use changed. */
+static void wakecapacity (LuaScheduler *s) {
+  if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_RELAXED) != 0)
+    luaX_checksync(pthread_cond_signal(&s->reentry_changed));
+  else wakework(s, 0);
+}
+
 static void cachereturned (void *context) {
   LuaScheduler *s = context;
   lock(s);
-  notify(s);
-  wakework(s, 1);
+  wakecapacity(s);
   unlock(s);
-}
-
-static int slotdemand (LuaScheduler *s) {
-  return __atomic_load_n(&s->runnable, __ATOMIC_SEQ_CST) != 0 ||
-         __atomic_load_n(&s->reentry_waiting, __ATOMIC_SEQ_CST) != 0;
 }
 
 static void releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
+  LuaScheduler *s = task->scheduler;
   if (slot == NULL) return;
   task->fiber.execution.allocation_cache = NULL;
   task->slot = NULL;
@@ -218,27 +221,16 @@ static void releaseslot (LuaScheduledTask *task) {
   ** observes this return, or this observer check sees demand and signals under
   ** the scheduler mutex. A return with no demand needs no global transaction. */
   __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
-  if (slotdemand(task->scheduler) ||
-      (task->scheduler->config.slots > 1 && luaC_workerready(task->scheduler->global))) {
-    lock(task->scheduler);
-    notify(task->scheduler);
-    wakework(task->scheduler, 0);
-    unlock(task->scheduler);
-  }
-}
-
-static void flushrouting (LuaScheduler *s) {
-  if (__atomic_load_n(&s->routing_request, __ATOMIC_ACQUIRE) != 0 &&
-      __atomic_exchange_n(&s->routing_request, 0, __ATOMIC_ACQ_REL)) {
+  if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_SEQ_CST) != 0 ||
+      __atomic_load_n(&s->runnable, __ATOMIC_SEQ_CST) != 0 ||
+      (s->config.slots > 1 && luaC_workerready(s->global))) {
     lock(s);
-    notify(s);
-    wakework(s, 1);
+    wakecapacity(s);
     unlock(s);
   }
 }
 
-/* Reservation hooks cannot acquire a bookkeeping mutex. The execution that
-** releases a route arranges the scheduler notification at its next boundary. */
+/* Reservation hooks cannot acquire a bookkeeping mutex. */
 static int pincarrier (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
   LuaScheduledTask *expected = NULL;
@@ -255,9 +247,10 @@ static void unpincarrier (LuaExecution *execution) {
   if (!task->external && !task->native) {
     LuaCarrier *carrier = __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE);
     lua_assert(carrier == task->carrier);
+    /* Only this running carrier gains eligibility for other tasks. It checks
+    ** its queues again at dispatch, after publishing this task's outcome. */
     __atomic_store_n(&task->affinity, NULL, __ATOMIC_RELEASE);
     __atomic_store_n(&carrier->reserved, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&task->scheduler->routing_request, 1, __ATOMIC_RELEASE);
   }
 }
 
@@ -299,18 +292,19 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     lua_assert(task->slot != NULL);
   }
   else {
-    /* Reacquire local permission directly when nobody needs a handoff. Opaque
-    ** native execution still releases its slot between API operations. */
-    if (!slotdemand(s) && tryslot(task)) return;
+    /* Compete for a free slot without entering the queue's mutex. A waiter
+    ** already blocked for a slot gets priority over newer returns. */
+    if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0 &&
+        tryslot(task)) return;
     /* A synchronous reentry cannot move an opaque native activation. There
     ** are slots + native_limit carriers, so a waiting callback cannot occupy
     ** the last carrier able to dispatch queued managed work. */
     lock(s);
     __atomic_fetch_add(&s->reentry_waiting, 1, __ATOMIC_SEQ_CST);
-    while (!tryslot(task)) changed(s);
-    __atomic_fetch_sub(&s->reentry_waiting, 1, __ATOMIC_SEQ_CST);
-    notify(s);
-    wakework(s, 1);
+    while (!tryslot(task))
+      luaX_checksync(pthread_cond_wait(&s->reentry_changed, &s->mutex));
+    if (__atomic_sub_fetch(&s->reentry_waiting, 1, __ATOMIC_SEQ_CST) == 0)
+      wakework(s, 1);
     unlock(s);
   }
 }
@@ -322,7 +316,6 @@ static void managedleave (LuaExecution *execution) {
       (execution->trusted == NULL ||
        execution->native_depth > execution->trusted->native_depth))
     releaseslot(execution->context);
-  flushrouting(execution->scheduler);
 }
 
 static void nativeenter (LuaExecution *execution, lua_State *L) {
@@ -381,7 +374,6 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
   luaQ_wake(&s->native_changed, &s->native_waiters);
   luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
   if (execution->pin_depth == 0) unpincarrier(execution);
-  flushrouting(s);
 }
 
 static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) {
@@ -479,7 +471,6 @@ static void poll (LuaExecution *execution, lua_State *L) {
   int timed = task->polls == 0;  /* requests set polls to 1 in either mode */
   int serial = s->config.slots == 1;
   unsigned publishing, reentry;
-  flushrouting(s);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
   /* Read publication before the runnable predicate: observing its completion
@@ -619,10 +610,9 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) continue;
     task = localwork(s, index, carrier);
     if (task == NULL) {
-      __atomic_store_n(&slot->owner, NULL, __ATOMIC_RELEASE);
+      __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
       if (!locked) lock(s);
-      notify(s);
-      wakework(s, 0);
+      wakecapacity(s);
       if (!locked) unlock(s);
       continue;
     }
@@ -686,8 +676,7 @@ static void *carrierentry (void *argument) {
       lock(s);
       lua_assert(s->gc_active != 0);
       s->gc_active--;
-      notify(s);
-      wakework(s, 1);
+      wakecapacity(s);
       unlock(s);
       continue;
     }
@@ -741,6 +730,14 @@ static void freecollectors (LuaScheduler *s) {
   }
 }
 
+static void destroywaits (LuaScheduler *s) {
+  luaX_checksync(pthread_cond_destroy(&s->reentry_changed));
+  luaX_checksync(pthread_cond_destroy(&s->changed));
+  luaX_checksync(pthread_mutex_destroy(&s->mutex));
+  luaX_checksync(pthread_cond_destroy(&s->native_changed));
+  luaX_checksync(pthread_mutex_destroy(&s->native_mutex));
+}
+
 static void freeengine (lua_State *L, LuaScheduler *s) {
   unsigned i;
   lua_lock(L);
@@ -763,10 +760,7 @@ static void freeengine (lua_State *L, LuaScheduler *s) {
   __atomic_store_n(&G(L)->scheduler, NULL, __ATOMIC_RELEASE);
   luaW_start(L);
   lua_unlock(L);
-  luaX_checksync(pthread_cond_destroy(&s->changed));
-  luaX_checksync(pthread_mutex_destroy(&s->mutex));
-  luaX_checksync(pthread_cond_destroy(&s->native_changed));
-  luaX_checksync(pthread_mutex_destroy(&s->native_mutex));
+  destroywaits(s);
 }
 
 int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config) {
@@ -804,16 +798,21 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
     luaX_checksync(pthread_mutex_destroy(&s->mutex));
     return status;
   }
+  status = pthread_cond_init(&s->reentry_changed, NULL);
+  if (status != 0) {
+    luaX_checksync(pthread_cond_destroy(&s->native_changed));
+    luaX_checksync(pthread_mutex_destroy(&s->native_mutex));
+    luaX_checksync(pthread_cond_destroy(&s->changed));
+    luaX_checksync(pthread_mutex_destroy(&s->mutex));
+    return status;
+  }
   lua_lock(L);
   {
     LuaScheduler *expected = NULL;
     if (!__atomic_compare_exchange_n(&G(L)->scheduler, &expected, s, 0,
           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
       lua_unlock(L);
-      luaX_checksync(pthread_cond_destroy(&s->changed));
-      luaX_checksync(pthread_mutex_destroy(&s->mutex));
-      luaX_checksync(pthread_cond_destroy(&s->native_changed));
-      luaX_checksync(pthread_mutex_destroy(&s->native_mutex));
+      destroywaits(s);
       return EBUSY;
     }
   }
@@ -854,10 +853,7 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
     s->carriers = NULL;
     __atomic_store_n(&G(L)->scheduler, NULL, __ATOMIC_RELEASE);
     lua_unlock(L);
-    luaX_checksync(pthread_cond_destroy(&s->changed));
-    luaX_checksync(pthread_mutex_destroy(&s->mutex));
-    luaX_checksync(pthread_cond_destroy(&s->native_changed));
-    luaX_checksync(pthread_mutex_destroy(&s->native_mutex));
+    destroywaits(s);
     return status;
   }
   luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
