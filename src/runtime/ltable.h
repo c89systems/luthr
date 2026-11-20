@@ -111,13 +111,14 @@ LUAI_DDEC(const Node luaH_dummynode;)
 
 
 LUAI_FUNC lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res);
-LUAI_FUNC lu_byte luaH_getshortstr (lua_State *L, Table *t, TString *key, TValue *res);
 LUAI_FUNC lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res);
 LUAI_FUNC lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res);
 
 /* Nonparking lookup. A successful read can report an absent key. */
 LUAI_FUNC int luaH_tryget (lua_State *, Table *, const TValue *, TValue *,
                           lu_byte *);
+LUAI_FUNC int luaH_trygetint (lua_State *, Table *, lua_Integer, TValue *,
+                              lu_byte *);
 LUAI_FUNC int luaH_trygetstr (lua_State *, Table *, TString *, TValue *,
                               lu_byte *);
 
@@ -129,7 +130,7 @@ LUAI_FUNC lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res);
 ** Encoded storage locations never leave this operation. */
 LUAI_FUNC int luaH_assignowned (lua_State *L, Table *t, const TValue *key,
                                TValue *value, int raw);
-/* Complete only a private, non-allocating write. Failure leaves the operation
+/* Try a non-allocating write. Failure leaves the operation
 ** for ordinary rooted access; no encoded storage location escapes. */
 LUAI_FUNC int luaH_tryset (lua_State *, Table *, const TValue *, TValue *, int);
 LUAI_FUNC int luaH_setshared (lua_State *, Table *, const TValue *, TValue *, int);

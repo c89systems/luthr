@@ -37,20 +37,34 @@ static __thread lua_State *relocating;
 static __thread unsigned relocations;
 static __thread int capture_retry;
 
+static int retry_lookup(TString *key) {
+  if (capture_retry != 1 || !strisshr(key) ||
+      strcmp(getstr(key), "pending_capture") != 0)
+    return 0;
+  capture_retry = 2;
+  return 1; /* Simulate a writer invalidating the optimistic snapshot. */
+}
+
 int __real_luaH_trygetstr(lua_State *, Table *, TString *, TValue *, lu_byte *);
 int __wrap_luaH_trygetstr(lua_State *state, Table *table, TString *key,
                           TValue *result, lu_byte *tag) {
-  if (capture_retry == 1 && strisshr(key) &&
-      strcmp(getstr(key), "pending_capture") == 0) {
-    capture_retry = 2;
-    return 0; /* simulate a writer invalidating the optimistic snapshot */
-  }
+  if (retry_lookup(key))
+    return 0;
   return __real_luaH_trygetstr(state, table, key, result, tag);
 }
 
-lu_byte __real_luaH_getstr(lua_State *, Table *, TString *, TValue *);
-lu_byte __wrap_luaH_getstr(lua_State *state, Table *table, TString *key,
-                           TValue *result) {
+int __real_luaH_tryget(lua_State *, Table *, const TValue *, TValue *,
+                       lu_byte *);
+int __wrap_luaH_tryget(lua_State *state, Table *table, const TValue *key,
+                       TValue *result, lu_byte *tag) {
+  if (capture_retry == 1 && ttisstring(key) && retry_lookup(tsvalue(key)))
+    return 0;
+  return __real_luaH_tryget(state, table, key, result, tag);
+}
+
+lu_byte __real_luaH_get(lua_State *, Table *, const TValue *, TValue *);
+lu_byte __wrap_luaH_get(lua_State *state, Table *table, const TValue *key,
+                        TValue *result) {
   if (capture_retry == 2) {
     uintptr_t before = (uintptr_t)state->stack.p;
     ptrdiff_t offset = savestack(state, (StkId)result);
@@ -59,7 +73,7 @@ lu_byte __wrap_luaH_getstr(lua_State *state, Table *table, TString *key,
     require((uintptr_t)state->stack.p != before);
     result = s2v(restorestack(state, offset));
   }
-  return __real_luaH_getstr(state, table, key, result);
+  return __real_luaH_get(state, table, key, result);
 }
 
 static void rendezvous(pthread_barrier_t *barrier) {
@@ -1017,6 +1031,14 @@ static void captured_lookup(lua_State *state, int generational) {
               "ok, v=pcall(function() return bad.field end); "
               "assert(not ok and v:find(\"upvalue 'bad'\",1,true));") ==
           LUA_OK);
+  require(capture_retry == 0);
+  capture_retry = 1;
+  require(luaL_dostring(
+              state,
+              "local function read(object,k) return object[k] end; "
+              "local mt={__index=function(_,k) return k..'_resolved' end}; "
+              "assert(read(setmetatable({},mt),'pending_capture') == "
+              "'pending_capture_resolved');") == LUA_OK);
   require(capture_retry == 0);
   lua_setallocf(state, allocator.original, allocator.context);
 }

@@ -78,60 +78,31 @@
         TValue receiver;
         TValue *key = KC(i);  /* a short string */
         unsigned upvalue = GETARG_B(i);
-        lu_byte tag = LUA_VABSTKEY;
-        int retry;
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
         luaC_tracevalue(L, &receiver);
-        retry = ttistable(&receiver) &&
-          !luaH_trygetstr(L, hvalue(&receiver), tsvalue(key), s2v(ra), &tag);
-        if (l_unlikely(retry || luaV_needsindex(tag))) {
-          Protect(finishcaptureget(L, &receiver, key, ra, upvalue + 1u, retry));
-          updatebase(ci);
-        }
+        vmtableget(&receiver, key, luaH_trygetstr, tsvalue(key), upvalue + 1u);
         vmbreak;
       }
       vmcase(OP_GETTABLE) {
         StkId ra = readRA(i);
         TValue *rb = vRB(i);
         TValue *rc = vRC(i);
-        lu_byte tag;
-        ci->u.l.rootpc = ip;
-        if (ttisinteger(rc)) {  /* fast track for integers? */
-          luaV_fastgeti(rb, ivalue(rc), s2v(ra), tag);
-        }
-        else
-          luaV_fastget(rb, rc, s2v(ra), luaH_get, tag);
-        updatebase(ci);
-        if (luaV_needsindex(tag))
-          Protect(luaV_finishget(L, vRB(i), vRC(i), RA(i)));
+        vmtableget(rb, rc, luaH_tryget, rc, 0);
         vmbreak;
       }
       vmcase(OP_GETI) {
         StkId ra = readRA(i);
         TValue *rb = vRB(i);
-        int c = GETARG_C(i);
-        lu_byte tag;
-        ci->u.l.rootpc = ip;
-        luaV_fastgeti(rb, c, s2v(ra), tag);
-        updatebase(ci);
-        if (luaV_needsindex(tag)) {
-          TValue key;
-          setivalue(&key, c);
-          Protect(luaV_finishget(L, vRB(i), &key, RA(i)));
-        }
+        TValue key;
+        setivalue(&key, GETARG_C(i));
+        vmtableget(rb, &key, luaH_trygetint, ivalue(&key), 0);
         vmbreak;
       }
       vmcase(OP_GETFIELD) {
         StkId ra = readRA(i);
         TValue *rb = vRB(i);
         TValue *rc = KC(i);
-        TString *key = tsvalue(rc);  /* key must be a short string */
-        lu_byte tag;
-        ci->u.l.rootpc = ip;
-        luaV_fastget(rb, key, s2v(ra), luaH_getshortstr, tag);
-        updatebase(ci);
-        if (luaV_needsindex(tag))
-          Protect(luaV_finishget(L, vRB(i), rc, RA(i)));
+        vmtableget(rb, rc, luaH_trygetstr, tsvalue(rc), 0);
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
@@ -141,14 +112,14 @@
         unsigned upvalue = GETARG_A(i);
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
         luaC_tracevalue(L, &receiver);
-        Protect(settable(L, &receiver, rb, rc, upvalue + 1u));
+        vmtableset(&receiver, rb, rc, upvalue + 1u);
         vmbreak;
       }
       vmcase(OP_SETTABLE) {
         StkId ra = readRA(i);
         TValue *rb = vRB(i);  /* key (table is in 'ra') */
         TValue *rc = RKC(i);  /* value */
-        Protect(luaV_settable(L, s2v(ra), rb, rc));
+        vmtableset(s2v(ra), rb, rc, 0);
         vmbreak;
       }
       vmcase(OP_SETI) {
@@ -157,14 +128,14 @@
         int b = GETARG_B(i);
         TValue *rc = RKC(i);
         setivalue(&key, b);
-        Protect(luaV_settable(L, s2v(ra), &key, rc));
+        vmtableset(s2v(ra), &key, rc, 0);
         vmbreak;
       }
       vmcase(OP_SETFIELD) {
         StkId ra = readRA(i);
         TValue *rb = KB(i);
         TValue *rc = RKC(i);
-        Protect(luaV_settable(L, s2v(ra), rb, rc));
+        vmtableset(s2v(ra), rb, rc, 0);
         vmbreak;
       }
       vmcase(OP_NEWTABLE) {
@@ -178,17 +149,11 @@
       }
       vmcase(OP_SELF) {
         StkId ra = RA(i);
-        lu_byte tag;
         TValue *rb = vRB(i);
         TValue *rc = KC(i);
-        TString *key = tsvalue(rc);  /* key must be a short string */
         readrange(ra, 2);
-        ci->u.l.rootpc = ip;
         setobj2s(L, ra + 1, rb);
-        luaV_fastget(rb, key, s2v(ra), luaH_getshortstr, tag);
-        updatebase(ci);
-        if (luaV_needsindex(tag))
-          Protect(luaV_finishget(L, vRB(i), rc, RA(i)));
+        vmtableget(rb, rc, luaH_trygetstr, tsvalue(rc), 0);
         vmbreak;
       }
       vmcase(OP_ADDI) {

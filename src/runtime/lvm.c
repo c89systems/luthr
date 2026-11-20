@@ -354,19 +354,22 @@ lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
   return finishget(L, t, key, val, 0);
 }
 
-static void __attribute__((noinline)) finishcaptureget (lua_State *L,
+static void __attribute__((noinline)) finishvmget (lua_State *L,
     const TValue *receiver, TValue *key, StkId result, unsigned upvalue,
     int retry) {
   if (retry) {
-    LuaNativeRoot root;
+    LuaNativeRoot object, index;
     ptrdiff_t offset = savestack(L, result);
-    /* The retry may park before resolving the field. Retain the original
-    ** receiver across both the retry and any subsequent metamethod lookup. */
-    luaR_pushroot(L, &root);
-    setobj(L, &root.value, receiver);
-    if (luaV_needsindex(luaH_getstr(L, hvalue(&root.value), tsvalue(key), s2v(result))))
-      finishget(L, &root.value, key, restorestack(L, offset), upvalue);
-    luaR_poproot(L, &root);
+    /* A retry may park while resolving the field. Retain both operands
+    ** across stack relocation and any subsequent metamethod lookup. */
+    luaR_pushroot(L, &object);
+    luaR_setroot(L, &object, receiver);
+    luaR_pushroot(L, &index);
+    luaR_setroot(L, &index, key);
+    if (luaV_needsindex(luaH_get(L, hvalue(&object.value), &index.value, s2v(result))))
+      finishget(L, &object.value, &index.value, restorestack(L, offset), upvalue);
+    luaR_poproot(L, &index);
+    luaR_poproot(L, &object);
   }
   else
     finishget(L, receiver, key, result, upvalue);
@@ -377,8 +380,8 @@ static void __attribute__((noinline)) finishcaptureget (lua_State *L,
 ** Complete a table assignment 't[key] = val'. Roots snapshot all inputs
 ** once; the table operation owns lookup, insertion and resize together.
 */
-static void settable (lua_State *L, const TValue *t, TValue *key,
-                       TValue *val, unsigned upvalue) {
+static void __attribute__((noinline)) finishset (lua_State *L, const TValue *t,
+                         TValue *key, TValue *val, unsigned upvalue) {
   LuaObjectScope object;
   LuaNativeRoot owner;
   LuaNativeRoot *receiver = &owner;
@@ -386,7 +389,6 @@ static void settable (lua_State *L, const TValue *t, TValue *key,
   Table *table = ttistable(t) ? hvalue(t) : NULL;
   TValue other = {0};
   int loop, source = -1;
-  if (table != NULL && luaH_tryset(L, table, key, val, 0)) return;
   /* Retain diagnostic identity, not a stack pointer that an ownership wait
   ** can invalidate. Type information still comes from the rooted snapshot. */
   if (table == NULL) setobj(L, &other, t);
@@ -453,7 +455,8 @@ static void settable (lua_State *L, const TValue *t, TValue *key,
 }
 
 void luaV_settable (lua_State *L, const TValue *t, TValue *key, TValue *val) {
-  settable(L, t, key, val, 0);
+  if (!ttistable(t) || !luaH_tryset(L, hvalue(t), key, val, 0))
+    finishset(L, t, key, val, 0);
 }
 
 
@@ -1429,6 +1432,25 @@ l_sinline StkId directregister (StkId base, int reg) {
 ** the stack or hooks.)
 */
 #define halfProtect(exp)  (savestate(L,ci), (exp))
+
+/* Only waits and metamethod dispatch need to publish the current frame. */
+#define vmtableget(receiver,key,read,index,upvalue) { \
+  lu_byte tag = LUA_VABSTKEY; \
+  int retry = ttistable(receiver) && \
+    !read(L, hvalue(receiver), index, s2v(ra), &tag); \
+  if (l_unlikely(retry || luaV_needsindex(tag))) { \
+    Protect(finishvmget(L, receiver, key, ra, upvalue, retry)); \
+    updatebase(ci); \
+  } \
+}
+
+#define vmtableset(receiver,key,value,upvalue) { \
+  if (l_unlikely(!ttistable(receiver) || \
+      !luaH_tryset(L, hvalue(receiver), key, value, 0))) { \
+    Protect(finishset(L, receiver, key, value, upvalue)); \
+    updatebase(ci); \
+  } \
+}
 
 /* 'c' is the limit of live values in the stack. Publish before every handoff,
 ** even if this carrier does not collect. Another collector can move the stack

@@ -96,7 +96,7 @@ set_target_properties(capture_cells_test PROPERTIES C_STANDARD 99)
 target_compile_options(capture_cells_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(capture_cells_test PRIVATE luthr_static)
 target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
-  -Wl,--wrap=luaH_getstr -Wl,--wrap=luaH_getshortstr
+  -Wl,--wrap=luaH_trygetstr -Wl,--wrap=luaH_get
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
   -Wl,--wrap=luaF_loadshared -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
@@ -178,7 +178,7 @@ target_link_libraries(table_read_test PRIVATE luthr_static)
 target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=pthread_mutex_lock -Wl,--wrap=luaS_eqstr -Wl,--wrap=luaM_free_
   -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index
-  -Wl,--wrap=luaH_trygetstr -Wl,--wrap=luaH_getstr)
+  -Wl,--wrap=luaH_tryget -Wl,--wrap=luaH_trygetstr -Wl,--wrap=luaH_get)
 foreach(case IN ITEMS fast primitive batching overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational

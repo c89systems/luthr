@@ -124,4 +124,48 @@ invalid[nil]=17
 invalid[0/0]=23
 assert(#intercepted==2 and intercepted[1].key==nil and intercepted[1].value==17)
 assert(intercepted[2].key~=intercepted[2].key and intercepted[2].value==23)
+
+-- Each indexing form must resume with the correct register and operands.
+local co=coroutine.create(function()
+  local key={}
+  local object=setmetatable({}, {
+    __index=function(self,k)
+      coroutine.yield('read',k)
+      if k=='method' then return function(receiver) return receiver==self end end
+      return k
+    end,
+    __newindex=function(self,k,v)
+      coroutine.yield('write',k)
+      rawset(self,k,v)
+    end,
+  })
+  local function readcaptured() return object.field end
+  local field=object.field
+  local index=object[2]
+  local value=object[key]
+  assert(readcaptured()==field and field=='field' and index==2 and value==key)
+  assert(object:method())
+  object.field=field
+  object[2]=index
+  object[key]=value
+  assert(object.field==field and object[2]==index and object[key]==value)
+  return true
+end)
+local function yielded(operation,expected)
+  local ok,action,key=coroutine.resume(co)
+  assert(ok and action==operation and (expected==nil or key==expected))
+  collectgarbage('collect')
+  return key
+end
+yielded('read','field')
+yielded('read',2)
+local key=yielded('read')
+assert(type(key)=='table')
+yielded('read','field')
+yielded('read','method')
+yielded('write','field')
+yielded('write',2)
+yielded('write',key)
+local ok,result=coroutine.resume(co)
+assert(ok and result==true and coroutine.status(co)=='dead')
 print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')

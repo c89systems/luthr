@@ -320,7 +320,7 @@ static int getnumargs (lua_State *L, CallInfo *ci, Table *h) {
     return ci->u.l.nextraargs;
   else {
     TValue res;
-    if (luaH_getshortstr(L, h, luaS_new(L, "n"), &res) != LUA_VNUMINT ||
+    if (luaH_getstr(L, h, luaS_new(L, "n"), &res) != LUA_VNUMINT ||
         l_castS2U(ivalue(&res)) > cast_uint(INT_MAX/2))
       luaG_runerror(L, "vararg table has no proper 'n'");
     return cast_int(ivalue(&res));
