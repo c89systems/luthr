@@ -1571,6 +1571,15 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
     lua_unlock(L);
     return -1;
   }
+  if (what == LUA_GCSTEP) {
+    l_mem bytes;
+    va_start(argp, what);
+    bytes = cast(l_mem, va_arg(argp, size_t));
+    va_end(argp);
+    res = luaC_userstep(L, bytes);
+    lua_unlock(L);
+    return res;
+  }
   luaC_entergc(L, &gcframe);
   do {
     luaC_waittrace(L);
@@ -1609,25 +1618,6 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
     }
     case LUA_GCCOUNTB: {
       res = cast_int(gettotalbytes(g) & 0x3ff);
-      break;
-    }
-    case LUA_GCSTEP: {
-      l_mem n = cast(l_mem, va_arg(argp, size_t));
-      l_mem newdebt;
-      int work = 0;  /* true if GC did some work */
-      if (n <= 0)
-        newdebt = 0;  /* force to run one basic step */
-      else if (luaE_getdebt(g) >= n - MAX_LMEM)  /* no overflow? */
-        newdebt = luaE_getdebt(g) - n;
-      else  /* overflow */
-        newdebt = -MAX_LMEM;  /* set debt to mininum value */
-      luaE_setdebt(g, newdebt);
-      if (luaC_needstep(L)) {
-        luaC_step(L);
-        work = 1;
-      }
-      if (work && luaC_state(g) == GCSpause)  /* end of cycle? */
-        res = 1;  /* signal it */
       break;
     }
     case LUA_GCISRUNNING: {

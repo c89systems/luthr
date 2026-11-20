@@ -65,6 +65,11 @@ struct request {
 static void *request(void *argument) {
   struct request *r = argument;
   role = r->role;
+  if (r->phase == 5) {
+    require(lua_gc(r->state, LUA_GCSTEP, (size_t)0) == 0);
+    r->stops = stops;
+    return NULL;
+  }
   lua_lock(r->state);
   if (r->phase == 4) {
     luaC_checkGC(r->state);
@@ -85,6 +90,39 @@ static void *request(void *argument) {
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
   }
   return NULL;
+}
+
+static void explicit_trace_slice(lua_State *L) {
+  struct request helper = {0};
+  pthread_t worker;
+  unsigned steps;
+  lu_mem work;
+  lua_gc(L, LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPSTEPSIZE, 64);
+  require(luaL_loadstring(L, "local h; for i=1,20000 do h={h} end; return h") ==
+          LUA_OK);
+  require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  helper.state = lua_newthread(L);
+  helper.role = 1;
+  helper.phase = 5;
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  lua_lock(L);
+  require(luaC_tracing(L));
+  work = __atomic_load_n(&G(L)->pacer.work, __ATOMIC_RELAXED);
+  /* Payload work must finish while another participant holds metadata. */
+  luaW_heapenter(L);
+  require(pthread_create(&worker, NULL, request, &helper) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(helper.stops == 0 && luaC_tracing(L));
+  require(__atomic_load_n(&G(L)->pacer.work, __ATOMIC_RELAXED) > work);
+  luaW_heapleave(L);
+  lua_unlock(L);
+  for (steps = 0; steps < 1000; steps++)
+    if (lua_gc(L, LUA_GCSTEP, (size_t)0) == 1)
+      break;
+  require(steps < 1000 && lua_gc(L, LUA_GCISRUNNING) == 0);
+  require(lua_istable(L, 1));
 }
 
 static void phase_request(lua_State *L, int generational) {
@@ -290,6 +328,10 @@ int main(int argc, char **argv) {
   unsigned round;
   int explicit_step, stop, overdue;
   require(L != NULL && argc == 2);
+  if (strcmp(argv[1], "explicit_trace_slice") == 0) {
+    explicit_trace_slice(L);
+    goto done;
+  }
   if (strcmp(argv[1], "reachable_finalizers") == 0 ||
       strcmp(argv[1], "late_finalizer") == 0) {
     reachable_finalizers(L, strcmp(argv[1], "late_finalizer") == 0);

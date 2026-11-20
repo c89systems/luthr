@@ -14,6 +14,7 @@
 enum { REASON_OTHER, REASON_GC, REASON_BARRIER };
 enum {
   COLLECT_STEP,
+  COLLECT_USER_STEP,
   COLLECT_FULL,
   COLLECT_ASSIST,
   COLLECT_POLL,
@@ -194,6 +195,7 @@ int __real_luaW_trycollectenter(lua_State *);
 void __real_luaW_heapleave(lua_State *);
 void __real_luaQ_wake(pthread_cond_t *, LuaWaiter **);
 void __real_luaC_step(lua_State *);
+int __real_luaC_userstep(lua_State *, l_mem);
 void __real_luaC_fullgc(lua_State *, int);
 void __real_luaC_finishtrace(lua_State *);
 void __real_luaC_syncbarrier(lua_State *, GCObject *, GCObject *);
@@ -320,30 +322,34 @@ void __wrap_luaQ_wake(pthread_cond_t *changed, LuaWaiter **waiters) {
   __real_luaQ_wake(changed, waiters);
 }
 
-static void collect(lua_State *L, int operation, int emergency) {
+static int collect(lua_State *L, int operation, l_mem argument) {
   GcProbe *record = probe(L);
   uint64_t started = 0, excluded = 0, elapsed;
   unsigned reason = REASON_OTHER;
   unsigned previous_operation = 0;
-  int outer = 0, running = 0;
+  int outer = 0, running = 0, result = 0;
   if (record != NULL) {
     previous_operation = record->operation;
-    record->operation = operation;
+    record->operation =
+        operation == COLLECT_USER_STEP ? COLLECT_STEP : operation;
     outer = record->gc_depth++ == 0;
     reason = record->reason;
     record->reason = REASON_GC;
     if (outer) {
       started = now();
       excluded = record->coordination_ns + record->reclaim_ns;
-      running = operation == COLLECT_FULL || gcrunning(G(L)) != 0;
+      running = operation == COLLECT_FULL || operation == COLLECT_USER_STEP ||
+                gcrunning(G(L)) != 0;
       record->collector_calls++;
       record->collector_running_calls += running;
     }
   }
   if (operation == COLLECT_FULL)
-    __real_luaC_fullgc(L, emergency);
+    __real_luaC_fullgc(L, (int)argument);
   else if (operation == COLLECT_STEP)
     __real_luaC_step(L);
+  else if (operation == COLLECT_USER_STEP)
+    result = __real_luaC_userstep(L, argument);
   else if (operation == COLLECT_ASSIST)
     __real_luaC_assisttrace(L);
   else if (operation == COLLECT_POLL)
@@ -367,8 +373,12 @@ static void collect(lua_State *L, int operation, int emergency) {
     record->reason = reason;
     record->gc_depth--;
   }
+  return result;
 }
 void __wrap_luaC_step(lua_State *L) { collect(L, COLLECT_STEP, 0); }
+int __wrap_luaC_userstep(lua_State *L, l_mem bytes) {
+  return collect(L, COLLECT_USER_STEP, bytes);
+}
 void __wrap_luaC_fullgc(lua_State *L, int emergency) {
   collect(L, COLLECT_FULL, emergency);
 }

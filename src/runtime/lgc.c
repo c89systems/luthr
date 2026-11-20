@@ -1657,6 +1657,7 @@ static void finishincremental (lua_State *L, global_State *g) {
                    __ATOMIC_RELAXED);
   setidledebt(g);
   L->reclaim_pages = 1;
+  __atomic_fetch_add(&g->major_completed, 1, __ATOMIC_RELEASE);
 }
 
 
@@ -1915,6 +1916,8 @@ void luaC_endsweep (lua_State *L) {
   L->reclaim_pages = 1;
   finishgencycle(g);
   setidledebt(g);
+  if (plan->kind == SWEEP_OLD)
+    __atomic_fetch_add(&g->major_completed, 1, __ATOMIC_RELEASE);
 }
 
 /* Index resizing and young finalizers require an admitted collector. They
@@ -2402,9 +2405,13 @@ void luaC_runtilstate (lua_State *L, int state, int fast) {
 ** finishing a cycle (pause state). Finally, it sets the debt that
 ** controls when next step will be performed.
 */
-static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
+static l_mem incrementalwork (global_State *g, l_mem bytes) {
+  return applygcparam(g, STEPMUL, bytes / cast_int(sizeof(void *)));
+}
+
+static void incstep (lua_State *L, global_State *g, l_mem debt, int concurrent) {
   l_mem stepsize = applygcparam(g, STEPSIZE, 100);
-  l_mem work2do = applygcparam(g, STEPMUL, stepsize / cast_int(sizeof(void*)));
+  l_mem work2do = incrementalwork(g, stepsize);
   l_mem stres;
   int fast = (work2do == 0);  /* special case: do a full collection */
   /* Admission and local accounting can accumulate several workers' bytes
@@ -2413,7 +2420,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
   ** Explicit basic steps pass zero and retain the configured work size. */
   if (!fast && debt < 0) {
     l_mem allocated = stepsize > MAX_LMEM + debt ? MAX_LMEM : stepsize - debt;
-    work2do = applygcparam(g, STEPMUL, allocated / cast_int(sizeof(void*)));
+    work2do = incrementalwork(g, allocated);
   }
   do {  /* repeat until enough work */
     if (!fast && luaC_tracing(L)) {
@@ -2421,7 +2428,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
       lu_mem budget = work2do > MAX_LMEM / cast_int(sizeof(void*))
         ? cast(lu_mem, MAX_LMEM)
         : cast(lu_mem, work2do * cast_int(sizeof(void*)));
-      if (automatic && L->world_depth != 0) {
+      if (concurrent && L->world_depth != 0) {
         /* Initialize under this request's existing boundary. The automatic
         ** request borrows no mutable Lua fields while doing graph work, so
         ** it owes no restoration of a global pause when its slice returns. */
@@ -2430,7 +2437,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int automatic) {
         luaW_start(L);
       }
       tracework(L, budget, 0);
-      if (automatic) return;  /* shared completion owns the next idle budget */
+      if (concurrent) return;  /* shared completion owns the next idle budget */
       if (g->trace_epoch != epoch || luaC_kind(g) == KGC_GENMINOR) return;
       break;
     }
@@ -2553,14 +2560,61 @@ static void collectnursery (lua_State *L) {
   luaM_flushdebt(L);
 }
 
+/* Consume the world stop acquired to start a step. Shared graph work may
+** resume mutators immediately after its initial publication. */
+static void runstep (lua_State *L, l_mem debt, int concurrent, int user) {
+  global_State *g = G(L);
+  LuaGCFrame frame;
+  int reclaim = 0;
+  luaC_entergc(L, &frame);
+  lua_assert(!g->gcemergency);
+  luai_tracegc(L, 1);  /* for internal debugging */
+  switch (luaC_kind(g)) {
+    case KGC_INC: case KGC_GENMAJOR:
+      incstep(L, g, debt, concurrent);
+      reclaim = !luaC_tracing(L) &&
+                (luaC_state(g) == GCSpause || luaC_kind(g) == KGC_GENMINOR);
+      break;
+    case KGC_GENMINOR: {
+      l_mem budget = applygcparam(g, STEPMUL,
+                        applygcparam(g, STEPSIZE, 100));
+      uint64_t epoch;
+      lua_assert(luaC_state(g) == GCSpropagate);
+      starttrace(L, TRACE_YOUNG);
+      epoch = g->trace_epoch;
+      if (concurrent) {
+        luaC_advancetrace(L);
+        g->gcstopem = 0;
+        luaW_start(L);
+      }
+      tracework(L, cast(lu_mem, budget), user || budget == 0);
+      if (user && luaC_sweeping(L) && g->trace_epoch == epoch)
+        sweepwork(L, cast(lu_mem, MAX_LMEM), 1);
+      if (g->trace_epoch != epoch) break;
+      if (!concurrent && !luaC_tracing(L) && !luaC_sweeping(L)) setidledebt(g);
+      reclaim = !luaC_tracing(L) && !luaC_sweeping(L);
+      break;
+    }
+  }
+  luai_tracegc(L, 0);  /* for internal debugging */
+  /* Retiring all allocation caches and scanning every page belongs to a
+  ** completed collection, not each marking/partial-sweep step. Emergency and
+  ** explicit full collections still reclaim before retrying an allocation. */
+  if (reclaim) L->reclaim_pages = 1;
+  if (!concurrent || L->world_depth != 0) luaW_start(L);
+  if (!L->reclaiming && L->world_depth == 0 &&
+      (luaC_retired(L) != NULL || L->reclaim_pages))
+    luaC_reclaim(L);
+  luaC_leavegc(L, &frame);
+}
+
+
 /*
-** Performs a basic GC step while collection is enabled. Explicit API steps
-** temporarily enable collection while already owning the collector.
+** Performs a basic GC step while automatic collection is enabled.
 */
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
   LuaGCFrame frame;
-  int reclaim = 0;
   int claimed = 0;
   int automatic = L->world_depth == 0;
   l_mem debt;
@@ -2605,8 +2659,7 @@ void luaC_step (lua_State *L) {
     luaC_assistreclaim(L);
   if (L->world_depth == 0) {
     unsigned expected = 0;
-    /* One automatic request can wait for metadata while other mutators keep
-    ** working. Explicit steps already own the collector and must still run. */
+    /* One automatic request seeks metadata while other mutators keep working. */
     if (__atomic_compare_exchange_n(&g->gcstep_pending, &expected, 1, 0,
                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
       claimed = 1;
@@ -2617,8 +2670,7 @@ void luaC_step (lua_State *L) {
   }
   /* Another collector can service this request while metadata access waits.
   ** Revalidate under metadata ownership before requesting global quiescence.
-  ** Include unpublished local debt, just like the allocation-side check.
-  ** Explicit API steps set their debt while already owning the collector. */
+  ** Include unpublished local debt, just like the allocation-side check. */
   luaW_collectenter(L);
   if (luaC_tracing(L) || luaC_sweeping(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) {
@@ -2634,47 +2686,91 @@ void luaC_step (lua_State *L) {
     __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
     claimed = 0;
   }
-  luaC_entergc(L, &frame);
-  lua_assert(!g->gcemergency);
-  luai_tracegc(L, 1);  /* for internal debugging */
-  switch (luaC_kind(g)) {
-    case KGC_INC: case KGC_GENMAJOR:
-      incstep(L, g, debt, automatic);
-      reclaim = !luaC_tracing(L) &&
-                (luaC_state(g) == GCSpause || luaC_kind(g) == KGC_GENMINOR);
-      break;
-    case KGC_GENMINOR: {
-      l_mem budget = applygcparam(g, STEPMUL,
-                        applygcparam(g, STEPSIZE, 100));
-      uint64_t epoch;
-      lua_assert(luaC_state(g) == GCSpropagate);
-      starttrace(L, TRACE_YOUNG);
-      epoch = g->trace_epoch;
-      if (automatic) {
-        luaC_advancetrace(L);
-        g->gcstopem = 0;
-        luaW_start(L);
-      }
-      tracework(L, cast(lu_mem, budget), budget == 0);
-      if (g->trace_epoch != epoch) break;
-      if (!automatic && !luaC_tracing(L) && !luaC_sweeping(L)) setidledebt(g);
-      reclaim = !luaC_tracing(L) && !luaC_sweeping(L);
-      break;
-    }
-  }
-  luai_tracegc(L, 0);  /* for internal debugging */
-  /* Retiring all allocation caches and scanning every page belongs to a
-  ** completed collection, not each marking/partial-sweep step. Emergency and
-  ** explicit full collections still reclaim before retrying an allocation. */
-  if (reclaim) L->reclaim_pages = 1;
-  if (!automatic || L->world_depth != 0) luaW_start(L);
-  if (!L->reclaiming && L->world_depth == 0 &&
-      (luaC_retired(L) != NULL || L->reclaim_pages))
-    luaC_reclaim(L);
-  luaC_leavegc(L, &frame);
+  runstep(L, debt, automatic, 0);
  done:
   if (claimed)
     __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
+}
+
+
+/* A positive API request spends the current allowance. Serialize against
+** other adjustments and pacing updates without publishing the whole heap. */
+static void chargestep (global_State *g, l_mem bytes) {
+  l_mem step = __atomic_load_n(&g->GCstep, __ATOMIC_RELAXED);
+  l_mem minimum, next;
+  do {
+    minimum = getgcbytes(g) - MAX_LMEM;
+    next = step < minimum + bytes ? minimum : step - bytes;
+  } while (!__atomic_compare_exchange_n(&g->GCstep, &step, next, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
+/* Join the current cohort. A basic incremental request lends one slice;
+** a young-generation request finishes the minor collection it joined. */
+static void stepactive (lua_State *L) {
+  global_State *g = G(L);
+  uint64_t epoch = g->trace_epoch;
+  int marking = luaC_tracing(L);
+  int young = marking ? g->trace_plan.finish == TRACE_YOUNG
+                       : g->sweep_plan.kind == SWEEP_YOUNG;
+  l_mem size = applygcparam(g, STEPSIZE, 100);
+  l_mem work = incrementalwork(g, size);
+  int complete = young || work == 0;
+  if (marking) {
+    lu_mem budget = young ? cast(lu_mem, applygcparam(g, STEPMUL, size)) :
+      cast(lu_mem, work > MAX_LMEM / cast_int(sizeof(void *))
+        ? MAX_LMEM : work * cast_int(sizeof(void *)));
+    tracework(L, budget, complete);
+  }
+  if (g->trace_epoch == epoch && luaC_sweeping(L) && (!marking || complete))
+    sweepwork(L, cast(lu_mem, applygcparam(g, STEPMUL, size)), complete);
+  if (!young && complete && g->trace_epoch == epoch &&
+      luaC_state(g) == GCScallfin) {
+    luaW_collectenter(L);
+    if (g->trace_epoch == epoch && luaC_state(g) == GCScallfin) {
+      luaW_stop(L);
+      luaW_heapleave(L);
+      luaC_runtilstate(L, GCSpause, 1);
+      luaW_start(L);
+    }
+    else luaW_heapleave(L);
+  }
+  if (!L->reclaiming && L->world_depth == 0 &&
+      (luaC_retired(L) != NULL || L->reclaim_pages)) luaC_reclaim(L);
+}
+
+
+int luaC_userstep (lua_State *L, l_mem bytes) {
+  global_State *g = G(L);
+  uint64_t major = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE);
+  uint64_t epoch = g->trace_epoch;
+  LuaGCFrame frame;
+  if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
+  if (bytes > 0) {
+    chargestep(g, bytes);
+    if (!luaC_needstep(L)) return 0;
+  }
+  luaC_entergc(L, &frame);
+  if (!luaC_tracing(L) && !luaC_sweeping(L)) {
+    luaW_collectenter(L);
+    /* Another admitted request may have started or completed this step
+    ** while we waited. Keep the permit only when starting new work. */
+    if (!luaC_tracing(L) && !luaC_sweeping(L) && g->trace_epoch == epoch &&
+        __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) == major) {
+      LuaWorldScope scope = luaW_scope(L);
+      int concurrent = scope.collection == 0 && scope.heap == 1 &&
+                       L->object_scopes == NULL;
+      luaW_stop(L);
+      luaW_heapleave(L);
+      runstep(L, 0, concurrent, 1);
+      goto done;
+    }
+    luaW_heapleave(L);
+  }
+  if (luaC_tracing(L) || luaC_sweeping(L)) stepactive(L);
+ done:
+  luaC_leavegc(L, &frame);
+  return __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) != major;
 }
 
 

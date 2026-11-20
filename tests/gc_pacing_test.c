@@ -172,6 +172,16 @@ static void interrupted_assist(lua_State *L, void *unused) {
   require(0);
 }
 
+/* These fixtures need an unfinished young cycle with no automatic helpers.
+ * A public basic young step now completes the minor collection. */
+static void start_stopped_trace(lua_State *L) {
+  require(G(L)->gcstp == GCSTPUSR && !luaC_tracing(L) && !luaC_sweeping(L));
+  G(L)->gcstp = 0; /* The fixture owns the only carrier. */
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  G(L)->gcstp = GCSTPUSR;
+}
+
 static void bounded_marking(const char *kind) {
   lua_State *L = luaL_newstate();
   unsigned length = 0, steps = 0;
@@ -195,7 +205,9 @@ static void bounded_marking(const char *kind) {
     lua_gc(L, LUA_GCRESTART);
   lua_lock(L);
   G(L)->pacer.goal = MAX_LMEM; /* Isolate slice budgeting from heap pressure. */
-  if (stopped) {
+  if (stopped && generational)
+    start_stopped_trace(L);
+  else if (stopped) {
     lua_unlock(L);
     require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
     lua_lock(L);
@@ -619,11 +631,9 @@ static void borrowed_storage(int generational) {
 }
 
 static void young_cycle(lua_State *L) {
-  unsigned steps = 0;
-  do {
-    require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
-    require(++steps < 10000);
-  } while (luaC_tracing(L) || luaC_sweeping(L));
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  require(lua_gc(L, LUA_GCISRUNNING) == 0);
 }
 
 /* A concurrent sweep can promote a parent before a child allocated outside
@@ -648,8 +658,8 @@ static void cohort_promotion(void) {
   lua_setglobal(L, "weak_parent");
   young_cycle(L);
   require(getage(parent) == G_SURVIVAL);
-  require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0);
   lua_lock(L);
+  start_stopped_trace(L);
   luaC_waittrace(L);
   require(luaC_sweeping(L) && getage(parent) == G_SURVIVAL);
   lua_unlock(L);
@@ -704,7 +714,10 @@ static void marking_edges(void) {
   require(luaL_loadstring(L, "local h; for i=1,10000 do h={h} end; keep=h") ==
           LUA_OK);
   require(lua_pcall(L, 0, 0, 0) == LUA_OK);
-  require(lua_gc(L, LUA_GCSTEP, (size_t)0) >= 0 && luaC_tracing(L));
+  lua_lock(L);
+  start_stopped_trace(L);
+  require(luaC_tracing(L));
+  lua_unlock(L);
   for (i = 0; i < 2; i++) {
     GCObject *child;
     lua_getglobal(L, "parent");
