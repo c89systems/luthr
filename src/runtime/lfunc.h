@@ -116,7 +116,8 @@ l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
 
 /* Participation protects the selected cell even if another execution joins
 ** the closure. A borrowed operand must be consumed or rooted before leaving
-** participation. The contended load also holds admission and the stack gate. */
+** participation. The heap write barrier retains overwritten values and cells.
+** The contended load also holds admission and the stack gate. */
 l_sinline void luaF_loadupval (lua_State *L, UpVal *uv, TValue *value) {
   if (luaF_localupval(L, uv)) {
     const TValue *slot = luaF_privateslot(L, uv);

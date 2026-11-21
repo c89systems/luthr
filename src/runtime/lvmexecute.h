@@ -58,7 +58,6 @@
         int b = GETARG_B(i);
         StkId ra = readRA(i);
         luaF_loadupval(L, luaF_capturecell(cl, b), s2v(ra));
-        luaC_tracevalue(L, s2v(ra));
         vmbreak;
       }
       vmcase(OP_SETUPVAL) {
@@ -79,7 +78,6 @@
         TValue *key = KC(i);  /* a short string */
         unsigned upvalue = GETARG_B(i);
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
-        luaC_tracevalue(L, &receiver);
         vmtableget(&receiver, key, luaH_trygetstr, tsvalue(key), upvalue + 1u);
         vmbreak;
       }
@@ -111,7 +109,6 @@
         TValue *rc = RKC(i);
         unsigned upvalue = GETARG_A(i);
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
-        luaC_tracevalue(L, &receiver);
         vmtableset(&receiver, rb, rc, upvalue + 1u);
         vmbreak;
       }
