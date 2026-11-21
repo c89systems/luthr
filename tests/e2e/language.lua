@@ -117,6 +117,26 @@ equal(string.gsub('alpha=12 beta=21','(%a+)=(%d+)',function(k,v)
   return k..'='..tonumber(v)*2
 end),'alpha=24 beta=42')
 equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
+do
+  local format = string.format
+  equal(format('%d,%i,%u',0,-42,42),'0,-42,42')
+  equal(format('%d/%d',math.mininteger,math.maxinteger),
+    '-9223372036854775808/9223372036854775807')
+  equal(format('%u',-1),'18446744073709551615')
+  equal(format('%+06d/%#x/%.0d',42,42,0),'+00042/0x2a/')
+  equal(format('%d/%i','-42',42.0),'-42/42')
+  equal(tostring(math.mininteger),'-9223372036854775808')
+  equal('value='..math.maxinteger,'value=9223372036854775807')
+  local n = assert(load('return '..format('%q',math.mininteger)))()
+  assert(math.type(n)=='integer' and n==math.mininteger)
+  assert(not pcall(format,'%d',1.25))
+  assert(not pcall(format,'%100d',1))
+  local object = setmetatable({}, {__tostring=function()
+    collectgarbage('collect')
+    return 'rooted'
+  end})
+  equal(format('%d/%s/%q',42,object,'bytes'),'42/rooted/"bytes"')
+end
 equal(utf8.len('å中🙂'),3)
 local bytes = string.pack('<i8I2',-42,65535)
 local signed, unsigned, position = string.unpack('<i8I2',bytes)

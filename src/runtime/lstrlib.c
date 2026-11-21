@@ -1523,10 +1523,11 @@ static void addliteral (lua_State *L, unsigned *work, luaL_Buffer *b, int arg,
         nb = quotefloat(L, buff, fltvalue(&value->value));
       else {  /* integers */
         lua_Integer n = ivalue(&value->value);
-        const char *format = (n == LUA_MININTEGER)  /* corner case? */
-                           ? "0x%" LUA_INTEGER_FRMLEN "x"  /* use hex */
-                           : LUA_INTEGER_FMT;  /* else use default format */
-        nb = l_sprintf(buff, MAX_ITEM, format, (LUAI_UACINT)n);
+        if (n == LUA_MININTEGER)  /* its decimal literal would parse as float */
+          nb = l_sprintf(buff, MAX_ITEM, "0x%" LUA_INTEGER_FRMLEN "x",
+                         (LUA_UNSIGNED)n);
+        else
+          nb = cast_int(luaO_todecimal(buff, l_castS2U(n), n < 0));
       }
       luaL_addsize(b, cast_uint(nb));
       break;
@@ -1655,9 +1656,15 @@ static int str_format (lua_State *L) {
           flags = L_FMTFLAGSX;
          intcase: {
           lua_Integer n = luaL_checkinteger(L, arg);
-          checkformat(L, form, flags, 1);
-          addlenmod(form, LUA_INTEGER_FRMLEN);
-          nb = l_sprintf(buff, maxitem, form, (LUAI_UACINT)n);
+          if (form[2] == '\0' &&
+              (form[1] == 'd' || form[1] == 'i' || form[1] == 'u'))
+            nb = cast_int(luaO_todecimal(buff, l_castS2U(n),
+                                       n < 0 && form[1] != 'u'));
+          else {
+            checkformat(L, form, flags, 1);
+            addlenmod(form, LUA_INTEGER_FRMLEN);
+            nb = l_sprintf(buff, maxitem, form, (LUAI_UACINT)n);
+          }
           break;
         }
         case 'a': case 'A':

@@ -442,6 +442,25 @@ static int tostringbuffFloat (lua_Number n, char *buff) {
   return len;
 }
 
+/* Write a decimal integer and its terminator into a LUA_N2SBUFFSZ buffer.
+** Negate in unsigned arithmetic so LUA_MININTEGER needs no special case. */
+unsigned luaO_todecimal (char *buff, lua_Unsigned n, int negative) {
+  char digits[LUA_N2SBUFFSZ];
+  char *end = digits + sizeof(digits) - 1;
+  char *first = end;
+  unsigned len;
+  if (negative) n = 0u - n;
+  *end = '\0';
+  do {
+    *--first = cast_char('0' + n % 10);
+    n /= 10;
+  } while (n != 0);
+  if (negative) *--first = '-';
+  len = cast_uint(end - first);
+  memcpy(buff, first, len + 1);
+  return len;
+}
+
 
 /*
 ** Convert a number object to a string, adding it to a buffer.
@@ -449,10 +468,11 @@ static int tostringbuffFloat (lua_Number n, char *buff) {
 unsigned luaO_tostringbuff (const TValue *obj, char *buff) {
   int len;
   lua_assert(ttisnumber(obj));
-  if (ttisinteger(obj))
-    len = lua_integer2str(buff, LUA_N2SBUFFSZ, ivalue(obj));
-  else
-    len = tostringbuffFloat(fltvalue(obj), buff);
+  if (ttisinteger(obj)) {
+    lua_Integer n = ivalue(obj);
+    return luaO_todecimal(buff, l_castS2U(n), n < 0);
+  }
+  len = tostringbuffFloat(fltvalue(obj), buff);
   lua_assert(len < LUA_N2SBUFFSZ);
   return cast_uint(len);
 }
