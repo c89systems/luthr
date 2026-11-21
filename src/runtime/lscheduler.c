@@ -550,12 +550,13 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
   UNUSED(L);
   if (execution->native_depth != 0 ||
       __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
-  /* With fewer native permits than managed slots, redispatching a contender
-  ** on each short C return can run it just to find its permit busy again.
-  ** Reuse the reservation until a poll, park or bounded call count. */
-  if (s->config.native_limit < s->config.slots &&
+  /* Let parallel bursts reuse a permit instead of writing the shared count
+  ** on every call. Release at a poll, park or the burst limit. Give queued
+  ** contenders an earlier chance when native capacity can cover all slots. */
+  if (s->config.slots > 1 &&
       task->native_reuses < NATIVE_REUSE_BURST &&
-      (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING)) {
+      (s->config.native_limit < s->config.slots ||
+       !(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING))) {
     task->native_reuses++;
     __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
   }

@@ -1045,6 +1045,59 @@ static void native_burst(struct fixture *f, int polling) {
   finish(f);
 }
 
+static int poll_after_native_waiter(lua_State *L) {
+  struct fixture *f = fixture;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->waiting = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->pause_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return poll_for_native_peer(L);
+}
+
+static void late_native_waiter(struct fixture *f) {
+  initlimits(f, 2, 2);
+  lua_gc(f->main, LUA_GCSTOP);
+  f->native_release = 1;
+  managed(f->main, "poll_after_native_waiter", poll_after_native_waiter);
+  lua_pushcfunction(f->main, hold_second_permit);
+  lua_setglobal(f->main, "hold_second_permit");
+  lua_pushcfunction(f->main, short_native_call);
+  lua_setglobal(f->main, "short_native_call");
+  submit(f, 5, "return hold_second_permit()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->seen[5])
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 0, "short_native_call(0); return poll_after_native_waiter()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  /* The first call returned before the new request. The other permit is
+   * still occupied by a blocked call, so only the polling task can help. */
+  require(luaSC_nativeactive(&f->scheduler) == 2);
+  submit(f, 1, "return short_native_call(...)", 1);
+  wait_for_permit(f, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->pause_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 77);
+  require(collect(f, 1, LUA_OK) == 1);
+  require(luaSC_nativeactive(&f->scheduler) == 1);
+
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->admission_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 5, LUA_OK) == 66);
+  require(luaSC_nativeactive(&f->scheduler) == 0);
+  finish(f);
+}
+
 static int callback_done(lua_State *L) {
   lua_pushboolean(
       L, __atomic_load_n(&fixture->native_callback_done, __ATOMIC_ACQUIRE));
@@ -1312,6 +1365,8 @@ int main(int argc, char **argv) {
     native_burst(f, 0);
   else if (strcmp(argv[1], "native_burst_poll") == 0)
     native_burst(f, 1);
+  else if (strcmp(argv[1], "late_native_waiter") == 0)
+    late_native_waiter(f);
   else if (strcmp(argv[1], "startup_failures") == 0)
     startup_failures(f);
   else if (strcmp(argv[1], "idle_notifications") == 0)
