@@ -587,6 +587,26 @@ static size_t concretesize (unsigned int size) {
          luaH_arraycardcount(size) * sizeof(uint64_t);
 }
 
+static void resizecards (const Table *t, Value *array, unsigned size,
+                         unsigned copied) {
+  uint64_t *cards = cast(uint64_t *, cast_charp(array) + luaH_cardoffset(size));
+  unsigned i;
+  memset(cards, 0xff, luaH_arraycardcount(size) * sizeof(uint64_t));
+  if (t->asize >= LUA_ARRAY_CARD_MIN) {
+    const uint64_t *old = luaH_arraycards(t);
+    for (i = 0; i < luaH_arraycardcount(copied); i++) {
+      if (__atomic_load_n(&old[i], __ATOMIC_ACQUIRE) != LUA_ARRAY_CARD_SCALAR)
+        cards[i] = 0;
+    }
+  }
+  else {
+    const lu_byte *tags = cast(lu_byte *, array) + sizeof(unsigned);
+    for (i = 0; i < copied; i++) {
+      if (tags[i] & BIT_ISCOLLECTABLE) cards[i / LUA_ARRAY_CARD_SLOTS] = 0;
+    }
+  }
+}
+
 
 /*
 ** Prepare a replacement array, leaving the old image readable until the
@@ -603,22 +623,21 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
   else if (newasize == 0) return NULL;
   else {
     size_t newasizeb = concretesize(newasize);
+    unsigned tomove = oldasize < newasize ? oldasize : newasize;
     Value *np = cast(Value *,
                   luaM_realloc_(L, NULL, 0, newasizeb));
     if (np == NULL)  /* allocation error? */
       return NULL;
     np += newasize;  /* shift pointer to the end of value segment */
-    if (oldasize > 0) {
+    if (tomove > 0) {
       /* move common elements to new position */
       Value *op = t->array;  /* original array */
-      unsigned tomove = (oldasize < newasize) ? oldasize : newasize;
       size_t tomoveb = arraypayload(tomove);
       lua_assert(tomoveb > 0);
       memcpy(np - tomove, op - tomove, tomoveb);
     }
     if (newasize >= LUA_ARRAY_CARD_MIN)
-      memset(cast_charp(np) + luaH_cardoffset(newasize), 0,
-             luaH_arraycardcount(newasize) * sizeof(uint64_t));
+      resizecards(t, np, newasize, tomove);
     return np;
   }
 }

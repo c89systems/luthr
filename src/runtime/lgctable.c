@@ -82,41 +82,46 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
   return 1;
 }
 
-/* The stamp proves a card contained no young edges in this major
-** generation. An edge write dirties the card after publishing its slot.
-** Writers also shade old and new edges while the scan is active. */
+/* A scalar card has no edges for any trace. A young-clean stamp also skips
+** old edges for its major epoch. A reference store dirties either proof;
+** the existing barriers shade edges if the store races with the skip. */
 static int scanarray (lua_State *L, LuaTraceWork *work, Table *table,
                       const Table *view, int *young_edges) {
   global_State *g = G(L);
-  uint64_t epoch;
+  uint64_t epoch = 0;
   uint64_t *cards;
   unsigned first;
-  if (view->asize < LUA_ARRAY_CARD_MIN || !isold(obj2gco(table)) ||
-      !(luaC_markstate(g) & LUA_MARK_YOUNG))
+  if (view->asize < LUA_ARRAY_CARD_MIN)
     return scanpart(L, work, table, view, 0, view->asize, 0, NULL, young_edges);
-  epoch = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) + 1;
-  if (epoch == 0 || epoch == UINT64_MAX)
-    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, young_edges);
+  if (isold(obj2gco(table)) && (luaC_markstate(g) & LUA_MARK_YOUNG)) {
+    epoch = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) + 1;
+    if (epoch >= LUA_ARRAY_CARD_SCANNING) epoch = 0;
+  }
   cards = luaH_arraycards(view);
   for (first = 0; first < view->asize; first += LUA_ARRAY_CARD_SLOTS) {
     uint64_t *card = &cards[first / LUA_ARRAY_CARD_SLOTS];
     uint64_t stamp = __atomic_load_n(card, __ATOMIC_ACQUIRE);
     unsigned end = first + LUA_ARRAY_CARD_SLOTS;
     int young = 0, clearing, scanned;
-    if (stamp == epoch) {
+    if (stamp == LUA_ARRAY_CARD_SCALAR || (epoch != 0 && stamp == epoch)) {
       if (luaW_stopped(&g->world)) return 0;
       continue;
     }
     if (end > view->asize) end = view->asize;
+    if (epoch == 0) {
+      if (!scanpart(L, work, table, view, first, end, 0, NULL, young_edges))
+        return 0;
+      continue;
+    }
     /* Acquire the dirty publication before reading the slots. Publish the
     ** proof only if no writer dirtied the card during this scan. */
-    clearing = stamp != UINT64_MAX &&
-      __atomic_compare_exchange_n(card, &stamp, UINT64_MAX, 0,
+    clearing = stamp != LUA_ARRAY_CARD_SCANNING &&
+      __atomic_compare_exchange_n(card, &stamp, LUA_ARRAY_CARD_SCANNING, 0,
                                   __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
     scanned = scanpart(L, work, table, view, first, end, 0, NULL,
                        clearing ? &young : NULL);
     if (clearing) {
-      uint64_t expected = UINT64_MAX;
+      uint64_t expected = LUA_ARRAY_CARD_SCANNING;
       __atomic_compare_exchange_n(card, &expected, scanned && !young ? epoch : 0,
                                   0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }

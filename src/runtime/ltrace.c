@@ -58,13 +58,29 @@ void luaC_leavegc (lua_State *L, LuaGCFrame *frame) {
   L->native_depth--;
 }
 
-void luaC_traceview (lua_State *L, const Table *view) {
-  unsigned i, p, parts;
-  if (!luaC_tracing(L)) return;
-  for (i = 0; i < view->asize; i++) {
-    lu_byte tag = *getArrTag(view, i);
-    if (tag & BIT_ISCOLLECTABLE)
+l_sinline void traceviewarray (lua_State *L, const Table *view,
+                                unsigned first, unsigned end) {
+  unsigned i;
+  for (i = first; i < end; i++) {
+    if (*getArrTag(view, i) & BIT_ISCOLLECTABLE)
       luaC_traceobject(L, getArrVal(view, i)->gc);
+  }
+}
+
+void luaC_traceview (lua_State *L, const Table *view) {
+  unsigned p, parts;
+  if (!luaC_tracing(L)) return;
+  if (view->asize < LUA_ARRAY_CARD_MIN)
+    traceviewarray(L, view, 0, view->asize);
+  else {
+    const uint64_t *cards = luaH_arraycards(view);
+    unsigned first;
+    for (first = 0; first < view->asize; first += LUA_ARRAY_CARD_SLOTS) {
+      unsigned end = first + LUA_ARRAY_CARD_SLOTS;
+      if (__atomic_load_n(&cards[first / LUA_ARRAY_CARD_SLOTS],
+                          __ATOMIC_ACQUIRE) != LUA_ARRAY_CARD_SCALAR)
+        traceviewarray(L, view, first, end < view->asize ? end : view->asize);
+    }
   }
   if (view->node == NULL) return;
   parts = luaH_hashparts(view);

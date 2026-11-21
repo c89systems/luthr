@@ -121,9 +121,12 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 /* Computes the address of the value for the abstract C-index 'k' */
 #define getArrVal(t,k)	((t)->array - 1 - (k))
 
-/* Large array images end in one stamp per group of slots. A zero stamp
-** requires scanning. Only the young collector publishes a clean stamp. */
+/* Large arrays carry one stamp per group of slots. Scalar cards have
+** never held a reference in this image. Other cards are zero when dirty,
+** or retain the major epoch in which a young scan proved them clean. */
 enum { LUA_ARRAY_CARD_SLOTS = 64, LUA_ARRAY_CARD_MIN = 256 };
+#define LUA_ARRAY_CARD_SCALAR UINT64_MAX
+#define LUA_ARRAY_CARD_SCANNING (UINT64_MAX - 1)
 
 l_sinline size_t luaH_cardoffset (unsigned size) {
   size_t bytes = sizeof(unsigned) + cast_sizet(size);

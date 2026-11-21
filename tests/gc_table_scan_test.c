@@ -27,7 +27,7 @@ static struct {
   Table *table;
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write, fields, cards, promotion;
+      remember, first_write, fields, cards, scalar_cards, promotion;
   int retirement, drained;
   uint64_t initial_layout;
   unsigned chunks;
@@ -120,8 +120,10 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
   if (scanning && probe.cards && !probe.entered) {
     require(!hash && first == 0);
     require(__atomic_load_n(luaH_arraycards(probe.table), __ATOMIC_ACQUIRE) ==
-            UINT64_MAX);
+            LUA_ARRAY_CARD_SCANNING);
   }
+  if (scanning && probe.scalar_cards && !probe.entered)
+    require(!hash && first == LUA_ARRAY_CARD_SLOTS);
   if (scanning && !probe.relocate && !probe.remember && !probe.first_write &&
       !probe.promotion)
     hold();
@@ -207,11 +209,17 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 123);
     lua_rawset(L, probe.index);
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
-  } else if (probe.cards || probe.promotion) {
+  } else if (probe.cards || probe.scalar_cards || probe.promotion) {
     lua_newtable(L);
     lua_pushinteger(L, 77);
     lua_rawseti(L, -2, 1);
     lua_rawseti(L, probe.index, 1);
+    if (probe.scalar_cards) {
+      /* Replace the image after adding an edge to a previously scalar card. */
+      lua_lock(L);
+      luaH_resizearray(L, probe.table, 3 * LUA_ARRAY_CARD_MIN);
+      lua_unlock(L);
+    }
   } else if (probe.fields) {
     lua_pushnil(L);
     lua_setfield(L, probe.index, "deleted");
@@ -283,6 +291,7 @@ int main(int argc, char **argv) {
   probe.pause = strncmp(argv[1], "pause", 5) == 0;
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
   probe.cards = strcmp(argv[1], "cards_generational") == 0;
+  probe.scalar_cards = strncmp(argv[1], "scalar_cards_", 13) == 0;
   probe.promotion = strcmp(argv[1], "promotion_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
@@ -338,6 +347,23 @@ int main(int argc, char **argv) {
     lua_newtable(L);
     probe.removed = (GCObject *)lua_topointer(L, -1);
     lua_setfield(L, 3, "deleted");
+  } else if (probe.scalar_cards) {
+    for (i = 1; i < array_size; i++) {
+      lua_pushinteger(L, i);
+      lua_rawseti(L, 3, i);
+    }
+    lua_newtable(L);
+    lua_pushinteger(L, 42);
+    lua_rawseti(L, -2, 1);
+    lua_rawseti(L, 3, array_size);
+    /* Carry the mixed prefix across both an untracked and a tracked resize. */
+    lua_lock(L);
+    luaH_resizearray(L, probe.table, LUA_ARRAY_CARD_MIN);
+    luaH_resizearray(L, probe.table, 2 * LUA_ARRAY_CARD_MIN);
+    require(luaH_arraycards(probe.table)[0] == LUA_ARRAY_CARD_SCALAR);
+    require(luaH_arraycards(probe.table)[1] == 0);
+    require(luaH_arraycards(probe.table)[2] == LUA_ARRAY_CARD_SCALAR);
+    lua_unlock(L);
   } else {
     for (i = 1; i <= array_size; i++) {
       lua_newtable(L);
@@ -464,6 +490,8 @@ int main(int argc, char **argv) {
     }
     require(G(L)->gckind == KGC_GENMINOR);
   } else {
+    if (probe.scalar_cards)
+      require(luaH_arraycards(probe.table)[0] != LUA_ARRAY_CARD_SCALAR);
     lua_gc(L, LUA_GCCOLLECT);
     lua_gc(L, LUA_GCCOLLECT);
   }
@@ -485,7 +513,13 @@ int main(int argc, char **argv) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);
     require(lua_tointeger(probe.writer, -1) ==
-            ((probe.cards || probe.promotion) ? 77 : 42));
+            ((probe.cards || probe.scalar_cards || probe.promotion) ? 77 : 42));
+    if (probe.scalar_cards) {
+      lua_pop(probe.writer, 2);
+      require(lua_rawgeti(probe.writer, probe.index, array_size) == LUA_TTABLE);
+      require(lua_rawgeti(probe.writer, -1, 1) == LUA_TNUMBER);
+      require(lua_tointeger(probe.writer, -1) == 42);
+    }
   } else
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
   lua_close(L);
