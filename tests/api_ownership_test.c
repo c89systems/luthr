@@ -142,7 +142,14 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
   if (size == 0) {
     if (pointer != NULL) {
       fixture->live_allocations--;
-      free(pointer);
+      if (fixture->old_stack != NULL &&
+          (uintptr_t)fixture->old_stack >= (uintptr_t)pointer &&
+          (uintptr_t)fixture->old_stack - (uintptr_t)pointer < old_size &&
+          fixture->retired_stack == NULL) {
+        fixture->retired_stack = pointer;
+        memset(pointer, 0, old_size);
+      } else
+        free(pointer);
     }
     return NULL;
   }
@@ -153,14 +160,7 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
     fixture->live_allocations++;
   else {
     memcpy(replacement, pointer, old_size < size ? old_size : size);
-    if (fixture->old_stack != NULL &&
-        (uintptr_t)fixture->old_stack >= (uintptr_t)pointer &&
-        (uintptr_t)fixture->old_stack - (uintptr_t)pointer < old_size &&
-        fixture->retired_stack == NULL) {
-      fixture->retired_stack = pointer;
-      memset(pointer, 0, old_size);
-    } else
-      free(pointer);
+    free(pointer);
   }
   return replacement;
 }
