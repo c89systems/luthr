@@ -33,7 +33,7 @@ static struct {
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
-static __thread int scanning, hash_chunk, interrupted;
+static __thread int scanning, hash_chunk, interrupted, hold_after_scan;
 static __thread unsigned first_chunk;
 static void *watched_buffer;
 static unsigned returned;
@@ -44,6 +44,19 @@ void __wrap_luaM_free_(lua_State *L, void *buffer, size_t size) {
   if (watched != NULL && buffer == watched)
     __atomic_fetch_add(&returned, 1, __ATOMIC_RELAXED);
   __real_luaM_free_(L, buffer, size);
+}
+
+void __real_luaHS_scanend(lua_State *);
+void __wrap_luaHS_scanend(lua_State *L) {
+  __real_luaHS_scanend(L);
+  if (hold_after_scan) {
+    /* Storage protection has ended and the marker still participates. */
+    hold_after_scan = 0;
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    while (!probe.drained)
+      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
 }
 
 static void hold(void) {
@@ -86,6 +99,7 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
      * the writer has committed the replacement. */
     require(!hash && first == 0);
     interrupted = 1;
+    hold_after_scan = 1;
     hold();
     require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
   }
@@ -159,13 +173,6 @@ static void *mark(void *unused) {
       break;
   }
   require(i < 10000);
-  if (probe.retirement) {
-    /* The scan is over, but this coroutine still owns an admitted gate. */
-    require(pthread_mutex_lock(&probe.mutex) == 0);
-    while (!probe.drained)
-      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
-    require(pthread_mutex_unlock(&probe.mutex) == 0);
-  }
   lua_unlock(probe.marker);
   return NULL;
 }

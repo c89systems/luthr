@@ -371,7 +371,8 @@ target_compile_options(gc_table_scan_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_table_scan_test PRIVATE luthr_static)
 target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
   -Wl,--wrap=luaC_scanstrong -Wl,--wrap=luaH_tracechunk -Wl,--wrap=luaC_traceedges
-  -Wl,--wrap=luaC_finishstrong -Wl,--wrap=luaM_free_ -Wl,--undefined=luaC_scanstrong)
+  -Wl,--wrap=luaC_finishstrong -Wl,--wrap=luaM_free_ -Wl,--wrap=luaHS_scanend
+  -Wl,--undefined=luaC_scanstrong)
 foreach(collector IN ITEMS incremental generational)
   foreach(case IN ITEMS array metatable relocate pause first_write first_write_small)
     add_test(NAME gc_table_scan_${case}_${collector}
