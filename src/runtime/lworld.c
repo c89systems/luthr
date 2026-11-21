@@ -214,8 +214,9 @@ static void withdraw (lua_State *L) {
   /* Every withdrawal here holds world.mutex and retains its stack gate.
   ** A scanner may borrow these stable roots under that mutex, including
   ** when the owner cannot resume until a collection finishes. */
-  L->root_waiting = 1;
-  if (L->stack_peer != NULL) L->stack_peer->root_waiting = 1;
+  __atomic_store_n(&L->root_waiting, 1, __ATOMIC_SEQ_CST);
+  if (L->stack_peer != NULL)
+    __atomic_store_n(&L->stack_peer->root_waiting, 1, __ATOMIC_SEQ_CST);
   previous = __atomic_fetch_and(&L->admission->thread->stack_gate.word,
                                 ~cast(uintptr_t, LUA_GATE_ACTIVE),
                                 __ATOMIC_SEQ_CST);
@@ -278,13 +279,19 @@ void luaW_armtrace (lua_State *L) {
 void luaW_deactivate (lua_State *L) {
   luaM_publishdebt(L);
   withdraw(L);
+  if (luaC_waitingstacks(G(L))) {
+    luaC_readystack(G(L), cast(uintptr_t, L));
+    if (L->stack_peer != NULL)
+      luaC_readystack(G(L), cast(uintptr_t, L->stack_peer));
+  }
   notifyrendezvous(&G(L)->world);
 }
 
 void luaW_resume (lua_State *L) {
   /* Paired stack operations share an admission but retain both gates. */
-  L->root_waiting = 0;
-  if (L->stack_peer != NULL) L->stack_peer->root_waiting = 0;
+  __atomic_store_n(&L->root_waiting, 0, __ATOMIC_RELAXED);
+  if (L->stack_peer != NULL)
+    __atomic_store_n(&L->stack_peer->root_waiting, 0, __ATOMIC_RELAXED);
   luaW_activate(L);
   acknowledge(L);
 }
@@ -344,19 +351,28 @@ int luaW_tryenter (lua_State *L) {
   return 1;
 }
 
-void luaW_leave (LuaWorld *world, unsigned flags) {
+void luaW_leave (global_State *g, uintptr_t stack, unsigned flags) {
+  LuaWorld *world = &g->world;
+  uint64_t control = luaW_control(world);
   unsigned requests = (flags & LUA_GATE_STACK) ? LUA_WORLD_STOPPED
                                               : LUA_WORLD_REQUESTS;
   /* The releasing gate has already withdrawn. Its state and participation
   ** record may be gone; notification uses only the retained VM directory. */
-  if ((flags & LUA_GATE_WAITING) || (luaW_control(world) & requests)) {
+  if ((flags & LUA_GATE_WAITING) ||
+      (control & (requests | LUA_WORLD_STACK_ROOTS))) {
+    int ready = 0;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
+    /* The gate is already withdrawn. Serialize its notification with the
+    ** stop request, which owns all trace lists once participants leave. */
+    if ((control & LUA_WORLD_STACK_ROOTS) && !luaW_stopped(world))
+      ready = luaC_readystack(g, stack);
     notifyrendezvous(world);
     if ((flags & LUA_GATE_WAITING) ||
         (!(flags & LUA_GATE_STACK) &&
          (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
       luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    if (ready) luaSC_notifygc(g);
   }
 }
 
@@ -422,6 +438,8 @@ void luaW_start (lua_State *L) {
   luaW_resume(L);  /* the collector resumes as an ordinary mutator */
   __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_STOPPED),
                      __ATOMIC_SEQ_CST);
+  /* A gate can release during a stop that does not consume marking work. */
+  if (luaC_waitingstacks(G(L))) luaC_readystack(G(L), 0);
   luaQ_wake(&world->resumed, &world->resume_waiters);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -562,7 +580,9 @@ void luaW_waitcollector (lua_State *L, int reason) {
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
     if (__atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) == epoch &&
-        __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) && !luaC_markready(g))
+        (__atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) ||
+         (luaC_waitingstacks(g) && !luaC_tracerunnable(g))) &&
+        !luaC_markready(g))
       luaQ_wait(L, &g->trace_mutex, &g->trace_changed, &g->trace_waiters);
     luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
     luaX_checksync(pthread_mutex_lock(&world->mutex));

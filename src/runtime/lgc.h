@@ -60,9 +60,12 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
   __atomic_load_n(&(g)->trace_plan.phase, __ATOMIC_ACQUIRE)
 #define luaC_traceepoch(g) __atomic_load_n(&(g)->trace_epoch, __ATOMIC_ACQUIRE)
 #define luaC_weakstamp(g) __atomic_load_n(&(g)->weak_stamp, __ATOMIC_RELAXED)
-#define luaC_tracepending(g) \
+#define luaC_waitingstacks(g) \
+  ((luaW_control(&(g)->world) & LUA_WORLD_STACK_ROOTS) != 0)
+#define luaC_tracerunnable(g) \
   (__atomic_load_n(&(g)->trace_ready, __ATOMIC_ACQUIRE) || \
    __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
+#define luaC_tracepending(g) (luaC_tracerunnable(g) || luaC_waitingstacks(g))
 
 /* Publish the allocation and mark stamps together with trace activation.
 ** Inactive states retain the last trace's interpretation for sweeping. */
@@ -92,7 +95,7 @@ l_sinline int luaC_scanready (global_State *g) {
 #define LUA_TRACE_BATCH 64
 typedef struct LuaTraceWork {
   global_State *global;
-  LuaTraceList gray, grayagain, weak, allweak, ephemeron, deferred;
+  LuaTraceList gray, grayagain, weak, allweak, ephemeron, deferred, stacks;
   GCObject *retry, *retry_tail;
   GCObject *objects[LUA_TRACE_BATCH];
   uint64_t claims;
@@ -506,7 +509,9 @@ LUAI_FUNC void luaC_traceview (lua_State *L, const Table *view);
 LUAI_FUNC void luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
-LUAI_FUNC void luaC_readytrace (lua_State *L);
+LUAI_FUNC void luaC_readytrace (global_State *g);
+/* Zero rechecks all pending roots when the world reopens. */
+LUAI_FUNC int luaC_readystack (global_State *g, uintptr_t stack);
 LUAI_FUNC unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit);
 /* Strong tables use bounded, validated reads under the admission storage epoch.
 ** Return -1 for weak/borrowed ownership, 0 to defer, or 1 on completion. */

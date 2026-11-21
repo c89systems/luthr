@@ -456,6 +456,7 @@ static void markmt (global_State *g) {
 
 
 static void cleargraylists (global_State *g) {
+  lua_assert(g->trace_stacks == NULL);
   g->gray = g->grayagain = NULL;
   g->weak = g->allweak = g->ephemeron = NULL;
   g->trace_deferred = NULL;
@@ -558,7 +559,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   g->GCcyclelive = g->pacer.start;
   if (arming) {
     luaC_initialtrace(L);
-    luaC_readytrace(L);
+    luaC_readytrace(g);
     luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   }
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
@@ -571,7 +572,7 @@ static void starttrace (lua_State *L, unsigned finish) {
 
 static void endtrace (lua_State *L) {
   global_State *g = G(L);
-  lua_assert(L->world_depth != 0 &&
+  lua_assert(L->world_depth != 0 && g->trace_stacks == NULL &&
              !__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE));
   __atomic_store_n(&g->mark_state, luaC_markstate(g) & ~LUA_MARK_ACTIVE,
                    __ATOMIC_RELEASE);
@@ -986,7 +987,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o,
       /* Even a cached snapshot needs stable ownership while consuming its
       ** remembered age. The parked builder cannot resume under this mutex. */
       luaX_checksync(pthread_mutex_lock(&g->world.mutex));
-      if (!builder->root_waiting) {
+      if (!__atomic_load_n(&builder->root_waiting, __ATOMIC_RELAXED)) {
         luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
         return 0;
       }
@@ -1052,8 +1053,9 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o,
 ** backoff, lost credit or queued continuation belongs to this check. Producer
 ** barriers supply payload work even while the phase permit is occupied. */
 static int traceavailable (lua_State *L) {
-  return luaC_tracepending(G(L)) ||
+  return luaC_tracerunnable(G(L)) ||
     (__atomic_load_n(&G(L)->trace_busy, __ATOMIC_ACQUIRE) == 0 &&
+     !luaC_waitingstacks(G(L)) &&
      __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == NULL);
 }
 
@@ -1144,8 +1146,7 @@ unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit) {
   return count;
 }
 
-void luaC_readytrace (lua_State *L) {
-  global_State *g = G(L);
+void luaC_readytrace (global_State *g) {
   LuaTracePlan *plan = &g->trace_plan;
   unsigned ready = g->gray != NULL || plan->next != NULL ||
     plan->pending != NULL || (plan->finalizers != NULL &&
@@ -1154,6 +1155,49 @@ void luaC_readytrace (lua_State *L) {
   __atomic_store_n(&g->trace_ready,
     ready || g->trace_deferred != NULL || plan->deferred != NULL,
     __ATOMIC_RELEASE);
+}
+
+/* Check admission hints without borrowing any stack storage. The scan still
+** acquires the gate or world.mutex before reading a stack. */
+static int stackready (global_State *g, GCObject *object) {
+  lua_State *thread = gco2th(object);
+  return __atomic_load_n(&thread->trace_snapshot, __ATOMIC_SEQ_CST) ==
+           luaC_traceepoch(g) ||
+         __atomic_load_n(&thread->root_waiting, __ATOMIC_SEQ_CST) ||
+         __atomic_load_n(&thread->stack_gate.word, __ATOMIC_SEQ_CST) == 0;
+}
+
+static void finishstackqueue (global_State *g) {
+  if (g->trace_stacks == NULL)
+    __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_WORLD_STACK_ROOTS),
+                       __ATOMIC_SEQ_CST);
+}
+
+/* A release may run after its state has been retired. Match the address
+** against the current cohort's retained objects before dereferencing it. */
+int luaC_readystack (global_State *g, uintptr_t stack) {
+  GCObject **link, *object;
+  int ready = 0;
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  link = &g->trace_stacks;
+  while ((object = *link) != NULL) {
+    int match = cast(uintptr_t, object) == stack;
+    if ((match || stack == 0) && stackready(g, object)) {
+      *link = *luaC_graylink(object);
+      *luaC_graylink(object) = g->gray;
+      g->gray = object;
+      ready = 1;
+    }
+    else link = luaC_graylink(object);
+    if (match) break;
+  }
+  if (ready) {
+    luaC_readytrace(g);
+    finishstackqueue(g);
+    luaQ_wake(&g->trace_changed, &g->trace_waiters);
+  }
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  return ready;
 }
 
 /* Both walks own only collection links and atomic colours, never payloads.
@@ -1233,6 +1277,16 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     g->gray = *luaC_graylink(object);
     work->objects[work->count++] = object;
   }
+  /* Full or emergency collection may close admission while another stack
+  ** owns a request. All such stacks are scannable under quiescence. */
+  if (g->trace_stacks != NULL && luaW_iscollector(L)) {
+    while (g->trace_stacks != NULL && work->count < limit) {
+      GCObject *object = g->trace_stacks;
+      g->trace_stacks = *luaC_graylink(object);
+      work->objects[work->count++] = object;
+    }
+    finishstackqueue(g);
+  }
   if (work->count == 0 &&
       (plan->phase == TRACE_EPHEMERONS || plan->phase == TRACE_VALUES ||
        plan->phase == TRACE_CLEAR)) {
@@ -1253,7 +1307,11 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     __atomic_fetch_add(&g->trace_busy, 1, __ATOMIC_RELAXED);
   else if (plan->phase != TRACE_FINALIZERS)
     work->scanned += luaC_skiplivefinalizers(g, limit) * sizeof(GCObject);
-  luaC_readytrace(L);
+  luaC_readytrace(g);
+}
+
+static void deferscan (LuaTraceWork *work, GCObject *object) {
+  queuework(object->tt == LUA_VTHREAD ? &work->stacks : &work->deferred, object);
 }
 
 void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
@@ -1265,7 +1323,7 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     GCObject *object = work->objects[index];
     if (work->phase == TRACE_MARK) {
       if (!scantrace(L, work, object, quiescent))
-        queuework(&work->deferred, object);
+        deferscan(work, object);
     }
     else {
       int reservation = quiescent ? 0 : luaA_tryscan(L, object);
@@ -1288,7 +1346,7 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     GCObject *object = work->gray.head;
     work->gray.head = *luaC_graylink(object);
     if (!scantrace(L, work, object, quiescent))
-      queuework(&work->deferred, object);
+      deferscan(work, object);
   }
 }
 
@@ -1308,6 +1366,20 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   publishwork(&work->allweak, &g->allweak);
   publishwork(&work->ephemeron, &g->ephemeron);
   publishwork(&work->deferred, &g->trace_deferred);
+  if (work->stacks.head != NULL) {
+    GCObject *object = work->stacks.head;
+    /* Arm notifications before rechecking. Either a readiness transition
+    ** sees the request or this check observes the transition. */
+    __atomic_fetch_or(&g->world.control, LUA_WORLD_STACK_ROOTS, __ATOMIC_SEQ_CST);
+    do {
+      GCObject *next = *luaC_graylink(object);
+      GCObject **head = stackready(g, object) ? &g->gray : &g->trace_stacks;
+      *luaC_graylink(object) = *head;
+      *head = object;
+      object = next;
+    } while (object != NULL);
+    finishstackqueue(g);
+  }
   if (work->retry != NULL) {
     luaC_allocnext(work->retry_tail) = plan->deferred;
     if (plan->deferred == NULL) plan->tail = work->retry_tail;
@@ -1319,7 +1391,7 @@ void luaC_publishtrace (lua_State *L, LuaTraceWork *work) {
   ** with the work rather than contending on one cache line per object. */
   __atomic_fetch_add(&g->trace_changes, work->claims, __ATOMIC_RELAXED);
   __atomic_fetch_sub(&g->trace_busy, 1, __ATOMIC_RELEASE);
-  luaC_readytrace(L);
+  luaC_readytrace(g);
 }
 
 /* }====================================================== */
@@ -2256,7 +2328,8 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
         int boundary;
         luaX_checksync(pthread_mutex_lock(&g->world.mutex));
         if (luaC_tracing(L) && luaC_traceepoch(g) == epoch &&
-            __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) &&
+            (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) ||
+             (luaC_waitingstacks(g) && !luaC_tracerunnable(g))) &&
             !luaC_markready(g))
           luaW_waitcollector(L, LUA_WAIT_TRACE);
         boundary = luaC_tracing(L) && luaC_traceepoch(g) == epoch &&

@@ -614,6 +614,9 @@ void __wrap_luaC_scantrace(lua_State *L, LuaTraceWork *work, unsigned limit) {
     }
     for (object = work->retry; object != NULL; object = luaC_allocnext(object))
       record->trace_retry_tables++;
+    for (object = work->stacks.head; object != NULL;
+         object = *luaC_graylink(object))
+      record->trace_retry_threads++;
   }
 }
 

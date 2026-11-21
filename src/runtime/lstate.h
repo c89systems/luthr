@@ -366,7 +366,7 @@ struct lua_State {
   unsigned world_depth;
   unsigned heap_waiting;
   unsigned object_waiting;
-  unsigned root_waiting;  /* stack parked; protected by world.mutex */
+  unsigned root_waiting;  /* atomic hint; borrowing requires world.mutex */
   struct LuaObjectScope *object_scopes;
   uint64_t trace_snapshot;  /* release-published root snapshot epoch */
   uint64_t trace_trimmed;
@@ -532,6 +532,7 @@ typedef struct global_State {
   unsigned sweep_workers;  /* atomic: ordinary ranges in an admitted sweep */
   uint64_t trace_changes;  /* atomic monotonic shading progress */
   GCObject *trace_deferred;
+  GCObject *trace_stacks;  /* blocked stack roots, owned by trace_mutex */
   LuaTracePlan trace_plan;
   LuaSweepPlan sweep_plan;
   l_mem GCmarked;  /* bytes marked in a GC cycle */

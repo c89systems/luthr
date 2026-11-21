@@ -154,7 +154,9 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
       setnilvalue2s(slot);
   }
   thread->trace_bytes = luaE_threadsize(thread);
-  __atomic_store_n(&thread->trace_snapshot, epoch, __ATOMIC_RELEASE);
+  __atomic_store_n(&thread->trace_snapshot, epoch, __ATOMIC_SEQ_CST);
+  if (luaC_waitingstacks(G(L)))
+    luaC_readystack(G(L), cast(uintptr_t, thread));
 }
 
 void luaC_checksnapshot (lua_State *L) {
@@ -170,7 +172,7 @@ int luaC_snapshotparked (lua_State *L, lua_State *thread) {
   LuaWorld *world = &G(L)->world;
   int parked;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  parked = thread->root_waiting != 0;
+  parked = __atomic_load_n(&thread->root_waiting, __ATOMIC_RELAXED) != 0;
   if (parked) luaC_snapshot(L, thread);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   return parked;

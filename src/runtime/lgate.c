@@ -86,12 +86,13 @@ static void reserve (lua_State *L, NativeStackContext *context,
 }
 
 l_sinline void leavegate (lua_State *L) {
-  LuaWorld *world = &G(L)->world;
+  global_State *g = G(L);
+  uintptr_t stack = cast(uintptr_t, L);
   /* Retire ownership and participation together. After publication a
   ** collector can reclaim L; only the world directory is still accessible. */
   uintptr_t previous = __atomic_fetch_and(&L->stack_gate.word, LUA_GATE_WAITING,
                                            __ATOMIC_SEQ_CST);
-  luaW_leave(world, previous & LUA_GATE_FLAGS);
+  luaW_leave(g, stack, previous & LUA_GATE_FLAGS);
 }
 
 static void release (lua_State *L, void *token) {

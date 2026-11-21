@@ -43,7 +43,8 @@ static void advanceclosedtrace (lua_State *L) {
   while (luaC_tracing(L) && plan->finish != 0) {
     if (plan->phase == TRACE_INIT)
       luaC_initialtrace(L);
-    if (g->gray != NULL || g->trace_deferred != NULL) break;
+    if (g->gray != NULL || g->trace_deferred != NULL ||
+        g->trace_stacks != NULL) break;
     if (plan->again != NULL) {
       g->gray = plan->again;
       plan->again = NULL;
@@ -109,7 +110,7 @@ static void advanceclosedtrace (lua_State *L) {
     }
   }
   if (luaC_tracing(L))
-    luaC_readytrace(L);
+    luaC_readytrace(g);
 }
 
 static int canadvance (lua_State *L) {

@@ -24,9 +24,10 @@ enum {
   LUA_WORLD_STOPPED = 1,
   LUA_WORLD_STORAGE_WAIT = 2,
   LUA_WORLD_ARM_TRACE = 4,
+  LUA_WORLD_STACK_ROOTS = 8,
   LUA_WORLD_REQUESTS = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT |
                        LUA_WORLD_ARM_TRACE,
-  LUA_WORLD_EPOCH_STEP = 8
+  LUA_WORLD_EPOCH_STEP = 16
 };
 
 typedef struct LuaWorld {
@@ -60,7 +61,7 @@ l_sinline int luaW_stopped (const LuaWorld *world) {
 }
 
 l_sinline uint64_t luaW_epoch (uint64_t control) {
-  return control & ~cast(uint64_t, LUA_WORLD_REQUESTS);
+  return control & ~cast(uint64_t, LUA_WORLD_REQUESTS | LUA_WORLD_STACK_ROOTS);
 }
 
 LUAI_FUNC int luaW_init (struct global_State *g);
@@ -82,7 +83,7 @@ LUAI_FUNC void luaW_enter (lua_State *L);
 LUAI_FUNC int luaW_tryenter (lua_State *L);
 /* Global notification after the gate's final release publication. No state or
 ** participant record remains borrowed; flags describe the released gate. */
-LUAI_FUNC void luaW_leave (LuaWorld *world, unsigned flags);
+LUAI_FUNC void luaW_leave (struct global_State *g, uintptr_t stack, unsigned flags);
 /* The gate word is the authoritative admission; no independently retired
 ** counter can overlap its next owner. Safe while the directory is retained. */
 LUAI_FUNC unsigned luaW_active (const LuaParticipation *participant);

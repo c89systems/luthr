@@ -34,7 +34,7 @@ static __thread int role;
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
-void __real_luaW_leave(LuaWorld *, unsigned);
+void __real_luaW_leave(global_State *, uintptr_t, unsigned);
 
 static void pause_owner(struct fixture *fixture) {
   require(pthread_mutex_lock(&fixture->mutex) == 0);
@@ -45,10 +45,10 @@ static void pause_owner(struct fixture *fixture) {
   require(pthread_mutex_unlock(&fixture->mutex) == 0);
 }
 
-void __wrap_luaW_leave(LuaWorld *world, unsigned flags) {
+void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags) {
   if (role == 1 && current != NULL && current->mode == RETIRE)
     pause_owner(current);
-  __real_luaW_leave(world, flags);
+  __real_luaW_leave(g, stack, flags);
 }
 
 void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,

@@ -332,6 +332,110 @@ static void stack_snapshot(void) {
   finish(L);
 }
 
+enum { STACK_RELEASE, STACK_SNAPSHOT, STACK_REOPEN, STACK_COLLECT, STACK_PARK };
+
+struct stack_wait {
+  pthread_mutex_t mutex;
+  pthread_cond_t changed;
+  lua_State *thread;
+  int stage, action;
+};
+
+static void *reserve_stack(void *context) {
+  struct stack_wait *wait = context;
+  LuaWorld *world = &G(wait->thread)->world;
+  int reservation = luaX_tryreserve(wait->thread);
+  require(reservation == 1);
+  require(pthread_mutex_lock(&wait->mutex) == 0);
+  wait->stage = 1;
+  require(pthread_cond_broadcast(&wait->changed) == 0);
+  while (wait->stage == 1)
+    require(pthread_cond_wait(&wait->changed, &wait->mutex) == 0);
+  if (wait->action == STACK_SNAPSHOT || wait->action == STACK_PARK) {
+    if (wait->action == STACK_SNAPSHOT)
+      luaC_snapshot(wait->thread, wait->thread);
+    else {
+      require(pthread_mutex_lock(&world->mutex) == 0);
+      luaW_activate(wait->thread);
+      luaW_deactivate(wait->thread);
+      require(pthread_mutex_unlock(&world->mutex) == 0);
+    }
+    wait->stage = 3;
+    require(pthread_cond_broadcast(&wait->changed) == 0);
+    while (wait->stage == 3)
+      require(pthread_cond_wait(&wait->changed, &wait->mutex) == 0);
+    if (wait->action == STACK_PARK) {
+      require(pthread_mutex_lock(&world->mutex) == 0);
+      luaW_resume(wait->thread);
+      require(pthread_mutex_unlock(&world->mutex) == 0);
+    }
+  }
+  require(pthread_mutex_unlock(&wait->mutex) == 0);
+  luaX_endreserve(wait->thread, reservation);
+  return NULL;
+}
+
+static void wait_for_stack(int action) {
+  struct stack_wait wait = {.mutex = PTHREAD_MUTEX_INITIALIZER,
+                            .changed = PTHREAD_COND_INITIALIZER,
+                            .action = action};
+  lua_State *L = newstate();
+  global_State *g = G(L);
+  GCObject *child;
+  pthread_t owner;
+  unsigned i;
+  wait.thread = lua_newthread(L);
+  lua_newtable(wait.thread);
+  child = (GCObject *)lua_topointer(wait.thread, -1);
+  begin(L);
+  require(pthread_create(&owner, NULL, reserve_stack, &wait) == 0);
+  require(pthread_mutex_lock(&wait.mutex) == 0);
+  while (wait.stage == 0)
+    require(pthread_cond_wait(&wait.changed, &wait.mutex) == 0);
+  lua_lock(L);
+  for (i = 0; i < 64 && luaC_tracerunnable(g); i++)
+    luaC_tracebatch(L, 64);
+  require(!luaC_tracerunnable(g) && luaC_tracepending(g));
+  require(g->trace_stacks == obj2gco(wait.thread) && iswhite(g, child));
+  for (i = 0; i < 64; i++)
+    require(luaC_tracebatch(L, 64) == 0);
+  require(g->trace_stacks == obj2gco(wait.thread) && iswhite(g, child));
+  if (action == STACK_REOPEN || action == STACK_COLLECT)
+    luaW_stop(L);
+  else
+    lua_unlock(L);
+  if (action == STACK_COLLECT) {
+    require(luaC_tracebatch(L, 64) != 0);
+    require(!luaC_waitingstacks(g) && !iswhite(g, child));
+    luaW_start(L);
+    lua_unlock(L);
+  }
+  wait.stage = 2;
+  require(pthread_cond_broadcast(&wait.changed) == 0);
+  if (action == STACK_SNAPSHOT || action == STACK_PARK) {
+    while (wait.stage == 2)
+      require(pthread_cond_wait(&wait.changed, &wait.mutex) == 0);
+    require(!luaC_waitingstacks(g) && luaC_markready(g));
+    drain(L);
+    require(isblack(g, child) && !luaW_stopped(&g->world));
+    wait.stage = 4;
+    require(pthread_cond_broadcast(&wait.changed) == 0);
+  }
+  require(pthread_mutex_unlock(&wait.mutex) == 0);
+  require(pthread_join(owner, NULL) == 0);
+  if (action == STACK_REOPEN) {
+    require(luaC_waitingstacks(g));
+    luaW_start(L);
+    lua_unlock(L);
+  }
+  require(!luaC_waitingstacks(g));
+  drain(L);
+  require(isblack(g, child));
+  finish(L);
+  require(pthread_cond_destroy(&wait.changed) == 0);
+  require(pthread_mutex_destroy(&wait.mutex) == 0);
+}
+
 struct busy {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -1089,6 +1193,16 @@ int main(int argc, char **argv) {
   require(argc == 2);
   if (strcmp(argv[1], "stack") == 0)
     stack_snapshot();
+  else if (strcmp(argv[1], "stack_wait_snapshot") == 0)
+    wait_for_stack(STACK_SNAPSHOT);
+  else if (strcmp(argv[1], "stack_wait_release") == 0)
+    wait_for_stack(STACK_RELEASE);
+  else if (strcmp(argv[1], "stack_wait_reopen") == 0)
+    wait_for_stack(STACK_REOPEN);
+  else if (strcmp(argv[1], "stack_wait_collect") == 0)
+    wait_for_stack(STACK_COLLECT);
+  else if (strcmp(argv[1], "stack_wait_park") == 0)
+    wait_for_stack(STACK_PARK);
   else if (strcmp(argv[1], "busy") == 0)
     busy_object();
   else if (strcmp(argv[1], "parser") == 0)
