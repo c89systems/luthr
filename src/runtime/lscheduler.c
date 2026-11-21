@@ -21,7 +21,7 @@ enum {
 
 static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
-static void dropcachednative (LuaScheduledTask *task);
+static void dropcachednative (LuaScheduledTask *task, int handoff);
 
 enum { NATIVE_ACTIVE = 1, NATIVE_CACHED = 2 };
 enum { NATIVE_SLOT_TAG = 1 };
@@ -309,7 +309,7 @@ static void pause (LuaScheduledTask *task, int reason) {
   lua_assert(!task->external && execution->managed_depth == 0);
   lua_assert(execution->native_depth == 0 || affinity != NULL);
   UNUSED(affinity);
-  dropcachednative(task);
+  dropcachednative(task, 1);
   releaseslot(task);
   task->reason = reason;
   luaCT_pause(&task->fiber);
@@ -379,9 +379,7 @@ static void managedleave (LuaExecution *execution) {
   }
 }
 
-enum {
-  NATIVE_WAITING = 1, NATIVE_PERMIT = 2, NATIVE_REUSE_BURST = 32
-};
+enum { NATIVE_WAITING = 1, NATIVE_PERMIT = 2 };
 
 unsigned luaSC_nativeactive (const LuaScheduler *s) {
   return cast_uint(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) / NATIVE_PERMIT);
@@ -508,20 +506,17 @@ static void returnnative (LuaScheduledTask *task, int handoff) {
   LuaScheduler *s = task->scheduler;
   LuaWaiter *waiter = NULL;
   __atomic_store_n(&task->native, 0, __ATOMIC_RELAXED);
-  if (handoff) {
-    if (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING) {
-      luaX_checksync(pthread_mutex_lock(&s->native_mutex));
-      waiter = selectnative(s, 1);
-      luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
-    }
-    task->native_reuses = 0;
+  if (handoff &&
+      (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING)) {
+    luaX_checksync(pthread_mutex_lock(&s->native_mutex));
+    waiter = selectnative(s, 1);
+    luaX_checksync(pthread_mutex_unlock(&s->native_mutex));
   }
   if (waiter == NULL) {
     uint64_t previous = __atomic_fetch_sub(&s->native, NATIVE_PERMIT,
                                           __ATOMIC_SEQ_CST);
     lua_assert(previous >= NATIVE_PERMIT);
     if (previous & NATIVE_WAITING) {
-      if (task->native_reuses < NATIVE_REUSE_BURST) task->native_reuses++;
       if (previous / NATIVE_PERMIT +
           __atomic_load_n(&s->native_notices, __ATOMIC_SEQ_CST) <=
             s->config.native_limit) {
@@ -536,31 +531,24 @@ static void returnnative (LuaScheduledTask *task, int handoff) {
 }
 
 /* A cached permit cannot follow a task into a park. */
-static void dropcachednative (LuaScheduledTask *task) {
+static void dropcachednative (LuaScheduledTask *task, int handoff) {
   /* A waiter is still parking when another execution can grant its permit.
   ** Only its own execution can cache one or return a cached one. */
   if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED) {
     task->native_deadline = 0;
-    returnnative(task, 1);
+    task->native_used = 0;
+    returnnative(task, handoff);
   }
 }
 
 static void nativeleave (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
-  LuaScheduler *s = task->scheduler;
   UNUSED(L);
   if (execution->native_depth != 0 ||
       __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
-  /* A scarce permit can serve the same Lua task until its lease expires.
-  ** With capacity for every slot, keep the competitive release policy. */
-  if (s->config.slots > 1 &&
-      (s->config.native_limit < s->config.slots ||
-       (task->native_reuses < NATIVE_REUSE_BURST &&
-        !(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING)))) {
-    task->native_reuses++;
-    __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
-  }
-  else returnnative(task, task->native_reuses >= NATIVE_REUSE_BURST);
+  /* Consecutive calls use the same permit until a poll or park retires it. */
+  task->native_used = 1;
+  __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
   if (execution->pin_depth == 0) unpincarrier(execution);
 }
 
@@ -569,7 +557,7 @@ static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) 
   UNUSED(old);
   if (execution->native_depth == 0) task->native_pending = 0;
   nativeleave(execution, L);
-  if (execution->native_depth == 0) dropcachednative(task);
+  if (execution->native_depth == 0) dropcachednative(task, 1);
 }
 
 static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
@@ -665,9 +653,8 @@ static void pollnative (LuaScheduledTask *task, lua_State *L) {
   LuaScheduler *s = task->scheduler;
   if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_CACHED)
     return;
-  if (s->config.native_limit < s->config.slots &&
-      task->native_reuses != 0 && isLua(L->ci)) {
-    task->native_reuses = 0;
+  if (task->native_used && isLua(L->ci)) {
+    task->native_used = 0;
     if (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING) {
       uint64_t now = monotonicns();
       if (task->native_deadline == 0)
@@ -679,7 +666,7 @@ static void pollnative (LuaScheduledTask *task, lua_State *L) {
       return;
     }
   }
-  dropcachednative(task);
+  dropcachednative(task, 1);
 }
 
 static void poll (LuaExecution *execution, lua_State *L) {
@@ -801,8 +788,10 @@ static void taskentry (void *argument) {
       pause(task, SC_READY);
     }
   } while (status == LUA_YIELD);
-  dropcachednative(task);
   if (luaTK_finish(&task->root, &status, &results) != LUA_OK) abort();
+  /* Completion frees capacity immediately, including when the notified
+  ** contender is still saving its context. */
+  dropcachednative(task, 0);
   if (task->policy != NULL) __atomic_store_n(&task->policy->active, 0, __ATOMIC_RELEASE);
   lua_assert(task->fiber.execution.pin_depth == 0 &&
              !__atomic_load_n(&task->native, __ATOMIC_RELAXED) &&

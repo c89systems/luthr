@@ -642,8 +642,6 @@ static int block_binding(lua_State *L) {
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(pthread_equal(carrier, pthread_self()));
-  if (f->cancel_grant && id == 0)
-    f->tasks[0].native_reuses = ~0u; /* force the fairness handoff */
   /* Synchronous API reentry happens at native saturation on this carrier. */
   {
     int status =
@@ -910,6 +908,14 @@ static int hold_second_permit(lua_State *L) {
   return 1;
 }
 
+static int release_native_permit(lua_State *L) {
+  LuaScheduledTask *task = luaQ_current()->context;
+  /* A managed C poll ends reuse without yielding the task's slice. */
+  task->polls = 2;
+  luaQ_poll(L);
+  return 0;
+}
+
 static void native_fifo(struct fixture *f, int mode) {
   LuaScheduler *s = &f->scheduler;
   int cancel_grant = mode == CANCEL_GRANT;
@@ -929,7 +935,12 @@ static void native_fifo(struct fixture *f, int mode) {
   }
   lua_pushcfunction(f->main, block_binding);
   lua_setglobal(f->main, "block_binding");
-  submit(f, 0, "return block_binding(...)", 0);
+  managed(f->main, "release_native_permit", release_native_permit);
+  submit(f, 0,
+         competitive ? "return block_binding(...)"
+                     : "local result=block_binding(...); "
+                       "release_native_permit(); return result",
+         0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (f->native_entered == 0)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -1020,10 +1031,7 @@ static int wait_for_native_peer(lua_State *L) {
 
 static int poll_for_native_peer(lua_State *L) {
   struct fixture *f = fixture;
-  LuaScheduledTask *task = luaQ_current()->context;
-  /* This poll ends the native burst even though no task switch is due. */
-  task->polls = 2;
-  luaQ_poll(L);
+  release_native_permit(L);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->seen[1])
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -1032,9 +1040,9 @@ static int poll_for_native_peer(lua_State *L) {
   return 1;
 }
 
-static void native_burst(struct fixture *f, int polling) {
+static void native_burst(struct fixture *f, int polling, unsigned slots) {
   LuaScheduler *s = &f->scheduler;
-  initlimits(f, 2, 1);
+  initlimits(f, slots, 1);
   lua_gc(f->main, LUA_GCSTOP);
   managed(f->main, "wait_for_native_peer",
           polling ? poll_for_native_peer : wait_for_native_peer);
@@ -1061,12 +1069,21 @@ static void native_burst(struct fixture *f, int polling) {
   finish(f);
 }
 
-static void native_lease(struct fixture *f, int continuous) {
+static void native_lease(struct fixture *f, int continuous, unsigned permits) {
   LuaScheduler *s = &f->scheduler;
   f->native_lease_test = continuous ? 1 : 2;
   f->poll_time_ns = 1;
-  initlimits(f, 2, 1);
+  initlimits(f, 2, permits);
   lua_gc(f->main, LUA_GCSTOP);
+  if (permits == 2) {
+    lua_pushcfunction(f->main, hold_second_permit);
+    lua_setglobal(f->main, "hold_second_permit");
+    submit(f, 5, "return hold_second_permit()", 0);
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (!f->seen[5])
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
   lua_pushcfunction(f->main, short_native_call);
   lua_setglobal(f->main, "short_native_call");
   submit(f, 0,
@@ -1087,8 +1104,15 @@ static void native_lease(struct fixture *f, int continuous) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(collect(f, 0, LUA_OK) == 42 && f->native_lease_polls == 2);
   require(collect(f, 1, LUA_OK) == 1);
+  if (permits == 2) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    f->admission_release = 1;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+    require(collect(f, 5, LUA_OK) == 66);
+  }
   require(s->native == 0 && s->native_waiters.head == NULL &&
-          s->native_peak == 1);
+          s->native_peak == permits);
   finish(f);
 }
 
@@ -1409,13 +1433,17 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_competitive") == 0)
     native_fifo(f, COMPETITIVE_ADMISSION);
   else if (strcmp(argv[1], "native_burst_parking") == 0)
-    native_burst(f, 0);
+    native_burst(f, 0, 2);
   else if (strcmp(argv[1], "native_burst_poll") == 0)
-    native_burst(f, 1);
+    native_burst(f, 1, 2);
+  else if (strcmp(argv[1], "native_burst_single") == 0)
+    native_burst(f, 0, 1);
   else if (strcmp(argv[1], "native_lease_expiry") == 0)
-    native_lease(f, 1);
+    native_lease(f, 1, 1);
   else if (strcmp(argv[1], "native_lease_inactive") == 0)
-    native_lease(f, 0);
+    native_lease(f, 0, 1);
+  else if (strcmp(argv[1], "native_lease_full") == 0)
+    native_lease(f, 1, 2);
   else if (strcmp(argv[1], "late_native_waiter") == 0)
     late_native_waiter(f);
   else if (strcmp(argv[1], "startup_failures") == 0)

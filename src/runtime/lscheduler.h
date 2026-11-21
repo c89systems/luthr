@@ -44,7 +44,7 @@ struct LuaScheduledTask {
   uint64_t slice_deadline;  /* set at the first contended poll */
   unsigned home, polls;
   unsigned dispatches, handoffs, migrations, parks, early_wakes;
-  unsigned native_reuses;
+  int native_used;  /* an outer native call returned since the last Lua poll */
   int nargs, reason, complete, notified, published;
   int native, native_pending, native_notified, external;  /* permit and routing */
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
