@@ -254,6 +254,50 @@ static void finish(lua_State *L) {
   lua_close(L);
 }
 
+static void read_before_weakening(int array) {
+  lua_State *L = newstate();
+  const void *child, *descendant;
+  lua_newtable(L);
+  lua_newtable(L);
+  child = lua_topointer(L, -1);
+  lua_newtable(L);
+  descendant = lua_topointer(L, -1);
+  lua_rawseti(L, -2, 1);
+  if (array)
+    lua_rawseti(L, 1, 1);
+  else
+    lua_setfield(L, 1, "child");
+  require(luaL_loadstring(L, array ? "local t=...; return t[1]"
+                                   : "local t=...; return t.child") == LUA_OK);
+
+  begin(L);
+  /* The marker has yet to freeze the mode or reach the child. */
+  require(iswhite(G(L), (GCObject *)child));
+  lua_pushvalue(L, 1);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  lua_lock(L);
+  require(ttistable(s2v(L->top.p - 1)) && gcvalue(s2v(L->top.p - 1)) == child);
+  lua_unlock(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  require(lua_setmetatable(L, 1));
+  drain(L);
+  require(isblack(G(L), (GCObject *)child));
+  require(isblack(G(L), (GCObject *)descendant));
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(L, 2, 1) == LUA_TTABLE);
+  require(lua_topointer(L, -1) == descendant);
+
+  lua_settop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  if (array)
+    require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
+  else
+    require(lua_getfield(L, 1, "child") == LUA_TNIL);
+  lua_close(L);
+}
+
 static int noresult(lua_State *L) {
   (void)L;
   return 0;
@@ -1246,6 +1290,9 @@ int main(int argc, char **argv) {
     concurrent_collection(argv[1]);
   else if (strcmp(argv[1], "ephemerons") == 0)
     ephemerons();
+  else if (strcmp(argv[1], "weaken_array_after_read") == 0 ||
+           strcmp(argv[1], "weaken_hash_after_read") == 0)
+    read_before_weakening(strcmp(argv[1], "weaken_array_after_read") == 0);
   else if (strcmp(argv[1], "weak_retry") == 0)
     weak_retry();
   else if (strcmp(argv[1], "weak_stamp_wrap") == 0)
