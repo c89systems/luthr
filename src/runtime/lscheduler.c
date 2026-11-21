@@ -247,7 +247,8 @@ static int pincarrier (LuaExecution *execution) {
 
 static void unpincarrier (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
-  if (!task->external && task->native != NATIVE_ACTIVE) {
+  if (!task->external &&
+      __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) {
     LuaCarrier *carrier = __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE);
     lua_assert(carrier == task->carrier);
     /* Only this running carrier gains eligibility for other tasks. It checks
@@ -360,8 +361,10 @@ static LuaWaiter *selectnative (LuaScheduler *s, int transfer) {
   LuaScheduledTask *task;
   if (waiter == NULL) return NULL;
   task = waiter->execution->context;
-  lua_assert(!task->native && !task->native_notified);
-  if (transfer) task->native = NATIVE_ACTIVE;
+  lua_assert(!__atomic_load_n(&task->native, __ATOMIC_RELAXED) &&
+             !task->native_notified);
+  if (transfer)
+    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
   else {
     if (__atomic_load_n(&s->native, __ATOMIC_SEQ_CST) / NATIVE_PERMIT +
         __atomic_load_n(&s->native_notices, __ATOMIC_SEQ_CST) >=
@@ -381,10 +384,10 @@ static int awaitnative (lua_State *L, LuaScheduledTask *task) {
   luaX_checksync(pthread_mutex_lock(&s->native_mutex));
   /* Publish the queue bit before the final capacity check. A returning
   ** permit either precedes that check or will take this mutex to grant it. */
-  while (!task->native && !stopped) {
+  while (!__atomic_load_n(&task->native, __ATOMIC_RELAXED) && !stopped) {
     __atomic_fetch_or(&s->native, NATIVE_WAITING, __ATOMIC_SEQ_CST);
     if (trynative(s)) {
-      task->native = NATIVE_ACTIVE;
+      __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
       break;
     }
     stopped = luaQ_waitstopfifo(L, &s->native_mutex, &s->native_waiters);
@@ -393,8 +396,8 @@ static int awaitnative (lua_State *L, LuaScheduledTask *task) {
       __atomic_fetch_sub(&s->native_notices, 1, __ATOMIC_SEQ_CST);
     }
   }
-  if (stopped && task->native) {
-    task->native = 0;
+  if (stopped && __atomic_load_n(&task->native, __ATOMIC_RELAXED)) {
+    __atomic_store_n(&task->native, 0, __ATOMIC_RELAXED);
     handoff = selectnative(s, 1);  /* cancellation raced with a direct grant */
     if (handoff == NULL)
       __atomic_fetch_sub(&s->native, NATIVE_PERMIT, __ATOMIC_SEQ_CST);
@@ -424,8 +427,9 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
     ** through that boundary and every later native-admission wait. */
     if (managed) luaW_attach(L, depth);
   }
-  if (task->native == NATIVE_CACHED || trynative(s))
-    task->native = NATIVE_ACTIVE;
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED ||
+      trynative(s))
+    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
   else {
     if (managed) {
       depth = luaW_detach(L);  /* no foreign activation exists yet */
@@ -447,7 +451,7 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
 static void returnnative (LuaScheduledTask *task, int handoff) {
   LuaScheduler *s = task->scheduler;
   LuaWaiter *waiter = NULL;
-  task->native = 0;
+  __atomic_store_n(&task->native, 0, __ATOMIC_RELAXED);
   if (handoff) {
     if (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING) {
       luaX_checksync(pthread_mutex_lock(&s->native_mutex));
@@ -478,14 +482,18 @@ static void returnnative (LuaScheduledTask *task, int handoff) {
 /* A cached permit cannot follow a task into a park. A manageable burst
 ** also ends at a VM poll even if that poll keeps running the same task. */
 static void dropcachednative (LuaScheduledTask *task) {
-  if (task->native == NATIVE_CACHED) returnnative(task, 1);
+  /* A waiter is still parking when another execution can grant its permit.
+  ** Only its own execution can cache one or return a cached one. */
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED)
+    returnnative(task, 1);
 }
 
 static void nativeleave (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   UNUSED(L);
-  if (execution->native_depth != 0 || task->native != NATIVE_ACTIVE) return;
+  if (execution->native_depth != 0 ||
+      __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
   /* With fewer native permits than managed slots, redispatching a contender
   ** on each short C return can run it just to find its permit busy again.
   ** Reuse the reservation until a poll, park or bounded call count. */
@@ -493,7 +501,7 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
       task->native_reuses < NATIVE_REUSE_BURST &&
       (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING)) {
     task->native_reuses++;
-    task->native = NATIVE_CACHED;
+    __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
   }
   else returnnative(task, task->native_reuses >= NATIVE_REUSE_BURST);
   if (execution->pin_depth == 0) unpincarrier(execution);
@@ -710,7 +718,8 @@ static void taskentry (void *argument) {
   dropcachednative(task);
   if (luaTK_finish(&task->root, &status, &results) != LUA_OK) abort();
   if (task->policy != NULL) __atomic_store_n(&task->policy->active, 0, __ATOMIC_RELEASE);
-  lua_assert(task->fiber.execution.pin_depth == 0 && !task->native &&
+  lua_assert(task->fiber.execution.pin_depth == 0 &&
+             !__atomic_load_n(&task->native, __ATOMIC_RELAXED) &&
              task->fiber.execution.trusted == NULL && task->affinity == NULL);
   pause(task, SC_DONE);
   abort();
