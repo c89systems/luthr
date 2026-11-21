@@ -24,6 +24,25 @@ typedef struct LuaHeapWaiter {
   int collector;
 } LuaHeapWaiter;
 
+/* With no execution holding metadata, an open arm still owns the phase.
+** Grant the next queued request after it publishes readiness. */
+static void grantheap (LuaWorld *world, lua_State *L) {
+  LuaHeapWaiter *next;
+  lua_assert(world->heap_depth == 0);
+  next = world->heap_head;
+  if (next == NULL || (luaW_control(world) & LUA_WORLD_ARM_TRACE)) {
+    __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
+    return;
+  }
+  world->heap_head = next->next;
+  if (world->heap_head == NULL) world->heap_tail = &world->heap_head;
+  world->heap_depth = 1;
+  __atomic_store_n(&world->heap_owner.token, next->owner, __ATOMIC_RELEASE);
+  if (L != NULL && next->waiters != NULL && next->waiters->execution != NULL)
+    luaQ_requesthandoff(L);
+  luaQ_wake(&next->changed, &next->waiters);
+}
+
 int luaW_init (global_State *g) {
   LuaWorld *world = &g->world;
   int status, i;
@@ -94,6 +113,7 @@ void luaW_destroy (global_State *g) {
              world->participants == NULL &&
              world->heap_depth == 0 && world->waiters == NULL &&
              world->resume_waiters == NULL && world->rendezvous_waiters == NULL &&
+             !(luaW_control(world) & LUA_WORLD_ARM_TRACE) &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
              g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
@@ -224,16 +244,23 @@ static void withdraw (lua_State *L) {
   UNUSED(previous);
 }
 
-/* One metadata owner waits for either the preceding batch to reenter or
-** the current batch to withdraw. Only a completed predicate needs a wake. */
-static void notifyrendezvous (LuaWorld *world) {
-  uint64_t control;
-  if (world->rendezvous_waiters == NULL) return;
-  control = luaW_control(world);
+/* The last acknowledgement or withdrawal publishes shared tracing work.
+** Stops still have an owner; only a completed stop predicate needs a wake. */
+static void notifyrendezvous (global_State *g, lua_State *L) {
+  LuaWorld *world = &g->world;
+  uint64_t control = luaW_control(world);
   if (control & LUA_WORLD_ARM_TRACE) {
     if (!tracearmed(world)) return;
+    luaC_publishtraceplan(g);
+    __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_ARM_TRACE),
+                       __ATOMIC_SEQ_CST);
+    if (world->heap_depth == 0) grantheap(world, L);
+    luaQ_wake(&g->phase_changed, &g->phase_waiters);
+    luaSC_notifygc(g);
+    return;
   }
-  else if (control & LUA_WORLD_STOPPED) {
+  if (world->rendezvous_waiters == NULL) return;
+  if (control & LUA_WORLD_STOPPED) {
     if (luaW_activecount(world) != 0) return;
   }
   else if (world->entry_waiting != 0) return;
@@ -247,7 +274,7 @@ static void acknowledge (lua_State *L) {
     if (L->admission->trace_armed == epoch) return;
     L->admission->trace_armed = epoch;
     luaM_publishdebt(L);
-    notifyrendezvous(world);
+    notifyrendezvous(G(L), L);
   }
 }
 
@@ -265,14 +292,6 @@ void luaW_armtrace (lua_State *L) {
   world->arm_epoch = luaC_traceepoch(G(L));
   __atomic_fetch_or(&world->control, LUA_WORLD_ARM_TRACE, __ATOMIC_SEQ_CST);
   acknowledge(L);
-  if (!tracearmed(world)) {
-    luaW_deactivate(L);
-    while (!tracearmed(world))
-      luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
-    luaW_resume(L);
-  }
-  __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_ARM_TRACE),
-                     __ATOMIC_SEQ_CST);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -284,7 +303,7 @@ void luaW_deactivate (lua_State *L) {
     if (L->stack_peer != NULL)
       luaC_readystack(G(L), cast(uintptr_t, L->stack_peer));
   }
-  notifyrendezvous(&G(L)->world);
+  notifyrendezvous(G(L), L);
 }
 
 void luaW_resume (lua_State *L) {
@@ -310,11 +329,11 @@ static void __attribute__((noinline)) awaitentry (lua_State *L, LuaWorld *world)
   withdraw(L);  /* an unadmitted entrant cannot publish the stopped record */
   if (luaW_stopped(world)) {
     world->entry_waiting++;
-    notifyrendezvous(world);
+    notifyrendezvous(G(L), L);
     luaW_waitresume(L);
     luaW_resume(L);
     if (--world->entry_waiting == 0)
-      notifyrendezvous(world);
+      notifyrendezvous(G(L), L);
   }
   else luaW_resume(L);
   luaC_checksnapshot(L);
@@ -366,7 +385,7 @@ void luaW_leave (global_State *g, uintptr_t stack, unsigned flags) {
     ** stop request, which owns all trace lists once participants leave. */
     if ((control & LUA_WORLD_STACK_ROOTS) && !luaW_stopped(world))
       ready = luaC_readystack(g, stack);
-    notifyrendezvous(world);
+    notifyrendezvous(g, NULL);
     if ((flags & LUA_GATE_WAITING) ||
         (!(flags & LUA_GATE_STACK) &&
          (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
@@ -387,7 +406,7 @@ void luaW_stop (lua_State *L) {
   }
   luaW_collectenter(L);  /* finish the current metadata scope before stopping */
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(!luaW_stopped(world));  /* metadata ownership orders collection requests */
+  lua_assert(!(luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE)));
   /* Admit the batch notified by the previous stop before stopping again.
   ** Metadata ownership prevents another stop while this batch drains. */
   if (world->entry_waiting != 0) {
@@ -470,7 +489,8 @@ static void heapenter (lua_State *L, int collector) {
     world->heap_depth++;
   }
   else {
-    if (world->heap_depth != 0 || luaW_stopped(world)) {
+    if (world->heap_depth != 0 ||
+        (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
       LuaHeapWaiter wait = {NULL, NULL, NULL, PTHREAD_COND_INITIALIZER, 0};
       lua_assert(L->world_depth == 0 &&
         luaW_active(L->admission) != 0);
@@ -529,7 +549,8 @@ int luaW_trycollectenter (lua_State *L) {
     world->heap_depth++;
     acquired = 1;
   }
-  else if (world->heap_depth == 0 && !luaW_stopped(world)) {
+  else if (world->heap_depth == 0 &&
+           !(luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
     world->heap_depth = 1;
     __atomic_store_n(&world->heap_owner.token, luaX_token(L), __ATOMIC_RELEASE);
     acquired = 1;
@@ -543,20 +564,7 @@ void luaW_heapleave (lua_State *L) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(world->heap_depth != 0 &&
              luaX_isowner(L, &world->heap_owner));
-  if (--world->heap_depth == 0) {
-    LuaHeapWaiter *next = world->heap_head;
-    if (next == NULL)
-      __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
-    else {
-      world->heap_head = next->next;
-      if (world->heap_head == NULL) world->heap_tail = &world->heap_head;
-      world->heap_depth = 1;
-      __atomic_store_n(&world->heap_owner.token, next->owner, __ATOMIC_RELEASE);
-      if (next->waiters != NULL && next->waiters->execution != NULL)
-        luaQ_requesthandoff(L);
-      luaQ_wake(&next->changed, &next->waiters);
-    }
-  }
+  if (--world->heap_depth == 0) grantheap(world, L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -568,8 +576,8 @@ static unsigned heapdepth (lua_State *L) {
 void luaW_waitcollector (lua_State *L, int reason) {
   global_State *g = G(L);
   LuaWorld *world = &g->world;
-  uint64_t epoch = (reason == LUA_WAIT_TRACE || reason == LUA_WAIT_START)
-    ? __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) : 0;
+  uint64_t epoch = reason == LUA_WAIT_ARM ? luaC_traceepoch(g)
+    : __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE);
   lua_assert(L->native_depth != 0);
   luaW_deactivate(L);
   if (reason == LUA_WAIT_RECLAIM || (luaW_control(world) & LUA_WORLD_STORAGE_WAIT))
@@ -595,7 +603,7 @@ void luaW_waitcollector (lua_State *L, int reason) {
       luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
   }
   else if (reason == LUA_WAIT_ARM) {
-    while (luaC_markstate(g) & LUA_MARK_ARMING)
+    while (luaC_traceepoch(g) == epoch && (luaC_markstate(g) & LUA_MARK_ARMING))
       luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
   }
   else if (!luaW_stopped(world))

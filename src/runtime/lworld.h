@@ -13,7 +13,7 @@ typedef struct LuaParticipation {
   struct LuaParticipation *next;
   struct LuaParticipation **previous;
   lua_State *thread;
-  unsigned collector;  /* immutable system role; does not expand mutator pacing */
+  unsigned collector;  /* world.mutex; scheduler root until retired */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
   uint64_t trace_armed;  /* world.mutex, last acknowledged trace epoch */
 } LuaParticipation;

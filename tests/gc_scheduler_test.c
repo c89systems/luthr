@@ -28,6 +28,16 @@ static struct {
   unsigned workers, batches;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
+static LuaScheduler *root_scheduler;
+
+void __real_luaW_armtrace(lua_State *);
+void __wrap_luaW_armtrace(lua_State *L) {
+  if (root_scheduler != NULL) {
+    for (unsigned i = 0; i < root_scheduler->config.slots; ++i)
+      require(!iswhite(G(L), root_scheduler->slots[i].collector));
+  }
+  __real_luaW_armtrace(L);
+}
 
 static void observe(lua_State *L, int sweep) {
   LuaExecution *execution = luaQ_current();
@@ -154,6 +164,24 @@ int main(int argc, char **argv) {
     lua_remove(task_state, 1);
   }
   require(luaSC_init(L, &scheduler, &config) == 0);
+  if (strcmp(argv[1], "roots") == 0) {
+    uintptr_t collectors[2];
+    for (unsigned i = 0; i < 2; ++i)
+      collectors[i] = (uintptr_t)scheduler.slots[i].collector;
+    root_scheduler = &scheduler;
+    require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+    require(luaC_tracing(L));
+    root_scheduler = NULL;
+    require(luaSC_shutdown(&scheduler) == LUA_OK);
+    require(luaSC_destroy(L, &scheduler) == 0);
+    lua_gc(L, LUA_GCCOLLECT);
+    for (LuaParticipation *part = G(L)->world.participants; part != NULL;
+         part = part->next)
+      for (unsigned i = 0; i < 2; ++i)
+        require((uintptr_t)part->thread != collectors[i]);
+    lua_close(L);
+    return 0;
+  }
   if (single || stopped) {
     probe.armed =
         2; /* Record without holding a batch or waiting for a helper. */

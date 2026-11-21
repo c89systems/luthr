@@ -513,9 +513,12 @@ lua_State *luaE_newthread (lua_State *L, int collector) {
   /* Establish the system role and its lifetime pin before registration or
   ** stack allocation can expose this context to a concurrent scanner. */
   L1->participation.collector = collector;
-  if (collector) L1->native_depth++;
   status = luaD_rawrunprotected(L, buildthread, L1);
-  if (status != LUA_OK && collector) L1->native_depth--;
+  if (status != LUA_OK && collector) {
+    luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+    L1->participation.collector = 0;
+    luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  }
   luaX_endreserve(L1, reservation);
   if (status != LUA_OK) luaD_throw(L, status);
   return L1;

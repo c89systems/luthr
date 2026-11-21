@@ -291,8 +291,8 @@ set_target_properties(gc_scheduler_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_scheduler_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_scheduler_test PRIVATE luthr_static)
 target_link_options(gc_scheduler_test PRIVATE -Wl,--wrap=luaC_scantrace
-  -Wl,--wrap=luaC_scansweep)
-foreach(case IN ITEMS mark_incremental mark_generational sweep_incremental sweep_generational admission
+  -Wl,--wrap=luaC_scansweep -Wl,--wrap=luaW_armtrace)
+foreach(case IN ITEMS mark_incremental mark_generational sweep_incremental sweep_generational admission roots
     mark_pause_incremental mark_pause_generational sweep_pause_incremental sweep_pause_generational
     single_incremental single_generational stopped_incremental)
   add_test(NAME gc_scheduler_${case} COMMAND gc_scheduler_test ${case})
@@ -319,12 +319,13 @@ set_target_properties(gc_requests_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_requests_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_requests_test PRIVATE luthr_static)
 target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
+  -Wl,--wrap=luaW_heapleave
   -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_trycollectenter
   -Wl,--wrap=luaW_stop -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaC_tracebatch)
 foreach(case IN ITEMS incremental generational explicit explicit_trace_slice stopped phase_incremental phase_generational
     overdue_incremental overdue_generational overdue_stopped shrink_strings reachable_finalizers late_finalizer
     handoff_trace_incremental handoff_trace_generational handoff_sweep_incremental handoff_sweep_generational
-    minor_unwind minor_finalizer minor_arm minor_arm_registry)
+    minor_unwind minor_finalizer minor_arm minor_arm_registry arm_ack arm_withdraw arm_incremental major_after_minor)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

@@ -855,14 +855,17 @@ static void initcollectors (lua_State *L, void *argument) {
 
 static void freecollectors (LuaScheduler *s) {
   unsigned i;
+  LuaWorld *world = &s->global->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
   for (i = 0; i < s->config.slots; i++) {
     lua_State *worker = s->slots[i].collector;
     if (worker != NULL) {
-      lua_assert(worker->native_depth == 1);
-      worker->native_depth--;
+      lua_assert(worker->native_depth == 0 && worker->participation.collector);
+      worker->participation.collector = 0;
       s->slots[i].collector = NULL;
     }
   }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 static void destroywaits (LuaScheduler *s) {

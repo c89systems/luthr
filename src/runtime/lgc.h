@@ -533,6 +533,9 @@ LUAI_FUNC void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit
 LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit);
 LUAI_FUNC void luaC_publishtrace (lua_State *L, LuaTraceWork *work);
 LUAI_FUNC void luaC_advancetrace (lua_State *L);
+/* Publish the mark plan and accounting after the barrier handshake.
+** The caller owns world.mutex, or has stopped the world. */
+LUAI_FUNC void luaC_publishtraceplan (global_State *g);
 LUAI_FUNC void luaC_initialtrace (lua_State *L);
 LUAI_FUNC void luaC_finishroots (lua_State *L);
 LUAI_FUNC void luaC_finishtrace (lua_State *L);
