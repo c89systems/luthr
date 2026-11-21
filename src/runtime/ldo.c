@@ -34,6 +34,7 @@
 #include "lstate.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "ltm.h"
 #include "ltask.h"
 #include "lundump.h"

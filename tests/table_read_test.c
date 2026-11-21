@@ -61,24 +61,16 @@ static int retry_lookup(TString *key) {
   return 1; /* Simulate a writer invalidating the optimistic snapshot. */
 }
 
-int __real_luaH_trygetshortstr(lua_State *, Table *, TString *, TValue *,
-                               lu_byte *);
-int __wrap_luaH_trygetshortstr(lua_State *state, Table *table, TString *key,
-                               TValue *result, lu_byte *tag) {
+int __real_luaH_trygetsharedshortstr(lua_State *, Table *, TString *, TValue *,
+                                     lu_byte *);
+int __wrap_luaH_trygetsharedshortstr(lua_State *state, Table *table,
+                                     TString *key, TValue *result,
+                                     lu_byte *tag) {
   if (table == finished_index && isLua(state->ci))
     string_vm_reads++;
   if (retry_lookup(key))
     return 0;
-  return __real_luaH_trygetshortstr(state, table, key, result, tag);
-}
-
-int __real_luaH_tryget(lua_State *, Table *, const TValue *, TValue *,
-                       lu_byte *);
-int __wrap_luaH_tryget(lua_State *state, Table *table, const TValue *key,
-                       TValue *result, lu_byte *tag) {
-  if (capture_retry == 1 && ttisstring(key) && retry_lookup(tsvalue(key)))
-    return 0;
-  return __real_luaH_tryget(state, table, key, result, tag);
+  return __real_luaH_trygetsharedshortstr(state, table, key, result, tag);
 }
 
 lu_byte __real_luaH_get(lua_State *, Table *, const TValue *, TValue *);
@@ -1233,7 +1225,10 @@ static void captured_lookup(lua_State *state, int generational) {
               state,
               "local function read(object,k) return object[k] end; "
               "local mt={__index=function(_,k) return k..'_resolved' end}; "
-              "assert(read(setmetatable({},mt),'pending_capture') == "
+              "local object=setmetatable({},mt); "
+              "local registry=debug.getregistry(); "
+              "registry.read_probe=object; registry.read_probe=nil; "
+              "assert(read(object,'pending_capture') == "
               "'pending_capture_resolved');") == LUA_OK);
   require(capture_retry == 0);
   lua_setallocf(state, allocator.original, allocator.context);

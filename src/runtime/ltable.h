@@ -183,14 +183,6 @@ LUAI_FUNC lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *r
 LUAI_FUNC lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res);
 LUAI_FUNC lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res);
 
-/* Nonparking lookup. A successful read can report an absent key. */
-LUAI_FUNC int luaH_tryget (lua_State *, Table *, const TValue *, TValue *,
-                          lu_byte *);
-LUAI_FUNC int luaH_trygetint (lua_State *, Table *, lua_Integer, TValue *,
-                              lu_byte *);
-LUAI_FUNC int luaH_trygetshortstr (lua_State *, Table *, TString *, TValue *,
-                                   lu_byte *);
-
 /* Caller owns 't'. Reads do not allocate; writes require rooted key/value
 ** storage that remains valid through allocation and collection. */
 LUAI_FUNC lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res);

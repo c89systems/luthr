@@ -107,12 +107,6 @@ typedef union {
 
 
 /*
-** When the original hash value is good, hashing by a power of 2
-** avoids the cost of '%'.
-*/
-#define hashstr(nodes,str)	((nodes) + lmod((str)->hash, nodesteps(nodes)))
-
-/*
 ** for other types, it is better to avoid modulo by power of 2, as
 ** they can have many 2 factors.
 */
@@ -130,7 +124,7 @@ const Node luaH_dummynode = {
 };
 
 
-static const TValue absentkey = {ABSTKEYCONSTANT};
+const TValue luaH_absentkey = {ABSTKEYCONSTANT};
 
 
 /*
@@ -326,7 +320,7 @@ static const TValue *findkey (Node *n, const TValue *key, int deadok) {
     else {
       int nx = gnext(n);
       if (nx == 0)
-        return &absentkey;  /* not found */
+        return &luaH_absentkey;  /* not found */
       n += nx;
     }
   }
@@ -337,26 +331,17 @@ l_sinline const TValue *getgeneric (Node *nodes, const TValue *key, int deadok) 
 }
 
 /*
-** Return the index 'k' (converted to an unsigned) if it is inside
-** the range [1, limit].
-*/
-static unsigned checkrange (lua_Integer k, unsigned limit) {
-  return (l_castS2U(k) - 1u < limit) ? cast_uint(k) : 0;
-}
-
-
-/*
 ** Return the index 'k' if 'k' is an appropriate key to live in the
 ** array part of a table, 0 otherwise.
 */
-#define arrayindex(k)	checkrange(k, MAXASIZE)
+#define arrayindex(k)	luaH_indexin(k, MAXASIZE)
 
 
 /*
 ** Check whether an integer key is in the array part of a table and
 ** return its index there, or zero.
 */
-#define ikeyinarray(t,k)	checkrange(k, (t)->asize)
+#define ikeyinarray(t,k)	luaH_indexin(k, (t)->asize)
 
 
 /*
@@ -1252,7 +1237,7 @@ l_sinline const TValue *findinteger (Node *n, lua_Integer key) {
       n += nx;
     }
   }
-  return &absentkey;
+  return &luaH_absentkey;
 }
 
 static const TValue *getintfromhash (Table *t, lua_Integer key) {
@@ -1270,42 +1255,15 @@ static int hashkeyisempty (Table *t, lua_Unsigned key) {
 }
 
 
-static lu_byte finishnodeget (const TValue *val, TValue *res) {
-  if (!ttisnil(val)) {
-    setobj(((lua_State*)NULL), res, val);
-  }
-  return ttypetag(val);
+lu_byte luaH_getinthash (Table *t, lua_Integer key, TValue *res) {
+  return luaH_hashvalue(getintfromhash(t, key), res);
 }
 
 
 static lu_byte rawgetint (Table *t, lua_Integer key, TValue *res) {
   unsigned k = ikeyinarray(t, key);
-  if (k > 0) {
-    lu_byte tag = *getArrTag(t, k - 1);
-    if (!tagisempty(tag))
-      farr2val(t, k - 1, tag, res);
-    return tag;
-  }
-  else
-    return finishnodeget(getintfromhash(t, key), res);
-}
-
-
-/*
-** search function for short strings
-*/
-l_sinline const TValue *findshortstr (Node *n, TString *key) {
-  lua_assert(strisshr(key));
-  for (;;) {  /* check whether 'key' is somewhere in the chain */
-    if (keyisshrstr(n) && eqshrstr(keystrval(n), key))
-      return gval(n);  /* that's it */
-    else {
-      int nx = gnext(n);
-      if (nx == 0)
-        return &absentkey;  /* not found */
-      n += nx;
-    }
-  }
+  return k != 0 ? luaH_arrayvalue(t, k - 1, res)
+                : luaH_getinthash(t, key, res);
 }
 
 const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
@@ -1313,11 +1271,11 @@ const TValue *luaH_Hgetshortstr (Table *t, TString *key) {
   LuaHashDirectory *directory = luaH_hashdir(nodes);
   if (directory != NULL)
     nodes = directory->parts[distributedpart(key->hash)].nodes;
-  return findshortstr(hashstr(nodes, key), key);
+  return luaH_shortslot(luaH_shortposition(nodes, key), key);
 }
 
 static lu_byte rawgetshortstr (Table *t, TString *key, TValue *res) {
-  return finishnodeget(luaH_Hgetshortstr(t, key), res);
+  return luaH_hashvalue(luaH_Hgetshortstr(t, key), res);
 }
 
 
@@ -1340,7 +1298,7 @@ lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res) {
     case LUA_VNUMINT:
       return rawgetint(t, ivalue(key), res);
     case LUA_VNIL:
-      slot = &absentkey;
+      slot = &luaH_absentkey;
       break;
     case LUA_VNUMFLT: {
       lua_Integer k;
@@ -1352,7 +1310,7 @@ lu_byte luaH_getowned (Table *t, const TValue *key, TValue *res) {
       slot = getgeneric(keynodes(t, key), key, 0);
       break;
   }
-  return finishnodeget(slot, res);
+  return luaH_hashvalue(slot, res);
 }
 
 
@@ -1601,7 +1559,7 @@ l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
 l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
                              LuaTableSlot *slot, int writing) {
   unsigned asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
-  unsigned k = checkrange(ivalue(key), asize);
+  unsigned k = luaH_indexin(ivalue(key), asize);
   if (k != 0) {
     Value *array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
     if (!sameversion(table, layout)) return 0;
@@ -1696,8 +1654,8 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
   }
   else if (ttisshrstring(key)) {
     TString *name = tsvalue(key);
-    position = hashstr(nodes, name);
-    slot = findshortstr(position, name);
+    position = luaH_shortposition(nodes, name);
+    slot = luaH_shortslot(position, name);
   }
   else {
     position = mainpositionTV(nodes, key);
@@ -1891,8 +1849,8 @@ l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
   }
   if (ttisshrstring(key)) {
     TString *name = tsvalue(key);
-    Node *position = hashstr(table->node, name);
-    const TValue *slot = findshortstr(position, name);
+    Node *position = luaH_shortposition(table->node, name);
+    const TValue *slot = luaH_shortslot(position, name);
     if (isempty(slot) && !raw && table->metatable != NULL) return 0;
     if (isabstkey(slot)) {
       if (ttisnil(value)) return 1;
@@ -2213,7 +2171,7 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
   }
   else if (!luaH_readvalue(g, slot->payload, slot->tag, &value, sequence) ||
            !sameversion(table, sequence)) return 0;
-  if (slot->node != NULL) *tag = finishnodeget(&value, result);
+  if (slot->node != NULL) *tag = luaH_hashvalue(&value, result);
   else {
     *tag = rawtt(&value);
     if (!tagisempty(*tag)) setobj(L, result, &value);
@@ -2240,13 +2198,13 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
   if (!readsequence(L, table, sequence)) return 0;
   nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   if (!(*sequence & LUA_TABLE_SPLIT_VALUES) && luaH_hashdir(nodes) == NULL) {
-    Node *node = hashstr(nodes, key);
+    Node *node = luaH_shortposition(nodes, key);
     if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
         __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
       TValue value;
       luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, 0);
       if (!sameversion(table, *sequence)) return 0;
-      *tag = finishnodeget(&value, result);
+      *tag = luaH_hashvalue(&value, result);
       return 1;
     }
   }
@@ -2356,7 +2314,7 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
       ** every element. Root the stable value before releasing that guard. */
       __atomic_load(slot.payload, &snapshot.value_, __ATOMIC_ACQUIRE);
       snapshot.tt_ = __atomic_load_n(slot.tag, __ATOMIC_ACQUIRE);
-      tag = slot.node != NULL ? finishnodeget(&snapshot, &snapshot)
+      tag = slot.node != NULL ? luaH_hashvalue(&snapshot, &snapshot)
                              : rawtt(&snapshot);
       if (!tagisempty(tag)) luaR_setroot(L, &value, &snapshot);
       luaH_releasewriter(L, table, writer);
@@ -2384,14 +2342,14 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
 
 /* A miss completes indexing if the same view also has no metatable.
 ** An unresolved miss must leave the key intact if it aliases the result. */
-static lu_byte finishread (lua_State *L, Table *t, TValue *res, lu_byte tag,
-                            int local, uint64_t sequence) {
+static lu_byte finishsharedread (lua_State *L, Table *t, TValue *res,
+                                   lu_byte tag, uint64_t sequence) {
   if (!tagisempty(tag)) {
     luaC_tracevalue(L, res);
     return tag;
   }
   if (__atomic_load_n(&t->metatable, __ATOMIC_ACQUIRE) == NULL &&
-      (local || sameversion(t, sequence))) {
+      sameversion(t, sequence)) {
     setnilvalue(res);
     return LUA_VNIL;
   }
@@ -2406,17 +2364,16 @@ l_sinline int __attribute__((always_inline)) trygetshared (
   if (!readsequence(L, t, &sequence)) return 0;
   if (!locateslot(t, key, type, sequence, &slot, 0) ||
       !readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
-  *tag = finishread(L, t, res, *tag, 0, sequence);
+  *tag = finishsharedread(L, t, res, *tag, sequence);
   return 1;
 }
 
-int luaH_tryget (lua_State *L, Table *t, const TValue *key, TValue *res,
-                 lu_byte *tag) {
+int luaH_trygetkey (lua_State *L, Table *t, const TValue *key, TValue *res,
+                    lu_byte *tag) {
   if (luaA_localtable(L, t)) {
-    *tag = finishread(L, t, res, luaH_getowned(t, key, res), 1, 0);
+    *tag = luaH_privatevalue(L, t, res, luaH_getowned(t, key, res));
     return 1;
   }
-  if (ttisshrstring(key)) return luaH_trygetshortstr(L, t, tsvalue(key), res, tag);
   return trygetshared(L, t, key, rawtt(key), res, tag);
 }
 
@@ -2427,13 +2384,9 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   return getrooted(L, t, key, res);
 }
 
-int luaH_trygetint (lua_State *L, Table *t, lua_Integer key, TValue *res,
-                     lu_byte *tag) {
+int luaH_trygetsharedint (lua_State *L, Table *t, lua_Integer key, TValue *res,
+                           lu_byte *tag) {
   TValue index;
-  if (luaA_localtable(L, t)) {
-    *tag = finishread(L, t, res, rawgetint(t, key, res), 1, 0);
-    return 1;
-  }
   setivalue(&index, key);
   return trygetshared(L, t, &index, LUA_VNUMINT, res, tag);
 }
@@ -2446,20 +2399,12 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   return getrooted(L, t, &index, res);
 }
 
-int luaH_trygetshortstr (lua_State *L, Table *t, TString *key, TValue *res,
-                           lu_byte *tag) {
+int luaH_trygetsharedshortstr (lua_State *L, Table *t, TString *key,
+                                TValue *res, lu_byte *tag) {
   uint64_t sequence;
   lua_assert(strisshr(key));
-  if (luaA_localtable(L, t)) {
-    Node *nodes = t->node;
-    lua_assert(luaH_hashdir(nodes) == NULL);
-    *tag = finishread(L, t, res,
-                     finishnodeget(findshortstr(hashstr(nodes, key), key), res),
-                     1, 0);
-    return 1;
-  }
   if (!readshortslot(G(L), L, t, key, res, tag, &sequence)) return 0;
-  *tag = finishread(L, t, res, *tag, 0, sequence);
+  *tag = finishsharedread(L, t, res, *tag, sequence);
   return 1;
 }
 
@@ -2468,7 +2413,7 @@ static int trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
   TValue index;
   if (strisshr(key)) return luaH_trygetshortstr(L, t, key, res, tag);
   if (luaA_localtable(L, t)) {
-    *tag = finishread(L, t, res, finishnodeget(Hgetlongstr(t, key), res), 1, 0);
+    *tag = luaH_privatevalue(L, t, res, luaH_hashvalue(Hgetlongstr(t, key), res));
     return 1;
   }
   setsvalue(L, &index, key);

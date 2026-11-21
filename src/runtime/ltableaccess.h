@@ -4,7 +4,101 @@
 
 #include "lstate.h"
 #include "lgc.h"
+#include "laccess.h"
 #include "ltable.h"
+
+LUAI_DDEC(const TValue luaH_absentkey;)
+
+/* Shared and possibly weak lookups retain their checked snapshots. */
+LUAI_FUNC int luaH_trygetkey (lua_State *, Table *, const TValue *, TValue *,
+                             lu_byte *);
+LUAI_FUNC int luaH_trygetsharedint (lua_State *, Table *, lua_Integer,
+                                    TValue *, lu_byte *);
+LUAI_FUNC int luaH_trygetsharedshortstr (lua_State *, Table *, TString *,
+                                         TValue *, lu_byte *);
+LUAI_FUNC lu_byte luaH_getinthash (Table *, lua_Integer, TValue *);
+
+l_sinline unsigned luaH_indexin (lua_Integer key, unsigned limit) {
+  return (l_castS2U(key) - 1u < limit) ? cast_uint(key) : 0;
+}
+
+l_sinline Node *luaH_shortposition (Node *nodes, TString *key) {
+  return nodes + lmod(key->hash, twoto(nodes->u.lsize));
+}
+
+l_sinline const TValue *luaH_shortslot (Node *node, TString *key) {
+  lua_assert(strisshr(key));
+  for (;;) {
+    int next;
+    if (keyisshrstr(node) && keystrval(node) == key) return gval(node);
+    next = gnext(node);
+    if (next == 0) return &luaH_absentkey;
+    node += next;
+  }
+}
+
+l_sinline lu_byte luaH_hashvalue (const TValue *value, TValue *result) {
+  if (!ttisnil(value)) setobj(cast(lua_State *, NULL), result, value);
+  return ttypetag(value);
+}
+
+l_sinline lu_byte luaH_arrayvalue (Table *table, unsigned index, TValue *result) {
+  lu_byte tag = *getArrTag(table, index);
+  if (!tagisempty(tag)) farr2val(table, index, tag, result);
+  return tag;
+}
+
+/* A frozen strong table's write barriers retain its edges. Until the marker
+** freezes the mode, an owner can still attach a weak metatable this cycle. */
+l_sinline lu_byte luaH_privatevalue (lua_State *L, Table *table, TValue *result,
+                                      lu_byte tag) {
+  if (!tagisempty(tag)) {
+    if (iscollectable(result) && luaC_tracing(L) &&
+        !luaC_weakvalid(G(L), luaC_tablestate(table)))
+      luaC_traceobject(L, gcvalue(result));
+    return tag;
+  }
+  if (__atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE) != NULL)
+    return LUA_VABSTKEY;
+  setnilvalue(result);
+  return LUA_VNIL;
+}
+
+l_sinline int luaH_trygetint (lua_State *L, Table *table, lua_Integer key,
+                              TValue *result, lu_byte *tag) {
+  unsigned index;
+  lu_byte found;
+  if (!luaA_localtable(L, table))
+    return luaH_trygetsharedint(L, table, key, result, tag);
+  index = luaH_indexin(key, table->asize);
+  found = index != 0 ? luaH_arrayvalue(table, index - 1, result)
+                     : luaH_getinthash(table, key, result);
+  *tag = luaH_privatevalue(L, table, result, found);
+  return 1;
+}
+
+l_sinline int luaH_trygetshortstr (lua_State *L, Table *table, TString *key,
+                                   TValue *result, lu_byte *tag) {
+  Node *nodes;
+  lu_byte found;
+  if (!luaA_localtable(L, table))
+    return luaH_trygetsharedshortstr(L, table, key, result, tag);
+  nodes = table->node;
+  lua_assert(luaH_hashdir(nodes) == NULL);
+  found = luaH_hashvalue(luaH_shortslot(luaH_shortposition(nodes, key), key),
+                         result);
+  *tag = luaH_privatevalue(L, table, result, found);
+  return 1;
+}
+
+/* Nonparking lookup. A successful read can report an absent key. */
+l_sinline int luaH_tryget (lua_State *L, Table *table, const TValue *key,
+                           TValue *result, lu_byte *tag) {
+  if (ttisinteger(key)) return luaH_trygetint(L, table, ivalue(key), result, tag);
+  if (ttisshrstring(key))
+    return luaH_trygetshortstr(L, table, tsvalue(key), result, tag);
+  return luaH_trygetkey(L, table, key, result, tag);
+}
 
 l_sinline LuaTableWriter *luaH_writer (global_State *g, const Value *slot) {
   uintptr_t address = cast(uintptr_t, slot);

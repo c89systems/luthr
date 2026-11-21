@@ -31,6 +31,7 @@
 #include "lroots.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "ltm.h"
 #include "ltask.h"
 #include "lvm.h"
