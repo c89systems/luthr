@@ -293,7 +293,7 @@ static int pincarrier (LuaExecution *execution) {
 static void unpincarrier (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
   if (!task->external &&
-      __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) {
+      __atomic_load_n(&task->native, __ATOMIC_RELAXED) == 0) {
     LuaCarrier *carrier = __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE);
     lua_assert(carrier == task->carrier);
     /* Only this running carrier gains eligibility for other tasks. It checks
@@ -472,6 +472,13 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
   LuaWorldScope depth = {0};
   int detached = 0, managed = execution->managed_depth != 0;
   if (execution->native_depth != 0) return;
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED) {
+    /* The cached permit has kept this carrier's routing reservation. A
+    ** handoff drops both, so an opaque frame always stays on its carrier. */
+    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
+    if (!managed) releaseslot(task);
+    return;
+  }
   task->native_pending = 1;
   if (!eligible(task, task->carrier)) {
     lua_assert(execution->pin_depth == 0);
@@ -481,8 +488,7 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
     ** through that boundary and every later native-admission wait. */
     if (managed) luaW_attach(L, depth);
   }
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED ||
-      trynative(s))
+  if (trynative(s))
     __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
   else {
     if (managed) {
@@ -538,6 +544,8 @@ static void dropcachednative (LuaScheduledTask *task, int handoff) {
     task->native_deadline = 0;
     task->native_used = 0;
     returnnative(task, handoff);
+    if (task->fiber.execution.pin_depth == 0)
+      unpincarrier(&task->fiber.execution);
   }
 }
 
@@ -546,10 +554,9 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
   UNUSED(L);
   if (execution->native_depth != 0 ||
       __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
-  /* Consecutive calls use the same permit until a poll or park retires it. */
+  /* Consecutive calls reuse the permit and routing until a poll or park. */
   task->native_used = 1;
   __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
-  if (execution->pin_depth == 0) unpincarrier(execution);
 }
 
 static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) {

@@ -190,6 +190,13 @@ static int cpu_probe(lua_State *L) {
   return 1;
 }
 
+static int native_pinned_probe(lua_State *L) {
+  (void)L;
+  require(native_marker == 0xCAFE);
+  require(pthread_equal(pthread_self(), active->pinned_carrier));
+  return 0;
+}
+
 static int pinned_call(lua_State *L) {
   struct fixture *f = active;
   LuaCarrierPin outer = {0}, inner = {0};
@@ -222,11 +229,17 @@ static void affinity(struct fixture *f, int cancel, int opaque) {
     managed(f, "pinned", pinned_call);
   foreign(f, "block", block);
   foreign(f, "probe", probe);
+  foreign(f, "native_pinned_probe", native_pinned_probe);
   managed(f, "cpu_probe", cpu_probe);
-  submit(f, 0,
-         "return pinned(function() local r=event:recv(); assert(r=='wake'); "
-         "return 42 end)",
-         0);
+  /* The managed case enters the wait after caching a native permit under an
+   * explicit pin. Other tasks must get that capacity while this pin survives.
+   */
+  submit(
+      f, 0,
+      "return pinned(function() native_pinned_probe(); native_pinned_probe(); "
+      "local r=event:recv(); assert(r=='wake'); "
+      "return 42 end)",
+      0);
   parked(f, 0);
   lua_gc(f->main, LUA_GCCOLLECT);
   submit(f, 1, "return block(...)", 0);

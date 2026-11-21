@@ -676,31 +676,6 @@ void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native) {
   L->native_depth = native;
 }
 
-/* These boundaries retain the coroutine while native code blocks or reenters.
-** Protected unwinding restores the enclosing depth if a callback never returns. */
-LuaWorldScope luaW_detach (lua_State *L) {
-  LuaWorldScope scope;
-#if defined(LUAI_ASSERT)
-  LuaObjectScope *object;
-  for (object = L->object_scopes; object != NULL; object = object->previous)
-    lua_assert(!object->held);  /* callbacks never inherit object ownership */
-#endif
-  L->native_depth++;
-  scope = luaW_suspend(L);
-  scope.api_region = luaX_context(L)->api_region;
-  luaX_context(L)->api_region = NULL;
-  luaX_unlockstate(L);
-  return scope;
-}
-
-void luaW_attach (lua_State *L, LuaWorldScope scope) {
-  luaX_lockstate(L);
-  luaW_restore(L, scope, L->native_depth);
-  lua_assert(L->native_depth != 0);
-  L->native_depth--;
-  luaX_context(L)->api_region = scope.api_region;
-}
-
 LuaWorldScope luaW_suspendapi (void) {
   LuaWorldScope scope = {0};
   NativeStackContext *context = luaE_getnativestackcontext();

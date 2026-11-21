@@ -57,6 +57,13 @@ static int owned(lua_State *state) {
   return 0;
 }
 
+static int foreign_without_metadata(lua_State *state) {
+  require(luaE_getnativestackcontext()->api_region == NULL);
+  check_api(state, 1);
+  lua_pushinteger(state, 42);
+  return 1;
+}
+
 static int owned_without_metadata(lua_State *state) {
   LuaWorldScope scope = luaW_scope(state);
   require(scope.heap == 0 && scope.collection == 0);
@@ -65,11 +72,14 @@ static int owned_without_metadata(lua_State *state) {
   return 1;
 }
 
-static void metadata(lua_State *state) {
+static void metadata(lua_State *state, int foreign) {
   unsigned stops;
   for (stops = 0; stops <= 2; stops += 2) {
     LuaWorldScope restored;
-    luaQ_pushmanaged(state, owned_without_metadata, 0);
+    if (foreign)
+      lua_pushcfunction(state, foreign_without_metadata);
+    else
+      luaQ_pushmanaged(state, owned_without_metadata, 0);
     luaX_lockstate(state);
     luaW_heapenter(state);
     luaW_heapenter(state);
@@ -198,8 +208,9 @@ int main(int argc, char **argv) {
   if (strstr(argv[1], "generational") != NULL)
     lua_gc(state, LUA_GCGEN);
   if (strncmp(argv[1], "metadata_", 9) == 0) {
-    metadata(state);
-    require(checks == 2 && state->native_depth == 0);
+    metadata(state, 0);
+    metadata(state, 1);
+    require(checks == 4 && state->native_depth == 0);
     require(luaE_getnativestackcontext()->api_region == NULL);
     lua_close(state);
     return 0;

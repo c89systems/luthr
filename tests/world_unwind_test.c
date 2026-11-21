@@ -22,9 +22,9 @@ struct context {
 
 static struct context *active_context;
 
-void __real_luaX_lockstate(lua_State *state);
+void __real_luaX_apienter(lua_State *state);
 
-void __wrap_luaX_lockstate(lua_State *state) {
+void __wrap_luaX_apienter(lua_State *state) {
   struct context *context = active_context;
   if (context != NULL && context->forward_gc_pending &&
       state == context->state) {
@@ -37,7 +37,7 @@ void __wrap_luaX_lockstate(lua_State *state) {
     if (context->finalized != 0)
       abort();
   }
-  __real_luaX_lockstate(state);
+  __real_luaX_apienter(state);
 }
 
 static void *allocate(void *user, void *pointer, size_t old_size, size_t size) {
