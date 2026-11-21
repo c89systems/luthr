@@ -63,7 +63,8 @@ foreach(path IN LISTS gc_profile_paths)
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
         trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
         sweep_ns sweep_scan_ns sweep_records sweep_paused_records
-        startup_waits startup_wait_ns
+        startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
+        phase_waits phase_wait_ns trace_waits trace_wait_ns reclaim_waits reclaim_wait_ns
         metadata_waits metadata_wait_ns metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns)
       string(JSON ${field} GET "${row}" "gc_${field}")
     endforeach()
@@ -94,10 +95,14 @@ foreach(path IN LISTS gc_profile_paths)
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
         sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
         metadata_handoffs GREATER metadata_waits OR metadata_handoff_ns GREATER metadata_wait_ns OR
-        metadata_handoff_max_ns GREATER metadata_handoff_ns OR
-        (startup_waits EQUAL 0 AND NOT startup_wait_ns EQUAL 0))
+        metadata_handoff_max_ns GREATER metadata_handoff_ns)
       message(FATAL_ERROR "Invalid GC probe accounting: ${path}: ${row}")
     endif()
+    foreach(reason IN ITEMS startup arm minor phase trace reclaim)
+      if(${reason}_waits EQUAL 0 AND NOT ${reason}_wait_ns EQUAL 0)
+        message(FATAL_ERROR "Invalid ${reason} wait accounting: ${path}: ${row}")
+      endif()
+    endforeach()
     math(EXPR body_total "${body_total} + ${collector_body_ns}")
     math(EXPR records_total "${records_total} + ${barrier_records}")
     math(EXPR trace_total "${trace_total} + ${trace_ns}")

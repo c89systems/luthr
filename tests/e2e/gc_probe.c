@@ -733,21 +733,39 @@ void __wrap_luaC_checksnapshot(lua_State *L) { snapshot(L, NULL); }
 void __wrap_luaW_waitcollector(lua_State *L, int reason) {
   GcProbe *record = probe(L);
   uint64_t started = record != NULL ? now() : 0;
-  int tracing = luaC_tracing(L);
   if (record != NULL)
     coordination_begin(record);
   __real_luaW_waitcollector(L, reason);
   if (record != NULL) {
+    uint64_t elapsed = now() - started;
     coordination_end(record);
-    if (reason == LUA_WAIT_START) {
+    switch (reason) {
+    case LUA_WAIT_START:
       record->startup_waits++;
-      record->startup_wait_ns += now() - started;
-    } else if (tracing) {
+      record->startup_wait_ns += elapsed;
+      break;
+    case LUA_WAIT_ARM:
+      record->arm_waits++;
+      record->arm_wait_ns += elapsed;
+      break;
+    case LUA_WAIT_MINOR:
+      record->minor_waits++;
+      record->minor_wait_ns += elapsed;
+      break;
+    case LUA_WAIT_PHASE:
+      record->phase_waits++;
+      record->phase_wait_ns += elapsed;
+      break;
+    case LUA_WAIT_TRACE:
       record->trace_waits++;
-      record->trace_wait_ns += now() - started;
-    } else {
+      record->trace_wait_ns += elapsed;
+      break;
+    case LUA_WAIT_RECLAIM:
       record->reclaim_waits++;
-      record->reclaim_wait_ns += now() - started;
+      record->reclaim_wait_ns += elapsed;
+      break;
+    default:
+      abort();
     }
   }
 }
