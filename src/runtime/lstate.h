@@ -517,7 +517,7 @@ typedef struct global_State {
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
   LuaGCPacer pacer;
   l_mem GCcyclelive;  /* initial tracing cohort, less its logical garbage */
-  unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
+  unsigned gcstep_pending;  /* atomic; automatic startup requested or in progress */
   unsigned mark_state;  /* atomic stamps, allocation age and trace flags */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
@@ -525,6 +525,7 @@ typedef struct global_State {
   uint64_t major_completed;  /* atomic count at the end of major collection */
   uint64_t weak_stamp;  /* high bits of the tables' per-trace weak state */
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
+  unsigned trace_advance;  /* one complete assist seeking a phase transition */
   unsigned trace_ready;  /* atomic queued-work hint, independent of busy claims */
   unsigned barrier_ready;  /* atomic directory of nonempty barrier shards */
   LuaBarrierQueue barriers[LUA_BARRIER_SHARDS];

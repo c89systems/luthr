@@ -20,7 +20,7 @@
 static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  unsigned arrived[2], done;
+  unsigned arrived[2], startup_waits, trace_waits, done;
   int driver_parked, release_driver, finalized;
 } fixture = {.mutex = PTHREAD_MUTEX_INITIALIZER,
              .changed = PTHREAD_COND_INITIALIZER};
@@ -61,6 +61,23 @@ void __wrap_luaW_collectenter(lua_State *L) {
 int __wrap_luaW_trycollectenter(lua_State *L) {
   arrive();
   return __real_luaW_trycollectenter(L);
+}
+
+void __real_luaW_waitcollector(lua_State *, int);
+void __wrap_luaW_waitcollector(lua_State *L, int reason) {
+  if (role != 0 &&
+      (reason == LUA_WAIT_START ||
+       (reason == LUA_WAIT_TRACE &&
+        __atomic_load_n(&G(L)->trace_advance, __ATOMIC_ACQUIRE)))) {
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    if (reason == LUA_WAIT_START)
+      fixture.startup_waits++;
+    else
+      fixture.trace_waits++;
+    require(pthread_cond_broadcast(&fixture.changed) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  }
+  __real_luaW_waitcollector(L, reason);
 }
 
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
@@ -353,15 +370,24 @@ static void boundary_handoff(lua_State *L, const char *kind) {
   luaW_heapenter(L);
   for (i = 0; i < 2; i++)
     require(pthread_create(&workers[i], NULL, request, &helpers[i]) == 0);
+  if (!sweeping) {
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    while (fixture.trace_waits == 0)
+      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  }
   require(pthread_mutex_lock(&world->mutex) == 0);
   /* The caller retains metadata and active stack participation. A table
-   * sweep must finish before it releases either, while tracing needs both. */
+   * sweep can finish without it. During tracing, only one helper needs the
+   * metadata grant while the other waits for progress. */
   if (sweeping) {
     while (luaC_sweeping(L))
       luaQ_wait(L, &world->mutex, &G(L)->phase_changed, &G(L)->phase_waiters);
   } else {
-    while (!helpers[0].state->heap_waiting || !helpers[1].state->heap_waiting)
+    while (!helpers[0].state->heap_waiting && !helpers[1].state->heap_waiting)
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+    require(helpers[0].state->heap_waiting + helpers[1].state->heap_waiting ==
+            1);
   }
   require(!luaW_stopped(world));
   require(pthread_mutex_unlock(&world->mutex) == 0);
@@ -511,7 +537,7 @@ int main(int argc, char **argv) {
     goto done;
   }
   explicit_step = strcmp(argv[1], "explicit") == 0;
-  stop = strcmp(argv[1], "stopped") == 0;
+  stop = strstr(argv[1], "stopped") != NULL;
   overdue = strncmp(argv[1], "overdue_", 8) == 0;
   require(explicit_step || stop || overdue ||
           strcmp(argv[1], "incremental") == 0 ||
@@ -530,7 +556,8 @@ int main(int argc, char **argv) {
      * an existing shared job may simply defer a busy phase boundary. */
     lua_gc(L, LUA_GCCOLLECT);
     require(!luaC_tracing(L) && !luaC_sweeping(L));
-    fixture.arrived[0] = fixture.arrived[1] = fixture.done = 0;
+    fixture.arrived[0] = fixture.arrived[1] = fixture.startup_waits =
+        fixture.done = 0;
     lua_lock(L);
     luaW_heapenter(L);
     luaE_setdebt(G(L), overdue ? MAX_LMEM : 0);
@@ -543,8 +570,12 @@ int main(int argc, char **argv) {
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
     require(pthread_create(&workers[1], NULL, request, &requests[1]) == 0);
     require(pthread_mutex_lock(&fixture.mutex) == 0);
-    while (fixture.arrived[1] == 0 && !fixture.done)
+    while (fixture.arrived[1] == 0 && fixture.startup_waits == 0 &&
+           !fixture.done)
       require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    if (overdue)
+      require(fixture.startup_waits != 0 && fixture.arrived[1] == 0 &&
+              !fixture.done);
     skipped = fixture.done && fixture.arrived[1] == 0;
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
     if (explicit_step) {
@@ -567,8 +598,8 @@ int main(int argc, char **argv) {
     lua_unlock(L);
     require(pthread_join(workers[0], NULL) == 0);
     require(pthread_join(workers[1], NULL) == 0);
-    /* Coalesce ordinary requests; a spent hard allowance must instead join
-     * admission, even with a positive explicit work quota. */
+    /* Ordinary requests can return. An overdue request waits for the shared
+     * startup decision even with a positive explicit work quota. */
     require(overdue ? !skipped : skipped);
     if (stop)
       lua_gc(L, LUA_GCRESTART);

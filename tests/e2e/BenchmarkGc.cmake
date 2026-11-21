@@ -59,7 +59,7 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   trace_empty_soft trace_empty_busy trace_empty_ready trace_empty_metadata
   trace_retry_upvalues trace_retry_closures trace_retry_userdata
   mark_peak_bytes sweep_peak_bytes reclaim_peak_bytes idle_peak_bytes trace_peak_workers
-  trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
+  startup_waits startup_wait_ns trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
   sweep_paused_records sweep_poll_calls sweep_assist_calls sweep_peak_workers root_snapshot_calls root_snapshot_ns
   heap_deferred_entries
   logical_live_peak_bytes pacer_parallelism_peak pacer_goal_peak_bytes pacer_hard_peak_bytes

@@ -690,7 +690,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCmajorlive = sizeof(global_State);
   g->GCcyclelive = sizeof(global_State);
   g->gcstep_pending = 0;
-  g->trace_epoch = g->trace_busy = 0;
+  g->trace_epoch = g->trace_busy = g->trace_advance = 0;
   g->major_completed = 0;
   g->minor_request = g->minor_completed = 0;
   g->weak_stamp = 0;

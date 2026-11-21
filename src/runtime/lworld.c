@@ -568,7 +568,7 @@ static unsigned heapdepth (lua_State *L) {
 void luaW_waitcollector (lua_State *L, int reason) {
   global_State *g = G(L);
   LuaWorld *world = &g->world;
-  uint64_t epoch = reason == LUA_WAIT_TRACE
+  uint64_t epoch = (reason == LUA_WAIT_TRACE || reason == LUA_WAIT_START)
     ? __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) : 0;
   lua_assert(L->native_depth != 0);
   luaW_deactivate(L);
@@ -579,9 +579,9 @@ void luaW_waitcollector (lua_State *L, int reason) {
     ** A later cycle cannot inherit this wait across the unlocked interval. */
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
     luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
-    if (__atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) == epoch &&
-        (__atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) ||
-         (luaC_waitingstacks(g) && !luaC_tracerunnable(g))) &&
+    if (luaC_scanready(g) &&
+        __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) == epoch &&
+        luaC_traceblocked(g) &&
         !luaC_markready(g))
       luaQ_wait(L, &g->trace_mutex, &g->trace_changed, &g->trace_waiters);
     luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
@@ -589,6 +589,11 @@ void luaW_waitcollector (lua_State *L, int reason) {
   }
   else if (reason == LUA_WAIT_RECLAIM)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  else if (reason == LUA_WAIT_START) {
+    while (__atomic_load_n(&g->gcstep_pending, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&world->work_epoch, __ATOMIC_ACQUIRE) == epoch)
+      luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
+  }
   else if (reason == LUA_WAIT_ARM) {
     while (luaC_markstate(g) & LUA_MARK_ARMING)
       luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);

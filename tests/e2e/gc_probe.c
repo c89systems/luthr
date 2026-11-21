@@ -739,7 +739,10 @@ void __wrap_luaW_waitcollector(lua_State *L, int reason) {
   __real_luaW_waitcollector(L, reason);
   if (record != NULL) {
     coordination_end(record);
-    if (tracing) {
+    if (reason == LUA_WAIT_START) {
+      record->startup_waits++;
+      record->startup_wait_ns += now() - started;
+    } else if (tracing) {
       record->trace_waits++;
       record->trace_wait_ns += now() - started;
     } else {

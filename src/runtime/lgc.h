@@ -67,6 +67,12 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
    __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
 #define luaC_tracepending(g) (luaC_tracerunnable(g) || luaC_waitingstacks(g))
 
+l_sinline int luaC_traceblocked (global_State *g) {
+  return __atomic_load_n(&g->trace_advance, __ATOMIC_ACQUIRE) ||
+         __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) ||
+         (luaC_waitingstacks(g) && !luaC_tracerunnable(g));
+}
+
 /* Publish the allocation and mark stamps together with trace activation.
 ** Inactive states retain the last trace's interpretation for sweeping. */
 enum {

@@ -14,6 +14,7 @@
   X(coordination_ns) X(stop_request_ns) X(resume_ns) \
   X(stopped_ns) X(worker_calls) X(worker_empty_calls) X(worker_ns) X(worker_trace_calls) X(worker_sweep_calls) \
   X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
+  X(startup_waits) X(startup_wait_ns) \
   X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
   X(trace_zero_progress_batches) X(trace_retry_tables) X(trace_retry_threads) \
   X(trace_empty_assist) X(trace_empty_poll) X(trace_empty_step) X(trace_empty_full) \

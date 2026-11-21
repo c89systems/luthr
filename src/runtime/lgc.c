@@ -2275,6 +2275,36 @@ void luaC_finishtrace (lua_State *L) {
     entersweep(L);
 }
 
+/* Only one complete assist queues for a phase transition. Others either scan
+** newly published work or wait for progress without reserving metadata. */
+static void waittraceprogress (lua_State *L, uint64_t epoch) {
+  global_State *g = G(L);
+  int advance = 0;
+  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  if (luaC_tracing(L) && luaC_traceepoch(g) == epoch) {
+    int blocked = luaC_traceblocked(g);
+    if (!blocked && !luaC_tracepending(g)) {
+      __atomic_store_n(&g->trace_advance, 1, __ATOMIC_RELEASE);
+      advance = 1;
+    }
+    else if (blocked && !luaC_markready(g))
+      luaW_waitcollector(L, LUA_WAIT_TRACE);
+  }
+  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+  if (advance) {
+    luaW_collectenter(L);
+    if (luaC_tracing(L) && luaC_traceepoch(g) == epoch)
+      luaC_advancetrace(L);
+    luaW_heapleave(L);
+    /* Pair with wait registration under trace_mutex. No lock or collector
+    ** scope is kept by followers while the claimant seeks admission. */
+    luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+    __atomic_store_n(&g->trace_advance, 0, __ATOMIC_RELEASE);
+    luaQ_wake(&g->trace_changed, &g->trace_waiters);
+    luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  }
+}
+
 /* Only scalar tickets and ownership scopes survive a scheduler poll. Every
 ** graph cursor is shared, so another execution can finish this very job. */
 static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
@@ -2324,25 +2354,7 @@ static lu_mem tracework (lua_State *L, lu_mem budget, int complete) {
       }
       luaX_pollrequests(L);
       luaQ_poll(L);
-      if (done == 0) {
-        int boundary;
-        luaX_checksync(pthread_mutex_lock(&g->world.mutex));
-        if (luaC_tracing(L) && luaC_traceepoch(g) == epoch &&
-            (__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) ||
-             (luaC_waitingstacks(g) && !luaC_tracerunnable(g))) &&
-            !luaC_markready(g))
-          luaW_waitcollector(L, LUA_WAIT_TRACE);
-        boundary = luaC_tracing(L) && luaC_traceepoch(g) == epoch &&
-          !luaC_tracepending(g) &&
-          __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) == 0;
-        luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
-        if (boundary) {
-          luaW_collectenter(L);
-          if (luaC_tracing(L) && luaC_traceepoch(g) == epoch)
-            luaC_advancetrace(L);
-          luaW_heapleave(L);
-        }
-      }
+      if (done == 0) waittraceprogress(L, epoch);
     }
     luaW_restore(L, scope, L->native_depth);
   }
@@ -2711,6 +2723,13 @@ static void preparestep (lua_State *L, int concurrent) {
   }
 }
 
+static void finishrequest (global_State *g) {
+  luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+  __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
+  luaQ_wake(&g->phase_changed, &g->phase_waiters);
+  luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+}
+
 /* Consume the step's metadata admission or existing world stop. */
 static void runstep (lua_State *L, l_mem debt, int concurrent, int user) {
   global_State *g = G(L);
@@ -2732,6 +2751,7 @@ static void runstep (lua_State *L, l_mem debt, int concurrent, int user) {
       int arming = L->world_depth == 0;
       lua_assert(luaC_state(g) == GCSpropagate);
       starttrace(L, TRACE_YOUNG);
+      if (arming && !user) finishrequest(g);
       epoch = luaC_traceepoch(g);
       if (arming) {
         luaW_heapleave(L);
@@ -2771,7 +2791,6 @@ static void runstep (lua_State *L, l_mem debt, int concurrent, int user) {
 void luaC_step (lua_State *L) {
   global_State *g = G(L);
   LuaGCFrame frame;
-  int claimed = 0;
   int automatic = L->world_depth == 0;
   l_mem debt;
   if (luaC_sweeping(L)) {
@@ -2813,16 +2832,25 @@ void luaC_step (lua_State *L) {
   }
   if (L->world_depth == 0 && luaC_needassist(L))
     luaC_assistreclaim(L);
-  if (L->world_depth == 0) {
+  if (automatic) {
     unsigned expected = 0;
     /* One automatic request seeks metadata while other mutators keep working. */
-    if (__atomic_compare_exchange_n(&g->gcstep_pending, &expected, 1, 0,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-      claimed = 1;
-    else if (!luaC_cyclepressure(L)) return;
-    /* At the hard limit, coalescing may not let the other allocating workers
-    ** run ahead of a queued driver. Join admission and service the shared
-    ** request if it is still due; the original driver revalidates as usual. */
+    if (!__atomic_compare_exchange_n(&g->gcstep_pending, &expected, 1, 0,
+                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+      if (!luaC_cyclepressure(L)) return;
+      /* Allocators at the hard limit wait for the startup decision. They can
+      ** assist the resulting cycle, but need no separate metadata grant. */
+      luaX_checksync(pthread_mutex_lock(&g->world.mutex));
+      if (__atomic_load_n(&g->gcstep_pending, __ATOMIC_ACQUIRE)) {
+        L->native_depth++;
+        luaW_waitcollector(L, LUA_WAIT_START);
+        L->native_depth--;
+      }
+      luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+      if (luaC_tracing(L)) luaC_assisttrace(L);
+      else if (luaC_sweeping(L)) luaC_assistsweep(L);
+      return;
+    }
   }
   /* Another collector can service this request while metadata access waits.
   ** Revalidate under metadata ownership before requesting global quiescence.
@@ -2830,21 +2858,15 @@ void luaC_step (lua_State *L) {
   luaW_collectenter(L);
   if (luaC_tracing(L) || luaC_sweeping(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) {
+    if (automatic) finishrequest(g);
     luaW_heapleave(L);
-    goto done;
+    return;
   }
   preparestep(L, automatic);
+  if (automatic && L->world_depth != 0)
+    finishrequest(g);  /* followers wait for the world to resume */
   debt = automatic ? luaE_getdebt(g) : 0;
-  if (claimed) {
-    /* The admission request is complete. A parked driver must not suppress
-    ** future cycles after another execution finishes the shared job. */
-    __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
-    claimed = 0;
-  }
   runstep(L, debt, automatic, 0);
- done:
-  if (claimed)
-    __atomic_store_n(&g->gcstep_pending, 0, __ATOMIC_RELEASE);
 }
 
 
