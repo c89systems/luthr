@@ -217,6 +217,7 @@ static void startup_strings(void) {
 
 static void trim_idle_stacks(lua_State *L, int generational) {
   lua_State *large, *frames, *packed;
+  size_t frame_capacity;
   int packed_size;
   lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
@@ -234,10 +235,11 @@ static void trim_idle_stacks(lua_State *L, int generational) {
 
   frames = lua_newthread(L);
   lua_lock(frames);
-  for (int i = 0; i < 3; i++)
+  for (int i = 0; i < 5; i++)
     require(luaE_extendCI(frames, 1) != NULL);
   lua_unlock(frames);
-  require(frames->nci == 3 && stacksize(frames) == BASIC_STACK_SIZE);
+  frame_capacity = frames->call_bytes;
+  require(frame_capacity > 0 && stacksize(frames) == BASIC_STACK_SIZE);
 
   packed = lua_newthread(L);
   require(lua_checkstack(packed, 80));
@@ -250,7 +252,8 @@ static void trim_idle_stacks(lua_State *L, int generational) {
   count_trims = 0;
   require(trim_calls == 2);
   require(stacksize(large) < 1024 && lua_tointeger(large, -1) == 42);
-  require(frames->nci == 2 && stacksize(frames) == BASIC_STACK_SIZE);
+  require(frames->call_bytes < frame_capacity &&
+          stacksize(frames) == BASIC_STACK_SIZE);
   require(stacksize(packed) == packed_size && lua_tointeger(packed, -1) == 80);
   lua_close(L);
 }

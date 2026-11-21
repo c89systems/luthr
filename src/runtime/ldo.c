@@ -369,10 +369,8 @@ int luaD_checkminstack (lua_State *L) {
     return 0;
   if (getCcalls(L) >= LUAI_MAXCCALLS - 2)
     return 0;  /* not enough C-stack slots */
-  if (L->ci->next == NULL && luaE_extendCI(L, 0) == NULL)
-    return 0;  /* unable to allocate first ci */
   if (luaE_cireserve(L->ci) == NULL && luaE_extendCI(L, 0) == NULL)
-    return 0;  /* unable to allocate second ci */
+    return 0;  /* unable to reserve both frames */
   if (L->stack_last.p - L->top.p >= BASIC_STACK_SIZE)
     return 1;  /* enough (BASIC_STACK_SIZE) free slots in the Lua stack */
   else  /* try to grow stack to a size with enough free slots */
@@ -584,8 +582,7 @@ int luaD_cantrimstack (lua_State *L) {
   UNUSED(L);
   return 1;  /* retain forced relocations in stack stress builds */
 #else
-  CallInfo *reserve = luaE_cireserve(L->ci);
-  return (reserve != NULL && reserve->next != NULL) || stacktrimsize(L) != 0;
+  return luaE_cantrimCI(L) || stacktrimsize(L) != 0;
 #endif
 }
 

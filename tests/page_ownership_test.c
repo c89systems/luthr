@@ -59,7 +59,7 @@ int __wrap_luaAL_enter(lua_State *L) {
                      __ATOMIC_RELEASE);
     __atomic_store_n(rebind_cache->permission, execution, __ATOMIC_RELEASE);
     execution->allocation_cache = rebind_cache;
-    rebind_frame = luaM_newframe(L);
+    rebind_frame = luaM_allocframes(L, sizeof(CallInfo));
     require(rebind_frame != NULL);
   }
   return __real_luaAL_enter(L);
@@ -173,7 +173,7 @@ static void pressure(lua_State *L, struct fixture *f) {
   LuaAllocPage *page;
   lua_gc(L, LUA_GCCOLLECT);
   lua_lock(L);
-  first = luaM_newframe(L);
+  first = luaM_allocframes(L, sizeof(CallInfo));
   require(first != NULL);
   page = pageof(first);
   lua_unlock(L);
@@ -185,7 +185,7 @@ static void pressure(lua_State *L, struct fixture *f) {
   f->cap = f->live;
   lua_unlock(L);
   lua_lock(worker);
-  second = luaM_newframe(worker);
+  second = luaM_allocframes(worker, sizeof(CallInfo));
   require(second != NULL && pageof(second) == page && f->denied != 0);
   lua_unlock(worker);
   lua_lock(L);
@@ -254,7 +254,7 @@ static void *hold_cache(void *argument) {
   context.execution = &test->execution;
   previous = luaE_setnativestackcontext(&context);
   lua_lock(L);
-  test->block = luaM_newframe(L);
+  test->block = luaM_allocframes(L, sizeof(CallInfo));
   require(test->block != NULL);
   test->page = pageof(test->block);
   require(pthread_mutex_lock(&f->mutex) == 0);
@@ -263,7 +263,7 @@ static void *hold_cache(void *argument) {
   while (!f->release)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  replacement = luaM_newframe(L);
+  replacement = luaM_allocframes(L, sizeof(CallInfo));
   require(replacement != NULL && pageof(replacement) == test->page);
   memset(replacement, 0xa5, sizeof(CallInfo));
   luaM_free_(L, replacement, sizeof(CallInfo));
@@ -446,7 +446,7 @@ static void assist_rebind(lua_State *L) {
   previous = luaE_setnativestackcontext(&context);
   lua_lock(L);
   for (i = 0; i < 64; i++) {
-    frames[i] = luaM_newframe(L);
+    frames[i] = luaM_allocframes(L, sizeof(CallInfo));
     require(frames[i] != NULL);
   }
   for (i = 0; i < 64; i++) {
@@ -467,7 +467,7 @@ static void assist_rebind(lua_State *L) {
    * falsifiable rather than silently taking the later backing slow path. */
   rebind_cache = &caches[1];
   rebind_execution = &execution;
-  result = luaM_newframe(L);
+  result = luaM_allocframes(L, sizeof(CallInfo));
   require(rebind_execution == NULL && result != NULL && result != rebind_frame);
   require(pageof(result) == pageof(rebind_frame));
   for (i = 0; i < count; i++)

@@ -337,7 +337,8 @@ struct lua_State {
   ptrdiff_t errfunc;  /* current error handling function (stack index) */
   l_uint32 nCcalls;  /* number of nested non-yieldable or C calls */
   int oldpc;  /* last pc traced */
-  int nci;  /* number of items in 'ci' list */
+  size_t call_bytes;
+  struct LuaCallBlock *call_blocks;  /* newest block first */
   int basehookcount;
   unsigned hookcount;
   l_signalT hookmask;
@@ -675,6 +676,7 @@ LUAI_FUNC void luaE_freethread (lua_State *L, lua_State *L1);
 LUAI_FUNC void luaE_retirethread (lua_State *L, lua_State *thread);
 LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
+LUAI_FUNC int luaE_cantrimCI (lua_State *L);
 LUAI_FUNC void luaE_shrinkCI (lua_State *L);
 /* Two spare frames allow a finalizer and its nested call. */
 l_sinline CallInfo *luaE_cireserve (CallInfo *active) {

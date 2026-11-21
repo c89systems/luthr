@@ -260,12 +260,23 @@ static int defer_trim(lua_State *state) {
   return 0;
 }
 
+static int through_native(lua_State *state) {
+  lua_Debug frame;
+  require(lua_getstack(state, 0, &frame));
+  lua_pushvalue(state, 1);
+  lua_call(state, 0, 1);
+  require(lua_getinfo(state, "S", &frame) && strcmp(frame.what, "C") == 0);
+  return 1;
+}
+
 static void reuse_frames(lua_State *state) {
   luaL_openlibs(state);
   lua_pushcfunction(state, one);
   lua_setglobal(state, "one");
   lua_pushcfunction(state, defer_trim);
   lua_setglobal(state, "defer_trim");
+  lua_pushcfunction(state, through_native);
+  lua_setglobal(state, "through_native");
   int status = luaL_dostring(
       state,
       "collectgarbage('stop'); "
@@ -273,10 +284,11 @@ static void reuse_frames(lua_State *state) {
       "  if n==0 then local value=one(); return value end; "
       "  return 1+call(n-1) "
       "end; "
-      "assert(call(0)==1); defer_trim(); "
-      "local warm=collectgarbage('count'); assert(call(0)==1); "
+      "assert(call(4)==5); defer_trim(); "
+      "local warm=collectgarbage('count'); assert(call(4)==5); "
       "assert(collectgarbage('count')==warm, 'warm frame was discarded'); "
-      "assert(call(48)==49); local peak=collectgarbage('count'); "
+      "assert(through_native(function() return call(48) end)==49); "
+      "local peak=collectgarbage('count'); "
       "defer_trim(); assert(collectgarbage('count')<peak)");
   if (status != LUA_OK)
     fprintf(stderr, "%s\n", lua_tostring(state, -1));

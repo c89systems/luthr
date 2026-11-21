@@ -103,9 +103,10 @@ static void *borrow(void *argument) {
   initializations = 0;
   measured = 1;
   for (i = 0; i < (actor->frame ? 1U : BORROWED); i++) {
-    actor->blocks[i] = actor->frame
-                           ? (unsigned char *)luaM_newframe(actor->state)
-                           : luaM_malloc_(actor->state, BYTES, 0);
+    actor->blocks[i] =
+        actor->frame
+            ? (unsigned char *)luaM_allocframes(actor->state, sizeof(CallInfo))
+            : luaM_malloc_(actor->state, BYTES, 0);
     require(actor->blocks[i] != NULL);
     memset(actor->blocks[i], (int)(actor->id * BORROWED + i),
            actor->frame ? sizeof(CallInfo) : BYTES);
@@ -138,7 +139,7 @@ static void batch(int capped, int collect_during_init) {
     actors[i].frame = 1;
     actors[i].cache.global = G(L);
     actors[i].cache.permission = &actors[i].owner;
-    require(actors[i].state->nci == 0);
+    require(actors[i].state->call_bytes == 0);
   }
   lua_gc(L, LUA_GCSTOP);
   lua_lock(L);
@@ -155,7 +156,7 @@ static void batch(int capped, int collect_during_init) {
     CallInfo *probe;
     size_t capacity;
     lua_lock(L);
-    probe = luaM_newframe(L);
+    probe = luaM_allocframes(L, sizeof(CallInfo));
     require(probe != NULL);
     capacity = luaMP_page((LuaAllocBlock *)probe - 1)->bytes;
     luaM_free_(L, probe, sizeof(*probe));

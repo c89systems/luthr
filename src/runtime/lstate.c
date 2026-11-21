@@ -38,6 +38,7 @@
 #include "lgc.h"
 #include "llex.h"
 #include "lmem.h"
+#include "lmempage.h"
 #include "lstate.h"
 #include "ltablestorage.h"
 #include "lstring.h"
@@ -78,61 +79,85 @@ void luaE_setdebt (global_State *g, l_mem debt) {
   __atomic_store_n(&g->GCstep, step, __ATOMIC_RELAXED);
 }
 
+/* Keep active frames at stable addresses, including their debug handles and
+** continuations. The first block covers a finalizer and its nested call.
+** Subsequent blocks share the largest small frame-pool size class. */
+typedef struct LuaCallBlock {
+  struct LuaCallBlock *previous;
+  unsigned count;
+  CallInfo frames[];
+} LuaCallBlock;
+
+enum { FIRST_CALL_FRAMES = 2, CALL_BLOCK_FRAMES = 6 };
+#define callblockbytes(n) \
+  (offsetof(LuaCallBlock, frames) + (n) * sizeof(CallInfo))
+#define CALL_CACHE_BYTES \
+  (callblockbytes(FIRST_CALL_FRAMES) + callblockbytes(CALL_BLOCK_FRAMES))
+
+_Static_assert(callblockbytes(CALL_BLOCK_FRAMES) <= LUA_ALLOC_MAX,
+               "call blocks must use the dedicated frame pool");
 
 CallInfo *luaE_extendCI (lua_State *L, int err) {
-  CallInfo *ci;
-  ci = luaM_newframe(L);
-  if (l_unlikely(ci == NULL)) {  /* allocation failed? */
+  unsigned count = L->call_blocks == NULL ? FIRST_CALL_FRAMES : CALL_BLOCK_FRAMES;
+  size_t bytes = callblockbytes(count);
+  LuaCallBlock *block = cast(LuaCallBlock *, luaM_allocframes(L, bytes));
+  CallInfo *previous;
+  unsigned i;
+  if (l_unlikely(block == NULL)) {
     if (err)
       luaM_error(L);  /* raise the error */
     return NULL;  /* else only report it */
   }
-  ci->next = L->ci->next;
-  ci->previous = L->ci;
-  L->ci->next = ci;
-  if (ci->next)
-    ci->next->previous = ci;
-  ci->u.l.trap = 0;
-  L->nci++;
-  return ci;
-}
-
-
-/*
-** free all CallInfo structures not in use by a thread
-*/
-static void freeCI (lua_State *owner, lua_State *L) {
-  CallInfo *ci = L->ci;
-  CallInfo *next = ci->next;
-  ci->next = NULL;
-  while ((ci = next) != NULL) {
-    next = ci->next;
-    luaM_free(owner, ci);
-    L->nci--;
+  /* Allocation may service a collection. Find the retained tail after it. */
+  block->previous = L->call_blocks;
+  block->count = count;
+  previous = block->previous == NULL ? &L->base_ci
+    : &block->previous->frames[block->previous->count - 1];
+  for (i = 0; i < count; i++) {
+    CallInfo *ci = &block->frames[i];
+    previous->next = ci;
+    ci->previous = previous;
+    ci->u.l.trap = 0;
+    previous = ci;
   }
+  previous->next = NULL;
+  L->call_blocks = block;
+  L->call_bytes += bytes;
+  return L->ci->next;
 }
 
 
-/*
-** Free half of the unused CallInfo structures beyond the reserve.
-*/
+static void freecallblock (lua_State *owner, lua_State *L) {
+  LuaCallBlock *block = L->call_blocks;
+  size_t bytes = callblockbytes(block->count);
+  block->frames[0].previous->next = NULL;
+  L->call_blocks = block->previous;
+  L->call_bytes -= bytes;
+  luaM_freemem(owner, block, bytes);
+}
+
+
+static int canfreecallblock (lua_State *L, CallInfo *reserve, size_t keep) {
+  LuaCallBlock *block = L->call_blocks;
+  return reserve != NULL && block != NULL &&
+    L->call_bytes - callblockbytes(block->count) >= keep &&
+    cast(uintptr_t, reserve) - cast(uintptr_t, block->frames) >=
+      block->count * sizeof(CallInfo);
+}
+
+int luaE_cantrimCI (lua_State *L) {
+  return L->call_bytes > CALL_CACHE_BYTES &&
+         canfreecallblock(L, luaE_cireserve(L->ci), CALL_CACHE_BYTES);
+}
+
+/* Keep shallow call chains warm and return only whole unused blocks. One
+** trim retains at least half the capacity to avoid churn after deep calls. */
 void luaE_shrinkCI (lua_State *L) {
-  CallInfo *ci = luaE_cireserve(L->ci);
-  CallInfo *next;
-  if (ci == NULL)
-    return;
-  while ((next = ci->next) != NULL) {
-    CallInfo *next2 = next->next;  /* next's next */
-    ci->next = next2;  /* remove next from the list */
-    L->nci--;
-    luaM_free(L, next);  /* free next */
-    if (next2 == NULL)
-      break;  /* no more elements */
-    else {
-      next2->previous = ci;
-      ci = next2;  /* continue */
-    }
-  }
+  CallInfo *reserve = luaE_cireserve(L->ci);
+  size_t keep = L->call_bytes / 2;
+  if (keep < CALL_CACHE_BYTES) keep = CALL_CACHE_BYTES;
+  while (canfreecallblock(L, reserve, keep))
+    freecallblock(L, L);
 }
 
 
@@ -287,8 +312,8 @@ static void freestack (lua_State *owner, lua_State *L) {
   if (L->stack.p == NULL)
     return;  /* stack not completely built yet */
   L->ci = &L->base_ci;  /* free the entire 'ci' list */
-  freeCI(owner, L);
-  lua_assert(L->nci == 0);
+  while (L->call_blocks != NULL) freecallblock(owner, L);
+  lua_assert(L->call_bytes == 0);
   /* free stack */
   luaM_freearray(owner, L->stack.p, cast_sizet(stacksize(L) + EXTRA_STACK));
 }
@@ -342,7 +367,8 @@ static void preinit_thread (lua_State *L, global_State *g) {
   G(L) = g;
   L->stack.p = NULL;
   L->ci = NULL;
-  L->nci = 0;
+  L->call_bytes = 0;
+  L->call_blocks = NULL;
   L->nCcalls = 0;
   L->luthr_stack_limit = 0;
   L->luthr_stack_context = NULL;
@@ -414,8 +440,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
 
 
 lu_mem luaE_threadsize (lua_State *L) {
-  lu_mem sz = cast(lu_mem, sizeof(LX))
-            + cast_uint(L->nci) * sizeof(CallInfo);
+  lu_mem sz = cast(lu_mem, sizeof(LX)) + L->call_bytes;
   if (L->stack.p != NULL)
     sz += cast_uint(stacksize(L) + EXTRA_STACK) * sizeof(StackValue);
   return sz;
@@ -522,10 +547,10 @@ LUA_API lua_State *lua_newthread (lua_State *L) {
 
 
 void luaE_retirethread (lua_State *L, lua_State *thread) {
-  CallInfo *ci;
+  LuaCallBlock *block;
   lua_assert(thread->storage_retired == NULL && thread->storage_bytes == 0);
-  for (ci = thread->base_ci.next; ci != NULL; ci = ci->next)
-    luaM_retire_(L, ci, sizeof(*ci));
+  for (block = thread->call_blocks; block != NULL; block = block->previous)
+    luaM_retire_(L, block, callblockbytes(block->count));
   if (thread->stack.p != NULL)
     luaM_retirearray(L, thread->stack.p,
                      cast_sizet(stacksize(thread) + EXTRA_STACK));

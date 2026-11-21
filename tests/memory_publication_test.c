@@ -79,7 +79,7 @@ int __wrap_luaAL_enter(lua_State *state) {
     /* Populate the cache after the outer refill chose to seek admission.
      * This models another task using its slot while that admission parks. */
     frame_refill_probe = NULL;
-    frame = luaM_newframe(state);
+    frame = luaM_allocframes(state, sizeof(CallInfo));
     require(frame != NULL);
     luaM_free_(state, frame, sizeof(*frame));
   }
@@ -617,7 +617,7 @@ static void page_isolation(void) {
   for (i = 0; i < 1500; i++) {
     objects[i] = luaM_malloc_(state, frame_size, LUA_TTABLE);
     if (i == 1000) {
-      frame = (unsigned char *)luaM_newframe(state);
+      frame = (unsigned char *)luaM_allocframes(state, sizeof(CallInfo));
       require(frame != NULL);
       memset(frame, 0x5a, frame_size);
     }
@@ -643,13 +643,13 @@ static void refill_recheck(void) {
   struct allocator allocator = {0};
   lua_State *state = lua_newstate(allocate, &allocator, 0);
   CallInfo *frame;
-  require(state != NULL && state->nci == 0);
+  require(state != NULL && state->call_bytes == 0);
   lua_gc(state, LUA_GCCOLLECT); /* no retained frames: the frame pool is cold */
   allocator.cap = allocator.live + 4096;
   allocator.failures = 0;
   luaX_lockstate(state);
   frame_refill_probe = state;
-  frame = luaM_newframe(state);
+  frame = luaM_allocframes(state, sizeof(CallInfo));
   require(frame != NULL && frame_refill_probe == NULL);
   require(allocator.failures == 0);
   luaM_free_(state, frame, sizeof(*frame));
@@ -855,13 +855,13 @@ static void local_returns(void) {
   lua_gc(state, LUA_GCCOLLECT);
   baseline = allocator.live;
   luaX_lockstate(state);
-  blocks[count++] = luaM_newframe(state);
+  blocks[count++] = luaM_allocframes(state, sizeof(CallInfo));
   require(blocks[0] != NULL);
   page = luaMP_page((LuaAllocBlock *)blocks[0] - 1);
   require(page != NULL);
   while (page->local != NULL) {
     require(count < 2048);
-    blocks[count++] = luaM_newframe(state);
+    blocks[count++] = luaM_allocframes(state, sizeof(CallInfo));
     require(blocks[count - 1] != NULL);
   }
   require(count >= 2);
@@ -876,7 +876,7 @@ static void local_returns(void) {
   world_locks = 0;
   measured++;
   for (i = 0; i < 1000; i++) {
-    again = luaM_newframe(state);
+    again = luaM_allocframes(state, sizeof(CallInfo));
     require(again == returned);
     memset(again, 0x5a, sizeof(CallInfo));
     luaM_free_(state, again, sizeof(CallInfo));

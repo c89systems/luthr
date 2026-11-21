@@ -892,6 +892,6 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
 
 /* Retained call frames must not pin large pages of short-lived table nodes
 ** or objects. Unlike luaM_malloc_, this reports failure for optional frames. */
-CallInfo *luaM_newframe (lua_State *L) {
-  return cast(CallInfo *, allocateblock(L, sizeof(CallInfo), 0, LUA_ALLOC_BINS));
+void *luaM_allocframes (lua_State *L, size_t size) {
+  return allocateblock(L, size, 0, LUA_ALLOC_BINS);
 }
