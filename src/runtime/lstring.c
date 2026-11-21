@@ -144,8 +144,10 @@ void luaS_clearcache (global_State *g) {
     LuaParticipation *participant;
     g->strcache_epoch = 1;
     for (participant = g->world.participants; participant != NULL;
-         participant = participant->next)
-      participant->thread->strcache_epoch = 0;
+         participant = participant->next) {
+      LuaStringCache *cache = participant->thread->strcache;
+      if (cache != NULL) cache->epoch = 0;
+    }
   }
 }
 
@@ -331,15 +333,24 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
 ** check hits.
 */
 TString *luaS_new (lua_State *L, const char *str) {
-  uint64_t epoch = G(L)->strcache_epoch;
-  unsigned int i = point2uint(str) % STRCACHE_N;  /* hash */
+  LuaStringCache *cache = L->strcache;
+  uint64_t epoch;
+  TString **p;
   int j;
-  TString **p = L->strcache[i];
   TString *result;
-  if (l_unlikely(L->strcache_epoch != epoch)) {
-    memset(L->strcache, 0, sizeof(L->strcache));
-    L->strcache_epoch = epoch;
+  if (l_unlikely(cache == NULL)) {
+    cache = cast(LuaStringCache *, luaM_tryalloc(L, sizeof(*cache)));
+    if (cache == NULL) return luaS_newlstr(L, str, strlen(str));
+    cache->epoch = 0;
+    L->strcache = cache;
   }
+  /* Cache allocation can park. Use the epoch after resuming. */
+  epoch = G(L)->strcache_epoch;
+  if (l_unlikely(cache->epoch != epoch)) {
+    memset(cache->entries, 0, sizeof(cache->entries));
+    cache->epoch = epoch;
+  }
+  p = cache->entries[point2uint(str) % STRCACHE_N];
   for (j = 0; j < STRCACHE_M; j++) {
     if (p[j] != NULL && strcmp(str, getstr(p[j])) == 0) { /* hit? */
       result = p[j];
@@ -351,8 +362,8 @@ TString *luaS_new (lua_State *L, const char *str) {
   for (j = STRCACHE_M - 1; j > 0; j--)
     p[j] = p[j - 1];  /* move out last element */
   /* new element is first in the list */
-  p[0] = luaS_newlstr(L, str, strlen(str));
-  result = p[0];
+  result = luaS_newlstr(L, str, strlen(str));
+  p[0] = result;
   return result;
 }
 

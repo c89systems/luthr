@@ -147,6 +147,11 @@ struct lua_longjmp;  /* defined in ldo.c */
 #define STRCACHE_M              2
 #endif
 
+typedef struct LuaStringCache {
+  uint64_t epoch;
+  TString *entries[STRCACHE_N][STRCACHE_M];
+} LuaStringCache;
+
 
 #define BASIC_STACK_SIZE        (2*LUA_MINSTACK)
 
@@ -396,9 +401,8 @@ struct lua_State {
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
   struct lua_State *publish_next;
   struct lua_State **publish_previous;  /* atomic membership, shard owns links */
-  TString *strcache[STRCACHE_N][STRCACHE_M];
+  LuaStringCache *strcache;  /* weak API string cache, allocated on first use */
   LuaAllocationCache allocation;
-  uint64_t strcache_epoch;  /* zero until an owner initializes the cache */
 };
 
 

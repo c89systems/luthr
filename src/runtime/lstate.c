@@ -403,7 +403,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   memset(&L->allocation, 0, sizeof(L->allocation));
   L->allocation.global = g;
   L->allocation.thread = L;
-  L->strcache_epoch = 0;
+  L->strcache = NULL;
   L->participation.next = NULL;
   L->participation.previous = NULL;
   L->participation.thread = L;
@@ -445,6 +445,7 @@ lu_mem luaE_threadsize (lua_State *L) {
   lu_mem sz = cast(lu_mem, sizeof(LX)) + L->call_bytes;
   if (L->stack.p != NULL)
     sz += cast_uint(stacksize(L) + EXTRA_STACK) * sizeof(StackValue);
+  if (L->strcache != NULL) sz += sizeof(*L->strcache);
   return sz;
 }
 
@@ -471,6 +472,7 @@ static void close_state (lua_State *L, int owns_gate) {
   for (i = 0; i < LUA_STRING_SHARDS; i++)
     luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
   freestack(L, L);
+  if (L->strcache != NULL) luaM_free(L, L->strcache);
   luaCP_bind(L, NULL);
   luaHS_reclaim(L, LUAHS_DRAIN);
   luaM_reclaimpages(L);
@@ -574,6 +576,8 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
   if (thread->stack.p != NULL)
     luaM_retirearray(L, thread->stack.p,
                      cast_sizet(stacksize(thread) + EXTRA_STACK));
+  if (thread->strcache != NULL)
+    luaM_retire_(L, thread->strcache, sizeof(*thread->strcache));
   luaM_retire_(L, fromstate(thread), sizeof(LX));
 }
 
@@ -585,6 +589,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
   freestack(L, L1);
+  if (L1->strcache != NULL) luaM_free(L, L1->strcache);
   {
     LuaPolicy *policy = L1->policy;
     L1->policy = NULL;

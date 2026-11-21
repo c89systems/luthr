@@ -834,6 +834,10 @@ void *luaM_alloccontrol (lua_State *L, size_t size) {
   return allocatebacking(L, size, 0, 1);
 }
 
+void *luaM_tryalloc (lua_State *L, size_t size) {
+  return allocatebacking(L, size, 0, 0);
+}
+
 static void *allocatepooled (lua_State *L, size_t size, unsigned blockbytes,
                              unsigned pool, int emergency) {
   LuaAllocPage *page = *cachepage(allocationcache(L), pool);

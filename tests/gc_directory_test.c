@@ -3,6 +3,7 @@
 #include <lauxlib.h>
 #include <ldo.h>
 #include <lgc.h>
+#include <lmempage.h>
 #include <lstate.h>
 #include <lstring.h>
 #include <ltable.h>
@@ -100,40 +101,86 @@ static void publish_batches(lua_State *L, int generational) {
   lua_close(L);
 }
 
-static void invalidate_string_cache(lua_State *L, int generational) {
+struct startup_allocator {
+  size_t requests, fail_at, live;
+  int deny_cache, denied_cache;
+};
+
+static void *startup_alloc(void *argument, void *old, size_t old_size,
+                           size_t size) {
+  struct startup_allocator *test = argument;
+  void *memory;
+  if (size == 0) {
+    test->live -= old_size;
+    free(old);
+    return NULL;
+  }
+  if (test->deny_cache &&
+      size == sizeof(LuaStringCache) + sizeof(LuaAllocBlock)) {
+    test->denied_cache++;
+    return NULL;
+  }
+  if (++test->requests >= test->fail_at)
+    return NULL;
+  if (old == NULL)
+    old_size = 0;
+  memory = realloc(old, size);
+  if (memory != NULL)
+    test->live = test->live - old_size + size;
+  return memory;
+}
+
+static void invalidate_string_cache(int generational) {
+  struct startup_allocator test = {.fail_at = SIZE_MAX};
+  lua_State *L = lua_newstate(startup_alloc, &test, 42);
   lua_State *owner;
   char source[4097];
+  lu_mem initial_size;
+  require(L != NULL);
   lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
   owner = lua_newthread(L);
-  require(owner->strcache_epoch == 0);
+  require(owner->strcache == NULL);
+  initial_size = luaE_threadsize(owner);
   memset(source, 'a', sizeof(source) - 1);
   source[sizeof(source) - 1] = '\0';
+  test.deny_cache = 1;
+  require(strcmp(lua_pushstring(owner, source), source) == 0);
+  require(test.denied_cache == 1 && owner->strcache == NULL);
+  require(luaE_threadsize(owner) == initial_size);
+  lua_pop(owner, 1);
+  test.deny_cache = 0;
   for (int i = 0; i < 3; i++) {
     uint64_t epoch;
     const char *value = lua_pushstring(owner, source);
     require(strcmp(value, source) == 0);
+    require(owner->strcache != NULL &&
+            luaE_threadsize(owner) == initial_size + sizeof(LuaStringCache));
     size_t len;
     require(lua_tolstring(owner, -1, &len) == value &&
             len == sizeof(source) - 1);
-    epoch = owner->strcache_epoch;
+    epoch = owner->strcache->epoch;
     require(epoch == G(L)->strcache_epoch);
-    lua_pop(owner, 1);
+    require(lua_pushstring(owner, source) == value);
+    lua_pop(owner, 2);
     lua_gc(L, LUA_GCCOLLECT);
-    require(owner->strcache_epoch == epoch && G(L)->strcache_epoch != epoch);
+    require(owner->strcache->epoch == epoch && G(L)->strcache_epoch != epoch);
     source[0]++;
   }
   lua_lock(L);
   luaW_stop(L);
   /* Reuse of epoch one must also invalidate owners that last used it. */
-  owner->strcache_epoch = 1;
+  owner->strcache->epoch = 1;
   G(L)->strcache_epoch = UINT64_MAX;
   luaS_clearcache(G(L));
-  require(G(L)->strcache_epoch == 1 && owner->strcache_epoch == 0);
+  require(G(L)->strcache_epoch == 1 && owner->strcache->epoch == 0);
   luaW_start(L);
   lua_unlock(L);
   require(strcmp(lua_pushstring(owner, source), source) == 0);
+  lua_pop(L, 1);
+  lua_gc(L, LUA_GCCOLLECT);
   lua_close(L);
+  require(test.live == 0);
 }
 
 static void byte_strings(lua_State *L, int generational) {
@@ -175,31 +222,8 @@ static void byte_strings(lua_State *L, int generational) {
   lua_close(L);
 }
 
-struct startup_allocator {
-  size_t requests, fail_at, live;
-};
-
-static void *startup_alloc(void *argument, void *old, size_t old_size,
-                           size_t size) {
-  struct startup_allocator *test = argument;
-  void *memory;
-  if (size == 0) {
-    test->live -= old_size;
-    free(old);
-    return NULL;
-  }
-  if (++test->requests >= test->fail_at)
-    return NULL;
-  if (old == NULL)
-    old_size = 0;
-  memory = realloc(old, size);
-  if (memory != NULL)
-    test->live = test->live - old_size + size;
-  return memory;
-}
-
 static void startup_strings(void) {
-  struct startup_allocator test = {0, SIZE_MAX, 0};
+  struct startup_allocator test = {.fail_at = SIZE_MAX};
   lua_State *state = lua_newstate(startup_alloc, &test, 42);
   size_t requests;
   require(state != NULL);
@@ -207,7 +231,7 @@ static void startup_strings(void) {
   lua_close(state);
   require(test.live == 0);
   for (size_t fail = 1; fail <= requests; fail++) {
-    test = (struct startup_allocator){0, fail, 0};
+    test = (struct startup_allocator){.fail_at = fail};
     state = lua_newstate(startup_alloc, &test, 42);
     if (state != NULL)
       lua_close(state);
@@ -307,8 +331,8 @@ int main(int argc, char **argv) {
   }
   if (strncmp(argv[1], "string_cache_", 13) == 0) {
     free(objects);
-    invalidate_string_cache(L,
-                            strcmp(argv[1], "string_cache_generational") == 0);
+    lua_close(L);
+    invalidate_string_cache(strcmp(argv[1], "string_cache_generational") == 0);
     return 0;
   }
   if (strncmp(argv[1], "byte_strings_", 13) == 0) {
