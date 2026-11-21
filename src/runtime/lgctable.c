@@ -47,12 +47,11 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
 }
 
 l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
-                     const Table *view, unsigned size, int hash,
-                     const LuaHashPart *part) {
-  unsigned first;
-  for (first = 0; first < size;) {
+                     const Table *view, unsigned first, unsigned end,
+                     int hash, const LuaHashPart *part, int *young) {
+  while (first < end) {
     GCObject *edges[TRACE_SLOTS * 2];
-    unsigned slots = size - first, count;
+    unsigned slots = end - first, count;
     uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
     uint64_t revision = part != NULL ?
       __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
@@ -67,9 +66,61 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
          __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) != revision) ||
         __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;
+    if (young != NULL && !*young) {
+      unsigned i;
+      for (i = 0; i < count; i++) {
+        if (!isold(edges[i])) {
+          *young = 1;
+          break;
+        }
+      }
+    }
     luaC_traceedges(work, edges, count);
     first += slots;
     if (luaW_stopped(&G(L)->world)) return 0;
+  }
+  return 1;
+}
+
+/* The stamp proves a card contained no young edges in this major
+** generation. An edge write dirties the card after publishing its slot.
+** Writers also shade old and new edges while the scan is active. */
+static int scanarray (lua_State *L, LuaTraceWork *work, Table *table,
+                      const Table *view) {
+  global_State *g = G(L);
+  uint64_t epoch;
+  uint64_t *cards;
+  unsigned first;
+  if (view->asize < LUA_ARRAY_CARD_MIN || !isold(obj2gco(table)) ||
+      !(luaC_markstate(g) & LUA_MARK_YOUNG))
+    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, NULL);
+  epoch = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) + 1;
+  if (epoch == 0 || epoch == UINT64_MAX)
+    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, NULL);
+  cards = luaH_arraycards(view);
+  for (first = 0; first < view->asize; first += LUA_ARRAY_CARD_SLOTS) {
+    uint64_t *card = &cards[first / LUA_ARRAY_CARD_SLOTS];
+    uint64_t stamp = __atomic_load_n(card, __ATOMIC_ACQUIRE);
+    unsigned end = first + LUA_ARRAY_CARD_SLOTS;
+    int young = 0, clearing, scanned;
+    if (stamp == epoch) {
+      if (luaW_stopped(&g->world)) return 0;
+      continue;
+    }
+    if (end > view->asize) end = view->asize;
+    /* Acquire the dirty publication before reading the slots. Publish the
+    ** proof only if no writer dirtied the card during this scan. */
+    clearing = stamp != UINT64_MAX &&
+      __atomic_compare_exchange_n(card, &stamp, UINT64_MAX, 0,
+                                  __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    scanned = scanpart(L, work, table, view, first, end, 0, NULL,
+                       clearing ? &young : NULL);
+    if (clearing) {
+      uint64_t expected = UINT64_MAX;
+      __atomic_compare_exchange_n(card, &expected, scanned && !young ? epoch : 0,
+                                  0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+    if (!scanned) return 0;
   }
   return 1;
 }
@@ -95,7 +146,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     GCObject *edge = obj2gco(metatable);
     luaC_traceedges(work, &edge, 1);
   }
-  if (!scanpart(L, work, table, &view, view.asize, 0, NULL)) return 0;
+  if (!scanarray(L, work, table, &view)) return 0;
   directory = luaH_hashdir(view.node);
   parts = luaH_hashparts(&view);
   bytes = luaH_size(table, &view);
@@ -103,8 +154,8 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     const LuaHashPart *part = directory != NULL ? &directory->parts[i] : NULL;
     if (part != NULL)
       view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-    if (!scanpart(L, work, table, &view, luaH_nodesize(view.node), 1,
-                  i != 0 ? part : NULL)) return 0;
+    if (!scanpart(L, work, table, &view, 0, luaH_nodesize(view.node), 1,
+                  i != 0 ? part : NULL, NULL)) return 0;
   }
   work->marked += cast(l_mem, bytes);
   luaC_finishstrong(work, obj2gco(table));

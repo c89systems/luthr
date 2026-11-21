@@ -79,7 +79,8 @@ typedef union {
 ** MAXASIZEB is the maximum number of elements in the array part such
 ** that the size of the array fits in 'size_t'.
 */
-#define MAXASIZEB	(MAX_SIZET/(sizeof(Value) + 1))
+#define MAXASIZEB	((MAX_SIZET - sizeof(unsigned) - 2 * sizeof(uint64_t)) / \
+                         (sizeof(Value) + 2))
 
 
 /*
@@ -588,11 +589,17 @@ static void numusehash (Node *nodes, Counters *ct) {
 ** Convert an "abstract size" (number of slots in an array) to
 ** "concrete size" (number of bytes in the array).
 */
-static size_t concretesize (unsigned int size) {
+static size_t arraypayload (unsigned int size) {
   if (size == 0)
     return 0;
   else  /* space for the two arrays plus an unsigned in between */
     return size * (sizeof(Value) + 1) + sizeof(unsigned);
+}
+
+static size_t concretesize (unsigned int size) {
+  if (size < LUA_ARRAY_CARD_MIN) return arraypayload(size);
+  return cast_sizet(size) * sizeof(Value) + luaH_cardoffset(size) +
+         luaH_arraycardcount(size) * sizeof(uint64_t);
 }
 
 
@@ -618,13 +625,15 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
     np += newasize;  /* shift pointer to the end of value segment */
     if (oldasize > 0) {
       /* move common elements to new position */
-      size_t oldasizeb = concretesize(oldasize);
       Value *op = t->array;  /* original array */
       unsigned tomove = (oldasize < newasize) ? oldasize : newasize;
-      size_t tomoveb = (oldasize < newasize) ? oldasizeb : newasizeb;
+      size_t tomoveb = arraypayload(tomove);
       lua_assert(tomoveb > 0);
       memcpy(np - tomove, op - tomove, tomoveb);
     }
+    if (newasize >= LUA_ARRAY_CARD_MIN)
+      memset(cast_charp(np) + luaH_cardoffset(newasize), 0,
+             luaH_arraycardcount(newasize) * sizeof(uint64_t));
     return np;
   }
 }
@@ -1849,6 +1858,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   if (node != NULL && luaC_tracing(L) && keyiscollectable(node))
     luaC_traceobject(L, gckey(node));
   luaH_elementstore(L, table, slot.payload, slot.tag, value);
+  if (node == NULL)
+    luaH_dirtyarray(table, cast_uint(table->array - 1 - slot.payload), value);
   if (node != NULL && keyisshrstr(node))
     invalidatemethod(L, table, keystrval(node));
   luaH_releasewriter(L, table, writer);

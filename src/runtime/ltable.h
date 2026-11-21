@@ -121,6 +121,29 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 /* Computes the address of the value for the abstract C-index 'k' */
 #define getArrVal(t,k)	((t)->array - 1 - (k))
 
+/* Large array images end in one stamp per group of slots. A zero stamp
+** requires scanning. Only the young collector publishes a clean stamp. */
+enum { LUA_ARRAY_CARD_SLOTS = 64, LUA_ARRAY_CARD_MIN = 256 };
+
+l_sinline size_t luaH_cardoffset (unsigned size) {
+  size_t bytes = sizeof(unsigned) + cast_sizet(size);
+  return (bytes + sizeof(uint64_t) - 1) & ~(sizeof(uint64_t) - 1);
+}
+
+l_sinline unsigned luaH_arraycardcount (unsigned size) {
+  return size / LUA_ARRAY_CARD_SLOTS + (size % LUA_ARRAY_CARD_SLOTS != 0);
+}
+
+l_sinline uint64_t *luaH_arraycards (const Table *t) {
+  return cast(uint64_t *, cast_charp(t->array) + luaH_cardoffset(t->asize));
+}
+
+l_sinline void luaH_dirtyarray (Table *t, unsigned index, const TValue *value) {
+  if (t->asize >= LUA_ARRAY_CARD_MIN && iscollectable(value))
+    __atomic_store_n(&luaH_arraycards(t)[index / LUA_ARRAY_CARD_SLOTS], 0,
+                     __ATOMIC_RELEASE);
+}
+
 
 /*
 ** The unsigned between the two arrays is used as a hint for #t;
@@ -138,7 +161,8 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 
 #define obj2arr(h,k,val)  \
   (__atomic_store(getArrVal(h,(k)), &(val)->value_, __ATOMIC_RELEASE), \
-   __atomic_store_n(getArrTag(h,(k)), (val)->tt_, __ATOMIC_RELEASE))
+   __atomic_store_n(getArrTag(h,(k)), (val)->tt_, __ATOMIC_RELEASE), \
+   luaH_dirtyarray(h, (k), val))
 
 
 /*
@@ -151,7 +175,8 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 
 #define fval2arr(h,k,tag,val)  \
   (__atomic_store(getArrVal(h,(k)), &(val)->value_, __ATOMIC_RELEASE), \
-   __atomic_store_n((tag), (val)->tt_, __ATOMIC_RELEASE))
+   __atomic_store_n((tag), (val)->tt_, __ATOMIC_RELEASE), \
+   luaH_dirtyarray(h, (k), val))
 
 
 LUAI_FUNC lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res);

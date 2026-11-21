@@ -26,7 +26,7 @@ static struct {
   Table *table;
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write, fields;
+      remember, first_write, fields, cards;
   uint64_t initial_layout;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -83,6 +83,11 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
   first_chunk = first;
   if (scanning)
     probe.chunks++;
+  if (scanning && probe.cards && !probe.entered) {
+    require(!hash && first == 0);
+    require(__atomic_load_n(luaH_arraycards(probe.table), __ATOMIC_ACQUIRE) ==
+            UINT64_MAX);
+  }
   if (scanning && !probe.relocate && !probe.remember && !probe.first_write)
     hold();
   return found;
@@ -159,6 +164,11 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 123);
     lua_rawset(L, probe.index);
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
+  } else if (probe.cards) {
+    lua_newtable(L);
+    lua_pushinteger(L, 77);
+    lua_rawseti(L, -2, 1);
+    lua_rawseti(L, probe.index, 1);
   } else if (probe.fields) {
     lua_pushnil(L);
     lua_setfield(L, probe.index, "deleted");
@@ -214,10 +224,11 @@ int main(int argc, char **argv) {
   probe.relocate = strncmp(argv[1], "relocate", 8) == 0;
   probe.pause = strncmp(argv[1], "pause", 5) == 0;
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
+  probe.cards = strcmp(argv[1], "cards_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
   small = strncmp(argv[1], "first_write_small", 17) == 0;
-  array_size = small ? 2 : 128;
+  array_size = probe.cards ? LUA_ARRAY_CARD_MIN : small ? 2 : 128;
   probe.marker = lua_newthread(L);
   probe.writer = lua_newthread(L);
   lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
@@ -280,10 +291,11 @@ int main(int argc, char **argv) {
     key(L, 63);
     lua_xmove(L, probe.writer, 1);
   }
-  if (probe.remember) {
+  if (probe.remember || probe.cards) {
     lua_gc(L, LUA_GCCOLLECT);
     lua_newtable(probe.writer);
-    lua_rawseti(probe.writer, 1, 1); /* remember an old owner before tracing */
+    /* Remember the old owner. Leave the card under test full of old values. */
+    lua_rawseti(probe.writer, 1, probe.cards ? array_size : 1);
   }
   lua_lock(L);
   luaW_stop(L);
@@ -336,8 +348,19 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_join(writer, NULL) == 0);
   require(pthread_join(marker, NULL) == 0);
-  if (probe.remember) {
+  if (probe.remember || probe.cards) {
     lua_gc(L, LUA_GCCOUNT); /* join this minor, without starting another */
+    if (probe.cards) {
+      uint64_t *cards = luaH_arraycards(probe.table);
+      uint64_t stamp = G(L)->major_completed + 1;
+      /* The writer invalidated the first proof after the marker took its
+       * snapshot. An unaffected card can retain its proof. */
+      require(cards[0] == 0 && cards[1] == stamp);
+      lua_lock(L);
+      luaH_resizearray(L, probe.table, 2 * array_size);
+      lua_unlock(L);
+      require(luaH_arraycards(probe.table)[1] == 0);
+    }
     for (i = 0; i < 2; i++) {
       require(G(L)->gckind == KGC_GENMINOR);
       lua_gc(L, LUA_GCSTEP, (size_t)0);
@@ -365,7 +388,7 @@ int main(int argc, char **argv) {
   } else if (!probe.relocate) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);
-    require(lua_tointeger(probe.writer, -1) == 42);
+    require(lua_tointeger(probe.writer, -1) == (probe.cards ? 77 : 42));
   } else
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
   lua_close(L);
