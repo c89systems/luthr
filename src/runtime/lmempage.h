@@ -48,11 +48,9 @@ struct LuaAllocPage {
   __atomic_load_n(&(page)->remote, __ATOMIC_ACQUIRE) & ~LUA_PAGE_NOTIFIED)
 
 typedef struct LuaCacheBorrow {
-  struct LuaAllocationCache *cache;
-  struct global_State *global;
+  void **permission;
   lua_State *thread;
   int reservation;
-  int permission;
   void (*returned)(void *);
   void *context;
 } LuaCacheBorrow;
@@ -61,17 +59,12 @@ LUAI_FUNC void luaMP_notify (struct global_State *g, LuaAllocPage *page);
 LUAI_FUNC void luaMP_publish (struct global_State *g, LuaAllocPage *page);
 LUAI_FUNC void luaMP_return (struct global_State *g, LuaAllocBlock *block);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
-LUAI_FUNC void luaMC_enter (struct LuaExecution *execution);
-LUAI_FUNC void luaMC_leave (struct LuaExecution *execution);
 /* The caller holds the page's pool mutex throughout the short lease. */
 LUAI_FUNC int luaMC_borrow (lua_State *L, struct LuaAllocationCache *cache,
                            LuaCacheBorrow *borrow, int exclusive);
 /* Release the pool mutex before notifying a returned lease. */
 LUAI_FUNC void luaMC_return (LuaCacheBorrow *borrow);
 LUAI_FUNC void luaMC_notify (LuaCacheBorrow *borrow);
-LUAI_FUNC void luaMC_acquire (struct LuaAllocationCache *cache);
-LUAI_FUNC void luaMC_release (struct LuaAllocationCache *cache);
-LUAI_FUNC void luaMC_join (struct LuaAllocationCache *cache);
 
 #define LUA_ALLOC_PAGE_HEADER \
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \

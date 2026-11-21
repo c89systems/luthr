@@ -30,9 +30,7 @@ typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
   struct global_State *global;
   lua_State *thread;  /* unmanaged cache: borrow its coroutine gate */
-  void **permission;  /* managed slot's existing permission, or NULL */
-  void *owner;  /* inline permission for drivers without managed slots */
-  unsigned borrowers;  /* short page-work leases; record retirement joins them */
+  void **permission;  /* managed cache: borrow its slot's ownership word */
   void (*returned)(void *);  /* notify an idle slot after a collector borrows it */
   void *context;
   struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
@@ -80,7 +78,6 @@ typedef struct LuaExecution {
   unsigned pin_depth;
   pthread_t pinned_carrier;
   LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
-  LuaAllocationCache *memory_cache;  /* exact inline lease, if this entry took one */
   LuaCallScope *trusted;  /* runtime-owned C frames, including nested callbacks */
   struct LuaGCFrame *gc_frame;  /* execution-local collector reentrancy */
 } LuaExecution;

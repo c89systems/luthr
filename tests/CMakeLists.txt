@@ -277,7 +277,8 @@ target_link_libraries(page_ownership_test PRIVATE luthr_static)
 target_link_options(page_ownership_test PRIVATE -Wl,--wrap=luaW_heapenter
   -Wl,--wrap=luaAL_enter
   -Wl,--wrap=luaQ_poll -Wl,--wrap=luaW_stop)
-foreach(case IN ITEMS retained pressure task lease_unwind busy_cache remote_returns growth_handoff growth_epoch assist_rebind boundary credit overlap helpers unwind finite)
+foreach(case IN ITEMS retained pressure coroutine_cache coroutine_cache_unwind busy_cache
+    remote_returns growth_handoff growth_epoch assist_rebind boundary credit overlap helpers unwind finite)
   add_test(NAME page_ownership_${case} COMMAND page_ownership_test ${case})
   set_tests_properties(page_ownership_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)
@@ -1120,7 +1121,7 @@ target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
 foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition
     world_resume_condition world_rendezvous_condition world_phase_condition world_trace_condition
-    publisher_mutex pool_mutex pool_condition
+    publisher_mutex pool_mutex pool_last_mutex
     thread_no_resources closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex
     facade_world_mutex facade_pool_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})

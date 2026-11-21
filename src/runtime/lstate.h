@@ -495,8 +495,6 @@ typedef struct global_State {
   unsigned allocation_busy;
   struct LuaAllocPage *allocation_returning;  /* world mutex, finite return job */
   uint64_t allocation_return_epoch;
-  pthread_cond_t allocation_changed;  /* slow cache leases; pool zero mutex */
-  unsigned allocation_waiters;
   pthread_mutex_t allocation_mutex[LUA_ALLOC_POOLS];
   struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
   LuaAllocationCache *slot_caches;

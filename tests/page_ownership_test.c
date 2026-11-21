@@ -134,7 +134,7 @@ static LuaAllocPage *pageof(void *block) {
 }
 
 static void throw_poll(LuaExecution *execution, lua_State *L) {
-  require(execution->memory_cache == NULL);
+  require(execution->allocation_cache == NULL);
   luaD_throw(L, LUA_ERRRUN);
 }
 
@@ -195,7 +195,7 @@ static void pressure(lua_State *L, struct fixture *f) {
   lua_unlock(L);
 }
 
-static void task_cache(lua_State *L, int unwind) {
+static void coroutine_cache(lua_State *L, int unwind) {
   LuaExecution execution = {0};
   LuaTaskRoot task = {0};
   NativeStackContext context = {0}, *previous;
@@ -210,26 +210,26 @@ static void task_cache(lua_State *L, int unwind) {
   lua_lock(first);
   a = luaM_malloc_(first, 128, 0);
   page = pageof(a);
-  require(page->owner == &task.allocation);
+  require(page->owner == &first->allocation);
   if (unwind) {
+    void *replacement;
     execution.poll = throw_poll;
     require(luaD_rawrunprotected(first, poll_pages, NULL) == LUA_ERRRUN);
-    require(execution.memory_cache == &task.allocation);
-    require(__atomic_load_n(&task.allocation.owner, __ATOMIC_ACQUIRE) ==
-            &execution);
     execution.poll = NULL;
+    replacement = luaM_malloc_(first, 128, 0);
+    require(pageof(replacement) == page);
+    luaM_free_(first, replacement, 128);
   }
   lua_unlock(first);
   lua_lock(second);
   b = luaM_malloc_(second, 128, 0);
-  require(pageof(b) ==
-          page); /* the execution owns capacity across coroutines */
+  require(pageof(b)->owner == &second->allocation);
   lua_unlock(second);
   status = luaTK_resume(&task, 0, &results);
   require(status == LUA_OK && results == 1);
   require(luaTK_finish(&task, &status, &results) == LUA_OK);
   require(luaTK_collect(L, &task, &status, &results) == LUA_OK);
-  require(page->owner == NULL && execution.task == NULL);
+  require(page->owner == &first->allocation && execution.task == NULL);
   lua_lock(L);
   luaM_free_(L, a, 128);
   luaM_free_(L, b, 128);
@@ -254,7 +254,8 @@ static void *hold_cache(void *argument) {
   context.execution = &test->execution;
   previous = luaE_setnativestackcontext(&context);
   lua_lock(L);
-  test->block = luaM_malloc_(L, 128, 0);
+  test->block = luaM_newframe(L);
+  require(test->block != NULL);
   test->page = pageof(test->block);
   require(pthread_mutex_lock(&f->mutex) == 0);
   f->entered = 1;
@@ -262,10 +263,10 @@ static void *hold_cache(void *argument) {
   while (!f->release)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  replacement = luaM_malloc_(L, 128, 0);
-  require(pageof(replacement) == test->page);
-  memset(replacement, 0xa5, 128);
-  luaM_free_(L, replacement, 128);
+  replacement = luaM_newframe(L);
+  require(replacement != NULL && pageof(replacement) == test->page);
+  memset(replacement, 0xa5, sizeof(CallInfo));
+  luaM_free_(L, replacement, sizeof(CallInfo));
   lua_unlock(L);
   luaE_setnativestackcontext(previous);
   return NULL;
@@ -288,11 +289,11 @@ static void busy_cache(lua_State *L, struct fixture *f) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   lua_lock(L);
   pool = test.page->pool;
-  luaM_free_(L, test.block, 128);
+  luaM_free_(L, test.block, sizeof(CallInfo));
   measured = 1;
   luaM_reclaimpages(L);
   measured = 0;
-  require(stops == 0 && test.page->owner == &test.task.allocation);
+  require(stops == 0 && test.page->owner == &worker->allocation);
   lua_unlock(L);
   require(pthread_mutex_lock(&f->mutex) == 0);
   f->release = 1;
@@ -303,7 +304,7 @@ static void busy_cache(lua_State *L, struct fixture *f) {
   measured = 1;
   luaM_reclaimpages(L);
   measured = 0;
-  require(stops == 0 && test.task.allocation.pages[pool] == NULL);
+  require(stops == 0 && worker->allocation.pages[pool] == NULL);
   lua_unlock(L);
   context.execution = &test.execution;
   previous = luaE_setnativestackcontext(&context);
@@ -389,12 +390,14 @@ static void remote_returns(lua_State *L) {
 static void growth_handoff(lua_State *L, int collect) {
   LuaAllocationCache cache = {0};
   LuaExecution execution = {0};
+  void *owner = &execution;
   NativeStackContext context = {0}, *previous;
   void **blocks = calloc(5000, sizeof(*blocks)), *replacement;
   size_t bytes, cold = 0;
   unsigned count = 0, i;
   require(blocks != NULL);
   cache.global = G(L);
+  cache.permission = &owner;
   execution.allocation_cache = &cache;
   context.execution = &execution;
   previous = luaE_setnativestackcontext(&context);
@@ -606,8 +609,9 @@ int main(int argc, char **argv) {
     retained(L, &f);
   else if (strcmp(argv[1], "pressure") == 0)
     pressure(L, &f);
-  else if (strcmp(argv[1], "task") == 0 || strcmp(argv[1], "lease_unwind") == 0)
-    task_cache(L, strcmp(argv[1], "lease_unwind") == 0);
+  else if (strcmp(argv[1], "coroutine_cache") == 0 ||
+           strcmp(argv[1], "coroutine_cache_unwind") == 0)
+    coroutine_cache(L, strcmp(argv[1], "coroutine_cache_unwind") == 0);
   else if (strcmp(argv[1], "busy_cache") == 0)
     busy_cache(L, &f);
   else if (strcmp(argv[1], "remote_returns") == 0)

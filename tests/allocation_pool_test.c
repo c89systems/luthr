@@ -21,6 +21,7 @@ enum { BLOCKS = 5000, ACTORS = 4, BORROWED = 16, BYTES = 64 };
 struct actor {
   lua_State *state;
   LuaAllocationCache cache;
+  void *owner;
   unsigned id, admissions, initializations;
   int frame;
   unsigned char *blocks[BORROWED];
@@ -90,9 +91,12 @@ static void *borrow(void *argument) {
   NativeStackContext *previous = NULL;
   unsigned i;
   if (actor->cache.global != NULL) {
+    void *expected = NULL;
     context.execution = &execution;
     execution.allocation_cache = &actor->cache;
     previous = luaE_setnativestackcontext(&context);
+    require(__atomic_compare_exchange_n(&actor->owner, &expected, &execution, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED));
   }
   lua_lock(actor->state);
   admissions = 0;
@@ -110,8 +114,10 @@ static void *borrow(void *argument) {
   actor->admissions = admissions;
   actor->initializations = initializations;
   lua_unlock(actor->state);
-  if (actor->cache.global != NULL)
+  if (actor->cache.global != NULL) {
+    __atomic_store_n(&actor->owner, NULL, __ATOMIC_RELEASE);
     luaE_setnativestackcontext(previous);
+  }
   return NULL;
 }
 
@@ -131,6 +137,7 @@ static void batch(int capped, int collect_during_init) {
     actors[i].id = i + 1;
     actors[i].frame = 1;
     actors[i].cache.global = G(L);
+    actors[i].cache.permission = &actors[i].owner;
     require(actors[i].state->nci == 0);
   }
   lua_gc(L, LUA_GCSTOP);

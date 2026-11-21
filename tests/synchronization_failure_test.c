@@ -129,8 +129,7 @@ static int run_case(const char *name) {
   static const char *const conditions[] = {
       "allocator_condition",    "world_condition",
       "world_resume_condition", "world_rendezvous_condition",
-      "world_phase_condition",  "world_trace_condition",
-      "pool_condition"};
+      "world_phase_condition",  "world_trace_condition"};
   lua_State *state;
   int status = LUA_OK;
   int failed = 0;
@@ -159,6 +158,8 @@ static int run_case(const char *name) {
       fail_mutex = 2 + LUA_PUBLISH_SHARDS;
     else
       fail_mutex = position + (pool_case ? LUA_PUBLISH_SHARDS : 0);
+    if (strcmp(name, "pool_last_mutex") == 0)
+      fail_mutex += LUA_ALLOC_POOLS - 1;
   }
   state = lua_newstate(allocate, NULL, 0);
   if (main_case) {

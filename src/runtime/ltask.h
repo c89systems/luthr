@@ -17,7 +17,6 @@ typedef struct LuaTaskRoot {
   struct global_State *global;
   lua_State *thread;
   LuaExecution *execution;
-  LuaAllocationCache allocation;  /* fallback owner for drivers without slots */
   LuaWaiter *waiters;
   LuaStopWait *stop_wait;  /* world mutex; node outlives every borrowed notice */
   int phase;

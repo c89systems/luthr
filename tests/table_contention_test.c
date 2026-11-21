@@ -92,20 +92,14 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     delay = probe.collecting && !probe.collected;
     require(pthread_mutex_unlock(&probe.mutex) == 0);
     if (delay) {
-      LuaExecution *execution = luaQ_current();
-      int leased = execution != NULL && execution->memory_cache != NULL;
-      if (leased)
-        luaMC_leave(execution);
       /* Model a late scheduler wake: this execution remains inactive while
-       * every GC phase completes, with luaQ_wait's cache lease protocol. */
+       * every GC phase completes. */
       require(pthread_mutex_unlock(mutex) == 0);
       require(pthread_mutex_lock(&probe.mutex) == 0);
       while (!probe.collected)
         require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
       require(pthread_mutex_unlock(&probe.mutex) == 0);
       require(pthread_mutex_lock(mutex) == 0);
-      if (leased)
-        luaMC_enter(execution);
     }
   }
 }

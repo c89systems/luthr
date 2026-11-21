@@ -23,7 +23,6 @@
 #include "lmempage.h"
 #include "lobject.h"
 #include "lstate.h"
-#include "ltask.h"
 
 
 
@@ -143,7 +142,7 @@ int luaM_initpools (lua_State *L) {
   g->allocation_retired = g->allocation_returning = NULL;
   g->allocation_return_epoch = 0;
   g->allocation_epoch = 0;
-  g->allocation_busy = g->allocation_waiters = 0;
+  g->allocation_busy = 0;
   for (i = 0; i < LUA_ALLOC_POOLS; i++) {
     g->allocation_available[i] = NULL;
     g->allocation_pages[i] = NULL;
@@ -154,12 +153,6 @@ int luaM_initpools (lua_State *L) {
       return status;
     }
   }
-  status = pthread_cond_init(&g->allocation_changed, NULL);
-  if (status != 0) {
-    for (i = 0; i < LUA_ALLOC_POOLS; i++)
-      luaX_checksync(pthread_mutex_destroy(&g->allocation_mutex[i]));
-    return status;
-  }
   return 0;
 }
 
@@ -169,8 +162,7 @@ void luaM_destroypools (lua_State *L) {
              G(L)->allocation_pending == NULL &&
              G(L)->allocation_retired == NULL &&
              G(L)->allocation_returning == NULL &&
-             G(L)->allocation_busy == 0 && G(L)->allocation_waiters == 0);
-  luaX_checksync(pthread_cond_destroy(&G(L)->allocation_changed));
+             G(L)->allocation_busy == 0);
   for (i = 0; i < LUA_ALLOC_POOLS; i++) {
     lua_assert(G(L)->allocation_available[i] == NULL);
     lua_assert(G(L)->allocation_pages[i] == NULL);
@@ -208,16 +200,8 @@ static LuaAllocBlock *takeblock (LuaAllocPage *page) {
 static LuaAllocationCache *allocationcache (lua_State *L) {
   LuaExecution *execution = luaX_execution(L);
   if (execution != NULL) {
-    LuaTaskRoot *task;
-    if (execution->allocation_cache != NULL &&
-        execution->allocation_cache->global == G(L) &&
-        (execution->allocation_cache->permission != NULL ||
-         execution->memory_cache == execution->allocation_cache))
-      return execution->allocation_cache;
-    task = __atomic_load_n(&execution->task, __ATOMIC_ACQUIRE);
-    if (task != NULL && task->global == G(L) &&
-        execution->memory_cache == &task->allocation)
-      return &task->allocation;
+    LuaAllocationCache *cache = execution->allocation_cache;
+    if (cache != NULL && cache->global == G(L)) return cache;
   }
   return &L->allocation;
 }
@@ -291,10 +275,8 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
       continue;
     }
     if (page->owner != NULL && !luaMC_borrow(L, page->owner, &borrow, exclusive)) {
-      luaMC_return(&borrow);
       luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
       luaMP_publish(g, page);
-      luaMC_notify(&borrow);
       continue;
     }
     held = page->notified;
