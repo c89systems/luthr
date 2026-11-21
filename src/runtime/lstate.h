@@ -288,7 +288,7 @@ typedef struct NativeStackContext {
   struct LuaCoroutineScope *coroutine_scopes;
   LuaApiRegion *api_region;
   struct LuaThreadContext *host;  /* set for an unmanaged override */
-} NativeStackContext;
+} NativeStackContext __attribute__((aligned(16)));
 
 /* Carrier-local defaults and ambient host scopes share one TLS record. Managed
 ** fibers supply their own stack/execution context and never retain this record

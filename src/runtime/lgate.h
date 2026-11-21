@@ -16,13 +16,15 @@ struct LuaGateWaiter;
 ** Both modes participate in root rendezvous.
 ** Only managed owners can borrow retired table storage. An owner can
 ** withdraw admission while retaining the stack. WAITING reserves an
-** unowned gate for its FIFO head. */
+** unowned gate for its FIFO head. DORMANT reserves a bit for a Lua-created
+** coroutine that has never entered the managed rendezvous directory. */
 enum {
   LUA_GATE_MANAGED = 1,
   LUA_GATE_WAITING = 2,
   LUA_GATE_STACK = 4,
+  LUA_GATE_DORMANT = 8,
   LUA_GATE_ACTIVE = LUA_GATE_MANAGED | LUA_GATE_STACK,
-  LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING
+  LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING | LUA_GATE_DORMANT
 };
 
 typedef struct LuaStackGate {
@@ -37,7 +39,7 @@ l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
               word & ~cast(uintptr_t, LUA_GATE_FLAGS));
 }
 
-LUAI_FUNC void luaX_initgate (LuaStackGate *gate);
+LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);

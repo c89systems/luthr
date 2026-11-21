@@ -74,6 +74,8 @@ l_sinline uint64_t luaW_epoch (uint64_t control) {
 LUAI_FUNC int luaW_init (struct global_State *g);
 LUAI_FUNC void luaW_destroy (struct global_State *g);
 LUAI_FUNC void luaW_register (lua_State *L);
+/* First entry holds an inactive reservation and world.mutex. */
+LUAI_FUNC void luaW_enroll (lua_State *L);
 LUAI_FUNC void luaW_unregister (lua_State *L);
 /* Enroll the owner of a nonempty allocation or table-retirement batch. */
 LUAI_FUNC void luaW_trackpublisher (lua_State *L);

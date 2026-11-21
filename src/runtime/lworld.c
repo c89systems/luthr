@@ -24,6 +24,8 @@ typedef struct LuaHeapWaiter {
   int collector;
 } LuaHeapWaiter;
 
+static void notifyrendezvous (global_State *g, lua_State *L);
+
 /* With no execution holding metadata, an open arm still owns the phase.
 ** Grant the next queued request after it publishes readiness. */
 static void grantheap (LuaWorld *world, lua_State *L) {
@@ -148,11 +150,16 @@ void luaW_destroy (global_State *g) {
   luaX_checksync(pthread_mutex_destroy(&world->mutex));
 }
 
-void luaW_register (lua_State *L) {
+void luaW_enroll (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(participant->previous == NULL && luaW_active(participant) == 0);
+  if ((__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+       LUA_GATE_DORMANT) && luaW_stopped(world)) {
+    world->entry_waiting++;
+    luaW_waitresume(L);
+    if (--world->entry_waiting == 0) notifyrendezvous(G(L), L);
+  }
   /* A new coroutine has no outstanding allocation batch from before the
   ** arm request. Its creator accounts for the construction on its own gate. */
   participant->trace_armed = luaW_armepoch(world);
@@ -161,6 +168,12 @@ void luaW_register (lua_State *L) {
   if (participant->next != NULL)
     participant->next->previous = &participant->next;
   world->participants = participant;
+}
+
+void luaW_register (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  luaW_enroll(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -231,7 +244,8 @@ unsigned luaW_active (const LuaParticipation *participant) {
 void luaW_activate (lua_State *L) {
   uintptr_t previous = __atomic_fetch_or(
     &L->admission->thread->stack_gate.word, LUA_GATE_MANAGED, __ATOMIC_SEQ_CST);
-  lua_assert(luaX_gateowner(previous) != NULL && !(previous & LUA_GATE_ACTIVE));
+  lua_assert(luaX_gateowner(previous) != NULL &&
+             !(previous & (LUA_GATE_ACTIVE | LUA_GATE_DORMANT)));
   UNUSED(previous);
 }
 

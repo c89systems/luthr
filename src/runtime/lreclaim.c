@@ -76,6 +76,13 @@ static void freeobj (lua_State *L, GCObject *o) {
 /* The caller owns the dead coroutine's gate, or complete quiescence. */
 static void retirethreadlinks (lua_State *L, lua_State *thread) {
     lua_assert(thread != L && thread->native_depth == 0);
+    if (__atomic_load_n(&thread->stack_gate.word, __ATOMIC_RELAXED) &
+        LUA_GATE_DORMANT) {
+      lua_assert(thread->participation.previous == NULL &&
+                 thread->openupval == NULL && !thread->reclaim_registered &&
+                 thread->publish_previous == NULL);
+      return;
+    }
     luaM_releasecache(L, &thread->allocation);
     luaF_dropupvals(thread, 1);
     luaW_unregister(thread);
@@ -194,13 +201,16 @@ int luaC_tryretire (lua_State *L, GCObject *o) {
     int reservation = luaX_tryreserve(thread);
     int busy;
     if (reservation == 0) return SWEEP_RETRY;
-    luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
-    busy = thread->native_depth != 0 || thread->reclaim_registered ||
-           thread->reclaim_workers != 0;
-    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
-    if (busy || !luaF_dropupvals(thread, 0)) {
-      luaX_endreserve(thread, reservation);
-      return SWEEP_RETRY;
+    if (!(__atomic_load_n(&thread->stack_gate.word, __ATOMIC_RELAXED) &
+          LUA_GATE_DORMANT)) {
+      luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
+      busy = thread->native_depth != 0 || thread->reclaim_registered ||
+             thread->reclaim_workers != 0;
+      luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+      if (busy || !luaF_dropupvals(thread, 0)) {
+        luaX_endreserve(thread, reservation);
+        return SWEEP_RETRY;
+      }
     }
     retirethreadlinks(L, thread);
     luaX_endreserve(thread, reservation);

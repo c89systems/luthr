@@ -56,8 +56,8 @@ _Static_assert(_Alignof(NativeStackContext) > LUA_GATE_FLAGS,
 _Static_assert(offsetof(LuaThreadContext, native) == 0,
                "host token must point to the beginning of its TLS record");
 
-void luaX_initgate (LuaStackGate *gate) {
-  gate->word = 0;
+void luaX_initgate (LuaStackGate *gate, int dormant) {
+  gate->word = dormant ? LUA_GATE_DORMANT : 0;
   gate->head = NULL;
   gate->tail = &gate->head;
   gate->ready = 1;
@@ -66,7 +66,8 @@ void luaX_initgate (LuaStackGate *gate) {
 void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
-  lua_assert(gate->word == 0 && gate->head == NULL &&
+  lua_assert((gate->word == 0 || gate->word == LUA_GATE_DORMANT) &&
+             gate->head == NULL &&
              gate->tail == &gate->head);
   gate->ready = 0;
 }
@@ -92,15 +93,26 @@ static void reserve (lua_State *L, NativeStackContext *context,
     ** and wakes the world queue, or our recheck sees an already free gate. */
     __atomic_fetch_or(&gate->word, LUA_GATE_WAITING, __ATOMIC_SEQ_CST);
     for (;;) {
-      expected = LUA_GATE_WAITING;
+      uintptr_t dormant = __atomic_load_n(&gate->word, __ATOMIC_RELAXED) &
+                          LUA_GATE_DORMANT;
+      uintptr_t next = (desired & ~(dormant ? active : 0)) | dormant |
+                       (wait.next != NULL ? LUA_GATE_WAITING : 0);
+      expected = LUA_GATE_WAITING | dormant;
       if (gate->head == &wait &&
-          __atomic_compare_exchange_n(&gate->word, &expected,
-            desired | (wait.next != NULL ? LUA_GATE_WAITING : 0), 0,
-            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) break;
+          __atomic_compare_exchange_n(&gate->word, &expected, next, 0,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+        gate->head = wait.next;
+        if (gate->head == NULL) gate->tail = &gate->head;
+        if (dormant) {
+          /* A stopped collector walks the stable directory without its
+          ** mutex. Hold only an inactive gate until enrollment is legal. */
+          luaW_enroll(L);
+          __atomic_fetch_xor(&gate->word, dormant | active, __ATOMIC_SEQ_CST);
+        }
+        break;
+      }
       luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
     }
-    gate->head = wait.next;
-    if (gate->head == NULL) gate->tail = &gate->head;
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
 }
@@ -117,7 +129,8 @@ l_sinline void leavegate (lua_State *L, uintptr_t reservation) {
   ** bit for the FIFO head. The collector can reclaim L after this point. */
   uintptr_t previous = __atomic_fetch_sub(&L->stack_gate.word, reservation,
                                           __ATOMIC_SEQ_CST);
-  if (l_unlikely((previous & ~cast(uintptr_t, LUA_GATE_WAITING)) != reservation)) {
+  if (l_unlikely((previous & ~cast(uintptr_t, LUA_GATE_WAITING | LUA_GATE_DORMANT))
+                 != reservation)) {
     fputs("Luthr coroutine stack gate released without its reservation\n", stderr);
     abort();
   }
@@ -143,10 +156,13 @@ carrierentry int luaX_tryreserve (lua_State *target) {
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
   uintptr_t expected = 0;
-  if (!__atomic_compare_exchange_n(&gate->word, &expected, cast(uintptr_t, context), 0,
-                                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-    return luaX_gateowner(expected) == context ? 2 : 0;
-  return 1;
+  uintptr_t owner = cast(uintptr_t, context);
+  if (__atomic_compare_exchange_n(&gate->word, &expected, owner, 0,
+                                   __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
+  if (expected == LUA_GATE_DORMANT &&
+      __atomic_compare_exchange_n(&gate->word, &expected, owner | LUA_GATE_DORMANT,
+                                  0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
+  return luaX_gateowner(expected) == context ? 2 : 0;
 }
 
 void luaX_endreserve (lua_State *target, int reservation) {

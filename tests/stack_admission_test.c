@@ -229,6 +229,52 @@ static void world_stop(lua_State *parent, struct fixture *fixture) {
           lua_tointeger(fixture->state, 1) == 1);
 }
 
+static void *enter_dormant(void *argument) {
+  struct fixture *fixture = argument;
+  role = 1;
+  require(lua_gettop(fixture->state) == 1);
+  lua_pushinteger(fixture->state, 1);
+  return NULL;
+}
+
+static void dormant(lua_State *parent, struct fixture *fixture) {
+  static const char source[] =
+      "local captured = {41}; "
+      "local child = coroutine.create(function(n) return captured[1] + n end); "
+      "local weak = setmetatable({coroutine.create(function() end)}, "
+      "{__mode='v'}); return child,weak";
+  LuaWorld *world = &G(parent)->world;
+  pthread_t thread;
+  int results, reservation;
+  luaL_openlibs(parent);
+  require(luaL_dostring(parent, source) == LUA_OK);
+  fixture->state = lua_tothread(parent, 1);
+  require(fixture->state != NULL);
+  require(fixture->state->participation.previous == NULL);
+  reservation = luaX_tryreserve(fixture->state);
+  require(reservation == 1);
+  luaX_endreserve(fixture->state, reservation);
+  lua_gc(parent, LUA_GCCOLLECT);
+  require(fixture->state->participation.previous == NULL);
+  require(lua_rawgeti(parent, 2, 1) == LUA_TNIL);
+  lua_pop(parent, 1);
+
+  luaX_lockstate(parent);
+  luaW_stop(parent);
+  require(pthread_create(&thread, NULL, enter_dormant, fixture) == 0);
+  wait_flag(fixture, &fixture->queued[1]);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  require(fixture->state->participation.previous == NULL &&
+          world->entry_waiting == 1 && luaW_activecount(world) == 0);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+  luaW_start(parent);
+  luaX_unlockstate(parent);
+  require(pthread_join(thread, NULL) == 0);
+  require(fixture->state->participation.previous != NULL);
+  require(lua_resume(fixture->state, NULL, 1, &results) == LUA_OK);
+  require(results == 1 && lua_tointeger(fixture->state, -1) == 42);
+}
+
 static void *hold_gate(void *argument) {
   struct fixture *fixture = argument;
   lua_State *state = fixture->state;
@@ -347,6 +393,8 @@ int main(int argc, char **argv) {
   } else if (strncmp(argv[1], "world_stop_", 11) == 0) {
     fixture.mode = WORLD_STOP;
     world_stop(state, &fixture);
+  } else if (strncmp(argv[1], "dormant_", 8) == 0) {
+    dormant(state, &fixture);
   } else if (strncmp(argv[1], "rendezvous_", 11) == 0) {
     fixture.mode = RENDEZVOUS;
     rendezvous(state, &fixture);

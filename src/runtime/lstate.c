@@ -365,7 +365,7 @@ static void f_luaopen (lua_State *L, void *ud) {
 ** preinitialize a thread with consistent values without allocating
 ** any memory (to avoid errors)
 */
-static void preinit_thread (lua_State *L, global_State *g) {
+static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   G(L) = g;
   L->stack.p = NULL;
   L->ci = NULL;
@@ -437,7 +437,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->errfunc = 0;
   L->oldpc = 0;
   L->base_ci.previous = L->base_ci.next = NULL;
-  luaX_initgate(&L->stack_gate);
+  luaX_initgate(&L->stack_gate, dormant);
 }
 
 
@@ -497,7 +497,7 @@ typedef struct NewThread {
 static void buildthread (lua_State *L, void *context) {
   NewThread *build = cast(NewThread *, context);
   lua_State *thread = build->thread;
-  luaW_register(thread);
+  if (build->entry == 0) luaW_register(thread);
   if (thread->participation.collector)
     lua_sethook(thread, NULL, 0, 0);
   else {
@@ -533,7 +533,7 @@ lua_State *luaE_newthread (lua_State *L, int collector, ptrdiff_t entry) {
   /* anchor it on L stack */
   setthvalue2s(L, L->top.p, L1);
   api_incr_top(L);
-  preinit_thread(L1, g);
+  preinit_thread(L1, g, entry != 0);
   /* No safepoint has exposed this fresh gate. Retain it while stack allocation
   ** can park the parent, so a concurrent scanner cannot read partial bounds.
   ** The parent supplies participation; the child must not add an active entry
@@ -591,7 +591,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
     luaCP_release(L, policy);
   }
   luaX_destroygate(&L1->stack_gate);
-  luaW_unregister(L1);
+  lua_assert(L1->participation.previous == NULL);
   luaM_free(L, l);
 }
 
@@ -661,7 +661,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->strcache_epoch = 1;
   g->shrink_strings = 0;
   L->marked = luaC_newmark(g);
-  preinit_thread(L, g);
+  preinit_thread(L, g, 0);
   if (luaW_init(g) != 0) {
     luaX_destroygate(&L->stack_gate);
     luaAL_destroy(&g->allocator);
