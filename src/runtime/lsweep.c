@@ -8,6 +8,7 @@
 
 #include <string.h>
 #include "lgc.h"
+#include "ltablestorage.h"
 #include "lscheduler.h"
 #include "ltable.h"
 
@@ -284,7 +285,9 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance,
   if (!previous && luaC_workerready(G(L))) luaSC_notifygc(G(L));
   scanned = work.count;
   if (work.count != 0) {
+    luaHS_scanbegin(L);
     luaC_scansweep(L, &work);
+    luaHS_scanend(L);
     if (work.count != 0) scanned = work.count;
     if (work.page != NULL) {
       unsigned pool = work.page->pool;

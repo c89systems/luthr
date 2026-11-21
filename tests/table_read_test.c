@@ -529,11 +529,15 @@ static void resume_epoch(lua_State *state) {
 
 static void batching(lua_State *state) {
   Table *table;
+  lua_State *peer;
   LuaWorld *world = &G(state)->world;
   uint64_t epoch;
   unsigned i;
   lua_gc(state, LUA_GCSTOP);
   lua_newtable(state);
+  peer = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, peer, 1);
   luaX_lockstate(state);
   luaHS_reclaim(state, LUAHS_DRAIN);
   table = hvalue(s2v(state->stack.p + 1));
@@ -599,6 +603,45 @@ static void stack_grace(lua_State *state) {
   luaHS_reclaim(state, LUAHS_ASSIST);
   require(__atomic_load_n(&world->storage_bytes, __ATOMIC_RELAXED) == 0);
   luaX_unlockstate(state);
+  rendezvous(&reader.admitted);
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&reader.admitted) == 0);
+}
+
+static void *hold_managed(void *context) {
+  struct stack_reader *reader = context;
+  luaX_lockstate(reader->child);
+  rendezvous(&reader->admitted);
+  rendezvous(&reader->admitted);
+  luaX_unlockstate(reader->child);
+  return NULL;
+}
+
+static void private_resize(lua_State *state) {
+  struct stack_reader reader;
+  pthread_t thread;
+  Table *table;
+  TValue value;
+  lua_gc(state, LUA_GCSTOP);
+  lua_createtable(state, 8192, 0);
+  lua_pushinteger(state, 42);
+  lua_rawseti(state, 1, 8192);
+  reader.child = lua_newthread(state);
+  require(pthread_barrier_init(&reader.admitted, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, hold_managed, &reader) == 0);
+  rendezvous(&reader.admitted);
+
+  luaX_lockstate(state);
+  table = hvalue(s2v(state->stack.p + 1));
+  watched = table->array - table->asize;
+  returned = 0;
+  luaH_resizearray(state, table, 16384);
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);
+  require(luaH_getint(state, table, 8192, &value) == LUA_VNUMINT);
+  require(ivalue(&value) == 42);
+  watched = NULL;
+  luaX_unlockstate(state);
+
   rendezvous(&reader.admitted);
   require(pthread_join(thread, NULL) == 0);
   require(pthread_barrier_destroy(&reader.admitted) == 0);
@@ -1235,6 +1278,8 @@ int main(int argc, char **argv) {
     batching(state);
   else if (strcmp(argv[1], "stack_grace") == 0)
     stack_grace(state);
+  else if (strcmp(argv[1], "private_resize") == 0)
+    private_resize(state);
   else if (strcmp(argv[1], "overlap") == 0)
     retirement(state, 0, 2, 0);
   else if (strcmp(argv[1], "inline_overlap") == 0)

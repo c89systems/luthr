@@ -185,7 +185,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaA_metafield -Wl,--wrap=luaH_readshortstr -Wl,--wrap=luaA_index
   -Wl,--wrap=luaH_tryget -Wl,--wrap=luaH_trygetshortstr -Wl,--wrap=luaH_get
   -Wl,--wrap=lua_setmetatable)
-foreach(case IN ITEMS fast primitive batching stack_grace overlap retirement pressure failure hash_failure resume
+foreach(case IN ITEMS fast primitive batching stack_grace private_resize overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     index_hit index_miss index_metatable_change
@@ -369,7 +369,7 @@ target_compile_options(gc_table_scan_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_table_scan_test PRIVATE luthr_static)
 target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
   -Wl,--wrap=luaC_scanstrong -Wl,--wrap=luaH_tracechunk -Wl,--wrap=luaC_traceedges
-  -Wl,--wrap=luaC_finishstrong -Wl,--undefined=luaC_scanstrong)
+  -Wl,--wrap=luaC_finishstrong -Wl,--wrap=luaM_free_ -Wl,--undefined=luaC_scanstrong)
 foreach(collector IN ITEMS incremental generational)
   foreach(case IN ITEMS array metatable relocate pause first_write first_write_small)
     add_test(NAME gc_table_scan_${case}_${collector}
@@ -377,7 +377,7 @@ foreach(collector IN ITEMS incremental generational)
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
   endforeach()
-  foreach(case IN ITEMS array metatable fields)
+  foreach(case IN ITEMS array metatable fields retirement)
     add_test(NAME gc_table_scan_private_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector} private)
     set_tests_properties(gc_table_scan_private_${case}_${collector} PROPERTIES

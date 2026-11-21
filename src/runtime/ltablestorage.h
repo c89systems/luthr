@@ -14,12 +14,20 @@ typedef struct LuaTableRetirement {
   size_t node_bytes;
   size_t bytes;
   uint64_t epoch;
+  int collector_only;
 } LuaTableRetirement;
+
+/* Collector payload batches may borrow even unshared layouts. A private
+** writer can skip retirement if it closed the layout before every scanner. */
+LUAI_FUNC void luaHS_scanbegin (lua_State *L);
+LUAI_FUNC void luaHS_scanend (lua_State *L);
+LUAI_FUNC int luaHS_scanning (lua_State *L);
 
 /* A descriptor is reserved before fallible resize construction. Failed
 ** construction frees it; successful construction publishes it after the last
 ** use of the replaced buffers. New buffers carry no retirement overhead. */
-LUAI_FUNC void luaHS_publish (lua_State *L, LuaTableRetirement *retirement);
+LUAI_FUNC void luaHS_publish (lua_State *L, LuaTableRetirement *retirement,
+                              int collector_only);
 /* Publish one owner's remaining retirement batch during quiescence. */
 LUAI_FUNC void luaHS_publishpending (lua_State *L);
 

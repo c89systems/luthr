@@ -766,16 +766,22 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
                                           unsigned nhsize) {
   Table newt;  /* to keep the new hash part */
   LuaNativeRoot image;
-  unsigned oldasize;
+  unsigned oldasize = t->asize;
   Value *newarray;
   Value *oldarray = t->array;
   Node *oldnodes = luaH_hashnodes(t, 0);
-  void *retired_array, *retired_nodes;
+  void *retired_array = oldasize != newasize && oldasize != 0 &&
+    separate(t, oldarray - oldasize) ? oldarray - oldasize : NULL;
+  void *retired_nodes = luaH_nodesize(oldnodes) != 0 && separate(t, hashbase(oldnodes))
+    ? hashbase(oldnodes) : NULL;
+  int replace = retired_array != NULL || retired_nodes != NULL;
+  int local = (__atomic_load_n(&t->sequence, __ATOMIC_RELAXED) & 1) &&
+    __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L);
+  int defer = replace && (!local || luaHS_scanning(L));
   LuaTableRetirement *retirement = NULL;
   int lsize = nhsize == 0 ? -1 : luaO_ceillog2(nhsize);
-  luaHS_reclaim(L, LUAHS_ASSIST);
+  if (!local || defer) luaHS_reclaim(L, LUAHS_ASSIST);
   luaC_traceview(L, t);
-  oldasize = t->asize;
   if (newasize > MAXASIZE)
     luaG_runerror(L, "table overflow");
   if (lsize > MAXHBITS || (lsize >= 0 && (1u << lsize) > MAXHSIZE))
@@ -789,11 +795,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   luaR_pushroot(L, &image);
   image.table_view = &newt;
   luaC_traceview(L, &newt);
-  retired_array = oldasize != newasize && oldasize != 0 &&
-                  separate(t, oldarray - oldasize) ? oldarray - oldasize : NULL;
-  retired_nodes = luaH_nodesize(oldnodes) != 0 && separate(t, hashbase(oldnodes))
-                  ? hashbase(oldnodes) : NULL;
-  if (retired_array != NULL || retired_nodes != NULL)
+  if (defer)
     retirement = luaM_new(L, LuaTableRetirement);
   /* Once the descriptor exists, allocations report failure without throwing:
   ** every error releases it and leaves the original image installed. */
@@ -827,14 +829,20 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   clearNewSlice(t, oldasize, newasize);
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
+  luaR_poproot(L, &image);
   if (retirement != NULL) {
     retirement->array = retired_array;
     retirement->array_bytes = retirement->array != NULL ? concretesize(oldasize) : 0;
     retirement->nodes = retired_nodes;
     retirement->node_bytes = retirement->nodes != NULL ? sizehash(newt.node) : 0;
-    luaHS_publish(L, retirement);
+    luaHS_publish(L, retirement, local);
   }
-  luaR_poproot(L, &image);
+  else {
+    if (retired_array != NULL)
+      luaM_free_(L, retired_array, concretesize(oldasize));
+    if (retired_nodes != NULL)
+      luaM_free_(L, retired_nodes, sizehash(newt.node));
+  }
 }
 
 
@@ -918,7 +926,7 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
   retirement->nodes = hashbase(source);
   retirement->node_bytes = sizehash(source);
   lua_assert(separate(table, retirement->nodes));
-  luaHS_publish(L, retirement);
+  luaHS_publish(L, retirement, 0);
 }
 
 
@@ -1655,7 +1663,7 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth, int log) {
 static void finishgrowth (lua_State *L, LuaHashGrowth *growth) {
   if (growth->nodes != NULL)
     luaM_freemem(L, hashbase(growth->nodes), sizehash(growth->nodes));
-  if (growth->retirement->nodes != NULL) luaHS_publish(L, growth->retirement);
+  if (growth->retirement->nodes != NULL) luaHS_publish(L, growth->retirement, 0);
   else luaM_free(L, growth->retirement);
 }
 

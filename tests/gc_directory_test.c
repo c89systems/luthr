@@ -69,6 +69,11 @@ static void publish_batches(lua_State *L, int generational) {
   lua_pushinteger(second_publisher, 43);
   lua_rawseti(second_publisher, 1, 1);
   table = (Table *)lua_topointer(second_publisher, 1);
+  /* Exercise a published storage batch by making the table visible to
+   * another coroutine before the resize. */
+  lua_pushvalue(second_publisher, 1);
+  lua_xmove(second_publisher, L, 1);
+  lua_pop(L, 1);
   lua_gc(L, LUA_GCCOLLECT);
 
   lua_newtable(first_publisher);

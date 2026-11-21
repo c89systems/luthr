@@ -380,6 +380,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->participation.thread = L;
   L->participation.collector = 0;
   L->participation.storage_epoch = 0;
+  L->participation.storage_scan = 0;
   L->participation.trace_armed = 0;
   L->admission = &L->participation;
   L->callback_owner = NULL;

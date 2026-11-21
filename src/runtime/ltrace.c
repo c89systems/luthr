@@ -9,6 +9,7 @@
 #include "lfunc.h"
 #include "ldo.h"
 #include "lgc.h"
+#include "ltablestorage.h"
 #include "lmem.h"
 #include "lstate.h"
 #include "ltable.h"
@@ -207,7 +208,9 @@ lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
   if (notify) luaSC_notifygc(g);
   if (work.count == 0) return work.scanned;
+  luaHS_scanbegin(L);
   luaC_scantrace(L, &work, limit);
+  luaHS_scanend(L);
   luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
   previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);
   luaC_publishtrace(L, &work);

@@ -15,6 +15,7 @@ typedef struct LuaParticipation {
   lua_State *thread;
   unsigned collector;  /* world.mutex; scheduler root until retired */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
+  uint64_t storage_scan;  /* tagged epoch of an active collector buffer borrow */
   uint64_t trace_armed;  /* world.mutex, last acknowledged trace epoch */
 } LuaParticipation;
 
@@ -47,7 +48,9 @@ typedef struct LuaWorld {
   uint64_t control, storage_grace;
   size_t storage_bytes;
   unsigned storage_busy, storage_workers;
+  unsigned storage_scanners;  /* atomic count above the collector wait bit */
   unsigned storage_waiters;  /* mutex-owned count behind the request bit */
+  unsigned storage_scan_waiters;  /* mutex-owned count behind the scan wait bit */
   unsigned heap_depth;
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
 } LuaWorld;

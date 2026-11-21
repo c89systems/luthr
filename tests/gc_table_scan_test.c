@@ -4,6 +4,7 @@
 #include <lgc.h>
 #include <lstate.h>
 #include <ltable.h>
+#include <ltablestorage.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -27,12 +28,23 @@ static struct {
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
       remember, first_write, fields, cards, promotion;
+  int retirement, drained;
   uint64_t initial_layout;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
 static __thread int scanning, hash_chunk, interrupted;
 static __thread unsigned first_chunk;
+static void *watched_buffer;
+static unsigned returned;
+
+void __real_luaM_free_(lua_State *, void *, size_t);
+void __wrap_luaM_free_(lua_State *L, void *buffer, size_t size) {
+  void *watched = __atomic_load_n(&watched_buffer, __ATOMIC_RELAXED);
+  if (watched != NULL && buffer == watched)
+    __atomic_fetch_add(&returned, 1, __ATOMIC_RELAXED);
+  __real_luaM_free_(L, buffer, size);
+}
 
 static void hold(void) {
   require(pthread_mutex_lock(&probe.mutex) == 0);
@@ -69,6 +81,14 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
                                 unsigned first, unsigned count, int hash,
                                 GCObject **edges) {
   unsigned found;
+  if (scanning && probe.retirement && !probe.entered) {
+    /* The scanner has validated the old view and will dereference it after
+     * the writer has committed the replacement. */
+    require(!hash && first == 0);
+    interrupted = 1;
+    hold();
+    require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
+  }
   if (scanning && probe.first_write && !probe.entered) {
     /* Hold an unflagged scan after it chose its validation path and before
      * it loads a value whose type the first concurrent writer will change. */
@@ -139,6 +159,13 @@ static void *mark(void *unused) {
       break;
   }
   require(i < 10000);
+  if (probe.retirement) {
+    /* The scan is over, but this coroutine still owns an admitted gate. */
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    while (!probe.drained)
+      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
   lua_unlock(probe.marker);
   return NULL;
 }
@@ -159,6 +186,10 @@ static void *write_values(void *unused) {
     luaW_start(L);
     lua_unlock(L);
     return NULL;
+  } else if (probe.retirement) {
+    lua_lock(L);
+    luaH_resizearray(L, probe.table, 2 * probe.table->asize);
+    lua_unlock(L);
   } else if (probe.first_write) {
     lua_pushinteger(L, LUA_MININTEGER);
     lua_rawseti(L, probe.index, 1);
@@ -206,6 +237,21 @@ static void *write_values(void *unused) {
   return NULL;
 }
 
+static void *drain_buffer(void *argument) {
+  lua_State *L = argument;
+  lua_lock(L);
+  luaHS_reclaim(L, LUAHS_DRAIN);
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);
+  __atomic_store_n(&watched_buffer, NULL, __ATOMIC_RELAXED);
+  require(luaW_active(&probe.marker->participation));
+  lua_unlock(L);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  probe.drained = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  return NULL;
+}
+
 static void key(lua_State *L, unsigned bucket) {
   static unsigned serial;
   do {
@@ -218,7 +264,7 @@ static void key(lua_State *L, unsigned bucket) {
 
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
-  pthread_t marker, writer;
+  pthread_t marker, writer, drainer;
   struct timespec deadline;
   unsigned i, array_size;
   int small;
@@ -233,6 +279,7 @@ int main(int argc, char **argv) {
   probe.promotion = strcmp(argv[1], "promotion_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
+  probe.retirement = strncmp(argv[1], "retirement", 10) == 0;
   small = strncmp(argv[1], "first_write_small", 17) == 0;
   array_size = probe.cards                  ? LUA_ARRAY_CARD_MIN
                : (small || probe.promotion) ? 2
@@ -333,6 +380,9 @@ int main(int argc, char **argv) {
   lua_unlock(L);
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
   deadline.tv_sec += 10;
+  if (probe.retirement)
+    __atomic_store_n(&watched_buffer, probe.table->array - probe.table->asize,
+                     __ATOMIC_RELAXED);
   probe.armed = 1;
   require(pthread_create(&marker, NULL, mark, NULL) == 0);
   require(pthread_mutex_lock(&probe.mutex) == 0);
@@ -363,6 +413,19 @@ int main(int argc, char **argv) {
     require(!iswhite(G(L), probe.child));
   if (probe.fields)
     require(!iswhite(G(L), probe.removed));
+  if (probe.retirement) {
+    LuaWorld *world = &G(L)->world;
+    unsigned waiting;
+    require(pthread_create(&drainer, NULL, drain_buffer, L) == 0);
+    do {
+      require(pthread_mutex_lock(&world->mutex) == 0);
+      waiting = world->storage_scan_waiters;
+      require(pthread_mutex_unlock(&world->mutex) == 0);
+      if (!waiting)
+        sched_yield();
+    } while (!waiting);
+    require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
+  }
   if (probe.pause) {
     require(probe.chunks == 1);
     probe.pause_release = 1;
@@ -371,6 +434,8 @@ int main(int argc, char **argv) {
   require(pthread_cond_broadcast(&probe.changed) == 0);
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_join(writer, NULL) == 0);
+  if (probe.retirement)
+    require(pthread_join(drainer, NULL) == 0);
   require(pthread_join(marker, NULL) == 0);
   if (probe.remember || probe.cards || probe.promotion) {
     lua_gc(L, LUA_GCCOUNT); /* join this minor, without starting another */

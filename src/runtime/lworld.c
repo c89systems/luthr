@@ -58,6 +58,8 @@ int luaW_init (global_State *g) {
   world->storage_grace = 0;
   world->storage_bytes = 0;
   world->storage_busy = world->storage_waiters = world->storage_workers = 0;
+  world->storage_scanners = 0;
+  world->storage_scan_waiters = 0;
   world->waiters = g->phase_waiters = g->minor_waiters = g->trace_waiters = NULL;
   world->resume_waiters = world->rendezvous_waiters = NULL;
   world->heap_head = NULL;
@@ -128,7 +130,8 @@ void luaW_destroy (global_State *g) {
              g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
              world->storage_bytes == 0 && world->storage_busy == 0 &&
-             world->storage_workers == 0 &&
+             world->storage_workers == 0 && world->storage_scanners == 0 &&
+             world->storage_scan_waiters == 0 &&
              world->storage_retired == NULL && world->storage_pending == NULL);
   for (i = 0; i < LUA_HASH_WAIT_SHARDS; i++)
     luaX_checksync(pthread_mutex_destroy(&g->hash_wait_mutex[i]));
@@ -184,7 +187,7 @@ void luaW_unregister (lua_State *L) {
   LuaParticipation *participant = &L->participation;
   unlinkpublisher(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(luaW_active(participant) == 0);
+  lua_assert(luaW_active(participant) == 0 && participant->storage_scan == 0);
   if (participant->previous != NULL) {
     *participant->previous = participant->next;
     if (participant->next != NULL)
