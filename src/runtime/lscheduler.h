@@ -47,6 +47,7 @@ struct LuaScheduledTask {
   unsigned native_reuses;
   int nargs, reason, complete, notified, published;
   int native, native_pending, native_notified, external;  /* permit and routing */
+  uint64_t native_deadline;  /* expiry after the first contended Lua poll */
 };
 
 struct LuaCarrier {

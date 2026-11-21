@@ -535,13 +535,14 @@ static void returnnative (LuaScheduledTask *task, int handoff) {
   if (waiter != NULL) luaQ_wakewaiter(waiter);
 }
 
-/* A cached permit cannot follow a task into a park. A manageable burst
-** also ends at a VM poll even if that poll keeps running the same task. */
+/* A cached permit cannot follow a task into a park. */
 static void dropcachednative (LuaScheduledTask *task) {
   /* A waiter is still parking when another execution can grant its permit.
   ** Only its own execution can cache one or return a cached one. */
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED)
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED) {
+    task->native_deadline = 0;
     returnnative(task, 1);
+  }
 }
 
 static void nativeleave (LuaExecution *execution, lua_State *L) {
@@ -550,13 +551,12 @@ static void nativeleave (LuaExecution *execution, lua_State *L) {
   UNUSED(L);
   if (execution->native_depth != 0 ||
       __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
-  /* Let parallel bursts reuse a permit instead of writing the shared count
-  ** on every call. Release at a poll, park or the burst limit. Give queued
-  ** contenders an earlier chance when native capacity can cover all slots. */
+  /* A scarce permit can serve the same Lua task until its lease expires.
+  ** With capacity for every slot, keep the competitive release policy. */
   if (s->config.slots > 1 &&
-      task->native_reuses < NATIVE_REUSE_BURST &&
       (s->config.native_limit < s->config.slots ||
-       !(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING))) {
+       (task->native_reuses < NATIVE_REUSE_BURST &&
+        !(__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING)))) {
     task->native_reuses++;
     __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
   }
@@ -658,6 +658,30 @@ static uint64_t monotonicns (void) {
   return cast(uint64_t, now.tv_sec) * 1000000000 + cast(uint64_t, now.tv_nsec);
 }
 
+/* Limit reuse by time under contention, and return the permit once a Lua
+** poll interval did no native work. A runtime C poll can precede a wait of
+** its own, so it releases the cached permit immediately. */
+static void pollnative (LuaScheduledTask *task, lua_State *L) {
+  LuaScheduler *s = task->scheduler;
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_CACHED)
+    return;
+  if (s->config.native_limit < s->config.slots &&
+      task->native_reuses != 0 && isLua(L->ci)) {
+    task->native_reuses = 0;
+    if (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING) {
+      uint64_t now = monotonicns();
+      if (task->native_deadline == 0)
+        task->native_deadline = now + DEFAULT_SLICE_NS;
+      if (now < task->native_deadline) return;
+    }
+    else {
+      task->native_deadline = 0;
+      return;
+    }
+  }
+  dropcachednative(task);
+}
+
 static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
@@ -665,7 +689,7 @@ static void poll (LuaExecution *execution, lua_State *L) {
   int timed = task->polls == 0;  /* requests set polls to 1 in either mode */
   int serial = s->config.slots == 1;
   unsigned publishing, reentry;
-  dropcachednative(task);
+  pollnative(task, L);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
   /* Read publication before the runnable predicate: observing its completion

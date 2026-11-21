@@ -41,6 +41,7 @@ struct fixture {
   unsigned metadata_held, metadata_queued, metadata_released;
   size_t live;
   uint64_t poll_time_ns;
+  unsigned native_lease_test, native_lease_polls;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
 static struct fixture *fixture;
@@ -194,13 +195,28 @@ void __wrap_luaQ_wakewaiter(LuaWaiter *waiter) {
 }
 void __real_luaX_poll(lua_State *);
 void __wrap_luaX_poll(lua_State *L) {
-  if (fixture->inspect_polls && luaQ_current() != NULL) {
+  LuaExecution *execution = luaQ_current();
+  unsigned lease_poll = 0;
+  if (fixture->native_lease_test && execution != NULL &&
+      L == fixture->tasks[0].root.thread && fixture->seen[0] && isLua(L->ci) &&
+      execution->native_depth == 0 && fixture->native_lease_polls < 2) {
+    lease_poll = ++fixture->native_lease_polls;
+    if (fixture->native_lease_test == 1 && lease_poll == 2)
+      __atomic_fetch_add(&fixture->poll_time_ns, 2000000, __ATOMIC_RELAXED);
+  }
+  if (fixture->inspect_polls && execution != NULL) {
     inspecting = 1;
     __atomic_fetch_add(&poll_calls, 1, __ATOMIC_RELAXED);
     __real_luaX_poll(L);
     inspecting = 0;
   } else
     __real_luaX_poll(L);
+  if (lease_poll != 0) {
+    LuaScheduler *s = &fixture->scheduler;
+    require(pthread_mutex_lock(&s->native_mutex) == 0);
+    require((s->native_waiters.head != NULL) == (lease_poll == 1));
+    require(pthread_mutex_unlock(&s->native_mutex) == 0);
+  }
   if (fixture->metadata_peer != NULL && L == fixture->tasks[0].root.thread) {
     require(pthread_mutex_lock(&fixture->mutex) == 0);
     if (fixture->metadata_released && !fixture->pause_release) {
@@ -1045,6 +1061,37 @@ static void native_burst(struct fixture *f, int polling) {
   finish(f);
 }
 
+static void native_lease(struct fixture *f, int continuous) {
+  LuaScheduler *s = &f->scheduler;
+  f->native_lease_test = continuous ? 1 : 2;
+  f->poll_time_ns = 1;
+  initlimits(f, 2, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_pushcfunction(f->main, short_native_call);
+  lua_setglobal(f->main, "short_native_call");
+  submit(f, 0,
+         continuous ? "local f=short_native_call; for i=1,1500 do f(0) end; "
+                      "return 42"
+                    : "short_native_call(0); local n=0; for i=1,1500 do "
+                      "n=n+i end; return n>0 and 42",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->seen[0])
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "return short_native_call(...)", 1);
+  wait_for_permit(f, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 42 && f->native_lease_polls == 2);
+  require(collect(f, 1, LUA_OK) == 1);
+  require(s->native == 0 && s->native_waiters.head == NULL &&
+          s->native_peak == 1);
+  finish(f);
+}
+
 static int poll_after_native_waiter(lua_State *L) {
   struct fixture *f = fixture;
   require(pthread_mutex_lock(&f->mutex) == 0);
@@ -1365,6 +1412,10 @@ int main(int argc, char **argv) {
     native_burst(f, 0);
   else if (strcmp(argv[1], "native_burst_poll") == 0)
     native_burst(f, 1);
+  else if (strcmp(argv[1], "native_lease_expiry") == 0)
+    native_lease(f, 1);
+  else if (strcmp(argv[1], "native_lease_inactive") == 0)
+    native_lease(f, 0);
   else if (strcmp(argv[1], "late_native_waiter") == 0)
     late_native_waiter(f);
   else if (strcmp(argv[1], "startup_failures") == 0)
