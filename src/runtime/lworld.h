@@ -16,7 +16,7 @@ typedef struct LuaParticipation {
   unsigned collector;  /* world.mutex; scheduler root until retired */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
   uint64_t storage_scan;  /* tagged epoch of an active collector buffer borrow */
-  uint64_t trace_armed;  /* world.mutex, last acknowledged trace epoch */
+  uint64_t trace_armed;  /* written with the stack gate and world.mutex */
 } LuaParticipation;
 
 /* Control publishes admission requests and the reclamation epoch together.
@@ -42,7 +42,7 @@ typedef struct LuaWorld {
   LuaParticipation *participants;
   lua_State *reclaimers;  /* atomic head; list/work ownership uses mutex */
   uint64_t work_epoch;
-  uint64_t arm_epoch;  /* world.mutex, epoch of the current arm request */
+  uint64_t arm_epoch;  /* atomic epoch published before the arm request */
   struct LuaTableRetirement *storage_retired;  /* atomic producer list */
   struct LuaTableRetirement *storage_pending;  /* sole storage_busy consumer */
   uint64_t control, storage_grace;
@@ -57,6 +57,10 @@ typedef struct LuaWorld {
 
 l_sinline uint64_t luaW_control (const LuaWorld *world) {
   return __atomic_load_n(&world->control, __ATOMIC_SEQ_CST);
+}
+
+l_sinline uint64_t luaW_armepoch (const LuaWorld *world) {
+  return __atomic_load_n(&world->arm_epoch, __ATOMIC_ACQUIRE);
 }
 
 l_sinline int luaW_stopped (const LuaWorld *world) {

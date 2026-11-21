@@ -108,6 +108,8 @@ static void reserve (lua_State *L, NativeStackContext *context,
 l_sinline void leavegate (lua_State *L, uintptr_t reservation) {
   global_State *g = G(L);
   uintptr_t stack = cast(uintptr_t, L);
+  int managed = (reservation & LUA_GATE_MANAGED) != 0;
+  uint64_t armed = managed ? L->participation.trace_armed : 0;
   uint64_t control;
   unsigned requests;
   /* Only a waiter can change the reservation, by adding its disjoint bit.
@@ -120,9 +122,14 @@ l_sinline void leavegate (lua_State *L, uintptr_t reservation) {
     abort();
   }
   control = luaW_control(&g->world);
-  requests = (reservation & LUA_GATE_STACK) ? LUA_WORLD_STOPPED : LUA_WORLD_REQUESTS;
+  requests = LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS;
+  if (!(reservation & LUA_GATE_STACK)) requests |= LUA_WORLD_STORAGE_WAIT;
+  /* Only a managed reservation with old allocation debt can hold up this
+  ** arm request. Read its acknowledgement before the gate can be reclaimed. */
   if (l_unlikely((previous & LUA_GATE_WAITING) ||
-                 (control & (requests | LUA_WORLD_STACK_ROOTS))))
+                 (control & requests) ||
+                 ((control & LUA_WORLD_ARM_TRACE) && managed &&
+                  armed != luaW_armepoch(&g->world))))
     luaW_leave(g, stack, previous & LUA_GATE_FLAGS, control);
 }
 

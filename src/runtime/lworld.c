@@ -153,6 +153,9 @@ void luaW_register (lua_State *L) {
   LuaParticipation *participant = &L->participation;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(participant->previous == NULL && luaW_active(participant) == 0);
+  /* A new coroutine has no outstanding allocation batch from before the
+  ** arm request. Its creator accounts for the construction on its own gate. */
+  participant->trace_armed = luaW_armepoch(world);
   participant->next = world->participants;
   participant->previous = &world->participants;
   if (participant->next != NULL)
@@ -237,8 +240,9 @@ void luaW_activate (lua_State *L) {
 ** before its first heap access. Stack-only scopes cannot mutate heap edges. */
 static int tracearmed (LuaWorld *world) {
   LuaParticipation *part;
+  uint64_t epoch = luaW_armepoch(world);
   for (part = world->participants; part != NULL; part = part->next)
-    if (part->trace_armed != world->arm_epoch &&
+    if (part->trace_armed != epoch &&
         (__atomic_load_n(&part->thread->stack_gate.word, __ATOMIC_SEQ_CST) &
           LUA_GATE_MANAGED)) return 0;
   return 1;
@@ -285,7 +289,7 @@ static void notifyrendezvous (global_State *g, lua_State *L) {
 static void acknowledge (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   if (luaW_control(world) & LUA_WORLD_ARM_TRACE) {
-    uint64_t epoch = world->arm_epoch;
+    uint64_t epoch = luaW_armepoch(world);
     if (L->admission->trace_armed == epoch) return;
     L->admission->trace_armed = epoch;
     luaM_publishdebt(L);
@@ -295,6 +299,7 @@ static void acknowledge (lua_State *L) {
 
 void luaW_acktrace (lua_State *L) {
   LuaWorld *world = &G(L)->world;
+  if (L->admission->trace_armed == luaW_armepoch(world)) return;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   acknowledge(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -304,7 +309,7 @@ void luaW_armtrace (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   lua_assert(luaW_ownsheap(L) && L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  world->arm_epoch = luaC_traceepoch(G(L));
+  __atomic_store_n(&world->arm_epoch, luaC_traceepoch(G(L)), __ATOMIC_RELEASE);
   __atomic_fetch_or(&world->control, LUA_WORLD_ARM_TRACE, __ATOMIC_SEQ_CST);
   acknowledge(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));

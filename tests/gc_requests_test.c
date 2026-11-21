@@ -186,7 +186,7 @@ static void arm_release(lua_State *L, int young, int withdraw) {
   LuaWorld *world = &G(L)->world;
   struct request driver = {0}, waiter = {0};
   pthread_t workers[2];
-  lua_State *mutator;
+  lua_State *mutator, *ready, *fresh;
   lua_gc(L, young ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
   if (!young) {
@@ -195,6 +195,7 @@ static void arm_release(lua_State *L, int young, int withdraw) {
     require(lua_pcall(L, 0, 1, 0) == LUA_OK);
   }
   mutator = lua_newthread(L);
+  ready = lua_newthread(L);
   driver.state = lua_newthread(L);
   waiter.state = lua_newthread(L);
   driver.role = 1;
@@ -209,6 +210,20 @@ static void arm_release(lua_State *L, int young, int withdraw) {
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
   require(!luaC_scanready(G(L)) && !luaW_trycollectenter(mutator));
+  lua_lock(ready);
+  lua_unlock(ready); /* acknowledge the in-flight epoch */
+  fresh = lua_newthread(L);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  /* An acknowledged participant and a new state can enter and leave while
+   * another participant still owes the collector its old allocation debt. */
+  lua_lock(ready);
+  require(luaW_active(ready->admission));
+  lua_unlock(ready);
+  lua_lock(fresh);
+  require(luaW_active(fresh->admission));
+  lua_unlock(fresh);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
+  require(!luaC_scanready(G(L)));
   require(pthread_create(&workers[1], NULL, request, &waiter) == 0);
   require(pthread_mutex_lock(&world->mutex) == 0);
   while (world->heap_head == NULL)
