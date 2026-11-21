@@ -1452,3 +1452,109 @@ TStatus luaD_protectedparser (lua_State *L, ZIO *z, const char *name,
 }
 
 
+/* These arithmetic operations cannot fail after their numeric type check. */
+static int leafarith (lua_State *L, const Proto *p, const StackValue *args,
+                      Instruction i, TValue *result) {
+  OpCode op = GET_OPCODE(i);
+  const TValue *left, *right;
+  TValue immediate;
+  int arithmetic;
+  if (GETARG_B(i) >= p->numparams) return 0;
+  left = s2v(args + GETARG_B(i));
+  if (op == OP_ADDI) {
+    setivalue(&immediate, GETARG_sC(i));
+    right = &immediate;
+    arithmetic = LUA_OPADD;
+  }
+  else if (op >= OP_ADDK && op <= OP_MULK) {
+    if (GETARG_C(i) >= p->sizek) return 0;
+    right = p->k + GETARG_C(i);
+    arithmetic = LUA_OPADD + (op - OP_ADDK);
+  }
+  else {
+    if (GETARG_C(i) >= p->numparams) return 0;
+    right = s2v(args + GETARG_C(i));
+    arithmetic = LUA_OPADD + (op - OP_ADD);
+  }
+  return luaO_rawarith(L, arithmetic, left, right, result);
+}
+
+/* A synchronous C API call can return a register or a single pure operation
+** without entering a Lua frame. Commit only after the entire call is known
+** to fit under the same stack reservation and instruction poll budget. */
+int luaD_tryluacall (lua_State *L, StkId func, int nargs, int wanted,
+                     NativeStackContext *context) {
+  const Proto *p = clLvalue(s2v(func))->p;
+  const Instruction *code = p->code;
+  const LuaPolicy *policy;
+  Instruction first, ret;
+  const TValue *value;
+  TValue result = {{0}, LUA_VNIL};
+  OpCode op;
+  int ticks = 1, count = 1, i;
+  if (p->sizecode < 1 || p->sizecode > 4 || isvararg(p) ||
+      nargs < p->numparams || p->dispatch != NULL || gethookmask(L) ||
+      L->errorJmp == NULL || isLua(L->ci) ||
+      (L->openupval != NULL && L->openupval->level >= savestack(L, func)) ||
+      L->ci->next == NULL || L->stack_last.p - L->top.p <= p->maxstacksize ||
+      getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
+      luaD_nativeposition() <= L->luthr_stack_limit)
+    return 0;
+  first = code[0];
+  op = GET_OPCODE(first);
+  value = &result;
+  if (op == OP_RETURN0) count = 0;
+  else if (op == OP_RETURN1) {
+    if (GETARG_A(first) >= p->numparams) return 0;
+    value = s2v(func + 1 + GETARG_A(first));
+  }
+  else {
+    int arithmetic = op == OP_ADDI || (op >= OP_ADDK && op <= OP_MULK) ||
+                                      (op >= OP_ADD && op <= OP_MUL);
+    ticks = 2;
+    if (p->sizecode < ticks + arithmetic) return 0;
+    ret = code[1 + arithmetic];
+    if (GET_OPCODE(ret) != OP_RETURN1 || GETARG_A(ret) != GETARG_A(first) ||
+        GETARG_A(first) >= p->maxstacksize)
+      return 0;
+    if (arithmetic) {
+      if (!testMMMode(GET_OPCODE(code[1])) ||
+          !leafarith(L, p, func + 1, first, &result))
+        return 0;
+    }
+    else switch (op) {
+      case OP_MOVE:
+        if (GETARG_B(first) >= p->numparams) return 0;
+        value = s2v(func + 1 + GETARG_B(first));
+        break;
+      case OP_LOADI: setivalue(&result, GETARG_sBx(first)); break;
+      case OP_LOADF: setfltvalue(&result, cast_num(GETARG_sBx(first))); break;
+      case OP_LOADFALSE: setbfvalue(&result); break;
+      case OP_LOADTRUE: setbtvalue(&result); break;
+      case OP_LOADNIL: setnilvalue(&result); break;
+      case OP_LOADK:
+        if (GETARG_Bx(first) >= p->sizek) return 0;
+        value = p->k + GETARG_Bx(first);
+        break;
+      default: return 0;
+    }
+  }
+  /* Full admission normally checks for an invocation change and refreshes
+  ** the hook and native stack bounds. Only reuse a prepared activation. */
+  if (L->luthr_stack_context != context) return 0;
+  policy = luaX_contextpolicy(context);
+  if (policy != NULL && policy != L->policy && policy->global == G(L)) return 0;
+  policy = L->policy;
+  if (L->poll_remaining <= cast_uint(ticks) || gethookmask(L) ||
+      (policy != NULL &&
+       (__atomic_load_n(&policy->hookmask, __ATOMIC_ACQUIRE) != 0 ||
+        luaCP_exhausted(L))) || luaTK_pendingon(L, context->execution) != NULL)
+    return 0;
+  if (wanted == LUA_MULTRET) wanted = count;
+  if (wanted > 0 && count != 0) { setobj2s(L, func, value); }
+  for (i = count; i < wanted; i++) setnilvalue2s(func + i);
+  L->top.p = func + wanted;
+  L->poll_remaining -= cast_uint(ticks);
+  return 1;
+}
+

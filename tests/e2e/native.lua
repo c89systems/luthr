@@ -40,4 +40,49 @@ for _,site in ipairs({'reader','writer'}) do
   assert(not ok and failure==marker)
 end
 assert(native.callback(function() return 42 end)==42)
+
+do
+  local call = native.call
+  local function identity(x) return x end
+  local function add(x,y) return x+y end
+  local function increment(x) return x+1 end
+  local function decrease(x) return x-1000 end
+  local function multiply(x,y) return x*y end
+  local function constant() return 'literal result' end
+  local function empty() end
+  local token = {}
+  local dumped = assert(load(string.dump(increment,true),'=dumped','b'))
+  for i=1,1100 do
+    assert(call(1,identity,token,i)==token)
+    local values = table.pack(call(4,identity,i))
+    assert(values.n==4 and values[1]==i and values[2]==nil and
+           values[3]==nil and values[4]==nil)
+    assert(select('#',call(0,constant))==0)
+    assert(select('#',call(-1,empty))==0)
+    assert(select('#',call(-1,identity,token))==1)
+    assert(call(1,dumped,i)==i+1)
+    assert(call(1,decrease,i)==i-1000)
+  end
+  assert(call(1,identity)==nil)
+  assert(call(1,constant)=='literal result')
+  assert(call(1,increment,math.maxinteger)==math.mininteger)
+  assert(call(1,add,1.5,2)==3.5)
+  assert(call(1,multiply,6,7)==42)
+  local value = setmetatable({}, {__add=function(_,b) return b+41 end})
+  assert(call(1,increment,value)==42)
+  assert(call(1,add,value,1)==42)
+  assert(call(1,function(...) return select('#',...) end,1,2,3)==3)
+
+  local calls, returns = 0,0
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func==increment then
+      if event=='call' then calls=calls+1
+      elseif event=='return' then returns=returns+1 end
+    end
+  end,'cr')
+  assert(call(1,increment,41)==42)
+  debug.sethook()
+  assert(calls==1 and returns==1)
+end
+
 print('native: nested callbacks, references, original errors, bounded 1 MiB stream passed')

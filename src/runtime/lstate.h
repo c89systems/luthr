@@ -716,6 +716,14 @@ l_sinline LuaExecution *luaX_execution (lua_State *L) {
   return luaX_context(L)->execution;
 }
 
+l_sinline LuaPolicy *luaX_contextpolicy (NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  if (execution != NULL) return execution->policy;
+  /* The carrier's default native context starts the host record. */
+  return (context->host != NULL ? context->host
+                               : cast(LuaThreadContext *, context))->policy;
+}
+
 l_sinline LuaThreadContext *luaX_hostcontext (lua_State *L) {
   NativeStackContext *context = luaX_boundcontext(L);
   if (context != NULL && context->execution == NULL) {

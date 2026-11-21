@@ -20,6 +20,15 @@ static int callback(lua_State *state) {
   return 1;
 }
 
+static int call(lua_State *state) {
+  lua_Integer wanted = luaL_checkinteger(state, 1);
+  luaL_argcheck(state, wanted >= LUA_MULTRET && wanted <= 4, 1,
+                "result count out of range");
+  lua_remove(state, 1);
+  lua_call(state, lua_gettop(state) - 1, (int)wanted);
+  return lua_gettop(state);
+}
+
 static int reference(lua_State *state) {
   int ref;
   lua_settop(state, 1);
@@ -66,11 +75,9 @@ static int pump(lua_State *state) {
 
 int luaopen_compat_fixture(lua_State *state);
 int luaopen_compat_fixture(lua_State *state) {
-  static const luaL_Reg functions[] = {{"callback", callback},
-                                       {"reference", reference},
-                                       {"pump", pump},
-                                       {"monotonic", monotonic},
-                                       {NULL, NULL}};
+  static const luaL_Reg functions[] = {{"callback", callback},   {"call", call},
+                                       {"reference", reference}, {"pump", pump},
+                                       {"monotonic", monotonic}, {NULL, NULL}};
   luaL_newlib(state, functions);
   return 1;
 }

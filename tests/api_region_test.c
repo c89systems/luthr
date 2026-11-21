@@ -104,6 +104,29 @@ static void metadata(lua_State *state, int foreign) {
 
 static int foreign(lua_State *state) {
   check_api(state, 1);
+  if (lua_gettop(state) != 0) {
+    unsigned ticks = (unsigned)lua_tointeger(state, 3);
+    int i;
+    for (i = 0; i < 3; i++) {
+      unsigned before;
+      if (i == 1) {
+        /* The warm call fits once before the next required poll. */
+        luaX_lockstate(state);
+        state->poll_remaining = 2 * ticks;
+        luaX_unlockstate(state);
+      }
+      lua_pushvalue(state, 1);
+      lua_pushinteger(state, 41);
+      lua_pushinteger(state, 1);
+      before = admissions;
+      lua_call(state, 2, 1);
+      if (i != 0)
+        require(admissions == before + (i == 2));
+      require(lua_rawequal(state, 2, -1));
+      require(lua_isinteger(state, -1) == lua_isinteger(state, 2));
+      lua_pop(state, 1);
+    }
+  }
   return 0;
 }
 
@@ -137,6 +160,20 @@ static void native_values(lua_State *state) {
   require(strcmp(lua_tostring(state, -1), "1234") == 0 && requests == 2);
   lua_pop(state, 1);
   require(requests == 2 && execution.managed_depth == 0);
+  require(luaL_dostring(state,
+                        "probe(function(x) return x end,41,1); "
+                        "probe(function(x) return x+1 end,42,2); "
+                        "probe(function(x) return x-1000 end,-959,2); "
+                        "probe(function(x,y) return x+y end,42,2); "
+                        "probe(function(x,y) return x*y end,41,2); "
+                        "probe(function() return 42 end,42,2); "
+                        "probe(function() return 42.0 end,42.0,2); "
+                        "probe(function() return 'literal' end,'literal',2); "
+                        "probe(function() return true end,true,2); "
+                        "probe(function() return false end,false,2); "
+                        "probe(function() return nil end,nil,2); "
+                        "probe(function() end,nil,1)") == LUA_OK);
+  require(execution.managed_depth == 0);
   require(luaE_setnativestackcontext(previous) == &context);
   lua_gc(state, LUA_GCCOLLECT);
   require(strcmp(string, "rooted across a native entry") == 0);

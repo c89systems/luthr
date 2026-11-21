@@ -28,8 +28,7 @@ typedef struct LuaTaskRoot {
 } LuaTaskRoot;
 
 /* Probe without delivering. The caller owns the current admission. */
-l_sinline LuaTaskRoot *luaTK_pendingstop (lua_State *L) {
-  LuaExecution *execution = luaX_execution(L);
+l_sinline LuaTaskRoot *luaTK_pendingon (lua_State *L, LuaExecution *execution) {
   LuaTaskRoot *task;
   if (execution == NULL || L->errorJmp == NULL ||
       L->errorJmp != execution->protected) return NULL;
@@ -37,6 +36,10 @@ l_sinline LuaTaskRoot *luaTK_pendingstop (lua_State *L) {
   if (task == NULL || task->global != G(L) ||
       !__atomic_load_n(&task->stop_requested, __ATOMIC_ACQUIRE)) return NULL;
   return task;
+}
+
+l_sinline LuaTaskRoot *luaTK_pendingstop (lua_State *L) {
+  return luaTK_pendingon(L, luaX_execution(L));
 }
 
 /* The record and execution are initially zeroed and outlive all entered calls,

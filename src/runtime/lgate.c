@@ -152,15 +152,7 @@ void luaX_endreserve (lua_State *target, int reservation) {
 
 static void preparecall (lua_State *L, NativeStackContext *context) {
   LuaExecution *execution = context->execution;
-  LuaPolicy *policy;
-  if (execution != NULL)
-    policy = execution->policy;
-  else {
-    /* The carrier's default native context starts the host record. */
-    LuaThreadContext *host = context->host != NULL ? context->host
-                                           : cast(LuaThreadContext *, context);
-    policy = host->policy;
-  }
+  LuaPolicy *policy = luaX_contextpolicy(context);
   if (policy != NULL || L->policy != NULL) luaCP_apply(L, policy);
   if (L->errorJmp == NULL && execution != NULL) luaE_refreshnativestack(L);
 }
@@ -293,9 +285,7 @@ static void managestack (lua_State *L, NativeStackContext *context) {
   luaW_enter(L);
 }
 
-l_sinline uintptr_t apienter (lua_State *L) {
-  LuaThreadContext *thread = &thread_context;
-  NativeStackContext *context = luaE_resolvestack(thread);
+l_sinline uintptr_t apienter (lua_State *L, NativeStackContext *context) {
   if (attachedapi(L, context)) {
     luaX_pollrequests(L);
     return 0;
@@ -305,8 +295,26 @@ l_sinline uintptr_t apienter (lua_State *L) {
 }
 
 carrierentry void luaX_apienter (lua_State *L) {
-  uintptr_t owner = apienter(L);
+  uintptr_t owner = apienter(L, luaE_resolvestack(&thread_context));
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
+}
+
+carrierentry uintptr_t luaX_callenter (lua_State *L,
+                                       NativeStackContext **activation) {
+  NativeStackContext *context = luaE_resolvestack(&thread_context);
+  LuaExecution *execution = context->execution;
+  uintptr_t owner;
+  if (execution != NULL && execution->native_depth != 0 &&
+      context->api_region == NULL) {
+    owner = luaX_valueenter(L, 1);
+    if (owner & LUA_VALUE_STACK) {
+      *activation = context;
+      return owner;
+    }
+  }
+  else owner = apienter(L, context);
+  if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
+  return 0;
 }
 
 void luaX_apileave (lua_State *L) {
@@ -326,7 +334,7 @@ carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
     }
     luaX_releasegate(L, LUA_GATE_STACK);
   }
-  return apienter(L);
+  return apienter(L, luaE_resolvestack(&thread_context));
 }
 
 void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
