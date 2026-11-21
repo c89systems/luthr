@@ -87,7 +87,7 @@ static const char *b_str2int (const char *s, unsigned base, lua_Integer *pn) {
 }
 
 
-static int luaB_tonumber (lua_State *L) {
+int luaB_tonumber (lua_State *L) {
   if (lua_isnoneornil(L, 2)) {  /* standard conversion? */
     if (lua_type(L, 1) == LUA_TNUMBER) {  /* already a number? */
       lua_settop(L, 1);  /* yes; return it */

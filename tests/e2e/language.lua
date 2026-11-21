@@ -59,6 +59,28 @@ do
   assert(observed==token and table.concat(events,',')=='call,return')
 end
 
+do
+  local convert = tonumber
+  local a,b = convert(' +0x2a ',nil,'ignored')
+  assert(a==42 and b==nil and math.type(a)=='integer')
+  assert(convert(1.5)==1.5 and math.type(convert('1.5'))=='float')
+  assert(convert('2a',16)==42 and convert(string.rep(' ',128)..'42')==42)
+  assert(select('#',convert('42\0suffix'))==1 and convert('42\0suffix')==nil)
+  assert(convert('invalid')==nil and convert(false)==nil and not pcall(convert))
+  local function tail(value) return convert(value) end
+  assert(tail('42')==42)
+  local events = {}
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func == convert then
+      events[#events+1] = event
+      if event == 'call' then assert(debug.setlocal(2,1,'42')) end
+    end
+  end,'cr')
+  local observed = convert('0')
+  debug.sethook()
+  assert(observed==42 and table.concat(events,',')=='call,return')
+end
+
 local closed, marker = {}, {}
 local function resource(id)
   return setmetatable({}, {__close=function(_,err)

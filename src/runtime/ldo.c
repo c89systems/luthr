@@ -890,6 +890,17 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
     else { setbfvalue(value); }
     return 1;
   }
+  if (f == luaB_tonumber) {
+    if (nargs >= 2 && !ttisnil(s2v(func + 2))) return -1;
+    if (ttisnumber(first)) { setobj(L, value, first); }
+    else if (ttisshrstring(first)) {
+      TString *str = tsvalue(first);
+      if (luaO_str2num(getshrstr(str), value) != cast_sizet(str->shrlen) + 1)
+        setnilvalue(value);
+    }
+    else return -1;
+    return 1;
+  }
   lua_assert(f == luaB_mathabs);
   if (!ttisinteger(first)) return -1;
   setivalue(value, luaB_absinteger(ivalue(first)));
