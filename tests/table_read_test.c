@@ -61,14 +61,15 @@ static int retry_lookup(TString *key) {
   return 1; /* Simulate a writer invalidating the optimistic snapshot. */
 }
 
-int __real_luaH_trygetstr(lua_State *, Table *, TString *, TValue *, lu_byte *);
-int __wrap_luaH_trygetstr(lua_State *state, Table *table, TString *key,
-                          TValue *result, lu_byte *tag) {
+int __real_luaH_trygetshortstr(lua_State *, Table *, TString *, TValue *,
+                               lu_byte *);
+int __wrap_luaH_trygetshortstr(lua_State *state, Table *table, TString *key,
+                               TValue *result, lu_byte *tag) {
   if (table == finished_index && isLua(state->ci))
     string_vm_reads++;
   if (retry_lookup(key))
     return 0;
-  return __real_luaH_trygetstr(state, table, key, result, tag);
+  return __real_luaH_trygetshortstr(state, table, key, result, tag);
 }
 
 int __real_luaH_tryget(lua_State *, Table *, const TValue *, TValue *,

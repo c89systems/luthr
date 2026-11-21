@@ -1312,19 +1312,6 @@ static const TValue *Hgetlongstr (Table *t, TString *key) {
 }
 
 
-static const TValue *Hgetstr (Table *t, TString *key) {
-  if (strisshr(key))
-    return luaH_Hgetshortstr(t, key);
-  else
-    return Hgetlongstr(t, key);
-}
-
-
-static lu_byte rawgetstr (Table *t, TString *key, TValue *res) {
-  return finishnodeget(Hgetstr(t, key), res);
-}
-
-
 /*
 ** main search function
 */
@@ -2215,16 +2202,43 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
   return 1;
 }
 
-int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
-                       TValue *result) {
+static int __attribute__((noinline)) readshortfallback (
+    global_State *g, lua_State *L, Table *table, TString *key,
+    TValue *result, lu_byte *tag, uint64_t sequence) {
   LuaTableSlot slot;
   TValue index;
+  setsvalue(L, &index, key);
+  return locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot, 0) &&
+         readslot(g, L, table, &slot, sequence, result, tag);
+}
+
+/* Interned-key hits in a single image usually need only the first node.
+** Check the established layout version before interpreting the copied value. */
+l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
+                             TString *key, TValue *result, lu_byte *tag,
+                             uint64_t *sequence) {
+  Node *nodes;
+  if (!readsequence(L, table, sequence)) return 0;
+  nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  if (!(*sequence & LUA_TABLE_SPLIT_VALUES) && luaH_hashdir(nodes) == NULL) {
+    Node *node = hashstr(nodes, key);
+    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
+        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
+      TValue value;
+      luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, 0);
+      if (!sameversion(table, *sequence)) return 0;
+      *tag = finishnodeget(&value, result);
+      return 1;
+    }
+  }
+  return readshortfallback(g, L, table, key, result, tag, *sequence);
+}
+
+int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
+                       TValue *result) {
   lu_byte tag;
   uint64_t sequence;
-  setsvalue(L, &index, key);
-  if (!readsequence(L, table, &sequence)) return 0;
-  if (!locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot, 0) ||
-      !readslot(g, L, table, &slot, sequence, result, &tag)) return 0;
+  if (!readshortslot(g, L, table, key, result, &tag, &sequence)) return 0;
   if (tagisempty(tag)) setnilvalue(result);
   return 1;
 }
@@ -2383,6 +2397,7 @@ int luaH_tryget (lua_State *L, Table *t, const TValue *key, TValue *res,
     *tag = finishread(L, t, res, luaH_getowned(t, key, res), 1, 0);
     return 1;
   }
+  if (ttisshrstring(key)) return luaH_trygetshortstr(L, t, tsvalue(key), res, tag);
   return trygetshared(L, t, key, rawtt(key), res, tag);
 }
 
@@ -2412,22 +2427,39 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
   return getrooted(L, t, &index, res);
 }
 
-int luaH_trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
-                      lu_byte *tag) {
-  TValue index;
+int luaH_trygetshortstr (lua_State *L, Table *t, TString *key, TValue *res,
+                           lu_byte *tag) {
+  uint64_t sequence;
+  lua_assert(strisshr(key));
   if (luaA_localtable(L, t)) {
-    *tag = finishread(L, t, res, rawgetstr(t, key, res), 1, 0);
+    Node *nodes = t->node;
+    lua_assert(luaH_hashdir(nodes) == NULL);
+    *tag = finishread(L, t, res,
+                     finishnodeget(findshortstr(hashstr(nodes, key), key), res),
+                     1, 0);
+    return 1;
+  }
+  if (!readshortslot(G(L), L, t, key, res, tag, &sequence)) return 0;
+  *tag = finishread(L, t, res, *tag, 0, sequence);
+  return 1;
+}
+
+static int trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
+                       lu_byte *tag) {
+  TValue index;
+  if (strisshr(key)) return luaH_trygetshortstr(L, t, key, res, tag);
+  if (luaA_localtable(L, t)) {
+    *tag = finishread(L, t, res, finishnodeget(Hgetlongstr(t, key), res), 1, 0);
     return 1;
   }
   setsvalue(L, &index, key);
-  return trygetshared(L, t, &index, strisshr(key) ? ctb(LUA_VSHRSTR) :
-                      ctb(LUA_VLNGSTR), res, tag);
+  return trygetshared(L, t, &index, ctb(LUA_VLNGSTR), res, tag);
 }
 
 lu_byte luaH_getstr (lua_State *L, Table *t, TString *key, TValue *res) {
   lu_byte tag;
   TValue index;
-  if (luaH_trygetstr(L, t, key, res, &tag)) return tag;
+  if (trygetstr(L, t, key, res, &tag)) return tag;
   setsvalue(L, &index, key);
   return getrooted(L, t, &index, res);
 }

@@ -59,7 +59,8 @@ void __real_luaF_storelocals(lua_State *state, StkId first, int count);
 StkId __real_luaF_loadlocal(lua_State *state, StkId slot);
 void __real_luaF_loadrange(lua_State *state, StkId first, int count);
 void __real_luaX_pollrequests(lua_State *state);
-int __real_luaH_trygetstr(lua_State *, Table *, TString *, TValue *, lu_byte *);
+int __real_luaH_trygetshortstr(lua_State *, Table *, TString *, TValue *,
+                               lu_byte *);
 lu_byte __real_luaH_get(lua_State *, Table *, const TValue *, TValue *);
 
 void __wrap_luaX_pollrequests(lua_State *state) {
@@ -109,12 +110,12 @@ static void collect_at_lookup(lua_State *state) {
   }
 }
 
-int __wrap_luaH_trygetstr(lua_State *state, Table *table, TString *key,
-                          TValue *result, lu_byte *tag) {
+int __wrap_luaH_trygetshortstr(lua_State *state, Table *table, TString *key,
+                               TValue *result, lu_byte *tag) {
   if (collect_lookup && !collected_lookup &&
       strcmp(getstr(key), "payload") == 0)
     return 0; /* Force the VM to publish the frame for a retry. */
-  return __real_luaH_trygetstr(state, table, key, result, tag);
+  return __real_luaH_trygetshortstr(state, table, key, result, tag);
 }
 
 lu_byte __wrap_luaH_get(lua_State *state, Table *table, const TValue *key,

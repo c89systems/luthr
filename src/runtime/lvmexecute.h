@@ -78,7 +78,7 @@
         TValue *key = KC(i);  /* a short string */
         unsigned upvalue = GETARG_B(i);
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
-        vmtableget(&receiver, key, luaH_trygetstr, tsvalue(key), upvalue + 1u);
+        vmtableget(&receiver, key, luaH_trygetshortstr, tsvalue(key), upvalue + 1u);
         vmbreak;
       }
       vmcase(OP_GETTABLE) {
@@ -100,7 +100,7 @@
         StkId ra = readRA(i);
         TValue *rb = vRB(i);
         TValue *rc = KC(i);
-        vmtableget(rb, rc, luaH_trygetstr, tsvalue(rc), 0);
+        vmtableget(rb, rc, luaH_trygetshortstr, tsvalue(rc), 0);
         vmbreak;
       }
       vmcase(OP_SETTABUP) {
@@ -150,7 +150,7 @@
         TValue *rc = KC(i);
         readrange(ra, 2);
         setobj2s(L, ra + 1, rb);
-        vmtableget(rb, rc, luaH_trygetstr, tsvalue(rc), 0);
+        vmtableget(rb, rc, luaH_trygetshortstr, tsvalue(rc), 0);
         vmbreak;
       }
       vmcase(OP_ADDI) {
