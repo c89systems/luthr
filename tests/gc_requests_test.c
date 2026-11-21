@@ -4,6 +4,7 @@
 #include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <ltask.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -246,6 +247,70 @@ static void arm_release(lua_State *L, int young, int withdraw) {
     require(lua_isnil(L, -1));
     lua_pop(L, 1);
   }
+}
+
+static void late_task_root(lua_State *L) {
+  struct request driver = {0};
+  pthread_t worker;
+  LuaTaskRoot root = {0};
+  LuaExecution execution = {0};
+  NativeStackContext native, *previous;
+  lua_State *mutator, *task;
+  int status, results;
+
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, 1);
+  mutator = lua_newthread(L);
+  driver.state = lua_newthread(L);
+  task = lua_newthread(L);
+  require(luaL_loadstring(task,
+                          "local t={value=42}; "
+                          "return function() return t.value end") == LUA_OK);
+  require(lua_pcall(task, 0, 1, 0) == LUA_OK);
+  lua_pushvalue(L, -1);
+  lua_rawseti(L, 1, 1);
+
+  driver.role = 1;
+  driver.phase = 5;
+  minor_case = ARM_RELEASE;
+  lua_lock(mutator);
+  require(pthread_create(&worker, NULL, request, &driver) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.driver_parked)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  /* Admission transfers the last strong reference after initial root discovery
+   * and before scanners or entering mutators can take stack snapshots. */
+  require(!luaC_scanready(G(L)) && iswhite(G(L), task));
+  require(luaTK_admit(task, &root, &execution) == LUA_OK);
+  lua_pop(L, 1);
+  lua_unlock(mutator);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  fixture.release_driver = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  require(lua_rawgeti(L, 1, 1) == LUA_TTHREAD && lua_tothread(L, -1) == task);
+  lua_pop(L, 1);
+
+  native = *luaE_getnativestackcontext();
+  native.execution = &execution;
+  previous = luaE_setnativestackcontext(&native);
+  status = luaTK_resume(&root, 0, &results);
+  require(status == LUA_OK && results == 1);
+  require(luaTK_finish(&root, &status, &results) == LUA_OK);
+  luaE_setnativestackcontext(previous);
+  require(luaTK_collect(L, &root, &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1 && lua_tointeger(L, -1) == 42);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
 }
 
 static void minor_arm(lua_State *L, int busy_registry) {
@@ -693,6 +758,10 @@ int main(int argc, char **argv) {
       strcmp(argv[1], "arm_incremental") == 0) {
     arm_release(L, strcmp(argv[1], "arm_incremental") != 0,
                 strcmp(argv[1], "arm_withdraw") == 0);
+    goto done;
+  }
+  if (strcmp(argv[1], "late_task_root") == 0) {
+    late_task_root(L);
     goto done;
   }
   explicit_step = strcmp(argv[1], "explicit") == 0;

@@ -188,6 +188,10 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
       lua_unlock(L);
       return LUA_TK_INVALID;
     }
+    /* Initial root discovery can precede this admission while the mark
+    ** handshake still prevents stack snapshots. The caller can drop its
+    ** stack reference as soon as this root is published. */
+    luaC_traceobject(L, obj2gco(L));
     registertask(L, task, execution, LUA_TASK_ADMITTED);
     L->task_owner = task;
     status = LUA_OK;
