@@ -385,29 +385,23 @@ int luaW_tryenter (lua_State *L) {
   return 1;
 }
 
-void luaW_leave (global_State *g, uintptr_t stack, unsigned flags) {
+void luaW_leave (global_State *g, uintptr_t stack, unsigned flags,
+                 uint64_t control) {
   LuaWorld *world = &g->world;
-  uint64_t control = luaW_control(world);
-  unsigned requests = (flags & LUA_GATE_STACK) ? LUA_WORLD_STOPPED
-                                              : LUA_WORLD_REQUESTS;
+  int ready = 0;
   /* The releasing gate has already withdrawn. Its state and participation
-  ** record may be gone; notification uses only the retained VM directory. */
+  ** record may be gone. Serialize notification with any stop request, which
+  ** owns the trace lists after all participants leave. */
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if ((control & LUA_WORLD_STACK_ROOTS) && !luaW_stopped(world))
+    ready = luaC_readystack(g, stack);
+  notifyrendezvous(g, NULL);
   if ((flags & LUA_GATE_WAITING) ||
-      (control & (requests | LUA_WORLD_STACK_ROOTS))) {
-    int ready = 0;
-    luaX_checksync(pthread_mutex_lock(&world->mutex));
-    /* The gate is already withdrawn. Serialize its notification with the
-    ** stop request, which owns all trace lists once participants leave. */
-    if ((control & LUA_WORLD_STACK_ROOTS) && !luaW_stopped(world))
-      ready = luaC_readystack(g, stack);
-    notifyrendezvous(g, NULL);
-    if ((flags & LUA_GATE_WAITING) ||
-        (!(flags & LUA_GATE_STACK) &&
-         (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
-      luaQ_wake(&world->changed, &world->waiters);
-    luaX_checksync(pthread_mutex_unlock(&world->mutex));
-    if (ready) luaSC_notifygc(g);
-  }
+      (!(flags & LUA_GATE_STACK) &&
+       (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
+    luaQ_wake(&world->changed, &world->waiters);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  if (ready) luaSC_notifygc(g);
 }
 
 /* The requesting mutator retains its stack gate. Other mutators publish their

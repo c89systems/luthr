@@ -67,7 +67,7 @@ static struct {
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
 uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
-void __real_luaW_leave(global_State *, uintptr_t, unsigned);
+__typeof__(luaW_leave) __real_luaW_leave;
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
                            size_t size);
@@ -181,7 +181,8 @@ uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
   return owner;
 }
 
-void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags) {
+void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags,
+                       uint64_t control) {
   if (role == 1) {
     require(pthread_mutex_lock(&handoff->mutex) == 0);
     handoff->retiring = 1;
@@ -191,7 +192,7 @@ void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags) {
     require(pthread_mutex_unlock(&handoff->mutex) == 0);
   }
   measured++;
-  __real_luaW_leave(g, stack, flags);
+  __real_luaW_leave(g, stack, flags, control);
   measured--;
 }
 
@@ -432,11 +433,16 @@ static void gate_handoff(lua_State *state, int paired) {
   require(pthread_mutex_init(&fixture.mutex, NULL) == 0);
   require(pthread_cond_init(&fixture.changed, NULL) == 0);
   handoff = &fixture;
+  /* A root check may remain pending after the gate itself is gone. */
+  __atomic_fetch_or(&G(state)->world.control, LUA_WORLD_STACK_ROOTS,
+                    __ATOMIC_SEQ_CST);
   require(pthread_create(&old, NULL, old_owner, &fixture) == 0);
   require(pthread_mutex_lock(&fixture.mutex) == 0);
   while (!fixture.retiring)
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  __atomic_fetch_and(&G(state)->world.control, ~(uint64_t)LUA_WORLD_STACK_ROOTS,
+                     __ATOMIC_SEQ_CST);
   require(pthread_create(&next, NULL, new_owner, &fixture) == 0);
   require(pthread_mutex_lock(&fixture.mutex) == 0);
   while (!fixture.entered)

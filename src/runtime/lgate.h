@@ -11,8 +11,9 @@
 
 struct LuaGateWaiter;
 
-/* The atomic word holds the aligned owner token and admission flags.
-** Stack-only and managed owners both participate in root rendezvous.
+/* Managed reservations carry an aligned owner token. A stack-only
+** reservation needs only its flag: it cannot recurse, migrate or park.
+** Both modes participate in root rendezvous.
 ** Only managed owners can borrow retired table storage. An owner can
 ** withdraw admission while retaining the stack. WAITING reserves an
 ** unowned gate for its FIFO head. */

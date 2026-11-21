@@ -34,7 +34,7 @@ static __thread int role;
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
-void __real_luaW_leave(global_State *, uintptr_t, unsigned);
+__typeof__(luaW_leave) __real_luaW_leave;
 
 static void pause_owner(struct fixture *fixture) {
   require(pthread_mutex_lock(&fixture->mutex) == 0);
@@ -45,10 +45,11 @@ static void pause_owner(struct fixture *fixture) {
   require(pthread_mutex_unlock(&fixture->mutex) == 0);
 }
 
-void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags) {
+void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags,
+                       uint64_t control) {
   if (role == 1 && current != NULL && current->mode == RETIRE)
     pause_owner(current);
-  __real_luaW_leave(g, stack, flags);
+  __real_luaW_leave(g, stack, flags, control);
 }
 
 void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
@@ -138,8 +139,14 @@ static void retire(lua_State *parent, struct fixture *fixture) {
   fixture->state = lua_newthread(parent);
   lua_pushvalue(parent, -1);
   lua_rawseti(parent, 1, 1);
+  /* Advertise a stack-root check so this release has a notification to delay.
+   */
+  __atomic_fetch_or(&G(parent)->world.control, LUA_WORLD_STACK_ROOTS,
+                    __ATOMIC_SEQ_CST);
   require(pthread_create(&thread, NULL, invoke, &call) == 0);
   wait_flag(fixture, &fixture->paused);
+  __atomic_fetch_and(&G(parent)->world.control,
+                     ~(uint64_t)LUA_WORLD_STACK_ROOTS, __ATOMIC_SEQ_CST);
   /* The departing API has released its gate and admission. Its delayed
    * notification must not dereference the now unreachable coroutine again. */
   require(__atomic_load_n(&fixture->state->stack_gate.word, __ATOMIC_ACQUIRE) ==
@@ -191,9 +198,14 @@ static void world_stop(lua_State *parent, struct fixture *fixture) {
 
 static void *hold_gate(void *argument) {
   struct fixture *fixture = argument;
-  luaX_lockstate(fixture->state);
+  lua_State *state = fixture->state;
+  uintptr_t reservation = luaX_valueenter(state, 1);
+  require(__atomic_load_n(&state->stack_gate.word, __ATOMIC_ACQUIRE) ==
+          LUA_GATE_STACK);
   pause_owner(fixture);
-  luaX_unlockstate(fixture->state);
+  setivalue(s2v(state->top.p), 42);
+  state->top.p++;
+  luaX_valueleave(state, reservation);
   return NULL;
 }
 
@@ -230,6 +242,8 @@ static void rendezvous(lua_State *parent, struct fixture *fixture) {
   luaX_unlockstate(last);
   require(pthread_join(collector, NULL) == 0);
   require(!luaW_stopped(world));
+  require(lua_gettop(fixture->state) == 1 &&
+          lua_tointeger(fixture->state, 1) == 42);
 }
 
 static int one(lua_State *state) {
