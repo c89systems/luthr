@@ -24,6 +24,8 @@ static struct {
   pthread_cond_t changed;
   int armed, sweep, entered, release;
   int pause, paused, pause_release, hold_driver;
+  unsigned native_entered;
+  int native_release;
   unsigned after_pause;
   unsigned workers, batches;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -91,6 +93,17 @@ static void *collect(void *argument) {
   return NULL;
 }
 
+static int block_native(lua_State *L) {
+  (void)L;
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  probe.native_entered++;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  while (!probe.native_release)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  return 0;
+}
+
 static void *pause_world(void *argument) {
   lua_State *L = argument;
   lua_lock(L);
@@ -125,18 +138,24 @@ int main(int argc, char **argv) {
   lua_State *L = luaL_newstate(), *task_state, *receiver;
   LuaScheduler scheduler = {0};
   LuaScheduledTask task = {0};
+  LuaScheduledTask native_tasks[2] = {0};
   LuaSchedulerConfig config = {2, 3, 1, 1, 1};
   pthread_t collector, pauser;
   struct timespec deadline;
-  int status, results, single, stopped, pause;
+  int status, results, single, stopped, pause, blocked;
   require(argc == 2 && L != NULL);
   single = strncmp(argv[1], "single_", 7) == 0;
   stopped = strcmp(argv[1], "stopped_incremental") == 0;
   pause = strstr(argv[1], "pause") != NULL;
+  blocked = strcmp(argv[1], "blocked_native") == 0;
   probe.hold_driver = pause;
   if (single) {
     config.slots = 1;
     config.carriers = 2;
+  }
+  if (blocked) {
+    config.carriers = 4;
+    config.native_limit = 2;
   }
   probe.sweep = strncmp(argv[1], "sweep_", 6) == 0;
   luaL_openlibs(L);
@@ -218,6 +237,18 @@ int main(int argc, char **argv) {
     lua_close(L);
     return 0;
   }
+  if (blocked) {
+    for (unsigned i = 0; i < 2; i++) {
+      lua_State *worker = lua_newthread(L);
+      lua_pushcfunction(worker, block_native);
+      require(luaSC_submit(&scheduler, &native_tasks[i], worker, 0) == LUA_OK);
+      lua_pop(L, 1);
+    }
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    while (probe.native_entered != 2)
+      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
   lua_gc(L, LUA_GCRESTART);
   probe.armed = 1;
   require(pthread_create(&collector, NULL, collect, L) == 0);
@@ -262,6 +293,19 @@ int main(int argc, char **argv) {
     require(pthread_join(pauser, NULL) == 0);
   }
   require(pthread_join(collector, NULL) == 0);
+  if (blocked) {
+    require(luaSC_nativeactive(&scheduler) == 2);
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    probe.native_release = 1;
+    require(pthread_cond_broadcast(&probe.changed) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+    for (unsigned i = 0; i < 2; i++) {
+      luaSC_wait(&native_tasks[i]);
+      require(luaSC_collect(receiver, &native_tasks[i], &status, &results) ==
+              LUA_OK);
+      require(status == LUA_OK && results == 0);
+    }
+  }
   probe.armed = 0;
   require(lua_rawlen(L, 1) == 16000);
   lua_rawgeti(L, 1, 16000);

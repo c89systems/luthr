@@ -294,7 +294,8 @@ static lua_Integer collect(struct fixture *f, unsigned i, int expected) {
   LuaScheduledTask *task = &f->tasks[i];
   lua_Integer value;
   luaSC_wait(task);
-  require(task->slot == NULL && task->fiber.execution.allocation_cache == NULL);
+  require(task->slot == NULL && task->native_slot == NULL &&
+          task->fiber.execution.allocation_cache == NULL);
   require(task->fiber.execution.managed_depth == 0);
   require(task->fiber.execution.native_depth == 0);
   require(luaSC_collect(f->main, task, &status, &results) == LUA_OK);
@@ -678,6 +679,78 @@ static void native_progress(struct fixture *f, int shutdown) {
   require(f->scheduler.native == 0);
   if (shutdown)
     require(luaSC_shutdown(&f->scheduler) == LUA_OK);
+  finish(f);
+}
+
+static void parallel_native_compensation(struct fixture *f) {
+  initlimits(f, 2, 2);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "started", started);
+  lua_pushcfunction(f->main, block_binding);
+  lua_setglobal(f->main, "block_binding");
+  submit(f, 0, "return block_binding()", 0);
+  submit(f, 1, "return block_binding()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered != 2)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  /* Both managed executions must reach the barrier before either C call
+   * returns. Progress in only one reclaimed slot cannot pass this test. */
+  submit(f, 2, "started(...); return 42", 0);
+  submit(f, 3, "started(...); return 43", 1);
+  require(collect(f, 2, LUA_OK) == 42);
+  require(collect(f, 3, LUA_OK) == 43);
+  require(luaSC_nativeactive(&f->scheduler) == 2);
+
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 500500);
+  require(collect(f, 1, LUA_OK) == 500500);
+  finish(f);
+}
+
+static int independently_blocked(lua_State *L) {
+  struct fixture *f = fixture;
+  unsigned id;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  id = f->native_entered++;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!(f->native_release & (1 << id)))
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  lua_pushinteger(L, 50 + id);
+  return 1;
+}
+
+static void native_return_compensation(struct fixture *f) {
+  unsigned i;
+  initlimits(f, 1, 2);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_pushcfunction(f->main, independently_blocked);
+  lua_setglobal(f->main, "independently_blocked");
+  for (i = 0; i < 2; i++) {
+    submit(f, i, "return independently_blocked()", 0);
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (f->native_entered != i + 1)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
+  /* The second call took the sole slot to enter C. The first return must
+   * proceed now, with no queued Lua work and the second still blocked. */
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 50);
+  require(luaSC_nativeactive(&f->scheduler) == 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 3;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 1, LUA_OK) == 51);
   finish(f);
 }
 
@@ -1217,6 +1290,10 @@ int main(int argc, char **argv) {
     native_reentry(f);
   else if (strcmp(argv[1], "shutdown") == 0)
     native_progress(f, 1);
+  else if (strcmp(argv[1], "parallel_native_compensation") == 0)
+    parallel_native_compensation(f);
+  else if (strcmp(argv[1], "native_return_compensation") == 0)
+    native_return_compensation(f);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

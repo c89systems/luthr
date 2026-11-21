@@ -20,7 +20,7 @@ typedef struct LuaSchedulerConfig {
 } LuaSchedulerConfig;
 
 struct LuaExecutionSlot {
-  void *owner;  /* atomic managed permission; page helpers may borrow an idle slot */
+  void *owner;  /* atomic permission; a tagged task is a recallable native reservation */
   pthread_mutex_t mutex;
   LuaScheduledTask *head, *tail;
   unsigned count;
@@ -37,7 +37,7 @@ struct LuaScheduledTask {
   LuaScheduledTask *next;  /* local runnable queue, never more than one */
   LuaScheduledTask *registered_next;
   LuaScheduledTask **registered_link;
-  LuaExecutionSlot *slot;
+  LuaExecutionSlot *slot, *native_slot;
   LuaWaiter *waiter;
   LuaCarrier *carrier;  /* current dispatch; changes only after publication */
   LuaCarrier *affinity;  /* atomic reservation while pinned/inside opaque C */
@@ -75,6 +75,7 @@ struct LuaScheduler {
   LuaExecutionSlot *slots;
   LuaCarrier *carriers;
   LuaCarrier *idle;
+  LuaCarrier *slot_watcher;  /* scheduler mutex; at most one timed sleeper */
   LuaScheduledTask *tasks;
   unsigned runnable;  /* atomic; no-request polls only read this word */
   unsigned pending_ready;  /* atomic notifications awaiting context publication */
