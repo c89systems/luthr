@@ -975,7 +975,7 @@ static void initcollectors (lua_State *L, void *argument) {
   if (s->config.slots == 1) return;  /* payload helpers need a concurrent driver */
   luaD_checkstack(L, 1);
   for (i = 0; i < s->config.slots; i++) {
-    lua_State *worker = luaE_newthread(L, 1);
+    lua_State *worker = luaE_newthread(L, 1, 0);
     s->slots[i].collector = worker;
     L->top.p--;
   }

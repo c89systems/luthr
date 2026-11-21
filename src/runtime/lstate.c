@@ -489,8 +489,14 @@ static void close_state (lua_State *L, int owns_gate) {
 }
 
 
+typedef struct NewThread {
+  lua_State *thread;
+  ptrdiff_t entry;
+} NewThread;
+
 static void buildthread (lua_State *L, void *context) {
-  lua_State *thread = cast(lua_State *, context);
+  NewThread *build = cast(NewThread *, context);
+  lua_State *thread = build->thread;
   luaW_register(thread);
   if (thread->participation.collector)
     lua_sethook(thread, NULL, 0, 0);
@@ -502,15 +508,25 @@ static void buildthread (lua_State *L, void *context) {
          LUA_EXTRASPACE);
   luai_userstatethread(L, thread);
   stack_init(thread, L);
+  if (build->entry != 0) {
+    StkId function = restorestack(L, build->entry);
+    luaC_tracevalue(L, s2v(function));
+    setobjs2s(thread, thread->top.p, function);
+    thread->top.p++;
+  }
 }
 
-lua_State *luaE_newthread (lua_State *L, int collector) {
+lua_State *luaE_newthread (lua_State *L, int collector, ptrdiff_t entry) {
   global_State *g = G(L);
   GCObject *o;
   lua_State *L1;
+  NewThread build;
   int reservation;
   TStatus status;
   luaC_checkGC(L);
+  /* Promotion may wait for a weak cutoff. Do it while the parent is the
+  ** only stack involved, before reserving the child's unadmitted gate. */
+  if (entry != 0) luaA_sharevalue(L, s2v(restorestack(L, entry)));
   /* create new thread */
   o = luaC_newobjdt(L, LUA_TTHREAD, sizeof(LX), offsetof(LX, l));
   L1 = gco2th(o);
@@ -527,7 +543,9 @@ lua_State *luaE_newthread (lua_State *L, int collector) {
   /* Establish the system role and its lifetime pin before registration or
   ** stack allocation can expose this context to a concurrent scanner. */
   L1->participation.collector = collector;
-  status = luaD_rawrunprotected(L, buildthread, L1);
+  build.thread = L1;
+  build.entry = entry;
+  status = luaD_rawrunprotected(L, buildthread, &build);
   if (status != LUA_OK && collector) {
     luaX_checksync(pthread_mutex_lock(&g->world.mutex));
     L1->participation.collector = 0;
@@ -542,7 +560,7 @@ lua_State *luaE_newthread (lua_State *L, int collector) {
 LUA_API lua_State *lua_newthread (lua_State *L) {
   lua_State *thread;
   lua_lock(L);
-  thread = luaE_newthread(L, 0);
+  thread = luaE_newthread(L, 0, 0);
   lua_unlock(L);
   return thread;
 }

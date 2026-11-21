@@ -16,6 +16,8 @@
 
 #include "lauxlib.h"
 #include "lualib.h"
+#include "lapi.h"
+#include "ldo.h"
 #include "llimits.h"
 #include "lexec.h"
 #include "lcontrol.h"
@@ -139,18 +141,17 @@ int luaB_auxwrap (lua_State *L) {
 }
 
 
-static int cocreate (lua_State *L) {
-  lua_State *NL;
-  luaL_checktype(L, 1, LUA_TFUNCTION);
-  NL = lua_newthread(L);
-  lua_pushvalue(L, 1);  /* move function to top */
-  lua_xmove(L, NL, 1);  /* move function from L to NL */
-  return 1;
-}
-
-
 int luaB_cocreate (lua_State *L) {
-  return otherstate(L, cocreate);
+  StkId function;
+  lua_lock(L);
+  function = L->ci->func.p + 1;
+  if (l_unlikely(function >= L->top.p || !ttisfunction(s2v(function)))) {
+    lua_unlock(L);
+    return luaL_typeerror(L, 1, "function");
+  }
+  luaE_newthread(L, 0, savestack(L, function));
+  lua_unlock(L);
+  return 1;
 }
 
 

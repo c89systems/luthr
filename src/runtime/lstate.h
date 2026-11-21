@@ -739,8 +739,10 @@ LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC TStatus luaE_resetthread (lua_State *L, TStatus status);
-/* State ownership and a protected allocation boundary are required. */
-LUAI_FUNC lua_State *luaE_newthread (lua_State *L, int collector);
+/* State ownership and a protected allocation boundary are required.
+** A nonzero entry names a function on the parent's stack. */
+LUAI_FUNC lua_State *luaE_newthread (lua_State *L, int collector,
+                                     ptrdiff_t entry);
 
 
 #endif
