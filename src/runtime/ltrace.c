@@ -16,14 +16,16 @@
 #include "lscheduler.h"
 
 LuaGCFrame *luaC_gcframe (void) {
-  LuaExecution *execution = luaQ_current();
-  return execution != NULL ? execution->gc_frame : luaE_thread_context.gc_frame;
+  LuaThreadContext *thread = luaE_threadcontext();
+  LuaExecution *execution = luaE_resolvestack(thread)->execution;
+  return execution != NULL ? execution->gc_frame : thread->gc_frame;
 }
 
 void luaC_restoregcframe (LuaGCFrame *frame) {
-  LuaExecution *execution = luaQ_current();
+  LuaThreadContext *thread = luaE_threadcontext();
+  LuaExecution *execution = luaE_resolvestack(thread)->execution;
   if (execution != NULL) execution->gc_frame = frame;
-  else luaE_thread_context.gc_frame = frame;
+  else thread->gc_frame = frame;
 }
 
 int luaC_ingc (lua_State *L) {

@@ -682,10 +682,14 @@ l_sinline CallInfo *luaE_cireserve (CallInfo *active) {
   return spare != NULL ? spare->next : NULL;
 }
 LUAI_FUNC void luaE_checkcstack (lua_State *L);
-LUAI_DDEC(__thread LuaThreadContext luaE_thread_context;)
+LUAI_FUNC LuaThreadContext *luaE_threadcontext (void);
 LUAI_FUNC uintptr_t luaE_initnativestack (void);
 LUAI_FUNC NativeStackContext *luaE_getnativestackcontext (void);
 LUAI_FUNC NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context);
+
+l_sinline NativeStackContext *luaE_resolvestack (LuaThreadContext *thread) {
+  return thread->override != NULL ? thread->override : &thread->native;
+}
 
 /* Only an owner (including a collector reservation) may use bound context.
 ** Bootstrap construction has no reservation yet and resolves its ambient
@@ -707,7 +711,7 @@ l_sinline LuaThreadContext *luaX_hostcontext (lua_State *L) {
     uintptr_t word = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
     return cast(LuaThreadContext *, luaX_gateowner(word));
   }
-  return &luaE_thread_context;
+  return luaE_threadcontext();
 }
 
 l_sinline void *luaX_token (lua_State *L) {

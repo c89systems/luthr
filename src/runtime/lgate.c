@@ -17,6 +17,26 @@
 #include "ltablestorage.h"
 #include "lscheduler.h"
 
+/* Keep physical TLS private to entry points that resolve it on the current
+** carrier. Inlining or IPA could preserve its address across fiber migration. */
+#define carrierentry __attribute__((noipa))
+static __thread LuaThreadContext thread_context;
+
+carrierentry LuaThreadContext *luaE_threadcontext (void) {
+  return &thread_context;
+}
+
+carrierentry NativeStackContext *luaE_getnativestackcontext (void) {
+  return luaE_resolvestack(&thread_context);
+}
+
+carrierentry NativeStackContext *luaE_setnativestackcontext (
+    NativeStackContext *context) {
+  NativeStackContext *previous = thread_context.override;
+  thread_context.override = context;
+  return previous;
+}
+
 void luaX_checksync (int status) {
   if (status != 0) {
     fprintf(stderr, "Luthr internal synchronization failure: %d\n", status);
@@ -106,11 +126,10 @@ static void release (lua_State *L, void *token) {
   leavegate(L);
 }
 
-int luaX_tryreserve (lua_State *target) {
+carrierentry int luaX_tryreserve (lua_State *target) {
   LuaStackGate *gate = &target->stack_gate;
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+  LuaThreadContext *thread = &thread_context;
+  NativeStackContext *context = luaE_resolvestack(thread);
   void *token = context->execution != NULL ? cast(void *, context->execution)
                                           : cast(void *, &thread->native);
   uintptr_t expected = 0;
@@ -141,10 +160,9 @@ static void *lockstate (lua_State *L, LuaThreadContext *thread,
   return token;
 }
 
-void luaX_lockstate (lua_State *L) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+carrierentry void luaX_lockstate (lua_State *L) {
+  LuaThreadContext *thread = &thread_context;
+  NativeStackContext *context = luaE_resolvestack(thread);
   lockstate(L, thread, context);
   preparecall(L, context->execution);
 }
@@ -226,9 +244,8 @@ static void managestack (lua_State *L, NativeStackContext *context) {
 }
 
 l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+  LuaThreadContext *thread = &thread_context;
+  NativeStackContext *context = luaE_resolvestack(thread);
   LuaExecution *execution = context->execution;
   if (attachedapi(L, context)) {
     luaX_pollrequests(L);
@@ -261,14 +278,13 @@ l_sinline uintptr_t apienter (lua_State *L, int stackonly) {
   return cast(uintptr_t, lockstate(L, thread, context));
 }
 
-void luaX_apienter (lua_State *L) {
+carrierentry void luaX_apienter (lua_State *L) {
   if (apienter(L, 0) != 0) preparecall(L, L->stack_gate.context->execution);
 }
 
-void luaX_apileave (lua_State *L) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+carrierentry void luaX_apileave (lua_State *L) {
+  LuaThreadContext *thread = &thread_context;
+  NativeStackContext *context = luaE_resolvestack(thread);
   if (!attachedapi(L, context)) {
     void *token = context->execution != NULL ? cast(void *, context->execution)
                                             : cast(void *, &thread->native);
@@ -276,7 +292,7 @@ void luaX_apileave (lua_State *L) {
   }
 }
 
-uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
+carrierentry uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
   return apienter(L, stackonly);
 }
 
@@ -306,10 +322,9 @@ int luaX_valuecall (lua_State *L, uintptr_t owner) {
 /* Reserve both stacks before joining managed execution. A blocked reservation
 ** must not count as a mutator or prevent the other owner from collecting.
 ** No managed stack/CI pointer is borrowed until both reservations are ready. */
-void luaX_lockpair (lua_State *first, lua_State *second) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *context = thread->override != NULL
-                                 ? thread->override : &thread->native;
+carrierentry void luaX_lockpair (lua_State *first, lua_State *second) {
+  LuaThreadContext *thread = &thread_context;
+  NativeStackContext *context = luaE_resolvestack(thread);
   LuaExecution *execution = context->execution;
   void *token = execution != NULL ? cast(void *, execution)
                                   : cast(void *, &thread->native);

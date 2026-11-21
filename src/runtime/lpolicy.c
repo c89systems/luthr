@@ -7,8 +7,9 @@
 #include "lstate.h"
 
 LuaPolicy *luaCP_current (void) {
-  LuaExecution *execution = luaQ_current();
-  return execution != NULL ? execution->policy : luaE_thread_context.policy;
+  LuaThreadContext *thread = luaE_threadcontext();
+  LuaExecution *execution = luaE_resolvestack(thread)->execution;
+  return execution != NULL ? execution->policy : thread->policy;
 }
 
 void luaCP_retain (LuaPolicy *policy) {
@@ -45,14 +46,15 @@ void luaCP_begin (LuaPolicy *policy, LuaPolicyScope *scope) {
     scope->execution->policy = policy;
   }
   else {
-    scope->previous = luaE_thread_context.policy;
-    luaE_thread_context.policy = policy;
+    LuaThreadContext *thread = luaE_threadcontext();
+    scope->previous = thread->policy;
+    thread->policy = policy;
   }
 }
 
 void luaCP_end (LuaPolicyScope *scope) {
   if (scope->execution != NULL) scope->execution->policy = scope->previous;
-  else luaE_thread_context.policy = scope->previous;
+  else luaE_threadcontext()->policy = scope->previous;
 }
 
 int luaCP_exhausted (lua_State *L) {

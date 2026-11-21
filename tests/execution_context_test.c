@@ -68,10 +68,11 @@ static void owned(lua_State *state, int managed) {
   luaX_lockstate(state);
   require(luaX_context(state) == &native);
   require(luaX_execution(state) == (managed ? &execution : NULL));
-  require(luaX_token(state) ==
-          (managed ? (void *)&execution : (void *)&luaE_thread_context.native));
+  require(
+      luaX_token(state) ==
+      (managed ? (void *)&execution : (void *)&luaE_threadcontext()->native));
   if (!managed)
-    require(luaX_hostcontext(state) == &luaE_thread_context);
+    require(luaX_hostcontext(state) == luaE_threadcontext());
   table = hvalue(s2v(state->top.p - 1));
   setivalue(&key, 1);
   luaC_entergc(state, &frame);
@@ -163,15 +164,15 @@ static void leave_native(LuaExecution *execution, lua_State *state) {
 static void *first_owner(void *user) {
   struct foreign *test = user;
   luaX_lockstate(test->state);
-  require(luaX_context(test->state) == &luaE_thread_context.native);
-  require(luaX_token(test->state) == &luaE_thread_context.native);
+  require(luaX_context(test->state) == &luaE_threadcontext()->native);
+  require(luaX_token(test->state) == &luaE_threadcontext()->native);
   require(pthread_mutex_lock(&test->mutex) == 0);
   test->entered = 1;
   require(pthread_cond_broadcast(&test->changed) == 0);
   while (!test->release)
     require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
   require(pthread_mutex_unlock(&test->mutex) == 0);
-  require(luaX_context(test->state) == &luaE_thread_context.native);
+  require(luaX_context(test->state) == &luaE_threadcontext()->native);
   luaX_unlockstate(test->state);
   return NULL;
 }
@@ -179,9 +180,9 @@ static void *first_owner(void *user) {
 static void *second_owner(void *user) {
   struct foreign *test = user;
   luaX_lockstate(test->state);
-  require(luaX_context(test->state) == &luaE_thread_context.native);
-  require(luaX_hostcontext(test->state) == &luaE_thread_context);
-  require(luaX_token(test->state) == &luaE_thread_context.native);
+  require(luaX_context(test->state) == &luaE_threadcontext()->native);
+  require(luaX_hostcontext(test->state) == luaE_threadcontext());
+  require(luaX_token(test->state) == &luaE_threadcontext()->native);
   luaX_unlockstate(test->state);
   return NULL;
 }

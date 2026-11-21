@@ -136,21 +136,6 @@ void luaE_shrinkCI (lua_State *L) {
 }
 
 
-/* Cache native bounds per physical thread; refresh on outer VM entry. */
-LUAI_DDEF __thread LuaThreadContext luaE_thread_context;
-
-NativeStackContext *luaE_getnativestackcontext (void) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  return thread->override != NULL ? thread->override : &thread->native;
-}
-
-NativeStackContext *luaE_setnativestackcontext (NativeStackContext *context) {
-  LuaThreadContext *thread = &luaE_thread_context;
-  NativeStackContext *previous = thread->override;
-  thread->override = context;
-  return previous;
-}
-
 #if defined(__linux__) && !defined(__GLIBC__)
 /* musl reports only the initial thread's mapped pages. Linux can grow that
 ** stack to its resource limit, bounded by the preceding mapping. Do not

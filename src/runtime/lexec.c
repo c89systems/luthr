@@ -162,9 +162,10 @@ int luaQ_isowner (const LuaOwner *owner) {
 }
 
 void *luaQ_ownertoken (void) {
-  LuaExecution *execution = luaQ_current();
+  LuaThreadContext *thread = luaE_threadcontext();
+  LuaExecution *execution = luaE_resolvestack(thread)->execution;
   return execution != NULL ? cast(void *, execution)
-                           : cast(void *, &luaE_thread_context.native);
+                           : cast(void *, &thread->native);
 }
 
 /* The caller has published roots and withdrawn collection participation where
