@@ -30,6 +30,7 @@ struct fixture {
   struct context warnings[2];
   struct actor actors[2];
   size_t live_bytes;
+  int mix_builtin;
   int blocked;
   int entered;
   int release;
@@ -51,12 +52,13 @@ static void *allocate(void *user, void *pointer, size_t old_size, size_t size,
   if (pointer == NULL)
     old_size = 0;
   if (size == 0) {
-    fixture->live_bytes -= old_size;
+    if (!fixture->mix_builtin)
+      fixture->live_bytes -= old_size;
     free(pointer);
     return NULL;
   }
   replacement = realloc(pointer, size);
-  if (replacement != NULL)
+  if (replacement != NULL && !fixture->mix_builtin)
     fixture->live_bytes = fixture->live_bytes - old_size + size;
   return replacement;
 }
@@ -110,6 +112,8 @@ static int panic_b(lua_State *state) {
 static void check_allocator(lua_State *state, struct fixture *fixture) {
   void *user;
   lua_Alloc current = lua_getallocf(state, &user);
+  if (fixture->mix_builtin && current == luaL_alloc && user == fixture)
+    return;
   if (!((current == allocate_a && user == &fixture->allocators[0]) ||
         (current == allocate_b && user == &fixture->allocators[1])))
     abort();
@@ -144,8 +148,11 @@ static int work(lua_State *state) {
       if (role == 0) {
         lua_CFunction previous;
         unsigned selected = i % 2;
-        lua_setallocf(state, selected ? allocate_b : allocate_a,
-                      &fixture->allocators[selected]);
+        if (fixture->mix_builtin && i % 3 == 2)
+          lua_setallocf(state, luaL_alloc, fixture);
+        else
+          lua_setallocf(state, selected ? allocate_b : allocate_a,
+                        &fixture->allocators[selected]);
         lua_setwarnf(state, selected ? warn_b : warn_a,
                      &fixture->warnings[selected]);
         previous = lua_atpanic(state, selected ? panic_b : panic_a);
@@ -197,7 +204,9 @@ int main(int argc, char **argv) {
     return 2;
   memset(&fixture, 0, sizeof(fixture));
   fixture.blocked = strcmp(argv[1], "blocked") == 0;
-  if (!fixture.blocked && strcmp(argv[1], "replace") != 0)
+  fixture.mix_builtin = strcmp(argv[1], "builtin") == 0;
+  if (!fixture.blocked && !fixture.mix_builtin &&
+      strcmp(argv[1], "replace") != 0)
     return 2;
   check(pthread_mutex_init(&fixture.mutex, NULL));
   check(pthread_cond_init(&fixture.changed, NULL));

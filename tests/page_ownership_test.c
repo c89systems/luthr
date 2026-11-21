@@ -50,8 +50,8 @@ void __wrap_luaW_heapenter(lua_State *L) {
   __real_luaW_heapenter(L);
 }
 
-void __real_luaAL_enter(lua_State *);
-void __wrap_luaAL_enter(lua_State *L) {
+__typeof__(luaAL_enter) __real_luaAL_enter, __wrap_luaAL_enter;
+int __wrap_luaAL_enter(lua_State *L) {
   if (rebind_execution != NULL) {
     LuaExecution *execution = rebind_execution;
     rebind_execution = NULL;
@@ -62,7 +62,7 @@ void __wrap_luaAL_enter(lua_State *L) {
     rebind_frame = luaM_newframe(L);
     require(rebind_frame != NULL);
   }
-  __real_luaAL_enter(L);
+  return __real_luaAL_enter(L);
 }
 
 void __real_luaQ_poll(lua_State *);

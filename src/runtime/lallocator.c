@@ -1,4 +1,4 @@
-/* Backing callbacks share an admission domain, not the collector's permit. */
+/* Caller-provided allocators share admission independently of the collector. */
 #define lallocator_c
 #define LUA_CORE
 #include "lprefix.h"
@@ -28,7 +28,7 @@ void luaAL_destroy (LuaAllocator *allocator) {
   luaX_checksync(pthread_mutex_destroy(&allocator->mutex));
 }
 
-void luaAL_enter (lua_State *L) {
+static void admit (lua_State *L) {
   LuaAllocator *allocator = &G(L)->allocator;
   LuaWorld *world = &G(L)->world;
   void *token = luaX_token(L), *owner;
@@ -73,8 +73,15 @@ void luaAL_enter (lua_State *L) {
   }
 }
 
-void luaAL_leave (lua_State *L) {
+int luaAL_enter (lua_State *L) {
+  if (G(L)->allocator.function == luaAL_builtin) return 0;
+  admit(L);
+  return 1;
+}
+
+void luaAL_leave (lua_State *L, int admitted) {
   LuaAllocator *allocator = &G(L)->allocator;
+  if (!admitted) return;
   lua_assert(__atomic_load_n(&allocator->owner, __ATOMIC_RELAXED) ==
                luaX_token(L) && allocator->depth != 0);
   if (--allocator->depth == 0) {
@@ -89,9 +96,16 @@ void luaAL_leave (lua_State *L) {
 
 void *luaAL_realloc (lua_State *L, void *block, size_t old, size_t size) {
   LuaAllocator *allocator = &G(L)->allocator;
-  void *replacement;
-  luaAL_enter(L);
-  replacement = allocator->function(allocator->context, block, old, size);
-  luaAL_leave(L);
+  int admitted = luaAL_enter(L);
+  void *replacement = allocator->function(allocator->context, block, old, size);
+  luaAL_leave(L, admitted);
   return replacement;
+}
+
+void luaAL_freeexternal (lua_State *L, lua_Alloc function, void *context,
+                         void *block, size_t size) {
+  int admitted = function != luaAL_builtin;
+  if (admitted) admit(L);
+  function(context, block, size, 0);
+  luaAL_leave(L, admitted);
 }

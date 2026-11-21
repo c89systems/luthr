@@ -250,14 +250,24 @@ set_target_properties(allocator_admission_test PROPERTIES C_STANDARD 99)
 target_compile_options(allocator_admission_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(allocator_admission_test PRIVATE luthr_static Threads::Threads)
 target_link_options(allocator_admission_test PRIVATE -Wl,--wrap=luaW_heapenter
-  -Wl,--wrap=luaQ_wake)
+  -Wl,--wrap=luaQ_wake -Wl,--wrap=realloc)
 foreach(case IN ITEMS metadata_incremental metadata_generational callback_incremental callback_generational
     external_incremental external_generational
-    notification_incremental notification_generational)
+    notification_incremental notification_generational builtin_direct builtin_refill
+    builtin_facade builtin_external)
   add_test(NAME allocator_admission_${case} COMMAND allocator_admission_test ${case})
   set_tests_properties(allocator_admission_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
+
+luthr_test_program(allocator_interposition_test allocator_interposition_test.c)
+set_target_properties(allocator_interposition_test PROPERTIES C_STANDARD 99)
+target_compile_options(allocator_interposition_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(allocator_interposition_test PRIVATE luthr_shared)
+target_link_options(allocator_interposition_test PRIVATE -Wl,--export-dynamic-symbol=luaL_alloc)
+add_test(NAME allocator_interposition COMMAND allocator_interposition_test)
+set_tests_properties(allocator_interposition PROPERTIES
+  LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 
 luthr_test_program(page_ownership_test page_ownership_test.c)
 set_target_properties(page_ownership_test PROPERTIES C_STANDARD 99)
@@ -1085,7 +1095,7 @@ luthr_test_program(callback_config_test callback_config_test.c)
 set_target_properties(callback_config_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_config_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(callback_config_test PRIVATE luthr_static)
-foreach(case IN ITEMS replace blocked)
+foreach(case IN ITEMS replace blocked builtin)
   add_test(NAME callback_config_${case} COMMAND callback_config_test ${case})
   set_tests_properties(callback_config_${case} PROPERTIES LABELS "parallel;memcheck" TIMEOUT 30)
 endforeach()
@@ -1240,7 +1250,7 @@ set_tests_properties(public_exports PROPERTIES LABELS abi TIMEOUT 10)
 add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   lua_facade_static lua_facade_shared native_roots_test execution_wait_test
   capture_cells_test closure_cache_test execution_context_test api_region_test stack_admission_test gc_admission_test value_api_test table_read_test memory_publication_test
-  allocation_pool_test allocator_admission_test page_ownership_test gc_pacing_test gc_controller_test
+  allocation_pool_test allocator_admission_test allocator_interposition_test page_ownership_test gc_pacing_test gc_controller_test
   gc_barriers_test gc_availability_test gc_scheduler_test gc_directory_test gc_requests_test gc_reclamation_test gc_tracing_test finalizer_work_test
   gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test table_partitions_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test
   gc_sweeping_test

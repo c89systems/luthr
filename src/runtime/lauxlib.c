@@ -1106,6 +1106,11 @@ void *luaL_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
     return realloc(ptr, nsize);
 }
 
+/* Compare against this private entry so an interposed luaL_alloc callback
+** takes the same admission path as any other embedding allocator. */
+LUAI_FUNC void *luaAL_builtin (void *, void *, size_t, size_t)
+  __attribute__((alias("luaL_alloc")));
+
 
 /*
 ** Standard panic function just prints an error message. The test

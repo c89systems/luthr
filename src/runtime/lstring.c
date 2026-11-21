@@ -404,9 +404,7 @@ TString *luaS_newextlstr (lua_State *L,
   else {
     ne.kind = LSTRMEM;
     if (luaD_rawrunprotected(L, f_newext, &ne) != LUA_OK) {  /* mem. error? */
-      luaAL_enter(L);
-      (*falloc)(ud, cast_voidp(s), len + 1, 0);  /* free external string */
-      luaAL_leave(L);
+      luaAL_freeexternal(L, falloc, ud, cast_voidp(s), len + 1);
       luaM_error(L);  /* re-raise memory error */
     }
     ne.ts->falloc = falloc;

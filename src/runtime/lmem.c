@@ -341,12 +341,13 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
   global_State *g = G(L);
   LuaAllocPage *pages[64];
   unsigned count = 0, i;
+  int admitted;
   if (__atomic_load_n(&g->allocation_retired, __ATOMIC_ACQUIRE) == NULL &&
       __atomic_load_n(&g->allocation_returning, __ATOMIC_ACQUIRE) == NULL)
     return 0;
   /* Claim work only after backing admission. No empty-page batch is stranded
   ** on an inactive stack while emergency collection needs those bytes. */
-  luaAL_enter(L);
+  admitted = luaAL_enter(L);
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   if (*epoch == 0 && g->allocation_returning == NULL) {
     LuaAllocPage *pending = __atomic_exchange_n(&g->allocation_retired, NULL,
@@ -374,7 +375,7 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
     luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
     callfrealloc(L, page, page->bytes, 0);
   }
-  luaAL_leave(L);
+  luaAL_leave(L, admitted);
   return count;
 }
 
@@ -729,7 +730,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   global_State *g = G(L);
   LuaAllocPage *page = allocationcache(L)->pages[pool];
   uint64_t epoch = luaC_traceepoch(g);
-  int fresh = 0;
+  int admitted, fresh = 0;
   /* Cold size classes need only a small block supply. These are allocator
   ** chunks, not OS mappings: reserving 4 KiB per cold coroutine/class strands
   ** most of a small public heap. Always fit at least two complete blocks. */
@@ -749,7 +750,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   if (page != NULL) {
     return page;
   }
-  luaAL_enter(L);
+  admitted = luaAL_enter(L);
   /* Admission can park and borrow a different slot. Its cache may already
   ** have been refilled, so retain usable pages instead of overwriting them. */
   page = reusecache(L, pool, minimum, &bytes, epoch);
@@ -765,11 +766,11 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
     }
     if (page == NULL) {
       int retry = 0;
-      luaAL_leave(L);
+      luaAL_leave(L, admitted);
       luaW_heapenter(L);
       if (cantryagain(g)) { luaC_fullgc(L, 1); retry = 1; }
       luaW_heapleave(L);
-      luaAL_enter(L);
+      admitted = luaAL_enter(L);
       page = reusecache(L, pool, minimum, &bytes, epoch);
       if (page != NULL) goto ready;
       page = availablepage(L, pool);
@@ -782,7 +783,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
     }
   }
  ready:
-  luaAL_leave(L);
+  luaAL_leave(L, admitted);
   if (fresh) {
     /* Initialize privately; publish a complete page under its pool mutex.
     ** Participation keeps the cache lease stable through this nonparking work. */

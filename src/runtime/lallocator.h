@@ -9,7 +9,7 @@
 typedef struct LuaAllocator {
   lua_Alloc function;
   void *context;
-  void *owner;  /* atomic logical owner; callback calls remain serialized */
+  void *owner;  /* atomic logical owner for caller-provided callbacks */
   unsigned depth;
   unsigned waiting;  /* atomic observer handshake with changed */
   pthread_mutex_t mutex;
@@ -19,10 +19,12 @@ typedef struct LuaAllocator {
 
 LUAI_FUNC int luaAL_init (LuaAllocator *, lua_Alloc, void *);
 LUAI_FUNC void luaAL_destroy (LuaAllocator *);
+LUAI_FUNC void *luaAL_builtin (void *, void *, size_t, size_t);
 /* Entry can park and change the caller's allocation-cache lease. No Lua work
 ** or safepoint may run while held; failed requests release before collection. */
-LUAI_FUNC void luaAL_enter (lua_State *L);
-LUAI_FUNC void luaAL_leave (lua_State *L);
+LUAI_FUNC int luaAL_enter (lua_State *L);
+LUAI_FUNC void luaAL_leave (lua_State *L, int admitted);
 LUAI_FUNC void *luaAL_realloc (lua_State *, void *, size_t, size_t);
+LUAI_FUNC void luaAL_freeexternal (lua_State *, lua_Alloc, void *, void *, size_t);
 
 #endif

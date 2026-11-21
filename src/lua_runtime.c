@@ -1092,7 +1092,12 @@ luthr_lua_runtime_status luthr_lua_runtime_new_with_allocator(
   }
 
   runtime->allocator.mutex = &runtime->allocator_mutex;
-  state = lua_newstate(luthr_lua_runtime_lua_alloc, &runtime->allocator, 0);
+  if (allocator.config.alloc_fn == luthr_lua_runtime_default_alloc &&
+      allocator.config.max_bytes == 0) {
+    state = lua_newstate(luaL_alloc, NULL, 0);
+  } else {
+    state = lua_newstate(luthr_lua_runtime_lua_alloc, &runtime->allocator, 0);
+  }
   if (state == NULL) {
     allocator = runtime->allocator;
     allocator.mutex = NULL;

@@ -64,11 +64,8 @@ static void freeobj (lua_State *L, GCObject *o) {
     }
     case LUA_VLNGSTR: {
       TString *ts = gco2ts(o);
-      if (ts->shrlen == LSTRMEM) {  /* external allocators stay serialized */
-        luaAL_enter(L);
-        (*ts->falloc)(ts->ud, ts->contents, ts->u.lnglen + 1, 0);
-        luaAL_leave(L);
-      }
+      if (ts->shrlen == LSTRMEM)
+        luaAL_freeexternal(L, ts->falloc, ts->ud, ts->contents, ts->u.lnglen + 1);
       luaM_freemem(L, ts, luaS_sizelngstr(ts->u.lnglen, ts->shrlen));
       break;
     }
