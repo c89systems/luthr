@@ -77,7 +77,7 @@ endforeach()
 
 foreach(runtime IN ITEMS upstream luthr)
   luthr_test_program(scheduled_${runtime} scheduled.c)
-  target_sources(scheduled_${runtime} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
+  target_sources(scheduled_${runtime} PRIVATE native.c "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
   set_target_properties(scheduled_${runtime} PROPERTIES C_STANDARD 99)
   target_compile_options(scheduled_${runtime} PRIVATE -Wall -Wextra -Werror)
   target_include_directories(scheduled_${runtime} BEFORE PRIVATE "${reference_dir}")
@@ -91,7 +91,7 @@ foreach(runtime IN ITEMS upstream luthr)
     set(scheduled_slots 2)
     set(scheduled_native 1)
   endif()
-  foreach(workload IN ITEMS integers independent_tables shared_table shared_hash shared_growth shared_reads closures allocation_gc)
+  foreach(workload IN ITEMS integers independent_tables shared_table shared_hash shared_growth shared_reads closures allocation_gc native_callbacks)
     foreach(collector IN ITEMS incremental generational)
       add_test(NAME lua_scheduled_${runtime}_${workload}_${collector}
         COMMAND scheduled_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
@@ -120,7 +120,7 @@ set(scheduled_arguments
 # measurement overhead without changing collector algorithms or public APIs.
 foreach(mode IN ITEMS control profile)
   luthr_test_program(scheduled_gc_${mode} scheduled.c)
-  target_sources(scheduled_gc_${mode} PRIVATE "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
+  target_sources(scheduled_gc_${mode} PRIVATE native.c "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")
   set_target_properties(scheduled_gc_${mode} PROPERTIES C_STANDARD 99)
   target_compile_options(scheduled_gc_${mode} PRIVATE -Wall -Wextra -Werror)
   target_compile_definitions(scheduled_gc_${mode} PRIVATE LUTHR_BENCH_SCHEDULER)

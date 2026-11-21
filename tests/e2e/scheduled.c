@@ -40,6 +40,8 @@ struct job {
   GcProbe probe;
 #endif
 };
+int luaopen_compat_fixture(lua_State *L);
+
 static unsigned delay_us;
 
 static uint64_t now(clockid_t clock) {
@@ -195,6 +197,10 @@ int main(int argc, char **argv) {
   L = lua_newstate(allocate, &memory, 0);
   require(L != NULL);
   luaL_openlibs(L);
+  if (strcmp(argv[2], "native_callbacks") == 0) {
+    luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
+    lua_pop(L, 1);
+  }
   lua_pushcfunction(L, pause_native);
   lua_setglobal(L, "benchmark_delay");
   lua_gc(L, strcmp(argv[3], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
