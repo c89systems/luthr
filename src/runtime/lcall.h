@@ -8,20 +8,23 @@
 /* Admission can park. In particular, reserve foreign execution capacity
 ** before building a frame or reading arguments that can move with the stack. */
 l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
-  LuaExecution *execution = luaX_execution(L);
-  scope->execution = execution;
+  NativeStackContext *context = luaX_context(L);
+  LuaExecution *execution = context->execution;
+  scope->context = context;
   scope->managed = managed;
-  if (!managed)
-    luaQ_beginnative(L, execution);
-  else if (execution != NULL) {
-    scope->previous = execution->trusted;
-    scope->native_depth = execution->native_depth;
-    execution->trusted = scope;
+  if (execution != NULL) {
+    if (!managed)
+      luaQ_beginnative(L, execution);
+    else {
+      scope->previous = execution->trusted;
+      scope->native_depth = execution->native_depth;
+      execution->trusted = scope;
+    }
   }
 }
 
 l_sinline void luaQ_entercall (lua_State *L, LuaCallScope *scope) {
-  NativeStackContext *context;
+  NativeStackContext *context = scope->context;
   if (!scope->managed) {
     scope->world = luaW_detach(L);
     return;
@@ -35,20 +38,18 @@ l_sinline void luaQ_entercall (lua_State *L, LuaCallScope *scope) {
 #endif
   L->native_depth++;
   scope->world = luaW_ownsheap(L) ? luaW_suspend(L) : (LuaWorldScope){0};
-  context = luaX_context(L);
   scope->api.previous = context->api_region;
   scope->api.state = L;
   context->api_region = &scope->api;
 }
 
 l_sinline void luaQ_leavecall (lua_State *L, LuaCallScope *scope) {
+  NativeStackContext *context = scope->context;
   if (!scope->managed) {
-    luaW_attach(L, scope->world);
-    luaQ_endnative(L, scope->execution);
+    luaW_returnnative(L, scope->world, context);
   }
   else {
-    NativeStackContext *context = luaX_context(L);
-    LuaExecution *execution = scope->execution;
+    LuaExecution *execution = context->execution;
     lua_assert(context->api_region == &scope->api && L->native_depth != 0);
     context->api_region = scope->api.previous;
     if (scope->world.heap != 0 || scope->world.collection != 0 ||

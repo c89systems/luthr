@@ -1163,7 +1163,7 @@ void luthr_lua_runtime_free(luthr_lua_runtime *runtime) {
     if (policy != NULL) {
       luaCP_begin(policy, &scope);
       lua_lock(runtime->state);
-      luaCP_apply(runtime->state);
+      luaCP_apply(runtime->state, policy);
       luaCP_release(runtime->state, policy);
       lua_unlock(runtime->state);
     }

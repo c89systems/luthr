@@ -157,8 +157,18 @@ void luaX_endreserve (lua_State *target, int reservation) {
   }
 }
 
-static void preparecall (lua_State *L, LuaExecution *execution) {
-  luaCP_apply(L);
+static void preparecall (lua_State *L, NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  LuaPolicy *policy;
+  if (execution != NULL)
+    policy = execution->policy;
+  else {
+    /* The carrier's default native context starts the host record. */
+    LuaThreadContext *host = context->host != NULL ? context->host
+                                           : cast(LuaThreadContext *, context);
+    policy = host->policy;
+  }
+  if (policy != NULL || L->policy != NULL) luaCP_apply(L, policy);
   if (L->errorJmp == NULL && execution != NULL) luaE_refreshnativestack(L);
 }
 
@@ -173,7 +183,7 @@ carrierentry void luaX_lockstate (lua_State *L) {
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
   lockstate(L, context);
-  preparecall(L, context->execution);
+  preparecall(L, context);
 }
 
 static void unlockstate (lua_State *L, NativeStackContext *context, int values) {
@@ -221,22 +231,33 @@ LuaWorldScope luaW_detach (lua_State *L) {
 #endif
   lua_assert(context != NULL && context == luaQ_ownertoken());
   L->native_depth++;
-  scope = luaW_suspend(L);
+  scope = luaW_ownsheap(L) ? luaW_suspend(L) : (LuaWorldScope){0};
   scope.api_region = context->api_region;
   context->api_region = NULL;
   unlockstate(L, context, 0);
   return scope;
 }
 
-carrierentry void luaW_attach (lua_State *L, LuaWorldScope scope) {
-  NativeStackContext *context = luaE_resolvestack(&thread_context);
+static void attach (lua_State *L, LuaWorldScope scope,
+                    NativeStackContext *context) {
   lockstate(L, context);
-  preparecall(L, context->execution);
+  preparecall(L, context);
   if (scope.collection != 0 || scope.heap != 0 || luaW_ownsheap(L))
     luaW_restore(L, scope, L->native_depth);
   lua_assert(L->native_depth != 0);
   L->native_depth--;
   context->api_region = scope.api_region;
+}
+
+carrierentry void luaW_attach (lua_State *L, LuaWorldScope scope) {
+  attach(L, scope, luaE_resolvestack(&thread_context));
+}
+
+void luaW_returnnative (lua_State *L, LuaWorldScope scope,
+                         NativeStackContext *context) {
+  lua_assert(context == luaQ_ownertoken());
+  attach(L, scope, context);
+  if (context->execution != NULL) luaQ_endnative(L, context->execution);
 }
 
 int luaX_tryworker (lua_State *L) {
@@ -295,7 +316,7 @@ l_sinline uintptr_t apienter (lua_State *L) {
 
 carrierentry void luaX_apienter (lua_State *L) {
   uintptr_t owner = apienter(L);
-  if (owner != 0) preparecall(L, cast(NativeStackContext *, owner)->execution);
+  if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
 }
 
 void luaX_apileave (lua_State *L) {
@@ -343,7 +364,7 @@ carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {
     }
     managestack(L, context);
   }
-  if (owner != 0) preparecall(L, luaX_boundcontext(L)->execution);
+  if (owner != 0) preparecall(L, luaX_boundcontext(L));
   return 1;
 }
 
@@ -375,12 +396,8 @@ carrierentry void luaX_lockpair (lua_State *first, lua_State *second) {
   luaW_activate(first);
   luaW_enter(first);
   if (second != first) luaC_checksnapshot(second);
-  luaCP_apply(first);
-  if (second != first) luaCP_apply(second);
-  if (first->errorJmp == NULL && execution != NULL)
-    luaE_refreshnativestack(first);
-  if (second != first && second->errorJmp == NULL && execution != NULL)
-    luaE_refreshnativestack(second);
+  preparecall(first, context);
+  if (second != first) preparecall(second, context);
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {

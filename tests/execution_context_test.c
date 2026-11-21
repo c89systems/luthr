@@ -96,20 +96,20 @@ static void owned(lua_State *state, int managed) {
     require(ivalue(&result) == i);
     require(luaC_ingc(state));
     luaTK_checkstop(state);
-    luaCP_apply(state);
+    luaCP_apply(state, &policy);
     luaA_end(state, &outer);
   }
   measuring = 0;
   require(lookups == 0 && state->policy == &policy);
   require(lua_gethook(state) == policy_hook && lua_gethookcount(state) == 1);
   lua_sethook(state, user_hook, LUA_MASKCALL, 0);
-  luaCP_apply(state);
+  luaCP_apply(state, &policy);
   require(lua_gethook(state) == policy_hook);
   __atomic_store_n(&policy.hookmask, 0, __ATOMIC_RELEASE);
-  luaCP_apply(state);
+  luaCP_apply(state, &policy);
   require(lua_gethook(state) == NULL);
   lua_sethook(state, user_hook, LUA_MASKCALL, 0);
-  luaCP_apply(state);
+  luaCP_apply(state, &policy);
   require(lua_gethook(state) == user_hook);
   lua_sethook(state, NULL, 0, 0);
   luaC_leavegc(state, &frame);

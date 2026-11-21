@@ -33,10 +33,7 @@ void luaCP_bind (lua_State *L, LuaPolicy *policy) {
   }
 }
 
-void luaCP_apply (lua_State *L) {
-  LuaExecution *execution = luaX_execution(L);
-  LuaPolicy *policy = execution != NULL ? execution->policy
-                                       : luaX_hostcontext(L)->policy;
+void luaCP_apply (lua_State *L, LuaPolicy *policy) {
   if (policy != L->policy && policy != NULL && policy->global == G(L))
     luaCP_bind(L, policy);
   policy = L->policy;

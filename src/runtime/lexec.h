@@ -11,6 +11,7 @@
 struct lua_longjmp;
 struct LuaWaiter;
 struct LuaTaskRoot;
+struct NativeStackContext;
 
 /* An attached runtime C activation owns its state across API calls. The
 ** record lives on the logical execution's retained C stack. */
@@ -51,7 +52,7 @@ typedef struct LuaAllocationCache {
 
 typedef struct LuaCallScope {
   struct LuaCallScope *previous;
-  struct LuaExecution *execution;
+  struct NativeStackContext *context;
   unsigned native_depth;
   int managed;
   LuaApiRegion api;

@@ -28,7 +28,7 @@ LUAI_FUNC void luaCP_release (lua_State *, LuaPolicy *);
 LUAI_FUNC void luaCP_bind (lua_State *, LuaPolicy *);
 /* State ownership/admission already exists. A compatible explicit execution or
 ** host scope wins; otherwise a coroutine retains its inherited invocation. */
-LUAI_FUNC void luaCP_apply (lua_State *);
+LUAI_FUNC void luaCP_apply (lua_State *, LuaPolicy *);
 LUAI_FUNC void luaCP_begin (LuaPolicy *, LuaPolicyScope *);
 LUAI_FUNC void luaCP_end (LuaPolicyScope *);
 LUAI_FUNC LuaPolicy *luaCP_current (void);
