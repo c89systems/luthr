@@ -12,8 +12,9 @@ typedef struct LuaPolicy {
   unsigned references;
   int active;  /* atomic; inactive inherited records never charge new work */
   int exhausted;  /* atomic terminal instruction-budget outcome */
+  int hookmask;  /* atomic; requested events while active */
   void *owner;
-  void (*configure)(struct LuaPolicy *, lua_State *);
+  lua_Hook hook;
   void (*release)(lua_State *, struct LuaPolicy *);
 } LuaPolicy;
 

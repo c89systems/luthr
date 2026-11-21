@@ -2,7 +2,6 @@
 #include <lapi.h>
 #include <lmem.h>
 #include <lstate.h>
-#include <luthr_hook_policy.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -71,24 +70,9 @@ static void hook(lua_State *L, lua_Debug *debug) {
   }
 }
 
-static void configure(LuaPolicy *base, lua_State *L) {
-  Invocation *invocation = (Invocation *)base;
-  int mask = 0, count = 0;
-  if (__atomic_load_n(&base->active, __ATOMIC_ACQUIRE)) {
-    if (invocation->options.instruction_limit != 0) {
-      mask |= LUA_MASKCOUNT;
-      count = 1;
-    }
-    if (__atomic_load_n(&invocation->options.trace, __ATOMIC_ACQUIRE) != NULL)
-      mask |= LUA_MASKLINE;
-  }
-  if (mask != 0) {
-    mask |= LUTHR_LUA_RUNTIME_MASK_FINALIZERS;
-    if (lua_gethook(L) != hook || lua_gethookmask(L) != mask ||
-        lua_gethookcount(L) != count)
-      lua_sethook(L, hook, mask, count);
-  } else if (lua_gethook(L) == hook)
-    lua_sethook(L, NULL, 0, 0);
+static int hookmask(const luthr_lua_task_options *options) {
+  return (options->instruction_limit != 0 ? LUA_MASKCOUNT : 0) |
+         (options->trace != NULL ? LUA_MASKLINE : 0);
 }
 
 static void release(lua_State *L, LuaPolicy *base) {
@@ -116,7 +100,8 @@ LuaPolicy *luthr_policy_new(lua_State *L, const luthr_lua_task_options *options,
       invocation->base.references = 1;
       invocation->base.active = 1;
       invocation->base.owner = owner;
-      invocation->base.configure = configure;
+      invocation->base.hook = hook;
+      invocation->base.hookmask = hookmask(&invocation->options);
       invocation->base.release = release;
     }
   }
@@ -135,6 +120,7 @@ void luthr_policy_reset(LuaPolicy *base,
   Invocation *invocation = (Invocation *)base;
   invocation->options = *options;
   invocation->remaining = options->instruction_limit;
+  __atomic_store_n(&base->hookmask, hookmask(options), __ATOMIC_RELEASE);
   __atomic_store_n(&base->exhausted, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&base->active, 1, __ATOMIC_RELEASE);
 }
@@ -151,6 +137,8 @@ void luthr_policy_trace(LuaPolicy *base, luthr_lua_runtime_trace_fn trace,
     check(pthread_mutex_lock(&invocation->observer));
   invocation->options.trace_context = trace != NULL ? context : NULL;
   __atomic_store_n(&invocation->options.trace, trace, __ATOMIC_RELEASE);
+  __atomic_store_n(&base->hookmask, hookmask(&invocation->options),
+                   __ATOMIC_RELEASE);
   if (observing != invocation)
     check(pthread_mutex_unlock(&invocation->observer));
 }

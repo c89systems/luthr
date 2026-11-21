@@ -24,7 +24,6 @@
 
 static __thread unsigned measuring, lookups;
 static LuaPolicy policy;
-static unsigned configurations;
 
 NativeStackContext *__real_luaE_getnativestackcontext(void);
 NativeStackContext *__wrap_luaE_getnativestackcontext(void) {
@@ -33,9 +32,13 @@ NativeStackContext *__wrap_luaE_getnativestackcontext(void) {
   return __real_luaE_getnativestackcontext();
 }
 
-static void configure(LuaPolicy *value, lua_State *state) {
-  require(value == &policy && value->global == G(state));
-  configurations++;
+static void policy_hook(lua_State *state, lua_Debug *debug) {
+  require(state->policy == &policy && debug->event == LUA_HOOKCOUNT);
+}
+
+static void user_hook(lua_State *state, lua_Debug *debug) {
+  (void)state;
+  (void)debug;
 }
 
 static void release_policy(lua_State *state, LuaPolicy *value) {
@@ -58,7 +61,9 @@ static void owned(lua_State *state, int managed) {
   previous = luaE_setnativestackcontext(&native);
   policy.global = G(state);
   policy.references = 1;
-  policy.configure = configure;
+  policy.active = 1;
+  policy.hookmask = LUA_MASKCOUNT;
+  policy.hook = policy_hook;
   policy.release = release_policy;
   luaCP_begin(&policy, &scope);
   lua_gc(state, LUA_GCSTOP);
@@ -97,7 +102,18 @@ static void owned(lua_State *state, int managed) {
     luaA_end(state, &outer);
   }
   measuring = 0;
-  require(lookups == 0 && configurations >= 2000);
+  require(lookups == 0 && state->policy == &policy);
+  require(lua_gethook(state) == policy_hook && lua_gethookcount(state) == 1);
+  lua_sethook(state, user_hook, LUA_MASKCALL, 0);
+  luaCP_apply(state);
+  require(lua_gethook(state) == policy_hook);
+  __atomic_store_n(&policy.hookmask, 0, __ATOMIC_RELEASE);
+  luaCP_apply(state);
+  require(lua_gethook(state) == NULL);
+  lua_sethook(state, user_hook, LUA_MASKCALL, 0);
+  luaCP_apply(state);
+  require(lua_gethook(state) == user_hook);
+  lua_sethook(state, NULL, 0, 0);
   luaC_leavegc(state, &frame);
   luaX_unlockstate(state);
   require(state->stack_gate.context == NULL && state->stack_gate.word == 0);

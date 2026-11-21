@@ -1,10 +1,12 @@
 #define LUA_CORE
 #include "lprefix.h"
 #include "lapi.h"
+#include "ldebug.h"
 #include "ldo.h"
 #include "lgc.h"
 #include "lpolicy.h"
 #include "lstate.h"
+#include "luthr_hook_policy.h"
 
 LuaPolicy *luaCP_current (void) {
   LuaThreadContext *thread = luaE_threadcontext();
@@ -35,8 +37,21 @@ void luaCP_apply (lua_State *L) {
   LuaExecution *execution = luaX_execution(L);
   LuaPolicy *policy = execution != NULL ? execution->policy
                                        : luaX_hostcontext(L)->policy;
-  if (policy != NULL && policy->global == G(L)) luaCP_bind(L, policy);
-  if (L->policy != NULL) L->policy->configure(L->policy, L);
+  if (policy != L->policy && policy != NULL && policy->global == G(L))
+    luaCP_bind(L, policy);
+  policy = L->policy;
+  if (policy != NULL) {
+    int mask = __atomic_load_n(&policy->hookmask, __ATOMIC_ACQUIRE);
+    lua_Hook hook = gethook(L);
+    if (mask != 0 && __atomic_load_n(&policy->active, __ATOMIC_ACQUIRE)) {
+      int count = (mask & LUA_MASKCOUNT) != 0;
+      mask |= LUTHR_LUA_RUNTIME_MASK_FINALIZERS;
+      if (hook != policy->hook || gethookmask(L) != mask ||
+          getbasehookcount(L) != count)
+        lua_sethook(L, policy->hook, mask, count);
+    }
+    else if (hook == policy->hook) lua_sethook(L, NULL, 0, 0);
+  }
 }
 
 void luaCP_begin (LuaPolicy *policy, LuaPolicyScope *scope) {
