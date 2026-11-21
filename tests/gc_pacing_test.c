@@ -888,6 +888,30 @@ static void nursery_progress(void) {
   lua_close(L);
 }
 
+static void table_growth(int generational, int stopped) {
+  lua_State *L = luaL_newstate();
+  uint64_t epoch;
+  require(L != NULL);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_loadstring(L, "local t = ...; for i=1,200000 do t[i]=i end; "
+                             "return t[1], t[200000]") == LUA_OK);
+  lua_newtable(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  if (!stopped)
+    lua_gc(L, LUA_GCRESTART);
+  lua_lock(L);
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  luaE_setdebt(G(L), LUA_GC_ASSIST_BYTES);
+  require(!luaC_needstep(L) && !luaC_cyclepressure(L));
+  epoch = luaC_traceepoch(G(L));
+  lua_unlock(L);
+  require(lua_pcall(L, 1, 2, 0) == LUA_OK);
+  require((luaC_traceepoch(G(L)) != epoch) == !stopped);
+  require(lua_tointeger(L, -2) == 1 && lua_tointeger(L, -1) == 200000);
+  lua_close(L);
+}
+
 static void managed_function(int generational) {
   lua_State *L = luaL_newstate();
   unsigned before;
@@ -911,6 +935,11 @@ static void managed_function(int generational) {
 int main(int argc, char **argv) {
   l_mem basic, overdue;
   require(argc == 2);
+  if (strncmp(argv[1], "table_growth_", 13) == 0) {
+    table_growth(strstr(argv[1], "generational") != NULL,
+                 strstr(argv[1], "stopped") != NULL);
+    return 0;
+  }
   if (strncmp(argv[1], "managed_function_", 17) == 0) {
     managed_function(strcmp(argv[1], "managed_function_generational") == 0);
     return 0;

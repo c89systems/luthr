@@ -321,6 +321,7 @@ struct lua_State {
   CommonHeader;
   lu_byte allowhook;
   TStatus status;
+  lu_byte gc_resize;  /* backing growth pending a safepoint check */
   StkIdRel top;  /* first free slot in the stack */
   struct global_State *l_G;
   CallInfo *ci;  /* call info for current function */

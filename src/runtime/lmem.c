@@ -852,6 +852,9 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     luaM_free_(L, block, osize);
     return NULL;
   }
+  /* A growing table or buffer may bypass object creation entirely. The
+  ** allocator cannot run the collector before the caller publishes it. */
+  if (nsize > osize) L->gc_resize = 1;
   allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
   lua_assert(allocation == NULL || !luaMP_retired(allocation));
   if (allocation != NULL && luaMP_page(allocation) != NULL &&
