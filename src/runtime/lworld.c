@@ -89,6 +89,16 @@ int luaW_init (global_State *g) {
       goto failed_trace;
     }
   }
+  for (i = 0; i < LUA_HASH_WAIT_SHARDS; i++) {
+    status = pthread_mutex_init(&g->hash_wait_mutex[i], NULL);
+    if (status != 0) {
+      while (i-- > 0)
+        luaX_checksync(pthread_mutex_destroy(&g->hash_wait_mutex[i]));
+      for (i = 0; i < LUA_PUBLISH_SHARDS; i++)
+        luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));
+      goto failed_trace;
+    }
+  }
   return 0;
  failed_trace:
   luaX_checksync(pthread_cond_destroy(&g->trace_changed));
@@ -120,6 +130,8 @@ void luaW_destroy (global_State *g) {
              world->storage_bytes == 0 && world->storage_busy == 0 &&
              world->storage_workers == 0 &&
              world->storage_retired == NULL && world->storage_pending == NULL);
+  for (i = 0; i < LUA_HASH_WAIT_SHARDS; i++)
+    luaX_checksync(pthread_mutex_destroy(&g->hash_wait_mutex[i]));
   for (i = 0; i < LUA_PUBLISH_SHARDS; i++) {
     lua_assert(g->publishers[i].head == NULL);
     luaX_checksync(pthread_mutex_destroy(&g->publishers[i].mutex));

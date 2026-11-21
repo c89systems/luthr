@@ -45,7 +45,7 @@ typedef struct LuaHashPart {
   uint64_t version;  /* odd during structural or split-value changes */
   unsigned gate;
   pthread_cond_t changed;
-  struct LuaWaiter *waiters;  /* world.mutex */
+  struct LuaWaiter *waiters;  /* address-sharded hash wait mutex */
 } LuaHashPart;
 
 typedef struct LuaHashDirectory {

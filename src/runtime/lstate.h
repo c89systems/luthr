@@ -475,6 +475,7 @@ typedef struct LuaTableWriter {
 } LuaTableWriter;
 
 #define LUA_PUBLISH_SHARDS 8
+#define LUA_HASH_WAIT_SHARDS 16
 typedef struct LuaPublishShard {
   pthread_mutex_t mutex;
   lua_State *head;
@@ -483,6 +484,7 @@ typedef struct LuaPublishShard {
 typedef struct global_State {
   LuaWorld world;
   LuaTableWriter table_writers[LUA_TABLE_WRITERS];
+  pthread_mutex_t hash_wait_mutex[LUA_HASH_WAIT_SHARDS];
   struct LuaScheduler *scheduler;
   struct LuaAllocPage *allocation_pages[LUA_ALLOC_POOLS];  /* pool mutex */
   struct LuaAllocPage *allocation_dirty;  /* atomic changed-page queue */

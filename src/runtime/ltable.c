@@ -1974,7 +1974,7 @@ int luaH_setshared (lua_State *L, Table *table, const TValue *key,
       if (result > 0) return 1;
       if (result < 0) continue;  /* another writer changed the needed capacity */
     }
-    if (retry.part != NULL) luaH_waitpart(L, table, retry.part);
+    if (retry.part != NULL) luaH_waitpart(L, retry.part);
     else if (retry.writer != NULL) luaH_waitwriters(L, table, retry.writer);
     else {
       if (luaH_waitlayout(L, table)) continue;
@@ -2313,7 +2313,7 @@ static lu_byte __attribute__((noinline)) getrooted (lua_State *L, Table *table,
       goto done;
     }
     if (slot.part != NULL) {
-      luaH_waitpart(L, table, slot.part);
+      luaH_waitpart(L, slot.part);
       continue;
     }
     if (slot.payload == NULL) continue;

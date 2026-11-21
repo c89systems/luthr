@@ -27,8 +27,8 @@ static struct {
   lua_Integer denied_key;
   unsigned deny_count;
   unsigned part, deny_after;
-  int entered, release, finished, waiting, same_done, layout_waiting,
-      layout_done;
+  int entered, release, finished, waiting, part_woken, same_done,
+      layout_waiting, layout_done;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
 
@@ -62,6 +62,7 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
   if (L == probe.same) {
     require(pthread_mutex_lock(&probe.mutex) == 0);
     if (!probe.waiting) {
+      require(mutex != &G(L)->world.mutex);
       require(cond == &probe.first_part->changed);
       require(list == &probe.first_part->waiters);
       probe.waiting = 1;
@@ -80,6 +81,17 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     require(pthread_mutex_unlock(&probe.mutex) == 0);
   }
   __real_luaQ_wait(L, mutex, cond, list);
+}
+
+void __real_luaQ_wake(pthread_cond_t *, LuaWaiter **);
+void __wrap_luaQ_wake(pthread_cond_t *cond, LuaWaiter **list) {
+  __real_luaQ_wake(cond, list);
+  if (probe.first_part != NULL && cond == &probe.first_part->changed) {
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    probe.part_woken = 1;
+    require(pthread_cond_broadcast(&probe.changed) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
 }
 
 static unsigned partition(lua_Integer key) {
@@ -300,12 +312,23 @@ int main(int argc, char **argv) {
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
   require(probe.layout_waiting && !probe.layout_done);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
   probe.release = 1;
   require(pthread_cond_broadcast(&probe.changed) == 0);
+  /* A partition waiter is notified even while global admission is held.
+   * The layout waiter still needs the global predicate to reopen. */
+  while (!probe.part_woken)
+    require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
+            0);
+  require(!probe.same_done && !probe.layout_done);
   require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
   require(pthread_join(first, NULL) == 0 && pthread_join(second, NULL) == 0);
   require(pthread_join(same, NULL) == 0 && probe.same_done);
   require(pthread_join(layout, NULL) == 0 && probe.layout_done);
+  probe.first_part = NULL;
   lua_gc(L, LUA_GCCOLLECT);
   check_sparse_value(L);
   lua_pushnil(L);

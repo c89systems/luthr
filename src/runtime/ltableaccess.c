@@ -10,6 +10,12 @@ static int partbusy (const LuaHashPart *part) {
           LUA_HASH_WRITING) != 0;
 }
 
+static pthread_mutex_t *partmutex (global_State *g, LuaHashPart *part) {
+  uintptr_t address = cast(uintptr_t, part);
+  return &g->hash_wait_mutex[((address >> 6) ^ (address >> 12)) &
+                            (LUA_HASH_WAIT_SHARDS - 1)];
+}
+
 static int active (global_State *g, Table *table, LuaTableWriter *writer) {
   LuaHashDirectory *directory;
   unsigned i;
@@ -32,12 +38,17 @@ void luaH_releasepart (lua_State *L, Table *table, LuaHashPart *part) {
     ~cast_uint(LUA_HASH_WRITING), __ATOMIC_SEQ_CST);
   int watched = luaA_lockwatched(&table->access);
   lua_assert(previous & LUA_HASH_WRITING);
-  if ((previous & LUA_HASH_WAITING) || watched) {
+  if (previous & LUA_HASH_WAITING) {
+    pthread_mutex_t *mutex = partmutex(G(L), part);
+    luaX_checksync(pthread_mutex_lock(mutex));
+    __atomic_fetch_and(&part->gate, ~cast_uint(LUA_HASH_WAITING), __ATOMIC_SEQ_CST);
+    luaQ_wake(&part->changed, &part->waiters);
+    luaX_checksync(pthread_mutex_unlock(mutex));
+  }
+  if (watched) {
     LuaWorld *world = &G(L)->world;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
-    if (previous & LUA_HASH_WAITING)
-      luaQ_wake(&part->changed, &part->waiters);
-    if (watched) luaQ_wake(&world->changed, &world->waiters);
+    luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
 }
@@ -165,62 +176,82 @@ static int watchlayout (lua_State *L, Table *table, LuaTableWriter *writer) {
   }
 }
 
-/* Publish the whole Lua frame before parking, as an object scope does. */
-static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
-                       LuaHashPart *part,
-                       int (*busy)(lua_State *, Table *, LuaTableWriter *)) {
-  LuaWorld *world = &G(L)->world;
+/* Preserve the whole Lua frame while the coroutine is off the active set. */
+static ptrdiff_t parkaccess (lua_State *L) {
   ptrdiff_t saved_top = -1;
+  lua_assert(G(L)->world.heap_depth == 0 ||
+             !luaX_isowner(L, &G(L)->world.heap_owner));
   if (isLua(L->ci) && L->top.p < L->ci->top.p) {
     saved_top = savestack(L, L->top.p);
     L->top.p = L->ci->top.p;
   }
+  L->native_depth++;
+  L->object_waiting++;
+  luaW_deactivate(L);
+  return saved_top;
+}
+
+static void resumeaccess (lua_State *L, ptrdiff_t saved_top) {
+  luaW_resume(L);
+  luaC_checksnapshot(L);
+  L->object_waiting--;
+  L->native_depth--;
+  if (saved_top >= 0) L->top.p = restorestack(L, saved_top);
+}
+
+static void waittable (lua_State *L, Table *table, LuaTableWriter *writer,
+                       int (*busy)(lua_State *, Table *, LuaTableWriter *)) {
+  LuaWorld *world = &G(L)->world;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (writer != NULL)
     __atomic_fetch_add(&writer->waiting, 1, __ATOMIC_SEQ_CST);
-  if (luaW_stopped(world) || (part != NULL ? partbusy(part) : busy(L, table, writer))) {
-    lua_assert(world->heap_depth == 0 || !luaX_isowner(L, &world->heap_owner));
-    L->native_depth++;
-    L->object_waiting++;
-    luaW_deactivate(L);
-    if (part == NULL ||
-        (luaW_control(world) & LUA_WORLD_STORAGE_WAIT))
-      luaQ_wake(&world->changed, &world->waiters);
+  if (luaW_stopped(world) || busy(L, table, writer)) {
+    ptrdiff_t saved_top = parkaccess(L);
+    luaQ_wake(&world->changed, &world->waiters);
     for (;;) {
       luaW_waitresume(L);
-      if (!(part != NULL ? partbusy(part) : busy(L, table, writer))) break;
-      if (part != NULL) {
-        /* The release tests this bit in the same operation that opens the
-        ** partition. A registering waiter either observes that departure
-        ** or is visible to the release while holding the predicate mutex. */
-        if (__atomic_fetch_or(&part->gate, LUA_HASH_WAITING,
-                              __ATOMIC_SEQ_CST) & LUA_HASH_WRITING)
-          luaQ_wait(L, &world->mutex, &part->changed, &part->waiters);
-        if (part->waiters == NULL)
-          __atomic_fetch_and(&part->gate, ~cast_uint(LUA_HASH_WAITING),
-                             __ATOMIC_SEQ_CST);
-      }
-      else
-        luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+      if (!busy(L, table, writer)) break;
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
     }
-    luaW_resume(L);
-    luaC_checksnapshot(L);
-    L->object_waiting--;
-    L->native_depth--;
+    resumeaccess(L, saved_top);
   }
   if (writer != NULL)
     __atomic_fetch_sub(&writer->waiting, 1, __ATOMIC_SEQ_CST);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  if (saved_top >= 0) L->top.p = restorestack(L, saved_top);
 }
 
 void luaH_waitwriters (lua_State *L, Table *table, LuaTableWriter *writer) {
-  waittable(L, table, writer, NULL, writersbusy);
+  waittable(L, table, writer, writersbusy);
 }
 
-void luaH_waitpart (lua_State *L, Table *table, LuaHashPart *part) {
-  if (partbusy(part) || luaW_stopped(&G(L)->world))
-    waittable(L, table, NULL, part, NULL);
+void luaH_waitpart (lua_State *L, LuaHashPart *part) {
+  global_State *g = G(L);
+  LuaWorld *world = &g->world;
+  if (!partbusy(part) && !luaW_stopped(world)) return;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (partbusy(part) || luaW_stopped(world)) {
+    ptrdiff_t saved_top = parkaccess(L);
+    pthread_mutex_t *mutex = partmutex(g, part);
+    if (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)
+      luaQ_wake(&world->changed, &world->waiters);
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+
+    /* The rooted receiver keeps its partition alive off the active set.
+    ** Registration and notification share the shard mutex. A waiter sees
+    ** the open gate or its bit is visible to the writer that opens it. */
+    luaX_checksync(pthread_mutex_lock(mutex));
+    while (__atomic_fetch_or(&part->gate, LUA_HASH_WAITING,
+                             __ATOMIC_SEQ_CST) & LUA_HASH_WRITING)
+      luaQ_wait(L, mutex, &part->changed, &part->waiters);
+    if (part->waiters == NULL)
+      __atomic_fetch_and(&part->gate, ~cast_uint(LUA_HASH_WAITING), __ATOMIC_SEQ_CST);
+    luaX_checksync(pthread_mutex_unlock(mutex));
+
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+    luaW_waitresume(L);
+    resumeaccess(L, saved_top);
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 /* Waiting for a layout change is not a request to own the following layout.
@@ -228,7 +259,7 @@ void luaH_waitpart (lua_State *L, Table *table, LuaHashPart *part) {
 int luaH_waitlayout (lua_State *L, Table *table) {
   void *owner = luaA_lockowner(&table->access);
   if (luaW_iscollector(L) || owner == NULL || owner == luaX_token(L)) return 0;
-  waittable(L, table, NULL, NULL, watchlayout);
+  waittable(L, table, NULL, watchlayout);
   return 1;
 }
 
