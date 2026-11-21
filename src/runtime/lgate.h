@@ -27,14 +27,14 @@ enum {
 
 typedef struct LuaStackGate {
   uintptr_t word;
-  struct NativeStackContext *context;  /* current reservation's logical stack */
   struct LuaGateWaiter *head;
   struct LuaGateWaiter **tail;
   int ready;
 } LuaStackGate;
 
-l_sinline void *luaX_gateowner (uintptr_t word) {
-  return cast(void *, word & ~cast(uintptr_t, LUA_GATE_FLAGS));
+l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
+  return cast(struct NativeStackContext *,
+              word & ~cast(uintptr_t, LUA_GATE_FLAGS));
 }
 
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate);

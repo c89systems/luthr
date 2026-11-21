@@ -73,9 +73,7 @@ static void owned(lua_State *state, int managed) {
   luaX_lockstate(state);
   require(luaX_context(state) == &native);
   require(luaX_execution(state) == (managed ? &execution : NULL));
-  require(
-      luaX_token(state) ==
-      (managed ? (void *)&execution : (void *)&luaE_threadcontext()->native));
+  require(luaX_token(state) == &native);
   if (!managed)
     require(luaX_hostcontext(state) == luaE_threadcontext());
   table = hvalue(s2v(state->top.p - 1));
@@ -116,7 +114,7 @@ static void owned(lua_State *state, int managed) {
   lua_sethook(state, NULL, 0, 0);
   luaC_leavegc(state, &frame);
   luaX_unlockstate(state);
-  require(state->stack_gate.context == NULL && state->stack_gate.word == 0);
+  require(state->stack_gate.word == 0);
   luaCP_end(&scope);
   luaX_lockstate(state);
   luaCP_bind(state, NULL);
@@ -142,17 +140,15 @@ static void reservations(lua_State *state, int paired) {
   require(reservation == (paired ? 2 : 1));
   require(luaX_context(other) == &native &&
           luaX_execution(other) == &execution);
-  require(luaX_token(other) == &execution && luaX_token(state) == &execution);
+  require(luaX_token(other) == &native && luaX_token(state) == &native);
   luaX_endreserve(other, reservation);
-  require((other->stack_gate.context != NULL) == paired);
   require((other->stack_gate.word != 0) == paired);
   require(luaX_execution(state) == &execution);
   if (paired)
     luaX_unlockpair(other, state);
   else
     luaX_unlockstate(state);
-  require(state->stack_gate.context == NULL &&
-          other->stack_gate.context == NULL);
+  require(state->stack_gate.word == 0 && other->stack_gate.word == 0);
   require(execution.managed_depth == 0);
   luaE_setnativestackcontext(previous);
 }
@@ -241,7 +237,7 @@ static void foreign(lua_State *state) {
   require(pthread_mutex_unlock(&test.mutex) == 0);
   require(pthread_join(first, NULL) == 0);
   require(pthread_join(second, NULL) == 0);
-  require(state->stack_gate.context == NULL && state->stack_gate.word == 0);
+  require(state->stack_gate.word == 0);
   lua_pushinteger(state, 42);
   require(lua_tointeger(state, -1) == 42);
   require(pthread_cond_destroy(&test.changed) == 0);
@@ -293,12 +289,12 @@ static void publication(lua_State *state) {
   luaX_unlockstate(state);
   require(pthread_join(entrant, NULL) == 0);
   require(lua_tointeger(other, -1) == 42);
-  require(other->stack_gate.context == NULL && other->stack_gate.word == 0);
+  require(other->stack_gate.word == 0);
 }
 
 static void count_poll(lua_State *state, void *context) {
   unsigned *polls = context;
-  require(state->stack_gate.context != NULL);
+  require(luaX_boundcontext(state) != NULL);
   (*polls)++;
 }
 

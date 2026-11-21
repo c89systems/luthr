@@ -161,8 +161,8 @@ LUAI_FUNC void luaQ_setmanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC int luaQ_ismanagedhook (lua_State *L, lua_Hook hook);
 LUAI_FUNC void luaQ_setowner (LuaOwner *owner);
 LUAI_FUNC int luaQ_isowner (const LuaOwner *owner);
-/* Stable for the logical execution across carrier movement; unmanaged callers
-** use a permanent thread-local address. The token outlives every held scope. */
+/* The active stack context is stable across carrier movement and outlives
+** every scope held by that execution. */
 LUAI_FUNC void *luaQ_ownertoken (void);
 /* All waits/observers register under the predicate mutex. Ordinary OS-thread
 ** waits retire registration on return, including spurious/direct POSIX signals;

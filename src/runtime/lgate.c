@@ -33,6 +33,8 @@ carrierentry NativeStackContext *luaE_getnativestackcontext (void) {
 carrierentry NativeStackContext *luaE_setnativestackcontext (
     NativeStackContext *context) {
   NativeStackContext *previous = thread_context.override;
+  if (context != NULL && context->execution == NULL)
+    context->host = &thread_context;
   thread_context.override = context;
   return previous;
 }
@@ -48,15 +50,13 @@ typedef struct LuaGateWaiter {
   struct LuaGateWaiter *next;
 } LuaGateWaiter;
 
-_Static_assert(_Alignof(LuaExecution) > LUA_GATE_FLAGS &&
-               _Alignof(NativeStackContext) > LUA_GATE_FLAGS,
+_Static_assert(_Alignof(NativeStackContext) > LUA_GATE_FLAGS,
                "stack gate owner tokens must leave space for the flags");
 _Static_assert(offsetof(LuaThreadContext, native) == 0,
                "host token must point to the beginning of its TLS record");
 
 void luaX_initgate (LuaStackGate *gate) {
   gate->word = 0;
-  gate->context = NULL;
   gate->head = NULL;
   gate->tail = &gate->head;
   gate->ready = 1;
@@ -66,21 +66,21 @@ void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
   lua_assert(gate->word == 0 && gate->head == NULL &&
-             gate->tail == &gate->head && gate->context == NULL);
+             gate->tail == &gate->head);
   gate->ready = 0;
 }
 
 static void reserve (lua_State *L, NativeStackContext *context,
-                      void *token, uintptr_t active) {
+                      uintptr_t active) {
   LuaStackGate *gate = &L->stack_gate;
   uintptr_t expected = 0;
-  uintptr_t desired = cast(uintptr_t, token) | active;
+  uintptr_t desired = cast(uintptr_t, context) | active;
   if (!__atomic_compare_exchange_n(&gate->word, &expected, desired, 0,
                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     LuaWorld *world = &G(L)->world;
     LuaGateWaiter wait = {NULL};
     /* Recursive entry is a boundary error. Waiting would deadlock. */
-    if (luaX_gateowner(expected) == token) {
+    if (luaX_gateowner(expected) == context) {
       fputs("Luthr recursive coroutine stack gate entry\n", stderr);
       abort();
     }
@@ -102,7 +102,6 @@ static void reserve (lua_State *L, NativeStackContext *context,
     if (gate->head == NULL) gate->tail = &gate->head;
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
-  gate->context = context;
 }
 
 l_sinline void leavegate (lua_State *L) {
@@ -128,7 +127,6 @@ static void release (lua_State *L, void *token) {
     fputs("Luthr coroutine stack gate released by a non-owner\n", stderr);
     abort();
   }
-  gate->context = NULL;
   leavegate(L);
 }
 
@@ -136,13 +134,10 @@ carrierentry int luaX_tryreserve (lua_State *target) {
   LuaStackGate *gate = &target->stack_gate;
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
-  void *token = context->execution != NULL ? cast(void *, context->execution)
-                                          : cast(void *, &thread->native);
   uintptr_t expected = 0;
-  if (!__atomic_compare_exchange_n(&gate->word, &expected, cast(uintptr_t, token), 0,
+  if (!__atomic_compare_exchange_n(&gate->word, &expected, cast(uintptr_t, context), 0,
                                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
-    return luaX_gateowner(expected) == token ? 2 : 0;
-  gate->context = context;
+    return luaX_gateowner(expected) == context ? 2 : 0;
   return 1;
 }
 
@@ -155,26 +150,22 @@ static void preparecall (lua_State *L, LuaExecution *execution) {
   if (L->errorJmp == NULL && execution != NULL) luaE_refreshnativestack(L);
 }
 
-static void *lockstate (lua_State *L, LuaThreadContext *thread,
-                        NativeStackContext *context) {
+static void lockstate (lua_State *L, NativeStackContext *context) {
   LuaExecution *execution = context->execution;
-  void *token = execution != NULL ? cast(void *, execution)
-                                  : cast(void *, &thread->native);
   if (execution != NULL) luaQ_entermanaged(L, execution);
-  reserve(L, context, token, LUA_GATE_MANAGED);
+  reserve(L, context, LUA_GATE_MANAGED);
   luaW_enter(L);
-  return token;
 }
 
 carrierentry void luaX_lockstate (lua_State *L) {
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
-  lockstate(L, thread, context);
+  lockstate(L, context);
   preparecall(L, context->execution);
 }
 
-static void unlockstate (lua_State *L, void *token, int values) {
-  LuaExecution *execution = L->stack_gate.context->execution;
+static void unlockstate (lua_State *L, NativeStackContext *context, int values) {
+  LuaExecution *execution = context->execution;
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
   ** and the next allocating/calling API, instead of extending every read. */
@@ -198,7 +189,7 @@ static void unlockstate (lua_State *L, void *token, int values) {
   }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
-  release(L, token);
+  release(L, context);
   if (execution != NULL) luaQ_leavemanaged(execution);
 }
 
@@ -224,7 +215,7 @@ int luaX_tryworker (lua_State *L) {
 static int attachedapi (lua_State *L, NativeStackContext *context) {
   LuaApiRegion *region = context->api_region;
   if (region == NULL) return 0;
-  if (region->state != L || L->stack_gate.context != context) {
+  if (region->state != L || luaX_boundcontext(L) != context) {
     fputs("Luthr API crossed an attached runtime activation\n", stderr);
     abort();
   }
@@ -237,17 +228,15 @@ enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
 /* Enter the storage epoch before borrowing any table buffers. A grace
 ** scan that still sees a stack-only gate covers only older retirements
 ** than the control word sampled after this promotion. */
-static void managestack (lua_State *L, LuaThreadContext *thread,
-                         NativeStackContext *context) {
+static void managestack (lua_State *L, NativeStackContext *context) {
   LuaStackGate *gate = &L->stack_gate;
   /* The caller owns the stack-only gate. Change its mode in one
   ** transaction while preserving any concurrent waiter registration. */
-  uintptr_t owner = cast(uintptr_t, &thread->native);
+  uintptr_t owner = cast(uintptr_t, context);
   uintptr_t old = __atomic_fetch_xor(&gate->word, owner | LUA_GATE_ACTIVE,
                                     __ATOMIC_SEQ_CST);
   lua_assert((old & ~cast(uintptr_t, LUA_GATE_WAITING)) == LUA_GATE_STACK);
   UNUSED(old);
-  gate->context = context;
   luaW_enter(L);
 }
 
@@ -258,21 +247,19 @@ l_sinline uintptr_t apienter (lua_State *L) {
     luaX_pollrequests(L);
     return 0;
   }
-  return cast(uintptr_t, lockstate(L, thread, context));
+  lockstate(L, context);
+  return cast(uintptr_t, context);
 }
 
 carrierentry void luaX_apienter (lua_State *L) {
-  if (apienter(L) != 0) preparecall(L, L->stack_gate.context->execution);
+  uintptr_t owner = apienter(L);
+  if (owner != 0) preparecall(L, cast(NativeStackContext *, owner)->execution);
 }
 
 carrierentry void luaX_apileave (lua_State *L) {
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
-  if (!attachedapi(L, context)) {
-    void *token = context->execution != NULL ? cast(void *, context->execution)
-                                            : cast(void *, &thread->native);
-    unlockstate(L, token, 0);
-  }
+  if (!attachedapi(L, context)) unlockstate(L, context, 0);
 }
 
 carrierentry uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
@@ -301,7 +288,7 @@ void luaX_valueleave (lua_State *L, uintptr_t owner) {
       luaSC_notifygc(G(L));
     leavegate(L);
   }
-  else if (owner != 0) unlockstate(L, cast(void *, owner), 1);
+  else if (owner != 0) unlockstate(L, cast(NativeStackContext *, owner), 1);
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {
@@ -312,9 +299,9 @@ carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {
       luaX_valueleave(L, owner);
       return 0;
     }
-    managestack(L, thread, context);
+    managestack(L, context);
   }
-  if (owner != 0) preparecall(L, L->stack_gate.context->execution);
+  if (owner != 0) preparecall(L, luaX_boundcontext(L)->execution);
   return 1;
 }
 
@@ -325,8 +312,6 @@ carrierentry void luaX_lockpair (lua_State *first, lua_State *second) {
   LuaThreadContext *thread = &thread_context;
   NativeStackContext *context = luaE_resolvestack(thread);
   LuaExecution *execution = context->execution;
-  void *token = execution != NULL ? cast(void *, execution)
-                                  : cast(void *, &thread->native);
   luaQ_entermanaged(first, execution);
   if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
     lua_State *swap = first;
@@ -335,8 +320,8 @@ carrierentry void luaX_lockpair (lua_State *first, lua_State *second) {
   }
   /* Never publish participation while waiting for the second gate. A
   ** collector holding it must be able to complete its rendezvous. */
-  reserve(first, context, token, 0);
-  if (second != first) reserve(second, context, token, 0);
+  reserve(first, context, 0);
+  if (second != first) reserve(second, context, 0);
   lua_assert(first->admission == &first->participation &&
              second->admission == &second->participation);
   lua_assert(first->stack_peer == NULL && second->stack_peer == NULL);

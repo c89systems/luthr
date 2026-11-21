@@ -132,7 +132,7 @@ static void poll(lua_State *state, void *user) {
   LuaThreadContext *outgoing;
   if (luaX_context(state) != &task->fiber.native ||
       luaX_execution(state) != &task->fiber.execution ||
-      luaX_token(state) != &task->fiber.execution)
+      luaX_token(state) != &task->fiber.native)
     abort();
   verify_rounding(task->rounding);
   if (!migratable(state)) {
@@ -163,7 +163,7 @@ static void poll(lua_State *state, void *user) {
       luaE_getnativestackcontext() != &task->fiber.native ||
       state->luthr_stack_context != &task->fiber.native ||
       luaX_context(state) != &task->fiber.native ||
-      luaX_token(state) != &task->fiber.execution)
+      luaX_token(state) != &task->fiber.native)
     abort();
   verify_rounding(task->rounding);
 }

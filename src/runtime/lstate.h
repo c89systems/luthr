@@ -287,6 +287,7 @@ typedef struct NativeStackContext {
   LuaExecution *execution;
   struct LuaCoroutineScope *coroutine_scopes;
   LuaApiRegion *api_region;
+  struct LuaThreadContext *host;  /* set for an unmanaged override */
 } NativeStackContext;
 
 /* Carrier-local defaults and ambient host scopes share one TLS record. Managed
@@ -690,12 +691,15 @@ l_sinline NativeStackContext *luaE_resolvestack (LuaThreadContext *thread) {
   return thread->override != NULL ? thread->override : &thread->native;
 }
 
-/* Only an owner (including a collector reservation) may use bound context.
-** Bootstrap construction has no reservation yet and resolves its ambient
-** context. A binding ends before its gate or final participation is released. */
+l_sinline NativeStackContext *luaX_boundcontext (lua_State *L) {
+  return luaX_gateowner(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED));
+}
+
+/* Only a gate owner may use its bound context. Stack-only operations and
+** bootstrap construction resolve their ambient context when needed. */
 l_sinline NativeStackContext *luaX_context (lua_State *L) {
-  return L->stack_gate.context != NULL ? L->stack_gate.context
-                                      : luaE_getnativestackcontext();
+  NativeStackContext *context = luaX_boundcontext(L);
+  return context != NULL ? context : luaE_getnativestackcontext();
 }
 
 l_sinline LuaExecution *luaX_execution (lua_State *L) {
@@ -703,20 +707,16 @@ l_sinline LuaExecution *luaX_execution (lua_State *L) {
 }
 
 l_sinline LuaThreadContext *luaX_hostcontext (lua_State *L) {
-  NativeStackContext *context = L->stack_gate.context;
+  NativeStackContext *context = luaX_boundcontext(L);
   if (context != NULL && context->execution == NULL) {
-    /* An unmanaged owner token names the host's first member, even when
-    ** an override supplies the logical stack context. */
-    uintptr_t word = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
-    return cast(LuaThreadContext *, luaX_gateowner(word));
+    /* The default native context is the first member of its host record. */
+    return context->host != NULL ? context->host : cast(LuaThreadContext *, context);
   }
   return luaE_threadcontext();
 }
 
 l_sinline void *luaX_token (lua_State *L) {
-  uintptr_t word = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
-  void *owner = luaX_gateowner(word);
-  return owner != NULL ? owner : luaQ_ownertoken();
+  return luaX_context(L);
 }
 
 l_sinline int luaX_isowner (lua_State *L, const LuaOwner *owner) {
