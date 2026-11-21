@@ -1930,7 +1930,7 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   if (work->page != NULL) {
     LuaAllocPage *page = work->page;
-    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(page->bin);
+    size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
     uintptr_t birth = luaMP_birth(g->sweep_plan.epoch);
     unsigned count = 0;
     size_t offset;

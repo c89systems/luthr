@@ -20,9 +20,9 @@ static void budget(const void *object, size_t maximum) {
   const LuaAllocBlock *block = (const LuaAllocBlock *)object - 1;
   const LuaAllocPage *page = luaMP_page(block);
   require(page != NULL);
-  if (luaMP_binbytes(page->bin) > maximum) {
+  if (page->blockbytes > maximum) {
     fprintf(stderr, "object allocation: %zu bytes, budget %zu\n",
-            luaMP_binbytes(page->bin), maximum);
+            (size_t)page->blockbytes, maximum);
     abort();
   }
 }

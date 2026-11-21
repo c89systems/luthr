@@ -466,19 +466,12 @@ static int awaitnative (lua_State *L, LuaScheduledTask *task) {
   return !stopped;
 }
 
-static void nativeenter (LuaExecution *execution, lua_State *L) {
+static void __attribute__((noinline)) enternewnative (LuaExecution *execution,
+                                                       lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   LuaWorldScope depth = {0};
   int detached = 0, managed = execution->managed_depth != 0;
-  if (execution->native_depth != 0) return;
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED) {
-    /* The cached permit has kept this carrier's routing reservation. A
-    ** handoff drops both, so an opaque frame always stays on its carrier. */
-    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
-    if (!managed) releaseslot(task);
-    return;
-  }
   task->native_pending = 1;
   if (!eligible(task, task->carrier)) {
     lua_assert(execution->pin_depth == 0);
@@ -506,6 +499,19 @@ static void nativeenter (LuaExecution *execution, lua_State *L) {
   task->native_pending = 0;
   if (detached) luaW_attach(L, depth);
   if (!managed) releaseslot(task); /* trusted hook/adapter now enters opaque C */
+}
+
+static void nativeenter (LuaExecution *execution, lua_State *L) {
+  LuaScheduledTask *task = execution->context;
+  if (execution->native_depth != 0) return;
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_CACHED) {
+    enternewnative(execution, L);
+    return;
+  }
+  /* A cached permit still owns this carrier. Only a fresh admission needs
+  ** routing, an admission wait or a saved stack scope. */
+  __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
+  if (execution->managed_depth == 0) releaseslot(task);
 }
 
 static void returnnative (LuaScheduledTask *task, int handoff) {
@@ -1119,6 +1125,7 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
   for (i = 0; i < config->slots; i++) {
     s->slots[i].allocation.global = G(L);
     s->slots[i].allocation.permission = &s->slots[i].owner;
+    s->slots[i].allocation.slot_pages = &s->slots[i].stack_pages;
     s->slots[i].allocation.returned = cachereturned;
     s->slots[i].allocation.context = s;
     s->slots[i].allocation.next = G(L)->slot_caches;

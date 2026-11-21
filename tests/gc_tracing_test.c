@@ -53,30 +53,38 @@ static struct closure_builder {
   int entered, release, thread_build, fail;
 } *building_closure;
 
+static void pause_builder(struct closure_builder *builder) {
+  /* The existing header is reachable before allocation of its payload. */
+  require(pthread_mutex_lock(&builder->mutex) == 0);
+  builder->entered = 1;
+  require(pthread_cond_broadcast(&builder->changed) == 0);
+  while (!builder->release)
+    require(pthread_cond_wait(&builder->changed, &builder->mutex) == 0);
+  require(pthread_mutex_unlock(&builder->mutex) == 0);
+}
+
 void *__real_luaM_malloc_(lua_State *, size_t, int);
 void *__wrap_luaM_malloc_(lua_State *L, size_t size, int tag) {
   struct closure_builder *builder = building_closure;
-  if (builder != NULL && L == builder->worker &&
-      size == (builder->thread_build
-                   ? (BASIC_STACK_SIZE + EXTRA_STACK) * sizeof(StackValue)
-                   : sizeof(UpVal))) {
-    LuaWorldScope scope = {0};
-    if (builder->fail)
-      luaM_error(L);
-    if (builder->thread_build)
-      scope = luaW_detach(L);
-    /* Pause before allocation. The existing header is reachable, and the
-     * fixture exposes no uninitialized payload allocation to the marker. */
-    require(pthread_mutex_lock(&builder->mutex) == 0);
-    builder->entered = 1;
-    require(pthread_cond_broadcast(&builder->changed) == 0);
-    while (!builder->release)
-      require(pthread_cond_wait(&builder->changed, &builder->mutex) == 0);
-    require(pthread_mutex_unlock(&builder->mutex) == 0);
-    if (builder->thread_build)
-      luaW_attach(L, scope);
-  }
+  if (builder != NULL && L == builder->worker && !builder->thread_build &&
+      size == sizeof(UpVal))
+    pause_builder(builder);
   return __real_luaM_malloc_(L, size, tag);
+}
+
+void *__real_luaM_allocstack(lua_State *, size_t, int);
+void *__wrap_luaM_allocstack(lua_State *L, size_t size, int emergency) {
+  struct closure_builder *builder = building_closure;
+  if (builder != NULL && L == builder->worker && builder->thread_build &&
+      size == (BASIC_STACK_SIZE + EXTRA_STACK) * sizeof(StackValue)) {
+    LuaWorldScope scope;
+    if (builder->fail)
+      return NULL;
+    scope = luaW_detach(L);
+    pause_builder(builder);
+    luaW_attach(L, scope);
+  }
+  return __real_luaM_allocstack(L, size, emergency);
 }
 
 void __real_luaW_stop(lua_State *);

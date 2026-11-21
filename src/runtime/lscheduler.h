@@ -25,6 +25,7 @@ struct LuaExecutionSlot {
   LuaScheduledTask *head, *tail;
   unsigned count;
   LuaAllocationCache allocation;
+  LuaSlotAllocPages stack_pages;
   lua_State *collector;  /* pinned until carriers have joined */
   LuaExecution collector_execution;  /* bounded, non-parking payload work */
 };

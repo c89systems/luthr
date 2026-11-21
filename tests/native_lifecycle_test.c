@@ -34,6 +34,7 @@ struct fixture {
   size_t peak;
   char error[128];
   size_t live;
+  size_t allocations, request_limit, refused_slabs;
   unsigned fail_allocations;
 };
 static struct fixture *active;
@@ -59,6 +60,11 @@ static void *allocate(void *context, void *block, size_t old, size_t size) {
   if (size == 0) {
     f->live -= old;
     free(block);
+    return NULL;
+  }
+  f->allocations++;
+  if (f->request_limit != 0 && size > f->request_limit) {
+    f->refused_slabs++;
     return NULL;
   }
   if (size > 4096 && f->fail_allocations != 0) {
@@ -654,6 +660,36 @@ static void streaming(struct fixture *f, int cancel, int shutdown) {
   finish(f);
 }
 
+static void coroutine_allocations(struct fixture *f) {
+  static const char *source =
+      "local count=...; local threads={}; "
+      "local function nest(n) if n==0 then return 1 end "
+      "return 1+nest(n-1) end; "
+      "for i=1,count do local co=coroutine.create(nest); threads[i]=co; "
+      "local ok,result=coroutine.resume(co,24); assert(ok and result==25) "
+      "end; return #threads";
+  size_t baseline, requests;
+  init(f);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  lua_gc(f->main, LUA_GCSTOP);
+  baseline = f->live;
+  requests = f->allocations;
+  submit(f, 0, source, 1024);
+  require(collect(f, 0, LUA_OK) == 1024);
+  require(f->allocations - requests < 512);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(f->live < baseline + 128 * 1024);
+
+  /* Each coroutine fits even when the allocator refuses a whole slab. */
+  f->request_limit = 3072;
+  submit(f, 1, source, 64);
+  require(collect(f, 1, LUA_OK) == 64);
+  require(f->refused_slabs != 0);
+  f->request_limit = 0;
+  finish(f);
+}
+
 int main(int argc, char **argv) {
   struct fixture *f = calloc(1, sizeof(*f));
   require(f != NULL && argc == 2);
@@ -675,6 +711,8 @@ int main(int argc, char **argv) {
     streaming(f, 1, 0);
   else if (strcmp(argv[1], "stream_shutdown") == 0)
     streaming(f, 0, 1);
+  else if (strcmp(argv[1], "coroutine_allocations") == 0)
+    coroutine_allocations(f);
   else
     callbacks(f, argv[1]);
   free(f);

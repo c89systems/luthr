@@ -25,7 +25,17 @@ typedef struct LuaWorldScope {
   LuaApiRegion *api_region;  /* detached activation, restored only on attach */
 } LuaWorldScope;
 #define LUA_ALLOC_BINS 8
-#define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)  /* ordinary storage and call frames */
+#define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)
+/* Ordinary objects, call frames, coroutine records and coroutine stacks. */
+#define LUA_ALLOC_THREAD_POOL LUA_ALLOC_POOLS
+#define LUA_ALLOC_STACK_POOL (LUA_ALLOC_THREAD_POOL + 1)
+#define LUA_ALLOC_STACK_CLASSES 6
+#define LUA_ALLOC_SLOT_POOLS (1 + LUA_ALLOC_STACK_CLASSES)
+#define LUA_ALLOC_TOTAL_POOLS (LUA_ALLOC_POOLS + LUA_ALLOC_SLOT_POOLS)
+typedef struct LuaSlotAllocPages {
+  struct LuaAllocPage *pages[LUA_ALLOC_SLOT_POOLS];
+  unsigned char growth[LUA_ALLOC_SLOT_POOLS];
+} LuaSlotAllocPages;
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
   struct global_State *global;
@@ -36,6 +46,7 @@ typedef struct LuaAllocationCache {
   struct LuaAllocPage *pages[LUA_ALLOC_POOLS];
   unsigned char growth[LUA_ALLOC_POOLS];  /* backing-size history survives handoffs */
   uint64_t growth_epoch;  /* a collection invalidates stale capacity demand */
+  LuaSlotAllocPages *slot_pages;  /* allocated with a scheduler slot */
 } LuaAllocationCache;
 
 typedef struct LuaCallScope {

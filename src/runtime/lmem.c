@@ -135,6 +135,27 @@ static void account (lua_State *L, l_mem change) {
 
 #define ALLOC_PAGE_MIN 1024
 
+l_sinline pthread_mutex_t *poolmutex (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_POOLS ? &g->allocation_mutex[pool]
+      : &g->slot_allocation_mutex[pool - LUA_ALLOC_POOLS];
+}
+
+l_sinline LuaAllocPage **poolpages (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_POOLS ? &g->allocation_pages[pool]
+      : &g->slot_allocation_pages[pool - LUA_ALLOC_POOLS];
+}
+
+l_sinline LuaAllocPage **poolavailable (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_POOLS ? &g->allocation_available[pool]
+      : &g->slot_allocation_available[pool - LUA_ALLOC_POOLS];
+}
+
+l_sinline LuaAllocPage **cachepage (LuaAllocationCache *cache, unsigned pool) {
+  if (pool < LUA_ALLOC_POOLS) return &cache->pages[pool];
+  lua_assert(cache->slot_pages != NULL);
+  return &cache->slot_pages->pages[pool - LUA_ALLOC_POOLS];
+}
+
 int luaM_initpools (lua_State *L) {
   global_State *g = G(L);
   int i, status;
@@ -143,13 +164,13 @@ int luaM_initpools (lua_State *L) {
   g->allocation_return_epoch = 0;
   g->allocation_epoch = 0;
   g->allocation_busy = 0;
-  for (i = 0; i < LUA_ALLOC_POOLS; i++) {
-    g->allocation_available[i] = NULL;
-    g->allocation_pages[i] = NULL;
-    status = pthread_mutex_init(&g->allocation_mutex[i], NULL);
+  for (i = 0; i < LUA_ALLOC_TOTAL_POOLS; i++) {
+    *poolavailable(g, i) = NULL;
+    *poolpages(g, i) = NULL;
+    status = pthread_mutex_init(poolmutex(g, i), NULL);
     if (status != 0) {
       while (i-- > 0)
-        luaX_checksync(pthread_mutex_destroy(&g->allocation_mutex[i]));
+        luaX_checksync(pthread_mutex_destroy(poolmutex(g, i)));
       return status;
     }
   }
@@ -163,26 +184,27 @@ void luaM_destroypools (lua_State *L) {
              G(L)->allocation_retired == NULL &&
              G(L)->allocation_returning == NULL &&
              G(L)->allocation_busy == 0);
-  for (i = 0; i < LUA_ALLOC_POOLS; i++) {
-    lua_assert(G(L)->allocation_available[i] == NULL);
-    lua_assert(G(L)->allocation_pages[i] == NULL);
-    luaX_checksync(pthread_mutex_destroy(&G(L)->allocation_mutex[i]));
+  for (i = 0; i < LUA_ALLOC_TOTAL_POOLS; i++) {
+    lua_assert(*poolavailable(G(L), i) == NULL);
+    lua_assert(*poolpages(G(L), i) == NULL);
+    luaX_checksync(pthread_mutex_destroy(poolmutex(G(L), i)));
   }
 }
 
 void luaM_releasecache (lua_State *L, LuaAllocationCache *cache) {
   int i;
-  for (i = 0; i < LUA_ALLOC_POOLS; i++) {
+  int end = cache->slot_pages != NULL ? LUA_ALLOC_TOTAL_POOLS : LUA_ALLOC_POOLS;
+  for (i = 0; i < end; i++) {
     LuaAllocPage *page;
-    luaX_checksync(pthread_mutex_lock(&G(L)->allocation_mutex[i]));
-    page = cache->pages[i];
+    luaX_checksync(pthread_mutex_lock(poolmutex(G(L), i)));
+    page = *cachepage(cache, i);
     if (page != NULL) {
       lua_assert(page->owner == cache);
-      cache->pages[i] = NULL;
+      *cachepage(cache, i) = NULL;
       page->owner = NULL;
       luaMP_notify(G(L), page);
     }
-    luaX_checksync(pthread_mutex_unlock(&G(L)->allocation_mutex[i]));
+    luaX_checksync(pthread_mutex_unlock(poolmutex(G(L), i)));
   }
 }
 
@@ -218,7 +240,7 @@ static void queuereturn (global_State *g, LuaAllocPage *page) {
 void luaM_releasepage (lua_State *L, LuaAllocPage *page, l_mem bytes) {
   global_State *g = G(L);
   unsigned pool = page->pool;
-  luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+  luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
   lua_assert(page->state == LUA_PAGE_SWEEPING && page->owner == NULL &&
              page->available_previous == NULL &&
              __atomic_load_n(&page->remote, __ATOMIC_RELAXED) == 0);
@@ -226,7 +248,7 @@ void luaM_releasepage (lua_State *L, LuaAllocPage *page, l_mem bytes) {
   /* Drop table membership until the backing-return queue unlinks the page. */
   __atomic_store_n(&page->table_epoch, 0, __ATOMIC_RELAXED);
   page->state = LUA_PAGE_RETURNING;
-  luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+  luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
   account(L, bytes);
   queuereturn(g, page);  /* last page access */
 }
@@ -263,19 +285,19 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
     unsigned pool = page->pool;
     int empty;
     memset(&borrow, 0, sizeof(borrow));
-    luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+    luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
     if (page->state == LUA_PAGE_SWEEPING) {
-      luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+      luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
       luaMP_publish(g, page);
       continue;
     }
     if (!complete && page->owner != NULL) {
-      luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+      luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
       luaMP_publish(g, page);
       continue;
     }
     if (page->owner != NULL && !luaMC_borrow(L, page->owner, &borrow, exclusive)) {
-      luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+      luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
       luaMP_publish(g, page);
       continue;
     }
@@ -290,8 +312,8 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
     }
     empty = page->used == 0;
     if ((empty || g->gcemergency) && page->owner != NULL) {
-      lua_assert(page->owner->pages[pool] == page);
-      page->owner->pages[pool] = NULL;
+      lua_assert(*cachepage(page->owner, pool) == page);
+      *cachepage(page->owner, pool) = NULL;
       page->owner = NULL;
     }
     if (empty) {
@@ -307,7 +329,7 @@ static unsigned reclaimpagebatch (lua_State *L, uint64_t *epoch, int exclusive,
              page->available_previous == NULL)
       offerpage(g, page);
     luaMC_return(&borrow);
-    luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+    luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
     if (empty) queuereturn(g, page);
     luaMC_notify(&borrow);
   }
@@ -349,12 +371,12 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
   for (i = 0; i < count; i++) {
     LuaAllocPage *page = pages[i];
     unsigned pool = page->pool;
-    luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
+    luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
     if (pool < LUA_ALLOC_BINS && g->sweep_plan.pages[pool] == page)
       g->sweep_plan.pages[pool] = page->next;
     *page->previous = page->next;
     if (page->next != NULL) page->next->previous = page->previous;
-    luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+    luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
     callfrealloc(L, page, page->bytes, 0);
   }
   luaAL_leave(L, admitted);
@@ -380,8 +402,8 @@ static void reclaimpages (lua_State *L, int complete) {
     }
     {
       unsigned pool;
-      for (pool = 0; pool < LUA_ALLOC_POOLS; pool++)
-        for (page = g->allocation_pages[pool]; page != NULL; page = page->next)
+      for (pool = 0; pool < LUA_ALLOC_TOTAL_POOLS; pool++)
+        for (page = *poolpages(g, pool); page != NULL; page = page->next)
           if (page->state == LUA_PAGE_OPEN) luaMP_notify(g, page);
     }
   }
@@ -523,7 +545,8 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
     /* The allocation consumer's lease protects its local list. Its returned
     ** block needs no remote notice or page-reclamation pass. Empty pages still
     ** notify reclamation so idle caches release their backing storage. */
-    if (cache->pages[page->pool] == page) {
+    if ((page->pool < LUA_ALLOC_POOLS || cache->slot_pages != NULL) &&
+        *cachepage(cache, page->pool) == page) {
       lua_assert(page->owner == cache && page->used != 0);
       page->used--;
       allocation->block.link.next = page->local;
@@ -606,27 +629,27 @@ static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
   /* The slow handoff uses a size-class mutex. Reoffering a page can then never
   ** create an ABA pop, and unlinking an empty offered page is constant work.
   ** No allocation, safepoint or public allocator call occurs under this lock. */
-  luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
-  page = g->allocation_available[pool];
+  luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+  page = *poolavailable(g, pool);
   if (page != NULL) {
-    g->allocation_available[pool] = page->available_next;
+    *poolavailable(g, pool) = page->available_next;
     if (page->available_next != NULL)
-      page->available_next->available_previous = &g->allocation_available[pool];
+      page->available_next->available_previous = poolavailable(g, pool);
     page->available_previous = NULL;
-    lua_assert(page->owner == NULL && cache->pages[pool] == NULL);
+    lua_assert(page->owner == NULL && *cachepage(cache, pool) == NULL);
     page->owner = cache;
-    cache->pages[pool] = page;
+    *cachepage(cache, pool) = page;
   }
-  luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+  luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
   return page;
 }
 
 static void preparepage (LuaAllocPage *page,
-                         unsigned bin, unsigned pool, size_t bytes) {
+                         unsigned blockbytes, unsigned pool, size_t bytes) {
   page->local = NULL;
   page->remote = 0;
   page->notified = NULL;
-  page->bin = bin;
+  page->blockbytes = blockbytes;
   page->pool = pool;
   page->available_next = NULL;
   page->available_previous = NULL;
@@ -640,7 +663,7 @@ static void preparepage (LuaAllocPage *page,
 
 /* Caller owns the pool mutex. */
 static void offerpage (global_State *g, LuaAllocPage *page) {
-  LuaAllocPage **head = &g->allocation_available[page->pool];
+  LuaAllocPage **head = poolavailable(g, page->pool);
   lua_assert(page->owner == NULL && page->available_previous == NULL);
   page->available_next = *head;
   page->available_previous = head;
@@ -652,17 +675,17 @@ static void abandonpage (lua_State *L, unsigned pool) {
   global_State *g = G(L);
   LuaAllocationCache *cache = allocationcache(L);
   LuaAllocPage *page;
-  luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
-  page = cache->pages[pool];
+  luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+  page = *cachepage(cache, pool);
   if (page != NULL) {
     lua_assert(page->owner == cache);
-    cache->pages[pool] = NULL;
+    *cachepage(cache, pool) = NULL;
     page->owner = NULL;
     /* A full page has no transferable capacity. Its first actual return
     ** supplies the notification; refills must not queue fruitless sweep work. */
     lua_assert(page->local == NULL);
   }
-  luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+  luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
 }
 
 /* Metadata admission can lend this slot to another task. Keep the requested
@@ -671,6 +694,7 @@ static void abandonpage (lua_State *L, unsigned pool) {
 static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
                          size_t minimum, size_t requested) {
   LuaExecution *execution = luaX_execution(L);
+  unsigned char *growth;
   size_t bytes;
   /* Only a provided cache can be lent to another task during admission.
   ** State/task-owned caches keep this request's demand on its retained stack;
@@ -679,14 +703,18 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
     return requested > minimum ? requested : minimum;
   if (cache->growth_epoch != luaC_traceepoch(cache->global)) {
     memset(cache->growth, 0, sizeof(cache->growth));
+    if (cache->slot_pages != NULL)
+      memset(cache->slot_pages->growth, 0, sizeof(cache->slot_pages->growth));
     cache->growth_epoch = luaC_traceepoch(cache->global);
   }
-  bytes = minimum << cache->growth[pool];
+  growth = pool < LUA_ALLOC_POOLS ? &cache->growth[pool]
+      : &cache->slot_pages->growth[pool - LUA_ALLOC_POOLS];
+  bytes = minimum << *growth;
   if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
   while (bytes < requested && bytes < LUA_ALLOC_PAGE_MAX) {
     bytes *= 2;
     if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
-    cache->growth[pool]++;
+    (*growth)++;
   }
   return bytes < minimum ? minimum : bytes;
 }
@@ -695,7 +723,7 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
 ** Keep its usable cache; abandon a full one before claiming another page. */
 static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
                                 size_t *bytes, uint64_t epoch) {
-  LuaAllocPage *page = allocationcache(L)->pages[pool];
+  LuaAllocPage *page = *cachepage(allocationcache(L), pool);
   if (luaC_traceepoch(G(L)) != epoch) *bytes = minimum;
   if (page != NULL) {
     size_t grown;
@@ -708,17 +736,17 @@ static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
   return NULL;
 }
 
-static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool,
+static LuaAllocPage *refill (lua_State *L, unsigned blockbytes, unsigned pool,
                              int emergency) {
   global_State *g = G(L);
-  LuaAllocPage *page = allocationcache(L)->pages[pool];
+  LuaAllocPage *page = *cachepage(allocationcache(L), pool);
   uint64_t epoch = luaC_traceepoch(g);
   int admitted, fresh = 0;
   /* Cold size classes need only a small block supply. These are allocator
   ** chunks, not OS mappings: reserving 4 KiB per cold coroutine/class strands
   ** most of a small public heap. Always fit at least two complete blocks. */
   size_t minimum = LUA_ALLOC_PAGE_HEADER +
-    2 * (sizeof(LuaAllocBlock) + luaMP_binbytes(bin));
+    2 * (sizeof(LuaAllocBlock) + blockbytes);
   size_t bytes;
   if (minimum < ALLOC_PAGE_MIN) minimum = ALLOC_PAGE_MIN;
   bytes = growcache(L, allocationcache(L), pool, minimum, page == NULL ? 0
@@ -761,7 +789,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool,
       if (retry) page = cast(LuaAllocPage *, callfrealloc(L, NULL, 0, bytes));
     }
     if (page != NULL) {
-      preparepage(page, bin, pool, bytes);
+      preparepage(page, blockbytes, pool, bytes);
       fresh = 1;
     }
   }
@@ -771,15 +799,15 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool,
     /* Initialize privately; publish a complete page under its pool mutex.
     ** Participation keeps the cache lease stable through this nonparking work. */
     luaMP_initpage(L, page);
-    luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
-    page->next = g->allocation_pages[pool];
-    page->previous = &g->allocation_pages[pool];
+    luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+    page->next = *poolpages(g, pool);
+    page->previous = poolpages(g, pool);
     if (page->next != NULL) page->next->previous = &page->next;
-    g->allocation_pages[pool] = page;
-    lua_assert(allocationcache(L)->pages[pool] == NULL);
+    *poolpages(g, pool) = page;
+    lua_assert(*cachepage(allocationcache(L), pool) == NULL);
     page->owner = allocationcache(L);
-    page->owner->pages[pool] = page;
-    luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+    *cachepage(page->owner, pool) = page;
+    luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
   }
   return page;
 }
@@ -806,21 +834,37 @@ void *luaM_alloccontrol (lua_State *L, size_t size) {
   return allocatebacking(L, size, 0, 1);
 }
 
+static void *allocatepooled (lua_State *L, size_t size, unsigned blockbytes,
+                             unsigned pool, int emergency) {
+  LuaAllocPage *page = *cachepage(allocationcache(L), pool);
+  LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
+  lua_assert(size <= blockbytes);
+  if (block == NULL) {
+    page = refill(L, blockbytes, pool, emergency);
+    if (page == NULL) return NULL;
+    block = takeblock(page);
+    lua_assert(block != NULL);
+  }
+  account(L, -cast(l_mem, size));
+  return block + 1;
+}
+
 static void *allocateblock (lua_State *L, size_t size, int tag,
                             unsigned poolbase, int emergency) {
   if (size <= LUA_ALLOC_MAX) {
     unsigned bin = luaMP_sizeclass(size);
-    unsigned pool = bin + poolbase;
-    LuaAllocPage *page = allocationcache(L)->pages[pool];
-    LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
-    if (block == NULL) {
-      page = refill(L, bin, pool, emergency);
-      if (page == NULL) return NULL;
-      block = takeblock(page);
-      lua_assert(block != NULL);
-    }
-    account(L, -cast(l_mem, size));
-    return block + 1;
+    return allocatepooled(L, size, cast_uint(luaMP_binbytes(bin)),
+                          bin + poolbase, emergency);
+  }
+  if (tag == LUA_TTHREAD && allocationcache(L)->slot_pages != NULL) {
+    /* Coroutine records have one uniform layout. Unlike host-side creation,
+    ** managed creation can amortize these pages across all tasks on a slot. */
+    size_t width = sizeof(LuaAllocBlock);
+    unsigned blockbytes = cast_uint(((sizeof(LX) + width - 1) / width) * width);
+    void *block;
+    lua_assert(size == sizeof(LX));
+    block = allocatepooled(L, size, blockbytes, LUA_ALLOC_THREAD_POOL, 0);
+    if (block != NULL) return block;
   }
   return allocatebacking(L, size, tag, emergency);
 }
@@ -843,7 +887,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
   lua_assert(allocation == NULL || !luaMP_retired(allocation));
   if (allocation != NULL && luaMP_page(allocation) != NULL &&
-      nsize <= luaMP_binbytes(luaMP_page(allocation)->bin)) {
+      nsize <= luaMP_page(allocation)->blockbytes) {
     account(L, cast(l_mem, osize) - cast(l_mem, nsize));
     return block;
   }
@@ -899,5 +943,15 @@ void *luaM_allocframes (lua_State *L, size_t size) {
 }
 
 void *luaM_allocstack (lua_State *L, size_t size, int emergency) {
+  static const unsigned short sizes[LUA_ALLOC_STACK_CLASSES] =
+    {768, 1152, 1664, 2560, 3840, 6144};
+  if (size > LUA_ALLOC_MAX && size <= sizes[LUA_ALLOC_STACK_CLASSES - 1] &&
+      allocationcache(L)->slot_pages != NULL) {
+    unsigned i = 0;
+    void *block;
+    while (sizes[i] < size) i++;
+    block = allocatepooled(L, size, sizes[i], LUA_ALLOC_STACK_POOL + i, 0);
+    if (block != NULL) return block;
+  }
   return allocateblock(L, size, 0, 0, emergency);
 }

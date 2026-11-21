@@ -593,6 +593,10 @@ typedef struct global_State {
   pthread_mutex_t trace_mutex;  /* trace batch claims and publication */
   pthread_cond_t trace_changed;
   LuaWaiter *trace_waiters;  /* trace_mutex */
+  /* Only managed slots allocate coroutine records and stacks from slabs. */
+  pthread_mutex_t slot_allocation_mutex[LUA_ALLOC_SLOT_POOLS];
+  struct LuaAllocPage *slot_allocation_pages[LUA_ALLOC_SLOT_POOLS];
+  struct LuaAllocPage *slot_allocation_available[LUA_ALLOC_SLOT_POOLS];
 } global_State;
 
 

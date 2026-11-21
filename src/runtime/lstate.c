@@ -297,7 +297,9 @@ static void resetCI (lua_State *L) {
 static void stack_init (lua_State *L1, lua_State *L) {
   int i;
   /* initialize stack array */
-  L1->stack.p = luaM_newvector(L, BASIC_STACK_SIZE + EXTRA_STACK, StackValue);
+  L1->stack.p = cast(StkId, luaM_allocstack(L,
+    (BASIC_STACK_SIZE + EXTRA_STACK) * sizeof(StackValue), 1));
+  if (l_unlikely(L1->stack.p == NULL)) luaM_error(L);
   L1->tbclist.p = L1->stack.p;
   for (i = 0; i < BASIC_STACK_SIZE + EXTRA_STACK; i++)
     setnilvalue2s(L1->stack.p + i);  /* erase new stack */

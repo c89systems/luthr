@@ -333,7 +333,7 @@ static unsigned page_releases, watched_bin;
 
 void __real_luaM_releasepage(lua_State *, LuaAllocPage *, l_mem);
 void __wrap_luaM_releasepage(lua_State *L, LuaAllocPage *page, l_mem bytes) {
-  if (page->bin == watched_bin)
+  if (page->pool == watched_bin)
     __atomic_fetch_add(&page_releases, 1, __ATOMIC_RELAXED);
   __real_luaM_releasepage(L, page, bytes);
 }
@@ -363,7 +363,7 @@ static void sweep_pooled(int separate_parts) {
     }
     if (i == 0) {
       const void *table = lua_topointer(L, -1);
-      watched_bin = luaMP_page((const LuaAllocBlock *)table - 1)->bin;
+      watched_bin = luaMP_page((const LuaAllocBlock *)table - 1)->pool;
     }
     lua_pop(L, 1);
   }

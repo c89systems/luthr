@@ -84,7 +84,7 @@ void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
   GCObject *object;
   int candidate = work->page != NULL && test != NULL && test->revive == NULL;
   if (work->page != NULL) {
-    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(work->page->bin);
+    size_t stride = sizeof(LuaAllocBlock) + work->page->blockbytes;
     size_t cells = (work->page->bytes - LUA_ALLOC_PAGE_HEADER) / stride;
     require(work->page->bytes <= LUA_ALLOC_PAGE_MAX);
     if (cells > sweep_limit)

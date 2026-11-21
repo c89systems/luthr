@@ -7,7 +7,7 @@
 #include "lstate.h"
 
 void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
-  size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(page->bin);
+  size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
   size_t offset;
   lua_assert(!completestate(G(L)) || luaW_iscollector(L) ||
     luaW_active(L->admission) != 0);

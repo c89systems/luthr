@@ -38,7 +38,7 @@ struct LuaAllocPage {
   size_t bytes;
   uint64_t table_epoch;  /* zero until first table, then last eligible sweep */
   unsigned used;  /* owner allocations, less returns collected in batches */
-  unsigned bin;
+  unsigned blockbytes;  /* payload capacity, excluding the block header */
   unsigned pool;
   unsigned state;  /* protected by the allocation pool mutex */
 };

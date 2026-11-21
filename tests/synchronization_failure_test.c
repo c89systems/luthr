@@ -159,7 +159,7 @@ static int run_case(const char *name) {
     else
       fail_mutex = position + (pool_case ? LUA_PUBLISH_SHARDS : 0);
     if (strcmp(name, "pool_last_mutex") == 0)
-      fail_mutex += LUA_ALLOC_POOLS - 1;
+      fail_mutex += LUA_ALLOC_TOTAL_POOLS - 1;
   }
   state = lua_newstate(allocate, NULL, 0);
   if (main_case) {
