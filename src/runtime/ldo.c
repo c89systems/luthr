@@ -31,6 +31,7 @@
 #include "lopcodes.h"
 #include "lparser.h"
 #include "lstate.h"
+#include "lstackapi.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltableaccess.h"

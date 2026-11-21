@@ -4,6 +4,7 @@
 #include <lgc.h>
 #include <lmem.h>
 #include <lroots.h>
+#include <lstackapi.h>
 #include <lstate.h>
 #include <lstring.h>
 #include <ltable.h>

@@ -27,6 +27,7 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "lroots.h"
+#include "lstackapi.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltm.h"

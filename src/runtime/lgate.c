@@ -14,6 +14,7 @@
 #include "lgc.h"
 #include "lmem.h"
 #include "lstate.h"
+#include "lstackapi.h"
 #include "ltask.h"
 #include "ltablestorage.h"
 #include "lscheduler.h"
@@ -117,38 +118,14 @@ static void reserve (lua_State *L, NativeStackContext *context,
   }
 }
 
-l_sinline void leavegate (lua_State *L, uintptr_t reservation) {
-  global_State *g = G(L);
-  uintptr_t stack = cast(uintptr_t, L);
-  int managed = (reservation & LUA_GATE_MANAGED) != 0;
-  uint64_t armed = managed ? L->participation.trace_armed : 0;
-  uint64_t control;
-  unsigned requests;
-  /* Only a waiter can change the reservation, by adding its disjoint bit.
-  ** Subtract the known reservation in a single transaction, keeping that
-  ** bit for the FIFO head. The collector can reclaim L after this point. */
-  uintptr_t previous = __atomic_fetch_sub(&L->stack_gate.word, reservation,
-                                          __ATOMIC_SEQ_CST);
-  if (l_unlikely((previous & ~cast(uintptr_t, LUA_GATE_WAITING | LUA_GATE_DORMANT))
-                 != reservation)) {
-    fputs("Luthr coroutine stack gate released without its reservation\n", stderr);
-    abort();
-  }
-  control = luaW_control(&g->world);
-  requests = LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS;
-  if (!(reservation & LUA_GATE_STACK)) requests |= LUA_WORLD_STORAGE_WAIT;
-  /* Only a managed reservation with old allocation debt can hold up this
-  ** arm request. Read its acknowledgement before the gate can be reclaimed. */
-  if (l_unlikely((previous & LUA_GATE_WAITING) ||
-                 (control & requests) ||
-                 ((control & LUA_WORLD_ARM_TRACE) && managed &&
-                  armed != luaW_armepoch(&g->world))))
-    luaW_leave(g, stack, previous & LUA_GATE_FLAGS, control);
+l_noret luaX_badrelease (void) {
+  fputs("Luthr coroutine stack gate released without its reservation\n", stderr);
+  abort();
 }
 
 static void release (lua_State *L, void *token, uintptr_t active) {
   lua_assert(L->world_depth == 0);
-  leavegate(L, cast(uintptr_t, token) | active);
+  luaX_releasegate(L, cast(uintptr_t, token) | active);
 }
 
 carrierentry int luaX_tryreserve (lua_State *target) {
@@ -301,9 +278,6 @@ static int attachedapi (lua_State *L, NativeStackContext *context) {
   return 1;
 }
 
-/* Entry tokens carry the obligations of this scope on their low bits. */
-enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
-
 /* Enter the storage epoch before borrowing any table buffers. A grace
 ** scan that still sees a stack-only gate covers only older retirements
 ** than the control word sampled after this promotion. */
@@ -341,33 +315,28 @@ void luaX_apileave (lua_State *L) {
   if (context->api_region == NULL) unlockstate(L, context, 0);
 }
 
-carrierentry uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
-  uintptr_t expected = 0;
-  if (stackonly && __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) == 0 &&
-      __atomic_compare_exchange_n(&L->stack_gate.word, &expected, LUA_GATE_STACK,
-                                  0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
-    /* A stop sees this reservation or precedes this check. Only the
-    ** managed fallback needs a carrier context or can wait for admission. */
+carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
+  if (reserved) {
     if (l_likely(!luaW_stopped(&G(L)->world))) {
-      if (l_unlikely(luaC_tracing(L))) {
+      if (luaC_tracing(L)) {
         luaC_checksnapshot(L);
         return LUA_VALUE_STACK | LUA_VALUE_TRACING;
       }
       return LUA_VALUE_STACK;
     }
-    leavegate(L, LUA_GATE_STACK);
+    luaX_releasegate(L, LUA_GATE_STACK);
   }
   return apienter(L);
 }
 
-void luaX_valueleave (lua_State *L, uintptr_t owner) {
+void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
   if (owner & LUA_VALUE_STACK) {
-    if ((owner & LUA_VALUE_TRACING) &&
-        __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
+    lua_assert(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
+    if (__atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
       luaSC_notifygc(G(L));
-    leavegate(L, LUA_GATE_STACK);
+    luaX_releasegate(L, LUA_GATE_STACK);
   }
-  else if (owner != 0) unlockstate(L, cast(NativeStackContext *, owner), 1);
+  else unlockstate(L, cast(NativeStackContext *, owner), 1);
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {

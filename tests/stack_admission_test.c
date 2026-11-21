@@ -1,5 +1,6 @@
 #include <lauxlib.h>
 #include <lgate.h>
+#include <lstackapi.h>
 #include <lstate.h>
 #include <lualib.h>
 #include <pthread.h>

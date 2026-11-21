@@ -38,8 +38,7 @@ static struct fixture *active_fixture;
 
 void __real_luaX_apienter(lua_State *state);
 void __real_luaX_apileave(lua_State *state);
-uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
-void __real_luaX_valueleave(lua_State *state, uintptr_t owner);
+void __real_luaW_leave(global_State *, uintptr_t, unsigned, uint64_t);
 void __real_luaX_pollrequests(lua_State *state);
 void __real_luaA_end(lua_State *state, LuaObjectScope *scope);
 
@@ -100,13 +99,21 @@ void __wrap_luaX_apileave(lua_State *state) {
   __real_luaX_apileave(state);
   leave_boundary(state);
 }
-uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
-  entry_boundary(state);
-  return __real_luaX_valueenter(state, stackonly);
-}
-void __wrap_luaX_valueleave(lua_State *state, uintptr_t owner) {
-  __real_luaX_valueleave(state, owner);
-  leave_boundary(state);
+void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags,
+                       uint64_t control) {
+  struct fixture *fixture = active_fixture;
+  if (fixture != NULL && fixture->armed && (flags & LUA_GATE_STACK) &&
+      (control & LUA_WORLD_STACK_ROOTS) &&
+      stack == (uintptr_t)fixture->worker) {
+    /* Clear the test request before the real notification. The stack is
+     * already unowned, so the collection can relocate it at this boundary. */
+    control &= ~(uint64_t)LUA_WORLD_STACK_ROOTS;
+    __atomic_fetch_and(&g->world.control, ~(uint64_t)LUA_WORLD_STACK_ROOTS,
+                       __ATOMIC_SEQ_CST);
+    __real_luaW_leave(g, stack, flags, control);
+    leave_boundary(fixture->worker);
+  } else
+    __real_luaW_leave(g, stack, flags, control);
 }
 
 void __wrap_luaX_pollrequests(lua_State *state) {
@@ -224,6 +231,10 @@ static int exercise(lua_State *state) {
     lua_pop(state, 1);
   } else {
     size_t length = 0;
+    /* Request a notification after physical release, even during an
+     * otherwise uncontended value access. */
+    __atomic_fetch_or(&G(state)->world.control, LUA_WORLD_STACK_ROOTS,
+                      __ATOMIC_SEQ_CST);
     const char *result =
         lua_tolstring(state, 1, fixture->length_case ? &length : NULL);
     if (result == NULL || strcmp(result, "retained string") != 0 ||

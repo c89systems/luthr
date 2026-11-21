@@ -4,6 +4,7 @@
 #include <lgc.h>
 #include <lmem.h>
 #include <lmempage.h>
+#include <lstackapi.h>
 #include <lstate.h>
 #include <ltable.h>
 #include <ltask.h>
@@ -69,7 +70,6 @@ static struct {
 
 int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
 void __real_luaW_enter(lua_State *state);
-uintptr_t __real_luaX_valueenter(lua_State *state, int stackonly);
 __typeof__(luaW_leave) __real_luaW_leave;
 void __real_luaX_poll(lua_State *state);
 void *__real_luaM_realloc_(lua_State *state, void *block, size_t old,
@@ -175,13 +175,6 @@ void __wrap_luaW_enter(lua_State *state) {
   measured--;
   if (role == 2 && handoff->paired)
     hold_handoff();
-}
-
-uintptr_t __wrap_luaX_valueenter(lua_State *state, int stackonly) {
-  uintptr_t owner = __real_luaX_valueenter(state, stackonly);
-  if (role == 2 && !handoff->paired)
-    hold_handoff();
-  return owner;
 }
 
 void __wrap_luaW_leave(global_State *g, uintptr_t stack, unsigned flags,
@@ -408,8 +401,13 @@ static void *new_owner(void *context) {
   role = 2;
   if (fixture->paired)
     lua_xmove(fixture->first, fixture->target, 0);
-  else
-    require(lua_gettop(fixture->target) == 0);
+  else {
+    uintptr_t owner = luaX_valueenter(fixture->target, 1);
+    require(owner == LUA_VALUE_STACK);
+    hold_handoff();
+    require(fixture->target->top.p == fixture->target->ci->func.p + 1);
+    luaX_valueleave(fixture->target, owner);
+  }
   return NULL;
 }
 
