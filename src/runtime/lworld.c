@@ -34,6 +34,7 @@ int luaW_init (global_State *g) {
   world->participants = NULL;
   world->reclaimers = NULL;
   world->work_epoch = 0;
+  world->arm_epoch = 0;
   world->storage_retired = world->storage_pending = NULL;
   world->storage_grace = 0;
   world->storage_bytes = 0;
@@ -196,6 +197,18 @@ void luaW_activate (lua_State *L) {
   UNUSED(previous);
 }
 
+/* The epoch is published before the arm request. An entry racing with the
+** directory walk either appears active there or sees the published request
+** before its first heap access. Stack-only scopes cannot mutate heap edges. */
+static int tracearmed (LuaWorld *world) {
+  LuaParticipation *part;
+  for (part = world->participants; part != NULL; part = part->next)
+    if (part->trace_armed != world->arm_epoch &&
+        (__atomic_load_n(&part->thread->stack_gate.word, __ATOMIC_SEQ_CST) &
+          LUA_GATE_MANAGED)) return 0;
+  return 1;
+}
+
 static void withdraw (lua_State *L) {
   uintptr_t previous;
   /* Every withdrawal here holds world.mutex and retains its stack gate.
@@ -213,10 +226,53 @@ static void withdraw (lua_State *L) {
 /* One metadata owner waits for either the preceding batch to reenter or
 ** the current batch to withdraw. Only a completed predicate needs a wake. */
 static void notifyrendezvous (LuaWorld *world) {
-  if (world->rendezvous_waiters != NULL &&
-      (luaW_stopped(world) ? luaW_activecount(world) == 0
-                           : world->entry_waiting == 0))
-    luaQ_wake(&world->rendezvous, &world->rendezvous_waiters);
+  uint64_t control;
+  if (world->rendezvous_waiters == NULL) return;
+  control = luaW_control(world);
+  if (control & LUA_WORLD_ARM_TRACE) {
+    if (!tracearmed(world)) return;
+  }
+  else if (control & LUA_WORLD_STOPPED) {
+    if (luaW_activecount(world) != 0) return;
+  }
+  else if (world->entry_waiting != 0) return;
+  luaQ_wake(&world->rendezvous, &world->rendezvous_waiters);
+}
+
+static void acknowledge (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  if (luaW_control(world) & LUA_WORLD_ARM_TRACE) {
+    uint64_t epoch = world->arm_epoch;
+    if (L->admission->trace_armed == epoch) return;
+    L->admission->trace_armed = epoch;
+    luaM_publishdebt(L);
+    notifyrendezvous(world);
+  }
+}
+
+void luaW_acktrace (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  acknowledge(L);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void luaW_armtrace (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  lua_assert(luaW_ownsheap(L) && L->world_depth == 0);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  world->arm_epoch = luaC_traceepoch(G(L));
+  __atomic_fetch_or(&world->control, LUA_WORLD_ARM_TRACE, __ATOMIC_SEQ_CST);
+  acknowledge(L);
+  if (!tracearmed(world)) {
+    luaW_deactivate(L);
+    while (!tracearmed(world))
+      luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
+    luaW_resume(L);
+  }
+  __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_ARM_TRACE),
+                     __ATOMIC_SEQ_CST);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 void luaW_deactivate (lua_State *L) {
@@ -230,6 +286,7 @@ void luaW_resume (lua_State *L) {
   L->root_waiting = 0;
   if (L->stack_peer != NULL) L->stack_peer->root_waiting = 0;
   luaW_activate(L);
+  acknowledge(L);
 }
 
 void luaW_waitresume (lua_State *L) {
@@ -266,7 +323,10 @@ void luaW_enter (lua_State *L) {
   lua_assert(luaW_active(L->admission));
   luaHS_announce(world, L->admission, luaW_epoch(control));
   if (l_unlikely(control & LUA_WORLD_STOPPED)) awaitentry(L, world);
-  else if (luaC_tracing(L)) luaC_checksnapshot(L);
+  else {
+    if (l_unlikely(control & LUA_WORLD_ARM_TRACE)) luaW_acktrace(L);
+    if (luaC_tracing(L)) luaC_checksnapshot(L);
+  }
 }
 
 int luaW_tryenter (lua_State *L) {
@@ -277,6 +337,7 @@ int luaW_tryenter (lua_State *L) {
     return 0;
   }
   luaW_activate(L);
+  acknowledge(L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaHS_quiescent(L);
   luaC_checksnapshot(L);
@@ -508,6 +569,10 @@ void luaW_waitcollector (lua_State *L, int reason) {
   }
   else if (reason == LUA_WAIT_RECLAIM)
     luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+  else if (reason == LUA_WAIT_ARM) {
+    while (luaC_markstate(g) & LUA_MARK_ARMING)
+      luaQ_wait(L, &world->mutex, &g->phase_changed, &g->phase_waiters);
+  }
   else if (!luaW_stopped(world))
     luaQ_wait(L, &world->mutex, &g->phase_changed,
       reason == LUA_WAIT_MINOR ? &g->minor_waiters : &g->phase_waiters);

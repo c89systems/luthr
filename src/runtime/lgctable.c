@@ -42,7 +42,7 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
   if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence) return 0;
   /* Only the claimed marker freezes this epoch. Publishing a strong mode
   ** cannot expose a weak cutoff; weak mode changes retain mutation ownership. */
-  luaC_settablestate(table, g->weak_stamp);
+  luaC_settablestate(table, luaC_weakstamp(g));
   return 1;
 }
 

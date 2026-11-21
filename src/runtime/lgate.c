@@ -376,10 +376,12 @@ l_uint32 luaX_parentcalls (lua_State *from) {
 }
 
 void luaX_pollrequests (lua_State *L) {
+  uint64_t control;
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
-  if (luaW_stopped(&G(L)->world) ||
+  control = luaW_control(&G(L)->world);
+  if ((control & LUA_WORLD_STOPPED) ||
       (__atomic_load_n(&L->stack_gate.word, __ATOMIC_ACQUIRE) &
         LUA_GATE_WAITING) != 0) {
     /* A real request publishes roots and hands off ownership. The successful
@@ -388,6 +390,12 @@ void luaX_pollrequests (lua_State *L) {
     luaX_unlockstate(L);
     luaX_lockstate(L);
     L->native_depth--;
+  }
+  else {
+    if (l_unlikely(control & LUA_WORLD_ARM_TRACE)) luaW_acktrace(L);
+    if (l_unlikely(luaC_scanready(G(L)) &&
+        __atomic_load_n(&L->trace_snapshot, __ATOMIC_ACQUIRE) !=
+          luaC_traceepoch(G(L)))) luaC_checksnapshot(L);
   }
 }
 

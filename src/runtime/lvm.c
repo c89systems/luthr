@@ -927,7 +927,7 @@ static LClosure *cachedclosure (lua_State *L, Proto *p) {
   ** No safepoint separates this check, pointer load and stack publication. */
   if (p->sizeupvalues == 0 &&
       __atomic_load_n(&p->closure_epoch, __ATOMIC_ACQUIRE) ==
-                   G(L)->trace_epoch) {
+                   luaC_traceepoch(G(L))) {
     LClosure *ncl = __atomic_load_n(&p->closure_cache, __ATOMIC_ACQUIRE);
     if (ncl != NULL) {
       luaC_tracepointer(L, ncl);
@@ -972,9 +972,14 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
     ** the rooted closure is complete. Racing publishers in that cohort all
     ** offer live immutable closures; either choice is valid. No collector
     ** reads this weak edge or needs to scan a cache directory. */
-    __atomic_store_n(&ncl->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
-    __atomic_store_n(&p->closure_cache, ncl, __ATOMIC_RELEASE);
-    __atomic_store_n(&p->closure_epoch, G(L)->trace_epoch, __ATOMIC_RELEASE);
+    global_State *g = G(L);
+    uint64_t epoch = luaC_traceepoch(g);
+    if (!(luaC_markstate(g) & LUA_MARK_ARMING)) {
+      luaC_tracepointer(L, ncl);  /* construction may straddle activation */
+      __atomic_store_n(&ncl->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
+      __atomic_store_n(&p->closure_cache, ncl, __ATOMIC_RELEASE);
+      __atomic_store_n(&p->closure_epoch, epoch, __ATOMIC_RELEASE);
+    }
   }
   luaR_poproot(L, &capture);
   luaR_poproot(L, &closure);

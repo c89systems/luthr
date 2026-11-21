@@ -61,7 +61,8 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   plan->page_limit = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
   for (unsigned pool = plan->page_pool; pool <= plan->page_limit; pool++)
     plan->pages[pool] = g->allocation_pages[pool];
-  g->new_mark = cast_byte(g->major_mark | g->minor_mark);
+  __atomic_store_n(&g->mark_state, luaC_markstate(g) & ~AGEBITS,
+                   __ATOMIC_RELAXED);
   plan->base_marked = marked;
   plan->next = g->allgc;
   plan->middle = kind == SWEEP_YOUNG ? g->survival : NULL;

@@ -687,7 +687,7 @@ void __wrap_luaC_assistsweep(lua_State *L) {
 static unsigned snapshot_needed(lua_State *L, lua_State *thread) {
   return luaC_tracing(L) &&
          __atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) !=
-             G(L)->trace_epoch;
+             luaC_traceepoch(G(L));
 }
 
 static void snapshot(lua_State *L, lua_State *thread) {

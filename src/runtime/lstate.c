@@ -395,6 +395,7 @@ static void preinit_thread (lua_State *L, global_State *g) {
   L->participation.thread = L;
   L->participation.collector = 0;
   L->participation.storage_epoch = 0;
+  L->participation.trace_armed = 0;
   L->admission = &L->participation;
   L->callback_owner = NULL;
   L->callback_active = 0;
@@ -621,9 +622,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   }
   L = &g->mainth.l;
   L->tt = LUA_VTHREAD;
-  g->major_mark = bitmask(MAJOR0BIT);
-  g->minor_mark = g->markminor = 0;
-  g->new_mark = g->major_mark;
+  g->mark_state = bitmask(MAJOR0BIT);
   g->strcache_epoch = 1;
   g->shrink_strings = 0;
   L->marked = luaC_newmark(g);
@@ -691,7 +690,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->GCmajorlive = sizeof(global_State);
   g->GCcyclelive = sizeof(global_State);
   g->gcstep_pending = 0;
-  g->trace_active = g->trace_epoch = g->trace_busy = 0;
+  g->trace_epoch = g->trace_busy = 0;
   g->major_completed = 0;
   g->minor_request = g->minor_completed = 0;
   g->weak_stamp = 0;

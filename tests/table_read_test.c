@@ -498,6 +498,7 @@ static void index_miss(lua_State *state) {
 
 static void resume_epoch(lua_State *state) {
   LuaWorld *world = &G(state)->world;
+  const unsigned requests = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT;
   luaX_lockstate(state);
   require(pthread_mutex_lock(&world->mutex) == 0);
   luaW_deactivate(state);
@@ -512,9 +513,9 @@ static void resume_epoch(lua_State *state) {
   /* Stopping, advancing a storage epoch, and restarting must preserve the
    * concurrent request. A subsequent API entry announces the latest epoch. */
   luaW_stop(state);
-  require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_REQUESTS);
+  require((luaW_control(world) & LUA_WORLD_REQUESTS) == requests);
   __atomic_fetch_add(&world->control, LUA_WORLD_EPOCH_STEP, __ATOMIC_SEQ_CST);
-  require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_REQUESTS);
+  require((luaW_control(world) & LUA_WORLD_REQUESTS) == requests);
   luaW_start(state);
   require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_STORAGE_WAIT);
   luaX_unlockstate(state);

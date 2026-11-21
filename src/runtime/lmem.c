@@ -694,9 +694,9 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
   ** carrying old parser demand into their later allocations strands storage. */
   if (execution == NULL || execution->allocation_cache != cache)
     return requested > minimum ? requested : minimum;
-  if (cache->growth_epoch != cache->global->trace_epoch) {
+  if (cache->growth_epoch != luaC_traceepoch(cache->global)) {
     memset(cache->growth, 0, sizeof(cache->growth));
-    cache->growth_epoch = cache->global->trace_epoch;
+    cache->growth_epoch = luaC_traceepoch(cache->global);
   }
   bytes = minimum << cache->growth[pool];
   if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
@@ -713,7 +713,7 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
 static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
                                 size_t *bytes, uint64_t epoch) {
   LuaAllocPage *page = allocationcache(L)->pages[pool];
-  if (G(L)->trace_epoch != epoch) *bytes = minimum;
+  if (luaC_traceepoch(G(L)) != epoch) *bytes = minimum;
   if (page != NULL) {
     size_t grown;
     if (page->local != NULL || luaMP_remote(page) != NULL) return page;
@@ -728,7 +728,7 @@ static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
 static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   global_State *g = G(L);
   LuaAllocPage *page = allocationcache(L)->pages[pool];
-  uint64_t epoch = g->trace_epoch;
+  uint64_t epoch = luaC_traceepoch(g);
   int fresh = 0;
   /* Cold size classes need only a small block supply. These are allocator
   ** chunks, not OS mappings: reserving 4 KiB per cold coroutine/class strands

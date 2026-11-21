@@ -438,6 +438,7 @@ typedef struct LuaTracePlan {
   unsigned direction;
   unsigned weak_list;
   unsigned finish;
+  int roots_pending;  /* native roots captured at the first closed boundary */
 } LuaTracePlan;
 
 /* A sweep owns its old allocation cohort until every claimed batch returns.
@@ -517,7 +518,7 @@ typedef struct global_State {
   LuaGCPacer pacer;
   l_mem GCcyclelive;  /* initial tracing cohort, less its logical garbage */
   unsigned gcstep_pending;  /* atomic; one automatic request seeks metadata */
-  unsigned trace_active;  /* atomic concurrent marking phase */
+  unsigned mark_state;  /* atomic stamps, allocation age and trace flags */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
@@ -541,10 +542,6 @@ typedef struct global_State {
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
   lu_byte gcparams[LUA_GCPN];
-  lu_byte major_mark;  /* rotating nonzero major stamp; zero denotes fixed */
-  lu_byte minor_mark;  /* alternating young-generation stamp */
-  lu_byte new_mark;    /* complete allocation/major-mark stamp for this phase */
-  lu_byte markminor;   /* interpretation of the last/current mark job */
   lu_byte gcstate;  /* state of garbage collector */
   lu_byte gckind;  /* kind of GC running */
   lu_byte gcstopem;  /* stops emergency collections */

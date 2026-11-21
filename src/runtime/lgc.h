@@ -58,9 +58,25 @@ enum {
 enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
 #define luaC_tracephase(g) \
   __atomic_load_n(&(g)->trace_plan.phase, __ATOMIC_ACQUIRE)
+#define luaC_traceepoch(g) __atomic_load_n(&(g)->trace_epoch, __ATOMIC_ACQUIRE)
+#define luaC_weakstamp(g) __atomic_load_n(&(g)->weak_stamp, __ATOMIC_RELAXED)
 #define luaC_tracepending(g) \
   (__atomic_load_n(&(g)->trace_ready, __ATOMIC_ACQUIRE) || \
    __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
+
+/* Publish the allocation and mark stamps together with trace activation.
+** Inactive states retain the last trace's interpretation for sweeping. */
+enum {
+  LUA_MARK_YOUNG = 1u << 8, LUA_MARK_ACTIVE = 1u << 9, LUA_MARK_ARMING = 1u << 10
+};
+#define luaC_markstate(g) __atomic_load_n(&(g)->mark_state, __ATOMIC_RELAXED)
+#define luaC_tracingglobal(g) \
+  ((__atomic_load_n(&(g)->mark_state, __ATOMIC_ACQUIRE) & LUA_MARK_ACTIVE) != 0)
+l_sinline int luaC_scanready (global_State *g) {
+  const unsigned bits = LUA_MARK_ACTIVE | LUA_MARK_ARMING;
+  return (__atomic_load_n(&g->mark_state, __ATOMIC_ACQUIRE) & bits) ==
+    LUA_MARK_ACTIVE;
+}
 
 /* Idle workers consume payloads only. Reservation retries and phase changes
 ** remain with ordinary collector drivers; neither is runnable idle work. */
@@ -68,7 +84,7 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
   (__atomic_load_n(&(g)->trace_workers, __ATOMIC_ACQUIRE) || \
    __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
 #define luaC_workerready(g) \
-  ((__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && luaC_markready(g)) || \
+  ((luaC_scanready(g) && luaC_markready(g)) || \
    __atomic_load_n(&(g)->sweep_workers, __ATOMIC_ACQUIRE))
 
 /* A batch owns its payloads until it publishes every list and counter. It
@@ -164,6 +180,7 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 
 
 #define MAJORBITS	bit2mask(MAJOR0BIT, MAJOR1BIT)
+#define MARKSTAMPS	(MAJORBITS | bitmask(MINORBIT))
 
 
 #define getmarked(x) __atomic_load_n(&(x)->marked, __ATOMIC_RELAXED)
@@ -178,7 +195,6 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define nw2black(x) \
   ((void)__atomic_fetch_and(&(x)->marked, cast_byte(~bitmask(QUEUEDBIT)), \
                             __ATOMIC_RELEASE))
-#define luaC_newmark(g) ((g)->new_mark)
 
 
 /* object age in generational mode */
@@ -190,6 +206,7 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define G_TOUCHED2	5	/* old object to scan in one minor cycle */
 
 #define AGEBITS		7  /* all age bits (111) */
+#define luaC_newmark(g) cast_byte(luaC_markstate(g) & (MARKSTAMPS | AGEBITS))
 
 #define getage(o)	(getmarked(o) & AGEBITS)
 static inline void luaC_setage (GCObject *o, lu_byte age) {
@@ -202,31 +219,36 @@ static inline void luaC_setage (GCObject *o, lu_byte age) {
 #define setage(o,a) luaC_setage(obj2gco(o), (a))
 #define isold(o)	(getage(o) > G_SURVIVAL)
 
-static inline int luaC_unmarked (global_State *g, lu_byte marked) {
-  if (g->markminor)
+static inline int luaC_unmarked (unsigned state, lu_byte marked) {
+  if (state & LUA_MARK_YOUNG)
     return (marked & AGEBITS) <= G_SURVIVAL &&
-           (marked & bitmask(MINORBIT)) != g->minor_mark;
+           ((marked ^ state) & bitmask(MINORBIT)) != 0;
   return (marked & MAJORBITS) != 0 &&
-         (marked & MAJORBITS) != g->major_mark;
+         ((marked ^ state) & MAJORBITS) != 0;
 }
-#define iswhite(g,o) luaC_unmarked((g), getmarked(o))
+#define iswhite(g,o) luaC_unmarked(luaC_markstate(g), getmarked(o))
 #define isblack(g,o) (!iswhite((g),(o)) && !isgray(o))
-#define isdead(g,o) \
-  (!__atomic_load_n(&(g)->trace_active, __ATOMIC_ACQUIRE) && iswhite((g),(o)))
 
-static inline lu_byte luaC_stamp (global_State *g, lu_byte marked) {
-  return g->markminor
-    ? cast_byte((marked & ~bitmask(MINORBIT)) | g->minor_mark)
-    : cast_byte((marked & ~(MAJORBITS | bitmask(MINORBIT) | AGEBITS)) |
-                 g->new_mark);
+static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
+  unsigned state = __atomic_load_n(&g->mark_state, __ATOMIC_ACQUIRE);
+  return !(state & LUA_MARK_ACTIVE) &&
+         luaC_unmarked(state, __atomic_load_n(marked, __ATOMIC_RELAXED));
+}
+#define isdead(g,o) luaC_deadmark((g), &(o)->marked)
+
+static inline lu_byte luaC_stamp (unsigned state, lu_byte marked) {
+  unsigned bits = state & LUA_MARK_YOUNG ? bitmask(MINORBIT)
+                                       : MARKSTAMPS | AGEBITS;
+  return cast_byte((marked & ~bits) | (state & bits));
 }
 
 /* Intern resurrection owns the shard, while a sweeper rechecks under the
 ** same ownership. A leaf is immediately marked and owns no trace queue. */
 static inline void luaC_revive (global_State *g, GCObject *o) {
+  unsigned state = luaC_markstate(g);
   lu_byte marked = getmarked(o), changed;
   do {
-    changed = cast_byte(luaC_stamp(g, marked) & ~bitmask(QUEUEDBIT));
+    changed = cast_byte(luaC_stamp(state, marked) & ~bitmask(QUEUEDBIT));
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
 }
@@ -368,7 +390,7 @@ enum {
 
 l_sinline int luaC_weakvalid (global_State *g, uint64_t state) {
   return (state & (~cast(uint64_t, LUA_WEAK_STAMP_STEP - 1) | NURSERY_TAG)) ==
-         g->weak_stamp;
+         luaC_weakstamp(g);
 }
 
 l_sinline unsigned luaC_weakmode (uint64_t state) {
@@ -401,7 +423,7 @@ static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
   /* The shared trace publishes all newborns before local work can resume. */
-  if (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE)) return 1;
+  if (luaC_tracingglobal(G(L))) return 1;
   luaC_nurseryedge(L, owner, value);
   if (luaC_kind(G(L)) != KGC_GENMINOR) return 0;
   marked = getmarked(owner);
@@ -463,8 +485,7 @@ LUAI_FUNC void luaC_linktrace (global_State *, GCObject *);
 LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
 /* A hybrid deletion/insertion barrier shades before mutation. No allocator,
 ** object ownership or collection request is permitted on these paths. */
-#define luaC_tracing(L) \
-  (__atomic_load_n(&G(L)->trace_active, __ATOMIC_ACQUIRE) != 0)
+#define luaC_tracing(L) luaC_tracingglobal(G(L))
 #define luaC_tracevalue(L,v) \
   { const TValue *trace_v_ = (v); \
     if (luaC_tracing(L) && iscollectable(trace_v_)) \
@@ -502,6 +523,7 @@ LUAI_FUNC void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit)
 LUAI_FUNC void luaC_publishtrace (lua_State *L, LuaTraceWork *work);
 LUAI_FUNC void luaC_advancetrace (lua_State *L);
 LUAI_FUNC void luaC_initialtrace (lua_State *L);
+LUAI_FUNC void luaC_finishroots (lua_State *L);
 LUAI_FUNC void luaC_finishtrace (lua_State *L);
 LUAI_FUNC void luaC_assisttrace (lua_State *L);
 LUAI_FUNC void luaC_polltrace (lua_State *L);

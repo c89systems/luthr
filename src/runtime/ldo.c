@@ -473,6 +473,9 @@ int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
   lu_byte oldgcstop;
  retry:
   luaW_heapenter(L);  /* acquire before making stack pointers unscannable */
+  /* This execution can still hold the gate it had at trace activation.
+  ** Publish its roots before allocator admission can park it with offsets. */
+  luaC_checksnapshot(L);
   oldsize = stacksize(L);  /* a collection while waiting may have shrunk it */
   oldstack = L->stack.p;
   oldgcstop = G(L)->gcstopem;

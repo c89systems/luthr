@@ -79,7 +79,7 @@ void luaC_traceview (lua_State *L, const Table *view) {
 /* The caller owns the builder's stack gate, or the prototype is frozen.
 ** This publishes referents, not shared mark-list mutations. */
 void luaC_snapshotproto (lua_State *L, Proto *proto) {
-  uint64_t epoch = G(L)->trace_epoch;
+  uint64_t epoch = luaC_traceepoch(G(L));
   int i;
   if (__atomic_load_n(&proto->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
     return;
@@ -103,7 +103,7 @@ void luaC_snapshotproto (lua_State *L, Proto *proto) {
 ** before a scanner can finish this root. Stacks stay black with the hybrid
 ** heap barrier; they do not need a second, globally paused traversal. */
 void luaC_snapshot (lua_State *L, lua_State *thread) {
-  uint64_t epoch = G(L)->trace_epoch;
+  uint64_t epoch = luaC_traceepoch(G(L));
   StkId slot;
   LuaNativeRoot *root;
   LuaSharingRoots *sharing;
@@ -158,7 +158,7 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
 }
 
 void luaC_checksnapshot (lua_State *L) {
-  if (luaC_tracing(L)) {
+  if (luaC_scanready(G(L))) {
     /* Paired operations own two gates but share the first participation word.
     ** An allocation wait on either stack must publish both root sets. */
     if (L->stack_peer != NULL) luaC_snapshot(L, L->stack_peer);
@@ -193,7 +193,7 @@ lu_mem luaC_tracebatch (lua_State *L, unsigned limit) {
   LuaTraceWork work = {0};
   unsigned previous;
   int notify;
-  if (!luaC_tracing(L) || limit == 0) return 0;
+  if (!luaC_scanready(g) || limit == 0) return 0;
   if (limit > LUA_TRACE_BATCH) limit = LUA_TRACE_BATCH;
   luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
   previous = __atomic_load_n(&g->trace_workers, __ATOMIC_RELAXED);

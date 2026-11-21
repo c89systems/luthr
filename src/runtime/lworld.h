@@ -15,6 +15,7 @@ typedef struct LuaParticipation {
   lua_State *thread;
   unsigned collector;  /* immutable system role; does not expand mutator pacing */
   uint64_t storage_epoch;  /* last point with no optimistic storage borrow */
+  uint64_t trace_armed;  /* world.mutex, last acknowledged trace epoch */
 } LuaParticipation;
 
 /* Control publishes admission requests and the reclamation epoch together.
@@ -22,8 +23,10 @@ typedef struct LuaParticipation {
 enum {
   LUA_WORLD_STOPPED = 1,
   LUA_WORLD_STORAGE_WAIT = 2,
-  LUA_WORLD_REQUESTS = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT,
-  LUA_WORLD_EPOCH_STEP = 4
+  LUA_WORLD_ARM_TRACE = 4,
+  LUA_WORLD_REQUESTS = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT |
+                       LUA_WORLD_ARM_TRACE,
+  LUA_WORLD_EPOCH_STEP = 8
 };
 
 typedef struct LuaWorld {
@@ -37,6 +40,7 @@ typedef struct LuaWorld {
   LuaParticipation *participants;
   lua_State *reclaimers;  /* atomic head; list/work ownership uses mutex */
   uint64_t work_epoch;
+  uint64_t arm_epoch;  /* world.mutex, epoch of the current arm request */
   struct LuaTableRetirement *storage_retired;  /* atomic producer list */
   struct LuaTableRetirement *storage_pending;  /* sole storage_busy consumer */
   uint64_t control, storage_grace;
@@ -84,6 +88,8 @@ LUAI_FUNC void luaW_leave (LuaWorld *world, unsigned flags);
 LUAI_FUNC unsigned luaW_active (const LuaParticipation *participant);
 LUAI_FUNC void luaW_stop (lua_State *L);
 LUAI_FUNC void luaW_start (lua_State *L);
+LUAI_FUNC void luaW_armtrace (lua_State *L);
+LUAI_FUNC void luaW_acktrace (lua_State *L);
 /* Caller retains its stack gate and holds world.mutex while inactive. */
 LUAI_FUNC void luaW_waitresume (lua_State *L);
 LUAI_FUNC void luaW_heapenter (lua_State *L);
@@ -92,7 +98,8 @@ LUAI_FUNC void luaW_collectenter (lua_State *L);
 LUAI_FUNC int luaW_trycollectenter (lua_State *L);
 LUAI_FUNC void luaW_heapleave (lua_State *L);
 /* Caller owns world.mutex, retains native depth and borrows no shared work. */
-enum { LUA_WAIT_RECLAIM, LUA_WAIT_PHASE, LUA_WAIT_MINOR, LUA_WAIT_TRACE };
+enum { LUA_WAIT_RECLAIM, LUA_WAIT_PHASE, LUA_WAIT_MINOR, LUA_WAIT_TRACE,
+       LUA_WAIT_ARM };
 LUAI_FUNC void luaW_waitcollector (lua_State *L, int reason);
 LUAI_FUNC LuaWorldScope luaW_scope (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);

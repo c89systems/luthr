@@ -39,6 +39,7 @@ static void clearing (global_State *g, unsigned phase) {
 static void advanceclosedtrace (lua_State *L) {
   global_State *g = G(L);
   LuaTracePlan *plan = &g->trace_plan;
+  luaC_finishroots(L);
   while (luaC_tracing(L) && plan->finish != 0) {
     if (plan->phase == TRACE_INIT)
       luaC_initialtrace(L);
@@ -113,7 +114,7 @@ static void advanceclosedtrace (lua_State *L) {
 
 static int canadvance (lua_State *L) {
   global_State *g = G(L);
-  return luaC_tracing(L) && g->trace_plan.finish != 0 &&
+  return luaC_scanready(g) && g->trace_plan.finish != 0 &&
     __atomic_load_n(&g->trace_busy, __ATOMIC_RELAXED) == 0 &&
     (luaC_tracephase(g) == TRACE_INIT || !luaC_tracepending(g));
 }

@@ -26,7 +26,7 @@ static struct {
              .changed = PTHREAD_COND_INITIALIZER};
 static __thread unsigned role;
 static __thread unsigned stops;
-enum { MINOR_NO_GATE, MINOR_UNWIND, MINOR_FINALIZER };
+enum { MINOR_NO_GATE, MINOR_UNWIND, MINOR_FINALIZER, MINOR_ARM };
 static int minor_case;
 static void arrive(void);
 
@@ -66,6 +66,12 @@ int __wrap_luaW_trycollectenter(lua_State *L) {
 lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
 lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
   if (role == 1 && minor_case != MINOR_NO_GATE && !fixture.driver_parked) {
+    lu_mem marked = 0;
+    if (minor_case == MINOR_ARM) {
+      require(stops == 0 && !luaW_stopped(&G(L)->world));
+      marked = __real_luaC_tracebatch(L, limit);
+      require(marked != 0);
+    }
     require(pthread_mutex_lock(&fixture.mutex) == 0);
     fixture.driver_parked = 1;
     require(pthread_cond_broadcast(&fixture.changed) == 0);
@@ -74,6 +80,8 @@ lu_mem __wrap_luaC_tracebatch(lua_State *L, unsigned limit) {
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
     if (minor_case == MINOR_UNWIND)
       luaD_throw(L, LUA_ERRRUN);
+    if (minor_case == MINOR_ARM)
+      return marked;
   }
   return __real_luaC_tracebatch(L, limit);
 }
@@ -134,6 +142,50 @@ static int minor_finalizer(lua_State *L) {
   fixture.finalized++;
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
   return 0;
+}
+
+static void minor_arm(lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  struct request driver = {0};
+  lua_State *mutator;
+  pthread_t worker;
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  mutator = lua_newthread(L);
+  require(luaL_loadstring(mutator, "local h; for i=1,4096 do h={h} end; "
+                                   "return h") == LUA_OK);
+  require(lua_pcall(mutator, 0, 1, 0) == LUA_OK);
+  driver.state = lua_newthread(L);
+  driver.role = 1;
+  driver.phase = 5;
+  minor_case = MINOR_ARM;
+  lua_lock(mutator);
+  require(pthread_create(&worker, NULL, request, &driver) == 0);
+  while (!(luaW_control(world) & LUA_WORLD_ARM_TRACE))
+    sched_yield();
+  require(!luaW_stopped(world) && !luaC_scanready(G(L)));
+  luaW_acktrace(mutator);
+  require(luaW_active(mutator->admission));
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.driver_parked)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(luaW_active(mutator->admission) && !luaW_stopped(world));
+  require(mutator->trace_snapshot != luaC_traceepoch(G(L)));
+  require(luaD_reallocstack(mutator, stacksize(mutator) + 128, 1));
+  require(mutator->trace_snapshot == luaC_traceepoch(G(L)));
+  lua_unlock(mutator);
+  fixture.release_driver = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(driver.stops == 1 && !luaC_tracing(L) && !luaC_sweeping(L));
+  for (unsigned i = 0; i < 4096; i++) {
+    require(lua_istable(mutator, -1));
+    lua_rawgeti(mutator, -1, 1);
+    lua_remove(mutator, -2);
+  }
+  require(lua_isnil(mutator, -1));
 }
 
 static void explicit_minor_followers(lua_State *L, int unwind) {
@@ -452,6 +504,10 @@ int main(int argc, char **argv) {
     require(strcmp(argv[1], "phase_incremental") == 0 ||
             strcmp(argv[1], "phase_generational") == 0);
     phase_request(L, strcmp(argv[1], "phase_generational") == 0);
+    goto done;
+  }
+  if (strcmp(argv[1], "minor_arm") == 0) {
+    minor_arm(L);
     goto done;
   }
   explicit_step = strcmp(argv[1], "explicit") == 0;

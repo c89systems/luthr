@@ -396,7 +396,7 @@ int main(int argc, char **argv) {
     owner = (GCObject *)lua_topointer(state, -1);
     require(isold(owner));
     setmarked(owner, (getmarked(owner) & ~(1 << MINORBIT)) |
-                         (G(state)->minor_mark ^ (1 << MINORBIT)));
+                         (~luaC_newmark(G(state)) & (1 << MINORBIT)));
     lua_pop(state, 1);
   }
   require(lua_pcall(test.worker, 0, 0, 0) == LUA_OK);

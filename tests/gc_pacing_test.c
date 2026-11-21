@@ -215,7 +215,7 @@ static void bounded_marking(const char *kind) {
     unsigned before = stops;
     luaE_setdebt(G(L), 0);
     luaC_step(L); /* A normal request returns with its job unfinished. */
-    require(stops == before + 1); /* returning a slice owes no new pause */
+    require(stops == before + !generational);
   }
   require(luaC_tracing(L));
   require(!luaW_stopped(&G(L)->world) && L->world_depth == 0);

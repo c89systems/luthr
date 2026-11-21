@@ -324,7 +324,7 @@ target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
 foreach(case IN ITEMS incremental generational explicit explicit_trace_slice stopped phase_incremental phase_generational
     overdue_incremental overdue_generational shrink_strings reachable_finalizers late_finalizer
     handoff_trace_incremental handoff_trace_generational handoff_sweep_incremental handoff_sweep_generational
-    minor_unwind minor_finalizer)
+    minor_unwind minor_finalizer minor_arm)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
