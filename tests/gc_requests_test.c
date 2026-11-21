@@ -1,3 +1,4 @@
+#include <laccess.h>
 #include <lapi.h>
 #include <lauxlib.h>
 #include <ldo.h>
@@ -161,8 +162,9 @@ static int minor_finalizer(lua_State *L) {
   return 0;
 }
 
-static void minor_arm(lua_State *L) {
+static void minor_arm(lua_State *L, int busy_registry) {
   LuaWorld *world = &G(L)->world;
+  LuaObjectScope registry;
   struct request driver = {0};
   lua_State *mutator;
   pthread_t worker;
@@ -177,7 +179,17 @@ static void minor_arm(lua_State *L) {
   driver.role = 1;
   driver.phase = 5;
   minor_case = MINOR_ARM;
+  if (busy_registry) {
+    /* This young table is reachable only through the replaceable root slot. */
+    lua_newtable(L);
+    lua_pushinteger(L, 918);
+    lua_setfield(L, -2, "arm_root");
+    lua_copy(L, -1, LUA_REGISTRYINDEX);
+    lua_pop(L, 1);
+  }
   lua_lock(mutator);
+  if (busy_registry)
+    luaA_beginlock(mutator, &G(L)->registry_access, &registry);
   require(pthread_create(&worker, NULL, request, &driver) == 0);
   while (!(luaW_control(world) & LUA_WORLD_ARM_TRACE))
     sched_yield();
@@ -188,6 +200,10 @@ static void minor_arm(lua_State *L) {
   while (!fixture.driver_parked)
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(luaW_active(mutator->admission) && !luaW_stopped(world));
+  if (busy_registry) {
+    require(iswhite(G(L), hvalue(&G(L)->l_registry)));
+    luaA_end(mutator, &registry);
+  }
   require(mutator->trace_snapshot != luaC_traceepoch(G(L)));
   require(luaD_reallocstack(mutator, stacksize(mutator) + 128, 1));
   require(mutator->trace_snapshot == luaC_traceepoch(G(L)));
@@ -196,7 +212,14 @@ static void minor_arm(lua_State *L) {
   require(pthread_cond_broadcast(&fixture.changed) == 0);
   require(pthread_mutex_unlock(&fixture.mutex) == 0);
   require(pthread_join(worker, NULL) == 0);
-  require(driver.stops == 1 && !luaC_tracing(L) && !luaC_sweeping(L));
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  if (busy_registry) {
+    require(lua_getfield(L, LUA_REGISTRYINDEX, "arm_root") == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 918);
+    lua_pop(L, 1);
+  } else {
+    require(driver.stops == 1);
+  }
   for (unsigned i = 0; i < 4096; i++) {
     require(lua_istable(mutator, -1));
     lua_rawgeti(mutator, -1, 1);
@@ -532,8 +555,9 @@ int main(int argc, char **argv) {
     phase_request(L, strcmp(argv[1], "phase_generational") == 0);
     goto done;
   }
-  if (strcmp(argv[1], "minor_arm") == 0) {
-    minor_arm(L);
+  if (strcmp(argv[1], "minor_arm") == 0 ||
+      strcmp(argv[1], "minor_arm_registry") == 0) {
+    minor_arm(L, strcmp(argv[1], "minor_arm_registry") == 0);
     goto done;
   }
   explicit_step = strcmp(argv[1], "explicit") == 0;

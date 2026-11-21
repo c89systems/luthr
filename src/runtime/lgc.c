@@ -2230,20 +2230,31 @@ void luaC_initialtrace (lua_State *L) {
   __atomic_store_n(&g->trace_plan.phase,
     g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK, __ATOMIC_RELAXED);
   markobject(g, L);  /* mark running thread */
-  if (!g->trace_plan.roots_pending) marknativeframes(g);
-  /* registry and global metatables may be changed by API */
-  markvalue(g, &g->l_registry);
+  if (!g->trace_plan.roots_pending) {
+    marknativeframes(g);
+    markvalue(g, &g->l_registry);
+  }
+  else {
+    /* The registry slot is replaceable. Its owner may be waiting for
+    ** startup; a busy slot is covered by the stopped root closure. */
+    int reservation = luaA_trylock(L, &g->registry_access);
+    if (reservation != 0) {
+      markvalue(g, &g->l_registry);
+      luaA_endlock(L, &g->registry_access, reservation);
+    }
+  }
   markmt(g);  /* mark global metatables */
 }
 
-/* Detached native frames and registered callbacks have their own lifetime
-** protocol. Close this part of the root set before any weak decisions. */
+/* Close roots whose owners can be paused across startup before making any
+** weak decisions. This includes a registry slot busy during the handshake. */
 void luaC_finishroots (lua_State *L) {
   global_State *g = G(L);
   lua_assert(L->world_depth != 0);
   if (g->trace_plan.roots_pending) {
     g->trace_plan.roots_pending = 0;
     marknativeframes(g);
+    markvalue(g, &g->l_registry);
   }
 }
 
