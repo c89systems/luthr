@@ -708,7 +708,8 @@ static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
   return NULL;
 }
 
-static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
+static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool,
+                             int emergency) {
   global_State *g = G(L);
   LuaAllocPage *page = allocationcache(L)->pages[pool];
   uint64_t epoch = luaC_traceepoch(g);
@@ -746,7 +747,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
       bytes = minimum;
       page = cast(LuaAllocPage *, firsttry(L, NULL, 0, bytes));
     }
-    if (page == NULL) {
+    if (page == NULL && emergency) {
       int retry = 0;
       luaAL_leave(L, admitted);
       luaW_heapenter(L);
@@ -783,13 +784,14 @@ static LuaAllocPage *refill (lua_State *L, unsigned bin, unsigned pool) {
   return page;
 }
 
-static void *allocatebacking (lua_State *L, size_t size, int tag) {
+static void *allocatebacking (lua_State *L, size_t size, int tag,
+                               int emergency) {
   LuaAllocBlock *block;
   size_t bytes;
   if (size > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
   bytes = size + sizeof(LuaAllocBlock);
   block = cast(LuaAllocBlock *, firsttry(L, NULL, cast_sizet(tag), bytes));
-  if (block == NULL)
+  if (block == NULL && emergency)
     block = cast(LuaAllocBlock *, tryagain(L, NULL, cast_sizet(tag), bytes));
   if (block != NULL) {
     block->block.page = 0;
@@ -801,18 +803,18 @@ static void *allocatebacking (lua_State *L, size_t size, int tag) {
 /* Persistent SDK records must not pin transient object pages. Retain normal
 ** accounting and retry behavior, while allocating their exact backing size. */
 void *luaM_alloccontrol (lua_State *L, size_t size) {
-  return allocatebacking(L, size, 0);
+  return allocatebacking(L, size, 0, 1);
 }
 
 static void *allocateblock (lua_State *L, size_t size, int tag,
-                            unsigned poolbase) {
+                            unsigned poolbase, int emergency) {
   if (size <= LUA_ALLOC_MAX) {
     unsigned bin = luaMP_sizeclass(size);
     unsigned pool = bin + poolbase;
     LuaAllocPage *page = allocationcache(L)->pages[pool];
     LuaAllocBlock *block = page != NULL ? takeblock(page) : NULL;
     if (block == NULL) {
-      page = refill(L, bin, pool);
+      page = refill(L, bin, pool, emergency);
       if (page == NULL) return NULL;
       block = takeblock(page);
       lua_assert(block != NULL);
@@ -820,7 +822,7 @@ static void *allocateblock (lua_State *L, size_t size, int tag,
     account(L, -cast(l_mem, size));
     return block + 1;
   }
-  return allocatebacking(L, size, tag);
+  return allocatebacking(L, size, tag, emergency);
 }
 
 
@@ -861,7 +863,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     }
     return replacement != NULL ? replacement + 1 : NULL;
   }
-  newblock = allocateblock(L, nsize, 0, 0);
+  newblock = allocateblock(L, nsize, 0, 0, 1);
   if (newblock == NULL) return NULL;
   if (block != NULL) {
     memcpy(newblock, block, osize < nsize ? osize : nsize);
@@ -884,7 +886,7 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
   if (size == 0)
     return NULL;  /* that's all */
   else {
-    void *block = allocateblock(L, size, tag, 0);
+    void *block = allocateblock(L, size, tag, 0, 1);
     if (block == NULL) luaM_error(L);
     return block;
   }
@@ -893,5 +895,9 @@ void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
 /* Retained call frames must not pin large pages of short-lived table nodes
 ** or objects. Unlike luaM_malloc_, this reports failure for optional frames. */
 void *luaM_allocframes (lua_State *L, size_t size) {
-  return allocateblock(L, size, 0, LUA_ALLOC_BINS);
+  return allocateblock(L, size, 0, LUA_ALLOC_BINS, 1);
+}
+
+void *luaM_allocstack (lua_State *L, size_t size, int emergency) {
+  return allocateblock(L, size, 0, 0, emergency);
 }

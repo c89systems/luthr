@@ -123,7 +123,7 @@ LUAI_FUNC int luaD_canselfclose (lua_State *L);
 LUAI_FUNC int luaD_growstack (lua_State *L, int n, int raiseerror);
 /* Caller owns the stack. This checks capacity and free frames without parking. */
 LUAI_FUNC int luaD_cantrimstack (lua_State *L);
-LUAI_FUNC void luaD_shrinkstack (lua_State *L);
+LUAI_FUNC void luaD_shrinkstack (lua_State *L, lua_State *owner);
 LUAI_FUNC int luaD_checkminstack (lua_State *L);
 LUAI_FUNC void luaD_anchorobj (lua_State *L, Table *anchor, GCObject *obj);
 

@@ -175,14 +175,9 @@ typedef union StackValue {
 typedef StackValue *StkId;
 
 
-/*
-** When reallocating the stack, change all pointers to the stack into
-** proper offsets.
-*/
-typedef union {
-  StkId p;  /* actual pointer */
-  ptrdiff_t offset;  /* used while the stack is being reallocated */
-} StkIdRel;
+typedef struct {
+  StkId p;
+} StackPointer;
 
 
 /* convert a 'StackValue' to a 'TValue' */

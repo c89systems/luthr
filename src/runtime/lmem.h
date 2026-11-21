@@ -119,6 +119,8 @@ LUAI_FUNC void *luaM_shrinkvector_ (lua_State *L, void *block, int *nelem,
 LUAI_FUNC void *luaM_malloc_ (lua_State *L, size_t size, int tag);
 LUAI_FUNC void *luaM_alloccontrol (lua_State *L, size_t size);
 LUAI_FUNC void *luaM_allocframes (lua_State *L, size_t size);
+/* A capacity query or opportunistic shrink may fail without emergency GC. */
+LUAI_FUNC void *luaM_allocstack (lua_State *L, size_t size, int emergency);
 
 #endif
 

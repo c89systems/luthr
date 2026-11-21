@@ -15,7 +15,7 @@
     }                                                                          \
   } while (0)
 
-enum { FIFO, RETIRE, WORLD_STOP, RENDEZVOUS };
+enum { FIFO, RETIRE, WORLD_STOP, RENDEZVOUS, GROW };
 struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -23,6 +23,7 @@ struct fixture {
   LuaWaiter **waiters;
   unsigned queued[4];
   unsigned paused, resume;
+  unsigned grown;
   int mode;
 };
 struct invocation {
@@ -98,6 +99,38 @@ static void *invoke(void *argument) {
   role = call->role;
   lua_pushinteger(call->fixture->state, role);
   return NULL;
+}
+
+static void *grow(void *argument) {
+  struct fixture *fixture = argument;
+  role = 1;
+  require(lua_checkstack(fixture->state, 512));
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  fixture->grown = 1;
+  require(pthread_cond_broadcast(&fixture->changed) == 0);
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  return NULL;
+}
+
+static void grow_during_metadata(lua_State *parent, struct fixture *fixture) {
+  pthread_t worker;
+  unsigned independent;
+  lua_gc(parent, LUA_GCSTOP);
+  fixture->state = lua_newthread(parent);
+  lua_pushinteger(fixture->state, 42);
+  luaX_lockstate(parent);
+  luaW_heapenter(parent);
+  require(pthread_create(&worker, NULL, grow, fixture) == 0);
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  while (!fixture->grown && !fixture->queued[1])
+    require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
+  independent = fixture->grown && !fixture->queued[1];
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  luaW_heapleave(parent);
+  luaX_unlockstate(parent);
+  require(pthread_join(worker, NULL) == 0);
+  require(independent && lua_gettop(fixture->state) == 1 &&
+          lua_tointeger(fixture->state, 1) == 42);
 }
 
 static void fifo(lua_State *parent, struct fixture *fixture) {
@@ -308,7 +341,10 @@ int main(int argc, char **argv) {
     fifo(state, &fixture);
   else if (strncmp(argv[1], "reuse_", 6) == 0)
     reuse_frames(state);
-  else if (strncmp(argv[1], "world_stop_", 11) == 0) {
+  else if (strncmp(argv[1], "grow_", 5) == 0) {
+    fixture.mode = GROW;
+    grow_during_metadata(state, &fixture);
+  } else if (strncmp(argv[1], "world_stop_", 11) == 0) {
     fixture.mode = WORLD_STOP;
     world_stop(state, &fixture);
   } else if (strncmp(argv[1], "rendezvous_", 11) == 0) {

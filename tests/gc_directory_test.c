@@ -47,11 +47,11 @@ void __wrap_luaM_flushdebt(lua_State *owner) {
   __real_luaM_flushdebt(owner);
 }
 
-void __real_luaD_shrinkstack(lua_State *L);
-void __wrap_luaD_shrinkstack(lua_State *L) {
+void __real_luaD_shrinkstack(lua_State *L, lua_State *owner);
+void __wrap_luaD_shrinkstack(lua_State *L, lua_State *owner) {
   if (count_trims)
     trim_calls++;
-  __real_luaD_shrinkstack(L);
+  __real_luaD_shrinkstack(L, owner);
 }
 
 static void publish_batches(lua_State *L, int generational) {

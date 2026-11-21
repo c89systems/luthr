@@ -203,7 +203,7 @@ void luaC_trimstack (lua_State *L) {
     L->trace_trimmed = L->trace_snapshot;
     if (!luaD_cantrimstack(L)) return;
     L->reclaiming = 1;
-    luaD_shrinkstack(L);
+    luaD_shrinkstack(L, L);
     luaM_flushdebt(L);
     L->reclaiming = 0;
   }

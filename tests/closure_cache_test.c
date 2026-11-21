@@ -38,7 +38,7 @@ void __wrap_luaA_end(lua_State *state, LuaObjectScope *scope) {
     interrupt = NULL;
     interrupted++;
     luaC_fullgc(state, 0);
-    luaD_shrinkstack(state);
+    luaD_shrinkstack(state, state);
   }
 }
 

@@ -184,8 +184,8 @@ typedef struct stringtable {
 ** returning from a function;
 */
 struct CallInfo {
-  StkIdRel func;  /* function index in the stack */
-  StkIdRel top;  /* top for this function */
+  StackPointer func;  /* function index in the stack */
+  StackPointer top;  /* top for this function */
   struct CallInfo *previous, *next;  /* dynamic call link */
   union {
     struct {  /* only for Lua functions */
@@ -323,13 +323,13 @@ struct lua_State {
   lu_byte allowhook;
   TStatus status;
   lu_byte gc_resize;  /* backing growth pending a safepoint check */
-  StkIdRel top;  /* first free slot in the stack */
+  StackPointer top;  /* first free slot in the stack */
   struct global_State *l_G;
   CallInfo *ci;  /* call info for current function */
-  StkIdRel stack_last;  /* end of stack (last element + 1) */
-  StkIdRel stack;  /* stack base */
+  StackPointer stack_last;  /* end of stack (last element + 1) */
+  StackPointer stack;  /* stack base */
   UpVal *openupval;  /* list of open upvalues in this stack */
-  StkIdRel tbclist;  /* list of to-be-closed variables */
+  StackPointer tbclist;  /* list of to-be-closed variables */
   GCObject *gclist;
   struct lua_longjmp *errorJmp;  /* current error recover point */
   CallInfo base_ci;  /* CallInfo for first level (C host) */
@@ -677,7 +677,7 @@ LUAI_FUNC void luaE_retirethread (lua_State *L, lua_State *thread);
 LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC int luaE_cantrimCI (lua_State *L);
-LUAI_FUNC void luaE_shrinkCI (lua_State *L);
+LUAI_FUNC void luaE_shrinkCI (lua_State *L, lua_State *owner);
 /* Two spare frames allow a finalizer and its nested call. */
 l_sinline CallInfo *luaE_cireserve (CallInfo *active) {
   CallInfo *spare = active->next;

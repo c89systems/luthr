@@ -64,9 +64,7 @@ static void admit (lua_State *L) {
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaW_waitresume(L);
     luaW_resume(L);
-    /* A stack resize retains metadata ownership while pointers are offsets.
-    ** Its entry already published roots; do not scan that partial frame. */
-    if (luaW_scope(L).heap == 0) luaC_checksnapshot(L);
+    luaC_checksnapshot(L);
     L->native_depth--;
     __atomic_fetch_sub(&allocator->waiting, 1, __ATOMIC_SEQ_CST);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));

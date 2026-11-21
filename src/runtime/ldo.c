@@ -378,126 +378,53 @@ int luaD_checkminstack (lua_State *L) {
 }
 
 
-/*
-** In ISO C, any pointer use after the pointer has been deallocated is
-** undefined behavior. So, before a stack reallocation, all pointers
-** should be changed to offsets, and after the reallocation they should
-** be changed back to pointers. As during the reallocation the pointers
-** are invalid, the reallocation cannot run emergency collections.
-** Alternatively, we can use the old address after the deallocation.
-** That is not strict ISO C, but seems to work fine everywhere.
-** The following macro chooses how strict is the code.
-*/
-#if !defined(LUAI_STRICT_ADDRESS)
-#define LUAI_STRICT_ADDRESS	1
-#endif
-
-#if LUAI_STRICT_ADDRESS
-/*
-** Change all pointers to the stack into offsets.
-*/
-static void relstack (lua_State *L) {
+/* The owner can park while preparing the replacement. Until it resumes,
+** both mutators and collectors still see the original stack and frames.
+** Retarget only under the coroutine gate, with no safepoint until every
+** interior pointer names the new stack. Freeing the old storage can park. */
+static int resizestack (lua_State *L, lua_State *owner, int newsize,
+                        int raiseerror) {
+  StkId oldstack, newstack;
   CallInfo *ci;
-  L->top.offset = savestack(L, L->top.p);
-  L->tbclist.offset = savestack(L, L->tbclist.p);
-  for (ci = L->ci; ci != NULL; ci = ci->previous) {
-    ci->top.offset = savestack(L, ci->top.p);
-    ci->func.offset = savestack(L, ci->func.p);
-  }
-}
-
-
-/*
-** Change back all offsets into pointers.
-*/
-static void correctstack (lua_State *L, StkId oldstack) {
-  CallInfo *ci;
-  UNUSED(oldstack);
-  L->top.p = restorestack(L, L->top.offset);
-  L->tbclist.p = restorestack(L, L->tbclist.offset);
-  for (ci = L->ci; ci != NULL; ci = ci->previous) {
-    ci->top.p = restorestack(L, ci->top.offset);
-    ci->func.p = restorestack(L, ci->func.offset);
-    if (isLua(ci))
-      ci->u.l.trap = 1;  /* signal to update 'trap' in 'luaV_execute' */
-  }
-}
-
-#else
-/*
-** Assume that it is fine to use an address after its deallocation,
-** as long as we do not dereference it.
-*/
-
-static void relstack (lua_State *L) { UNUSED(L); }  /* do nothing */
-
-
-/*
-** Correct pointers into 'oldstack' to point into 'L->stack'.
-*/
-static void correctstack (lua_State *L, StkId oldstack) {
-  CallInfo *ci;
-  StkId newstack = L->stack.p;
-  if (oldstack == newstack)
-    return;
-  L->top.p = L->top.p - oldstack + newstack;
-  L->tbclist.p = L->tbclist.p - oldstack + newstack;
-  for (ci = L->ci; ci != NULL; ci = ci->previous) {
-    ci->top.p = ci->top.p - oldstack + newstack;
-    ci->func.p = ci->func.p - oldstack + newstack;
-    if (isLua(ci))
-      ci->u.l.trap = 1;  /* signal to update 'trap' in 'luaV_execute' */
-  }
-}
-#endif
-
-
-/*
-** Reallocate the stack to a new size, correcting all pointers into it.
-** In case of allocation error, raise an error or return false according
-** to 'raiseerror'.
-*/
-int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
-  int oldsize = stacksize(L);
-  int i, retried = 0;
-  StkId newstack;
-  StkId oldstack = L->stack.p;
-  lu_byte oldgcstop;
- retry:
-  luaW_heapenter(L);  /* acquire before making stack pointers unscannable */
-  /* This execution can still hold the gate it had at trace activation.
-  ** Publish its roots before allocator admission can park it with offsets. */
-  luaC_checksnapshot(L);
-  oldsize = stacksize(L);  /* a collection while waiting may have shrunk it */
-  oldstack = L->stack.p;
-  oldgcstop = G(L)->gcstopem;
+  int oldsize, copied, i;
+  lua_assert(G(L) == G(owner));
   lua_assert(newsize <= MAXSTACK || newsize == ERRORSTACKSIZE);
-  relstack(L);  /* change pointers to offsets */
-  G(L)->gcstopem = 1;  /* stop emergency collection */
-  newstack = luaM_reallocvector(L, oldstack, oldsize + EXTRA_STACK,
-                                   newsize + EXTRA_STACK, StackValue);
-  G(L)->gcstopem = oldgcstop;  /* restore emergency collection */
-  if (l_unlikely(newstack == NULL)) {  /* reallocation failed? */
-    correctstack(L, oldstack);  /* change offsets back to pointers */
-    luaW_heapleave(L);
-    /* Collection needs a scannable stack. Restore it before the one emergency
-    ** retry; nonraising capacity checks retain their ordinary failure result. */
-    if (raiseerror && !oldgcstop && !retried) {
-      retried = 1;
-      luaC_fullgc(L, 1);
-      goto retry;
-    }
-    if (raiseerror)
-      luaM_error(L);
-    else return 0;  /* do not raise an error */
+#if !defined(HARDSTACKTESTS)
+  if (newsize == stacksize(L)) return 1;
+#endif
+  newstack = cast(StkId, luaM_allocstack(owner,
+    (cast_sizet(newsize) + EXTRA_STACK) * sizeof(StackValue), raiseerror));
+  if (l_unlikely(newstack == NULL)) {
+    if (raiseerror) luaM_error(L);
+    return 0;
   }
+  /* A trace may have started while preparing the replacement. Publish the
+  ** live stack before replacing its storage. */
+  if (L == owner) luaC_checksnapshot(L);
+  else if (luaC_scanready(G(owner))) luaC_snapshot(owner, L);
+  oldstack = L->stack.p;
+  oldsize = stacksize(L);
+  copied = (oldsize < newsize ? oldsize : newsize) + EXTRA_STACK;
+  memcpy(newstack, oldstack, cast_sizet(copied) * sizeof(StackValue));
+  for (i = copied; i < newsize + EXTRA_STACK; i++)
+    setnilvalue2s(newstack + i);
   L->stack.p = newstack;
-  correctstack(L, oldstack);  /* change offsets back to pointers */
-  L->stack_last.p = L->stack.p + newsize;
-  for (i = oldsize + EXTRA_STACK; i < newsize + EXTRA_STACK; i++)
-    setnilvalue2s(newstack + i); /* erase new segment */
-  luaW_heapleave(L);
+  L->stack_last.p = newstack + newsize;
+  L->top.p = newstack + (L->top.p - oldstack);
+  L->tbclist.p = newstack + (L->tbclist.p - oldstack);
+  for (ci = L->ci; ci != NULL; ci = ci->previous) {
+    ci->top.p = newstack + (ci->top.p - oldstack);
+    ci->func.p = newstack + (ci->func.p - oldstack);
+    if (isLua(ci))
+      ci->u.l.trap = 1;  /* refresh cached stack pointers in the VM */
+  }
+  if (newsize > oldsize) L->gc_resize = 1;
+  luaM_freearray(owner, oldstack, cast_sizet(oldsize) + EXTRA_STACK);
   return 1;
+}
+
+int luaD_reallocstack (lua_State *L, int newsize, int raiseerror) {
+  return resizestack(L, L, newsize, raiseerror);
 }
 
 
@@ -586,13 +513,14 @@ int luaD_cantrimstack (lua_State *L) {
 #endif
 }
 
-void luaD_shrinkstack (lua_State *L) {
+void luaD_shrinkstack (lua_State *L, lua_State *owner) {
   int nsize = stacktrimsize(L);
+#if defined(HARDSTACKTESTS)
+  if (nsize == 0) nsize = stacksize(L);
+#endif
   if (nsize != 0)
-    luaD_reallocstack(L, nsize, 0);  /* ok if that fails */
-  else  /* don't change stack */
-    condmovestack(L,(void)0,(void)0);  /* (change only for debugging) */
-  luaE_shrinkCI(L);  /* shrink CI list */
+    resizestack(L, owner, nsize, 0);
+  luaE_shrinkCI(L, owner);
 }
 
 /* }================================================================== */
@@ -1113,7 +1041,7 @@ static TStatus finishpcallk (lua_State *L,  CallInfo *ci) {
     L->allowhook = getoah(ci);  /* restore 'allowhook' */
     func = luaF_close(L, func, status, 1);  /* can yield or raise an error */
     luaD_seterrorobj(L, status, func);
-    luaD_shrinkstack(L);   /* restore stack size in case of overflow */
+    luaD_shrinkstack(L, L);   /* restore stack size in case of overflow */
     setcistrecst(ci, LUA_OK);  /* clear original status */
   }
   ci->callstatus &= ~CIST_YPCALL;
@@ -1411,7 +1339,7 @@ TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
     L->allowhook = old_allowhooks;
     status = luaD_closeprotected(L, old_top, status);
     luaD_seterrorobj(L, status, restorestack(L, old_top));
-    luaD_shrinkstack(L);   /* restore stack size in case of overflow */
+    luaD_shrinkstack(L, L);   /* restore stack size in case of overflow */
   }
   L->errfunc = old_errfunc;
   return status;

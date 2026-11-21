@@ -39,6 +39,9 @@ struct allocator {
   size_t denied_request;
   unsigned denied_requests, small_fallback;
   int deny;
+  lua_State *inspect_stack;
+  StkId old_stack;
+  unsigned prepared_stack, released_stack;
 };
 
 struct metadata_handoff {
@@ -526,6 +529,19 @@ static void late_admission(lua_State *state, int tentative) {
 static void *allocate(void *context, void *pointer, size_t old, size_t size) {
   struct allocator *allocator = context;
   void *replacement;
+  if (allocator->inspect_stack != NULL) {
+    lua_State *L = allocator->inspect_stack;
+    require(L->top.p == L->stack.p + 11);
+    require(L->ci->func.p == L->stack.p);
+    require(ttistable(s2v(L->stack.p + 10)));
+    if (size != 0) {
+      require(pointer == NULL && L->stack.p == allocator->old_stack);
+      allocator->prepared_stack++;
+    } else {
+      require(L->stack.p != allocator->old_stack);
+      allocator->released_stack++;
+    }
+  }
   if (pointer == NULL)
     old = 0;
   require(old <= allocator->live);
@@ -939,6 +955,11 @@ static void stack_retry(void) {
   require(status == LUA_ERRMEM && allocator.failures == 2);
   require(lua_gettop(state) == 10);
   allocator.cap = 0;
+  allocator.inspect_stack = state;
+  allocator.old_stack = state->stack.p;
+  require(lua_checkstack(state, 1024));
+  allocator.inspect_stack = NULL;
+  require(allocator.prepared_stack == 1 && allocator.released_stack == 1);
   lua_close(state);
   require(allocator.live == 0);
 }

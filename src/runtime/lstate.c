@@ -152,12 +152,12 @@ int luaE_cantrimCI (lua_State *L) {
 
 /* Keep shallow call chains warm and return only whole unused blocks. One
 ** trim retains at least half the capacity to avoid churn after deep calls. */
-void luaE_shrinkCI (lua_State *L) {
+void luaE_shrinkCI (lua_State *L, lua_State *owner) {
   CallInfo *reserve = luaE_cireserve(L->ci);
   size_t keep = L->call_bytes / 2;
   if (keep < CALL_CACHE_BYTES) keep = CALL_CACHE_BYTES;
   while (canfreecallblock(L, reserve, keep))
-    freecallblock(L, L);
+    freecallblock(owner, L);
 }
 
 
