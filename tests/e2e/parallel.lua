@@ -69,10 +69,10 @@ local workloads={
     return sum
   end,
 }
-if kind=='native_callbacks' then
+if kind=='native_callbacks' or kind=='native_direct' then
   local native=require('compat_fixture')
   local function add(value) return value+1 end
-  workloads.native_callbacks=function()
+  workloads[kind]=function()
     local sum=0
     for i=1,n do sum=sum+native.callback(add,i) end
     return sum
@@ -81,7 +81,7 @@ end
 local work=assert(workloads[kind],'unknown workload')
 if kind=='independent_tables' then total=total*3 end
 if kind=='shared_reads' then total=n end
-if kind=='allocation_gc' or kind=='allocation_only' or kind=='native_callbacks' then total=total+n end
+if kind=='allocation_gc' or kind=='allocation_only' or kind=='native_callbacks' or kind=='native_direct' then total=total+n end
 local function prepare()
   if kind=='shared_reads' then
     shared.value=1

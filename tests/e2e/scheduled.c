@@ -96,6 +96,11 @@ static void *allocate(void *context, void *old, size_t old_size, size_t size) {
 #endif
   return result;
 }
+static int direct_callback(lua_State *L) {
+  lua_call(L, 1, 1);
+  return 1;
+}
+
 static int pause_native(lua_State *L) {
   struct timespec remaining = {delay_us / 1000000, (delay_us % 1000000) * 1000};
   (void)L;
@@ -190,15 +195,20 @@ int main(int argc, char **argv) {
   stopped = argc == 12;
 #ifndef LUTHR_BENCH_SCHEDULER
   if (slots != 1 || native != 0) {
-    fputs("upstream reference requires slots=1 and native_limit=0\n", stderr);
+    fputs("serial host requires slots=1 and native_limit=0\n", stderr);
     return 2;
   }
 #endif
   L = lua_newstate(allocate, &memory, 0);
   require(L != NULL);
   luaL_openlibs(L);
-  if (strcmp(argv[2], "native_callbacks") == 0) {
+  int direct = strcmp(argv[2], "native_direct") == 0;
+  if (direct || strcmp(argv[2], "native_callbacks") == 0) {
     luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
+    if (direct) {
+      lua_pushcfunction(L, direct_callback);
+      lua_setfield(L, -2, "callback");
+    }
     lua_pop(L, 1);
   }
   lua_pushcfunction(L, pause_native);
