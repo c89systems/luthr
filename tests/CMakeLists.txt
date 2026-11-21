@@ -383,12 +383,17 @@ foreach(collector IN ITEMS incremental generational)
   endforeach()
 endforeach()
 
-foreach(case IN ITEMS remember cards)
+foreach(case IN ITEMS remember cards promotion)
   add_test(NAME gc_table_scan_${case}_generational
     COMMAND gc_table_scan_test ${case}_generational)
   set_tests_properties(gc_table_scan_${case}_generational PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
 endforeach()
+
+add_test(NAME gc_table_scan_private_promotion_generational
+  COMMAND gc_table_scan_test promotion_generational private)
+set_tests_properties(gc_table_scan_private_promotion_generational PROPERTIES
+  LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
 
 luthr_test_program(gc_object_scan_test gc_object_scan_test.c)
 set_target_properties(gc_object_scan_test PROPERTIES C_STANDARD 99)

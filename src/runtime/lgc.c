@@ -215,17 +215,28 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
   if (tracing) luaC_traceobject(L, v);
   if (luaC_kind(g) == KGC_GENMINOR) {
     unsigned touched = tracing ? G_TOUCHED0 : G_TOUCHED1;
+    unsigned age;
+    if (isold(v)) return;
     marked = getmarked(o);
     do {
-      if ((marked & AGEBITS) <= G_SURVIVAL || isold(v) ||
-          (marked & AGEBITS) == touched) return;
-      claimed = cast_byte((marked & ~AGEBITS) | touched |
-                          bitmask(QUEUEDBIT));
+      age = marked & AGEBITS;
+      if (age <= G_SURVIVAL_CLEAN) {
+        if (o->tt != LUA_VTABLE || age == G_NEW || age == G_SURVIVAL_DIRTY ||
+            (age == G_SURVIVAL && !tracing)) return;
+        /* A writer and the marker compete on the same age byte. A younger
+        ** edge vetoes the proof even when it precedes the marker's scan. */
+        claimed = cast_byte((marked & ~AGEBITS) | G_SURVIVAL_DIRTY);
+      }
+      else {
+        if (age == touched) return;
+        claimed = cast_byte((marked & ~AGEBITS) | touched |
+                            bitmask(QUEUEDBIT));
+      }
     } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
                                           __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
     /* A queued owner already owns its link, including private scan/sweep
     ** batches. Only a fresh claim publishes another remembered root. */
-    if (!testbit(marked, QUEUEDBIT))
+    if (age > G_SURVIVAL_CLEAN && !testbit(marked, QUEUEDBIT))
       luaC_publishbarrier(L, o, 1);
     return;
   }
@@ -403,13 +414,15 @@ void luaC_traceedges (LuaTraceWork *work, GCObject **objects, unsigned count) {
 /* Retain link ownership until both age consumption and the remembered-list
 ** decision are committed. A writer either updates the age of our queued
 ** owner, or claims a released link; it can never publish our private link. */
-void luaC_finishstrong (LuaTraceWork *work, GCObject *object) {
+void luaC_finishstrong (LuaTraceWork *work, GCObject *object,
+                        int old_edges) {
   lu_byte marked = getmarked(object), changed;
   int remember;
   do {
     unsigned age = marked & AGEBITS;
     if (luaC_kind(work->global) == KGC_GENMINOR) {
-      if (age == G_TOUCHED0) age = G_TOUCHED1;
+      if (old_edges && age == G_SURVIVAL) age = G_SURVIVAL_CLEAN;
+      else if (age == G_TOUCHED0) age = G_TOUCHED1;
       else if (age == G_TOUCHED1) age = G_TOUCHED2;
       else if (age == G_TOUCHED2) age = G_OLD;
     }
@@ -1495,7 +1508,8 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   }
   if (kind == SWEEP_MAJOR) return SWEEP_LIVE;
   marked = getmarked(o);
-  if (kind == SWEEP_YOUNG && (marked & AGEBITS) == G_SURVIVAL) {
+  if (kind == SWEEP_YOUNG && (marked & AGEBITS) != G_NEW &&
+      (marked & AGEBITS) <= G_SURVIVAL_CLEAN) {
     if (o->tt == LUA_VTABLE && !luaW_iscollector(L)) {
       if (!luaC_tablesize(gco2t(o), &bytes)) return SWEEP_RETRY;
     }
@@ -1509,15 +1523,15 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   do {
     unsigned age = marked & AGEBITS;
     unsigned next = age;
-    int edges = novariant(o->tt) != LUA_TSTRING;
-    promoted = kind == SWEEP_YOUNG && age == G_SURVIVAL;
+    int edges = novariant(o->tt) != LUA_TSTRING && age != G_SURVIVAL_CLEAN;
+    promoted = kind == SWEEP_YOUNG && age != G_NEW && age <= G_SURVIVAL_CLEAN;
     if (promoted) next = edges ? G_TOUCHED1 : G_OLD;
     else if (kind == SWEEP_YOUNG && age == G_NEW) next = G_SURVIVAL;
-    else if (kind == SWEEP_OLD && age <= G_SURVIVAL) next = G_OLD;
+    else if (kind == SWEEP_OLD && age <= G_SURVIVAL_CLEAN) next = G_OLD;
     /* Changing age and claiming the remembered link are one operation.
     ** Mutators can update the age, and must leave our claimed link alone. */
     watching = ((promoted && edges) ||
-                (o->tt == LUA_VTHREAD && next > G_SURVIVAL)) &&
+                (o->tt == LUA_VTHREAD && next > G_SURVIVAL_CLEAN)) &&
                !testbit(marked, QUEUEDBIT);
     changed = cast_byte((marked & ~AGEBITS) | next);
     if (watching) changed |= bitmask(QUEUEDBIT);
@@ -1850,7 +1864,7 @@ int luaC_sweepgray (GCObject *o) {
   int keep;
   do {
     unsigned age = marked & AGEBITS;
-    keep = age > G_SURVIVAL &&
+    keep = age > G_SURVIVAL_CLEAN &&
       (age == G_TOUCHED0 || age >= G_TOUCHED1 || o->tt == LUA_VTHREAD);
     changed = keep ? marked : cast_byte(marked & ~bitmask(QUEUEDBIT));
     if (changed == marked) break;
@@ -1869,7 +1883,7 @@ static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
     work->retry = object;
   }
   else if (result != SWEEP_RETIRED) {
-    if (getage(object) <= G_SURVIVAL)
+    if (!isold(object))
       luaMP_young(luaMP_pageof(header), G(L)->sweep_plan.epoch + 1);
     if (header & LUA_BLOCK_BIRTH)
       __atomic_store_n(&block->block.page, header & ~cast(uintptr_t, LUA_BLOCK_BIRTH),

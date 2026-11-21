@@ -43,6 +43,6 @@ int luaC_scanvalues (lua_State *L, LuaTraceWork *work, GCObject *object) {
     if (luaW_stopped(&G(L)->world)) return 0;
   } while (first < size);
   work->marked += luaC_objsize(object);
-  luaC_finishstrong(work, object);
+  luaC_finishstrong(work, object, 0);
   return 1;
 }

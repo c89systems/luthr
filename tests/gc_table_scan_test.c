@@ -26,7 +26,7 @@ static struct {
   Table *table;
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write, fields, cards;
+      remember, first_write, fields, cards, promotion;
   uint64_t initial_layout;
   unsigned chunks;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
@@ -88,7 +88,8 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
     require(__atomic_load_n(luaH_arraycards(probe.table), __ATOMIC_ACQUIRE) ==
             UINT64_MAX);
   }
-  if (scanning && !probe.relocate && !probe.remember && !probe.first_write)
+  if (scanning && !probe.relocate && !probe.remember && !probe.first_write &&
+      !probe.promotion)
     hold();
   return found;
 }
@@ -99,13 +100,17 @@ void __wrap_luaC_traceedges(LuaTraceWork *work, GCObject **edges, unsigned n) {
   if (scanning && probe.relocate && hash_chunk && first_chunk == 0)
     hold();
 }
-void __real_luaC_finishstrong(LuaTraceWork *, GCObject *) __attribute__((weak));
-void __wrap_luaC_finishstrong(LuaTraceWork *work, GCObject *object) {
-  __real_luaC_finishstrong(work, object);
+void __real_luaC_finishstrong(LuaTraceWork *, GCObject *, int)
+    __attribute__((weak));
+void __wrap_luaC_finishstrong(LuaTraceWork *work, GCObject *object, int clear) {
+  __real_luaC_finishstrong(work, object, clear);
   /* The remembered owner now belongs to a private result list. A fresh write
    * must preserve its link until that list is published, and cover two minors.
    */
-  if (scanning && probe.remember)
+  if (scanning && probe.promotion) {
+    require(clear && getage(object) == G_SURVIVAL_CLEAN);
+    hold();
+  } else if (scanning && probe.remember)
     hold();
 }
 int __real_luaA_tryscan(lua_State *, GCObject *);
@@ -164,7 +169,7 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 123);
     lua_rawset(L, probe.index);
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
-  } else if (probe.cards) {
+  } else if (probe.cards || probe.promotion) {
     lua_newtable(L);
     lua_pushinteger(L, 77);
     lua_rawseti(L, -2, 1);
@@ -225,12 +230,20 @@ int main(int argc, char **argv) {
   probe.pause = strncmp(argv[1], "pause", 5) == 0;
   probe.remember = strncmp(argv[1], "remember", 8) == 0;
   probe.cards = strcmp(argv[1], "cards_generational") == 0;
+  probe.promotion = strcmp(argv[1], "promotion_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
   small = strncmp(argv[1], "first_write_small", 17) == 0;
-  array_size = probe.cards ? LUA_ARRAY_CARD_MIN : small ? 2 : 128;
+  array_size = probe.cards                  ? LUA_ARRAY_CARD_MIN
+               : (small || probe.promotion) ? 2
+                                            : 128;
   probe.marker = lua_newthread(L);
   probe.writer = lua_newthread(L);
+  if (probe.promotion) {
+    lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+    lua_newtable(L);
+    lua_gc(L, LUA_GCCOLLECT);
+  }
   lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
                   probe.relocate ? 64
                   : probe.fields ? 8
@@ -254,6 +267,15 @@ int main(int argc, char **argv) {
       lua_pushinteger(L, i);
       lua_rawset(L, 3);
     }
+  } else if (probe.promotion) {
+    /* A table replacing another table uses the same-tag shared slot path.
+     * The marker has already proven this slot contains an old edge. */
+    lua_pushvalue(L, 3);
+    lua_rawseti(L, 4, 1);
+    lua_remove(L, 3);
+    lua_gc(L, LUA_GCSTEP, (size_t)0);
+    lua_gc(L, LUA_GCCOUNT);
+    require(getage(obj2gco(probe.table)) == G_SURVIVAL);
   } else if (probe.fields) {
     require(argc == 3);
     lua_newtable(L);
@@ -335,6 +357,8 @@ int main(int argc, char **argv) {
   while (!probe.written)
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
+  if (probe.promotion)
+    require(getage(obj2gco(probe.table)) == G_SURVIVAL_DIRTY);
   if (probe.relocate || probe.fields)
     require(!iswhite(G(L), probe.child));
   if (probe.fields)
@@ -348,7 +372,7 @@ int main(int argc, char **argv) {
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_join(writer, NULL) == 0);
   require(pthread_join(marker, NULL) == 0);
-  if (probe.remember || probe.cards) {
+  if (probe.remember || probe.cards || probe.promotion) {
     lua_gc(L, LUA_GCCOUNT); /* join this minor, without starting another */
     if (probe.cards) {
       uint64_t *cards = luaH_arraycards(probe.table);
@@ -388,7 +412,8 @@ int main(int argc, char **argv) {
   } else if (!probe.relocate) {
     require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     lua_rawgeti(probe.writer, -1, 1);
-    require(lua_tointeger(probe.writer, -1) == (probe.cards ? 77 : 42));
+    require(lua_tointeger(probe.writer, -1) ==
+            ((probe.cards || probe.promotion) ? 77 : 42));
   } else
     require(gcvalue(gval(gnode(probe.table, 10))) == probe.child);
   lua_close(L);

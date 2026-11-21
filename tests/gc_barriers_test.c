@@ -126,7 +126,7 @@ static void link_handoff(lua_State *L, int sweeping) {
   if (sweeping)
     require(!luaC_sweepgray(handoff.owner));
   else
-    luaC_finishstrong(&work, handoff.owner);
+    luaC_finishstrong(&work, handoff.owner, 0);
   require(pthread_join(worker, NULL) == 0);
   require(isgray(handoff.owner) && getage(handoff.owner) == G_TOUCHED1);
   luaW_stop(L);

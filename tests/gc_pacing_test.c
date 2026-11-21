@@ -641,7 +641,7 @@ static void young_cycle(lua_State *L) {
  */
 static void cohort_promotion(void) {
   lua_State *L = luaL_newstate();
-  GCObject *parent, *child;
+  GCObject *parent, *control, *child;
   require(L != NULL);
   lua_gc(L, LUA_GCGEN);
   lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
@@ -650,6 +650,9 @@ static void cohort_promotion(void) {
   lua_newtable(L);
   parent = (GCObject *)lua_topointer(L, -1);
   lua_setglobal(L, "parent");
+  lua_newtable(L);
+  control = (GCObject *)lua_topointer(L, -1);
+  lua_setglobal(L, "control");
   lua_newtable(L);
   lua_newtable(L);
   lua_pushliteral(L, "v");
@@ -661,7 +664,8 @@ static void cohort_promotion(void) {
   lua_lock(L);
   start_stopped_trace(L);
   luaC_waittrace(L);
-  require(luaC_sweeping(L) && getage(parent) == G_SURVIVAL);
+  require(luaC_sweeping(L) && getage(parent) == G_SURVIVAL_CLEAN);
+  require(getage(control) == G_SURVIVAL_CLEAN);
   lua_unlock(L);
   lua_getglobal(L, "parent");
   lua_newtable(L);
@@ -677,6 +681,7 @@ static void cohort_promotion(void) {
   lua_lock(L);
   luaC_waitsweep(L);
   require(getage(parent) == G_TOUCHED1 && isgray(parent));
+  require(getage(control) == G_OLD && !isgray(control));
   require(getage(child) == G_NEW);
   lua_unlock(L);
   young_cycle(L);

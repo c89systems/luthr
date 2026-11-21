@@ -209,10 +209,12 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 /* object age in generational mode */
 #define G_NEW		0	/* created in current cycle */
 #define G_SURVIVAL	1	/* created in previous cycle */
-#define G_TOUCHED0	2	/* old owner written during concurrent marking */
-#define G_OLD		3	/* old object (not to be visited) */
-#define G_TOUCHED1	4	/* old object to scan in two minor cycles */
-#define G_TOUCHED2	5	/* old object to scan in one minor cycle */
+#define G_SURVIVAL_DIRTY 2  /* survivor received a younger edge */
+#define G_SURVIVAL_CLEAN 3  /* survivor scanned without young edges */
+#define G_TOUCHED0      4  /* old owner written during concurrent marking */
+#define G_OLD           5  /* old object (not to be visited) */
+#define G_TOUCHED1      6  /* old object to scan in two minor cycles */
+#define G_TOUCHED2      7  /* old object to scan in one minor cycle */
 
 #define AGEBITS		7  /* all age bits (111) */
 #define luaC_newmark(g) cast_byte(luaC_markstate(g) & (MARKSTAMPS | AGEBITS))
@@ -226,11 +228,11 @@ static inline void luaC_setage (GCObject *o, lu_byte age) {
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
 }
 #define setage(o,a) luaC_setage(obj2gco(o), (a))
-#define isold(o)	(getage(o) > G_SURVIVAL)
+#define isold(o)	(getage(o) > G_SURVIVAL_CLEAN)
 
 static inline int luaC_unmarked (unsigned state, lu_byte marked) {
   if (state & LUA_MARK_YOUNG)
-    return (marked & AGEBITS) <= G_SURVIVAL &&
+    return (marked & AGEBITS) <= G_SURVIVAL_CLEAN &&
            ((marked ^ state) & bitmask(MINORBIT)) != 0;
   return (marked & MAJORBITS) != 0 &&
          ((marked ^ state) & MAJORBITS) != 0;
@@ -265,7 +267,8 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 
 /*
 ** New and survival objects are young. Promotion remembers objects with
-** outgoing edges for two subsequent young collections. A child
+** outgoing edges for two subsequent young collections unless the mark found
+** only old edges. An inserted young edge vetoes that proof until sweep. A child
 ** born during the parent's sweep lies outside that frozen cohort and needs
 ** both scans before it matures. A major selected for generational execution
 ** stamps its objects and allocations old during marking. The quiescent switch
@@ -438,7 +441,7 @@ static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
   marked = getmarked(owner);
   if ((marked & AGEBITS) <= G_SURVIVAL) return 0;
   referent = getmarked(value);
-  return (referent & AGEBITS) <= G_SURVIVAL;
+  return (referent & AGEBITS) <= G_SURVIVAL_CLEAN;
 }
 
 #define luaC_objbarrier(L,p,o) \
@@ -524,7 +527,7 @@ LUAI_FUNC unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit);
 LUAI_FUNC int luaC_scanstrong (lua_State *, LuaTraceWork *, Table *);
 LUAI_FUNC int luaC_tablesize (Table *, l_mem *);
 LUAI_FUNC void luaC_traceedges (LuaTraceWork *, GCObject **, unsigned);
-LUAI_FUNC void luaC_finishstrong (LuaTraceWork *, GCObject *);
+LUAI_FUNC void luaC_finishstrong (LuaTraceWork *, GCObject *, int old_edges);
 LUAI_FUNC int luaC_scanvalues (lua_State *, LuaTraceWork *, GCObject *);
 LUAI_FUNC unsigned luaC_objectchunk (GCObject *, unsigned, unsigned,
                                      GCObject **);

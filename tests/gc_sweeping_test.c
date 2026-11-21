@@ -44,6 +44,15 @@ void __wrap_luaW_restore(lua_State *state, LuaWorldScope scope,
     /* Reproduce another execution starting a cycle before the suspended
      * driver reacquires its collector scope. Native depth retains its roots. */
     lua_unlock(state);
+    /* Supply fresh mark work for every competing cycle. Earlier collections
+     * may have promoted the original rows without remembering them. */
+    lua_gc(test->worker, LUA_GCSTOP);
+    lua_createtable(test->worker, OBJECTS, 0);
+    for (unsigned i = 1; i <= OBJECTS; ++i) {
+      lua_newtable(test->worker);
+      lua_rawseti(test->worker, -2, i);
+    }
+    lua_gc(test->worker, LUA_GCRESTART);
     lua_lock(test->worker);
     luaE_setdebt(G(state), 0);
     luaC_step(test->worker);
@@ -233,6 +242,12 @@ static int boundary(lua_State *state) {
   lua_gc(state, LUA_GCCOLLECT);
   require(test.boundaries == 0);
   fixture = NULL;
+  require(lua_gettop(test.worker) == 2);
+  for (int i = 1; i <= 2; ++i) {
+    require(lua_rawlen(test.worker, i) == OBJECTS);
+    require(lua_rawgeti(test.worker, i, OBJECTS) == LUA_TTABLE);
+    lua_pop(test.worker, 1);
+  }
   execute(state, "for i=1,4096 do assert(rows[i][1]==i) end");
   lua_close(state);
   return 0;

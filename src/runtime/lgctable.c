@@ -86,17 +86,17 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
 ** generation. An edge write dirties the card after publishing its slot.
 ** Writers also shade old and new edges while the scan is active. */
 static int scanarray (lua_State *L, LuaTraceWork *work, Table *table,
-                      const Table *view) {
+                      const Table *view, int *young_edges) {
   global_State *g = G(L);
   uint64_t epoch;
   uint64_t *cards;
   unsigned first;
   if (view->asize < LUA_ARRAY_CARD_MIN || !isold(obj2gco(table)) ||
       !(luaC_markstate(g) & LUA_MARK_YOUNG))
-    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, NULL);
+    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, young_edges);
   epoch = __atomic_load_n(&g->major_completed, __ATOMIC_ACQUIRE) + 1;
   if (epoch == 0 || epoch == UINT64_MAX)
-    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, NULL);
+    return scanpart(L, work, table, view, 0, view->asize, 0, NULL, young_edges);
   cards = luaH_arraycards(view);
   for (first = 0; first < view->asize; first += LUA_ARRAY_CARD_SLOTS) {
     uint64_t *card = &cards[first / LUA_ARRAY_CARD_SLOTS];
@@ -131,7 +131,8 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   unsigned i, parts;
   lu_mem bytes;
   uint64_t sequence;
-  int mode;
+  int mode, young = 0;
+  int *young_edges = NULL;
   if (!snapshot(table, &view, &metatable, &sequence)) {
     /* A nested collection can borrow its own suspended native operation.
     ** Its partial construction image is stable under that existing owner;
@@ -142,23 +143,30 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   }
   mode = strongmode(L, table, metatable, sequence);
   if (mode != 1) return mode;
+  directory = luaH_hashdir(view.node);
   if (metatable != NULL) {
     GCObject *edge = obj2gco(metatable);
     luaC_traceedges(work, &edge, 1);
   }
-  if (!scanarray(L, work, table, &view)) return 0;
-  directory = luaH_hashdir(view.node);
-  parts = luaH_hashparts(&view);
+  else if (directory == NULL && getage(obj2gco(table)) == G_SURVIVAL &&
+           (luaC_markstate(G(L)) & LUA_MARK_YOUNG))
+    young_edges = &young;
+  if (!scanarray(L, work, table, &view, young_edges)) return 0;
+  parts = directory != NULL ? LUA_HASH_PARTS : 1;
   bytes = luaH_size(table, &view);
   for (i = 0; i < parts; ++i) {
     const LuaHashPart *part = directory != NULL ? &directory->parts[i] : NULL;
     if (part != NULL)
       view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
     if (!scanpart(L, work, table, &view, 0, luaH_nodesize(view.node), 1,
-                  i != 0 ? part : NULL, NULL)) return 0;
+                  i != 0 ? part : NULL, young_edges)) return 0;
   }
   work->marked += cast(l_mem, bytes);
-  luaC_finishstrong(work, obj2gco(table));
+  /* A structural move can carry an existing young edge behind the scan.
+  ** The same image must survive all chunks. A young write vetoes the proof
+  ** in the age byte even if the write preserves the layout and tag. */
+  luaC_finishstrong(work, obj2gco(table), young_edges != NULL && !young &&
+                    __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence);
   return 1;
 }
 
