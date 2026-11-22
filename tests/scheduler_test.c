@@ -811,15 +811,41 @@ static int independently_blocked(lua_State *L) {
   return 1;
 }
 
-static void native_return_compensation(struct fixture *f) {
+static int wait_for_native_return(lua_State *L) {
+  LuaScheduler *s = &fixture->scheduler;
+  mark_running(L);
+  while (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0)
+    sched_yield();
+  require(pthread_mutex_lock(&s->mutex) == 0);
+  require(s->reentry_waiting == 1);
+  require(pthread_mutex_unlock(&s->mutex) == 0);
+  return 0;
+}
+
+static void native_return_compensation(struct fixture *f, int handoff) {
   unsigned i;
   initlimits(f, 1, 2);
   lua_gc(f->main, LUA_GCSTOP);
+  if (handoff)
+    managed(f->main, "wait_for_native_return", wait_for_native_return);
   lua_pushcfunction(f->main, independently_blocked);
   lua_setglobal(f->main, "independently_blocked");
   for (i = 0; i < 2; i++) {
-    submit(f, i, "return independently_blocked().value", 0);
+    submit(
+        f, i,
+        handoff && i == 1
+            ? "wait_for_native_return(); return independently_blocked().value"
+            : "return independently_blocked().value",
+        0);
     require(pthread_mutex_lock(&f->mutex) == 0);
+    if (handoff && i == 1) {
+      while (!f->waiting)
+        require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+      /* The second task holds the slot until the first has blocked on its
+       * native return. Entering C then has to notify the first task. */
+      f->native_release = 1;
+      require(pthread_cond_broadcast(&f->changed) == 0);
+    }
     while (f->native_entered != i + 1)
       require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
     require(pthread_mutex_unlock(&f->mutex) == 0);
@@ -1682,7 +1708,9 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "parallel_native_compensation") == 0)
     parallel_native_compensation(f);
   else if (strcmp(argv[1], "native_return_compensation") == 0)
-    native_return_compensation(f);
+    native_return_compensation(f, 0);
+  else if (strcmp(argv[1], "native_return_handoff") == 0)
+    native_return_compensation(f, 1);
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
   else if (strcmp(argv[1], "yield") == 0)
