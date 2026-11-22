@@ -1791,7 +1791,10 @@ static void nursery(struct fixture *f, int generational) {
   submit(f, 0,
          "local n=...; local name='nursery field '..n; "
          "local root={[name]=42}; root.self=root; name=nil; "
+         "rawset(root,'values',{42}); "
+         "for _,v in ipairs(rawget(root,'values')) do assert(v==42) end; "
          "for i=1,50000 do local row={i,i+1,kind='row'}; "
+         "if i%4096==0 then collectgarbage('step',0) end; "
          "assert(row[2]==i+1) end; "
          "nursery_ready=true; while not nursery_release do end; "
          "return root.self['nursery field '..n]",
@@ -1819,7 +1822,7 @@ static void nursery(struct fixture *f, int generational) {
   lua_pop(f->main, 4);
 
   submit(f, 2,
-         "local root={child={answer=42}}; nursery_export=root; "
+         "local root={child={answer=42}}; rawset(_G,'nursery_export',root); "
          "nursery_second_ready=true; while not nursery_second_release do end; "
          "return root.child.answer",
          0);
@@ -1847,7 +1850,10 @@ static void nursery(struct fixture *f, int generational) {
 
   lua_pushcfunction(f->main, nursery_native);
   lua_setglobal(f->main, "nursery_native");
-  submit(f, 4, "local root={answer=42}; return nursery_native(root)", 0);
+  submit(f, 4,
+         "local root={answer=42}; local ok,value=pcall(nursery_native,root); "
+         "assert(ok); return value",
+         0);
   require(collect(f, 4, LUA_OK) == 42);
   lua_gc(f->main, LUA_GCCOLLECT);
   require(lua_getglobal(f->main, "nursery_native_root") == LUA_TTABLE);

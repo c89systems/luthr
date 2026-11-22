@@ -10,7 +10,9 @@
 l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
   NativeStackContext *context;
   LuaExecution *execution;
-  if (l_unlikely(L->task_tables != NULL)) luaC_sealtask(L);
+  /* Managed library code publishes heap edges through the VM barriers.
+  ** Opaque C can expose the stack to another API activation. */
+  if (l_unlikely(!managed && L->task_tables != NULL)) luaC_sealtask(L);
   context = luaX_context(L);
   execution = context->execution;
   scope->context = context;
