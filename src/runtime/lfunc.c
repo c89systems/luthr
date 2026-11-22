@@ -513,6 +513,58 @@ static int capturedoperand (Proto *p, int pc, int reg) {
   }
 }
 
+/* A scalar call reads only its arguments, constants and registers it has
+** already written. Arithmetic skips the following metamethod instruction
+** when its operands pass the same numeric checks as the VM. */
+static lu_byte scalarticks (const Proto *p) {
+  unsigned live;
+  int pc, ticks = 0;
+  if (isvararg(p) || p->dispatch != NULL ||
+      p->sizecode > LUA_SCALAR_CODE_LIMIT ||
+      p->maxstacksize > LUA_SCALAR_REGISTERS || p->numparams > p->maxstacksize)
+    return 0;
+  live = (1u << p->numparams) - 1u;
+  for (pc = 0; pc < p->sizecode; pc++) {
+    Instruction i = p->code[pc];
+    OpCode op = GET_OPCODE(i);
+    unsigned a = GETARG_A(i);
+    unsigned end = a;
+#define livein(r) ((r) < p->maxstacksize && (live & (1u << (r))))
+    ticks++;
+    if (op == OP_RETURN0) return cast_byte(ticks);
+    if (op == OP_RETURN1) return livein(a) ? cast_byte(ticks) : 0;
+    if (a >= p->maxstacksize) return 0;
+    switch (op) {
+      case OP_LOADNIL:
+        end += GETARG_B(i);
+        if (end >= p->maxstacksize) return 0;
+        break;
+      case OP_LOADK:
+        if (GETARG_Bx(i) >= p->sizek) return 0;
+        break;
+      case OP_LOADI: case OP_LOADF: case OP_LOADFALSE: case OP_LOADTRUE:
+        break;
+      case OP_MOVE: case OP_UNM: case OP_NOT:
+        if (!livein(GETARG_B(i))) return 0;
+        break;
+      case OP_ADDI:
+      case OP_ADDK: case OP_SUBK: case OP_MULK:
+      case OP_ADD: case OP_SUB: case OP_MUL:
+        if (!livein(GETARG_B(i))) return 0;
+        if (op >= OP_ADD && !livein(GETARG_C(i))) return 0;
+        if (op >= OP_ADDK && op <= OP_MULK && GETARG_C(i) >= p->sizek)
+          return 0;
+        if (++pc >= p->sizecode || !testMMMode(GET_OPCODE(p->code[pc])))
+          return 0;
+        break;
+      default: return 0;
+    }
+    live |= ((1u << (end - a + 1)) - 1u) << a;
+#undef livein
+  }
+  return 0;
+}
+
 void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
@@ -541,6 +593,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
     }
     if (p->dispatch != NULL) p->dispatch[pc] = cast_byte(op);
   }
+  p->scalar_ticks = scalarticks(p);
 }
 
 
@@ -563,6 +616,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->numparams = 0;
   f->flag = 0;
   f->maxstacksize = 0;
+  f->scalar_ticks = 0;
   f->locvars = NULL;
   f->sizelocvars = 0;
   f->linedefined = 0;

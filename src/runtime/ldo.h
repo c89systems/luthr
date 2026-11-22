@@ -114,8 +114,9 @@ LUAI_FUNC int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted);
 LUAI_FUNC void luaD_callleaffallback (lua_State *L, StkId func, int wanted);
 LUAI_FUNC void luaD_call (lua_State *L, StkId func, int nResults);
 LUAI_FUNC void luaD_callnoyield (lua_State *L, StkId func, int nResults);
-LUAI_FUNC int luaD_tryluacall (lua_State *L, StkId func, int nargs,
-                              int wanted, NativeStackContext *context);
+LUAI_FUNC int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p,
+                                 int nargs, int wanted,
+                                 NativeStackContext *context);
 LUAI_FUNC TStatus luaD_closeprotected (lua_State *L, ptrdiff_t level,
                                                      TStatus status);
 LUAI_FUNC TStatus luaD_pcall (lua_State *L, Pfunc func, void *u,

@@ -106,22 +106,27 @@ static int foreign(lua_State *state) {
   check_api(state, 1);
   if (lua_gettop(state) != 0) {
     unsigned ticks = (unsigned)lua_tointeger(state, 3);
+    int second_argument = lua_gettop(state) == 4;
     int i;
     for (i = 0; i < 3; i++) {
       unsigned before;
       if (i == 1) {
         /* The warm call fits once before the next required poll. */
         luaX_lockstate(state);
-        state->poll_remaining = 2 * ticks;
+        state->poll_remaining = ticks != 0 ? 2 * ticks : 1024;
         luaX_unlockstate(state);
       }
       lua_pushvalue(state, 1);
       lua_pushinteger(state, 41);
-      lua_pushinteger(state, 1);
+      if (second_argument)
+        lua_pushvalue(state, 4);
+      else
+        lua_pushinteger(state, 1);
       before = admissions;
       lua_call(state, 2, 1);
       if (i != 0)
-        require(admissions == before + (i == 2));
+        require(ticks == 0 ? admissions > before
+                           : admissions == before + (i == 2));
       require(lua_rawequal(state, 2, -1));
       require(lua_isinteger(state, -1) == lua_isinteger(state, 2));
       lua_pop(state, 1);
@@ -166,6 +171,29 @@ static void native_values(lua_State *state) {
                         "probe(function(x) return x-1000 end,-959,2); "
                         "probe(function(x,y) return x+y end,42,2); "
                         "probe(function(x,y) return x*y end,41,2); "
+                        "probe(function(x) local shifted = x+2; "
+                        "return shifted*3 end,129,3); "
+                        "probe(function(x) return -((x+0.5)*2) end,-83.0,4); "
+                        "probe(function(x) return not (x+2) end,false,3); "
+                        "local payload=function(x,y) local shifted=x+2; "
+                        "return shifted*y end; "
+                        "probe(assert(load(string.dump(payload))),43,3); "
+                        "local calls=0; local arg=setmetatable({}, { "
+                        "__mul=function(left,right) assert(left==43); "
+                        "calls=calls+1; return 129 end }); "
+                        "probe(function(x,y) local shifted=x+2; "
+                        "return y end,arg,2,arg); "
+                        "probe(function(x) local a,b,c; return b end,nil,2); "
+                        "probe(function(x,y) local sum=x+y; return sum*3 end,"
+                        "(41+math.maxinteger)*3,3,math.maxinteger); "
+                        "probe(payload,129,0,arg); assert(calls==3); "
+                        "assert(payload(41,3)==129 and payload(41,arg)==129); "
+                        "assert(calls==4); "
+                        "local hooks=0; debug.sethook(function() "
+                        "if debug.getinfo(2,'f').func==payload then "
+                        "hooks=hooks+1 end end,'c'); "
+                        "probe(payload,43,0); assert(payload(41,1)==43); "
+                        "debug.sethook(); assert(hooks==4); "
                         "probe(function() return 42 end,42,2); "
                         "probe(function() return 42.0 end,42.0,2); "
                         "probe(function() return 'literal' end,'literal',2); "

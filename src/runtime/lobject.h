@@ -622,6 +622,7 @@ typedef struct Proto {
   lu_byte numparams;  /* number of fixed (named) parameters */
   lu_byte flag;
   lu_byte maxstacksize;  /* number of registers needed by this function */
+  lu_byte scalar_ticks;  /* instructions executed by a bounded scalar call */
   int sizeupvalues;  /* size of 'upvalues' */
   int sizek;  /* size of 'k' */
   int sizecode;

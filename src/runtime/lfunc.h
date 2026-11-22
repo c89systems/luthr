@@ -40,6 +40,9 @@ struct CallInfo;
 */
 #define MAXMISS		10
 
+/* Keep a speculative scalar call's stack and safepoint latency bounded. */
+enum { LUA_SCALAR_REGISTERS = 8, LUA_SCALAR_CODE_LIMIT = 16 };
+
 
 
 /* special status to close upvalues preserving the top of the stack */

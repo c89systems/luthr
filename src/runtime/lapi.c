@@ -1425,11 +1425,14 @@ LUA_API void lua_callk (lua_State *L, int nargs, int nresults,
   func = L->top.p - (nargs+1);
   if (owner != 0) {
     NativeStackContext *activation = luaX_gateowner(owner);
-    if (ttisLclosure(s2v(func)) &&
-        luaD_tryluacall(L, func, nargs, nresults, activation)) {
-      adjustresults(L, nresults);
-      luaX_callleave(L, owner);
-      return;
+    if (ttisLclosure(s2v(func))) {
+      const Proto *p = clLvalue(s2v(func))->p;
+      if (p->scalar_ticks != 0 &&
+          luaD_tryscalarcall(L, func, p, nargs, nresults, activation)) {
+        adjustresults(L, nresults);
+        luaX_callleave(L, owner);
+        return;
+      }
     }
     if (!luaX_callpromote(L, activation)) {
       luaX_callleave(L, owner);
