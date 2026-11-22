@@ -47,8 +47,8 @@ struct fixture {
 };
 static struct fixture *fixture;
 static __thread int inspecting;
-static __thread int measuring_reentry;
-static __thread unsigned reentry_locks;
+static __thread int measuring_scheduler;
+static __thread unsigned engine_locks, queue_locks;
 static unsigned poll_locks, poll_calls;
 static int fail_mutex = -1, fail_condition = -1, fail_carrier = -1;
 static int fail_mapping, fail_protection;
@@ -184,8 +184,13 @@ int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex) {
   struct fixture *f = fixture;
   if (inspecting)
     __atomic_fetch_add(&poll_locks, 1, __ATOMIC_RELAXED);
-  if (measuring_reentry && mutex == &f->scheduler.mutex)
-    reentry_locks++;
+  if (measuring_scheduler) {
+    if (mutex == &f->scheduler.mutex)
+      engine_locks++;
+    for (unsigned i = 0; i < f->scheduler.config.slots; i++)
+      if (mutex == &f->scheduler.slots[i].mutex)
+        queue_locks++;
+  }
   if (f != NULL && f->admission_pause && mutex == &f->scheduler.native_mutex &&
       luaQ_current() == &f->tasks[1].fiber.execution) {
     require(__real_pthread_mutex_lock(&f->mutex) == 0);
@@ -576,16 +581,16 @@ static int local_api(lua_State *L) {
   pthread_t carrier = pthread_self();
   lua_Integer sum = 0;
   unsigned i;
-  reentry_locks = 0;
-  measuring_reentry = 1;
+  engine_locks = 0;
+  measuring_scheduler = 1;
   for (i = 0; i < 2000; i++) {
     lua_pushinteger(L, (lua_Integer)i);
     sum += lua_tointeger(L, -1);
     lua_settop(L, 0);
   }
-  measuring_reentry = 0;
+  measuring_scheduler = 0;
   require(sum == 1999000 && pthread_equal(pthread_self(), carrier));
-  require(reentry_locks == 0);
+  require(engine_locks == 0);
   lua_pushinteger(L, sum);
   return 1;
 }
@@ -642,6 +647,51 @@ static void wake_before_publication(struct fixture *f, int generational) {
   require(f->tasks[0].early_wakes == 1 && f->tasks[0].parks == 1);
   lua_gc(f->main, LUA_GCCOLLECT);
   require(f->finalized == 1);
+  finish(f);
+}
+
+static void wake_waiters(struct fixture *f) {
+  enum { WAITING_TASKS = 7 };
+  LuaScheduler *s = &f->scheduler;
+  init(f, 2);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "event_wait", event_wait);
+  managed(f->main, "pinned_wait", pinned_wait);
+  f->pause_hold = 1;
+  submit(f, 0, "return event_wait()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->pause_seen)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  for (unsigned i = 1; i < WAITING_TASKS; i++)
+    submit(f, i,
+           i == WAITING_TASKS - 1 ? "return pinned_wait()"
+                                  : "return event_wait()",
+           0);
+  require(pthread_mutex_lock(&s->mutex) == 0);
+  for (unsigned i = 1; i < WAITING_TASKS; i++)
+    while (!f->tasks[i].published)
+      require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
+  require(!f->tasks[0].published);
+  require(pthread_mutex_unlock(&s->mutex) == 0);
+
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  require(f->waiting == WAITING_TASKS);
+  f->native_release = 1;
+  engine_locks = queue_locks = 0;
+  measuring_scheduler = 1;
+  luaQ_wake(&f->changed, &f->waiters);
+  measuring_scheduler = 0;
+  require(engine_locks == 1 && queue_locks == 2 && f->waiters == NULL);
+  f->pause_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  for (unsigned i = 0; i < WAITING_TASKS; i++) {
+    require(collect(f, i, LUA_OK) == 77);
+    require(f->tasks[i].early_wakes == (i == 0) && f->tasks[i].parks == 1);
+  }
+  require(s->pending_ready == 0);
   finish(f);
 }
 
@@ -1583,6 +1633,8 @@ int main(int argc, char **argv) {
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)
     wake_before_publication(f, 1);
+  else if (strcmp(argv[1], "wake_waiters") == 0)
+    wake_waiters(f);
   else if (strcmp(argv[1], "native") == 0)
     native_progress(f, 0);
   else if (strcmp(argv[1], "native_reentry") == 0)

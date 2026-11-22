@@ -133,7 +133,6 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task, int firstslice) {
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
-  notify(s);
 }
 
 /* Exchange at most eight queued tasks with a peer, rotating the first peer.
@@ -805,25 +804,82 @@ static void resourcewait (LuaExecution *execution, pthread_mutex_t *mutex,
   unlock(s);
 }
 
-static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
-  (void)waiter;  /* also checked by the debug ownership assertion below */
-  LuaScheduledTask *task = execution->context;
-  LuaScheduler *s = task->scheduler;
-  lock(s);
+l_sinline LuaScheduledTask *readywaiter (LuaScheduler *s, LuaWaiter *waiter) {
+  LuaScheduledTask *task = waiter->execution->context;
   lua_assert(task->waiter == waiter && !task->notified);
   task->notified = 1;
-  if (!task->external) {
-    if (task->published) {
-      task->published = 0;
-      enqueue(s, task, 0);
-    }
-    else {
-      task->early_wakes++;
-      __atomic_fetch_add(&s->pending_ready, 1, __ATOMIC_RELEASE);
-    }
+  if (task->external) return NULL;
+  if (task->published) {
+    task->published = 0;
+    return task;
   }
+  task->early_wakes++;
+  __atomic_fetch_add(&s->pending_ready, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
+  LuaScheduler *s = execution->scheduler;
+  LuaScheduledTask *ready;
+  lock(s);
+  ready = readywaiter(s, waiter);
+  if (ready != NULL) enqueue(s, ready, 0);
   notify(s);
   unlock(s);
+}
+
+typedef struct LuaWakeRun {
+  LuaExecutionSlot *slot;
+  LuaScheduledTask *head, *tail;
+  unsigned count;
+} LuaWakeRun;
+
+static void publishwakes (LuaScheduler *s, LuaWakeRun *run) {
+  LuaExecutionSlot *slot = run->slot;
+  LuaScheduledTask *task;
+  luaX_checksync(pthread_mutex_lock(&slot->mutex));
+  if (slot->tail != NULL) slot->tail->next = run->head;
+  else slot->head = run->head;
+  slot->tail = run->tail;
+  slot->count += run->count;
+  __atomic_fetch_add(&s->runnable, run->count, __ATOMIC_SEQ_CST);
+  for (task = run->head; task != NULL && s->idle != NULL; task = task->next)
+    wakequeued(s, task);
+  luaX_checksync(pthread_mutex_unlock(&slot->mutex));
+  run->head = run->tail = NULL;
+  run->count = 0;
+}
+
+LuaWaiter *luaSC_wakewaiters (LuaWaiter *waiter) {
+  enum { WAKE_RUNS = 8 };
+  LuaWakeRun runs[WAKE_RUNS] = {0};
+  LuaScheduler *s = waiter->execution->scheduler;
+  unsigned i;
+  lock(s);
+  do {
+    LuaWaiter *next = waiter->next;
+    LuaScheduledTask *ready;
+    lua_assert(waiter->execution->wake == resourcewake);
+    waiter->link = NULL;
+    ready = readywaiter(s, waiter);
+    if (ready != NULL) {
+      LuaExecutionSlot *slot = &s->slots[ready->home];
+      LuaWakeRun *run = &runs[ready->home % WAKE_RUNS];
+      lua_assert(ready->slot == NULL && ready->fiber.execution.allocation_cache == NULL);
+      /* Flush collisions so stack usage stays bounded at any worker count. */
+      if (run->count != 0 && run->slot != slot) publishwakes(s, run);
+      run->slot = slot;
+      append(&run->head, &run->tail, ready);
+      run->count++;
+    }
+    waiter = next;
+  } while (waiter != NULL && waiter->execution != NULL &&
+           waiter->execution->scheduler == s);
+  for (i = 0; i < WAKE_RUNS; i++)
+    if (runs[i].count != 0) publishwakes(s, &runs[i]);
+  notify(s);
+  unlock(s);
+  return waiter;
 }
 
 static void taskentry (void *argument) {
@@ -1242,6 +1298,7 @@ int luaSC_submit (LuaScheduler *s, LuaScheduledTask *task, lua_State *L,
       s->submitted++;
       s->outstanding++;
       enqueue(s, task, 0);
+      notify(s);
     }
   }
   unlock(s);

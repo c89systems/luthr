@@ -347,6 +347,12 @@ void luaQ_wake (pthread_cond_t *changed, LuaWaiter **waiters) {
   luaX_checksync(pthread_cond_broadcast(changed));
   while (waiter != NULL) {
     LuaWaiter *next = waiter->next;
+    if (next != NULL && waiter->execution != NULL && next->execution != NULL &&
+        waiter->execution->scheduler != NULL &&
+        waiter->execution->scheduler == next->execution->scheduler) {
+      waiter = luaSC_wakewaiters(waiter);
+      continue;
+    }
     waiter->link = NULL;
     if (waiter->execution != NULL)
       waiter->execution->wake(waiter->execution, waiter);
