@@ -118,7 +118,7 @@ set_target_properties(execution_context_test PROPERTIES C_STANDARD 99)
 target_compile_options(execution_context_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(execution_context_test PRIVATE luthr_static)
 target_link_options(execution_context_test PRIVATE -Wl,--wrap=luaE_getnativestackcontext)
-foreach(case IN ITEMS host managed borrow pair foreign publication native_work)
+foreach(case IN ITEMS host managed borrow pair foreign publication native_work native_bounds)
   add_test(NAME execution_context_${case} COMMAND execution_context_test ${case})
   set_tests_properties(execution_context_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

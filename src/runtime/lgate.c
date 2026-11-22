@@ -151,10 +151,8 @@ void luaX_endreserve (lua_State *target, int reservation) {
 }
 
 static void preparecall (lua_State *L, NativeStackContext *context) {
-  LuaExecution *execution = context->execution;
   LuaPolicy *policy = luaX_contextpolicy(context);
   if (policy != NULL || L->policy != NULL) luaCP_apply(L, policy);
-  if (L->errorJmp == NULL && execution != NULL) luaE_refreshnativestack(L);
 }
 
 static void lockstate (lua_State *L, NativeStackContext *context) {
@@ -188,12 +186,6 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values) 
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   lua_assert(L->admission == &L->participation);
-  /* Runtime stack descriptors can be temporary callback storage. Ordinary
-  ** embedding callers retain lazy per-thread discovery at their VM boundary. */
-  if (L->errorJmp == NULL && execution != NULL) {
-    L->luthr_stack_context = NULL;
-    L->luthr_stack_limit = 0;
-  }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L, context, LUA_GATE_MANAGED);
@@ -404,14 +396,6 @@ void luaX_unlockpair (lua_State *first, lua_State *second) {
   luaM_publishdebt(first);
   first->stack_peer = second->stack_peer = NULL;
   second->admission = &second->participation;
-  if (first->errorJmp == NULL && execution != NULL) {
-    first->luthr_stack_context = NULL;
-    first->luthr_stack_limit = 0;
-  }
-  if (second != first && second->errorJmp == NULL && execution != NULL) {
-    second->luthr_stack_context = NULL;
-    second->luthr_stack_limit = 0;
-  }
   if (second != first) release(second, token, 0);
   release(first, token, LUA_GATE_MANAGED);
   luaQ_leavemanaged(execution);

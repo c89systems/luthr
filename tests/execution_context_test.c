@@ -1,5 +1,6 @@
 #include <laccess.h>
 #include <lauxlib.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lmem.h>
 #include <lpolicy.h>
@@ -319,6 +320,35 @@ static void native_work(lua_State *state) {
   state->state_poll_context = NULL;
 }
 
+static int stack_result(lua_State *state) {
+  lua_pushinteger(state, 42);
+  return 1;
+}
+
+static int nested_stack(lua_State *state) {
+  NativeStackContext *outer = luaE_getnativestackcontext();
+  NativeStackContext nested = {.limit = luaD_nativeposition()};
+  NativeStackContext *previous = luaE_setnativestackcontext(&nested);
+  require(previous == NULL && outer->overflow == 0);
+  /* Leave little usable C stack inside this nested entry while the outer
+   * protected call on the same coroutine is still live. */
+  lua_pushcfunction(state, stack_result);
+  require(lua_pcall(state, 0, 1, 0) == LUA_ERRRUN);
+  require(strstr(lua_tostring(state, -1), "C stack overflow") != NULL);
+  require(nested.overflow == 0 && outer->overflow == 0);
+  lua_pop(state, 1);
+  luaE_setnativestackcontext(previous);
+  lua_pushcfunction(state, stack_result);
+  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+  return 1;
+}
+
+static void native_bounds(lua_State *state) {
+  lua_pushcfunction(state, nested_stack);
+  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+  require(lua_tointeger(state, -1) == 42);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -334,6 +364,8 @@ int main(int argc, char **argv) {
     publication(state);
   else if (strcmp(argv[1], "native_work") == 0)
     native_work(state);
+  else if (strcmp(argv[1], "native_bounds") == 0)
+    native_bounds(state);
   else {
     require(strcmp(argv[1], "foreign") == 0);
     foreign(state);

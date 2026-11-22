@@ -301,7 +301,6 @@ static void dumpHeader (DumpState *D) {
 int luaU_dump (lua_State *L, const Proto *f, lua_Writer w, void *data,
                int strip, int managed) {
   DumpState D;
-  luaE_refreshnativestack(L);
   luaR_pushroot(L, &D.roots[0]);
   setgcovalue(L, &D.roots[0].value, obj2gco(f));
   luaR_pushroot(L, &D.roots[1]);

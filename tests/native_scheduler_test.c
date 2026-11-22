@@ -1158,7 +1158,7 @@ static int exercise_callback(const char *name) {
     }
     luaCB_revoke(&test->registration);
   }
-  require(test->registration.thread->luthr_stack_context == NULL);
+  require(luaX_boundcontext(test->registration.thread) == NULL);
   require(luaCB_destroy(pool->main, &test->registration) == LUA_OK);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized ==
@@ -1169,7 +1169,8 @@ static int exercise_callback(const char *name) {
   require(pool->finalized == 1);
   lua_getglobal(pool->main, "shared");
   lua_getfield(pool->main, -1, "child");
-  require(lua_tothread(pool->main, -1)->luthr_stack_context == NULL);
+  require(lua_isthread(pool->main, -1));
+  require(luaX_boundcontext(lua_tothread(pool->main, -1)) == NULL);
   lua_pop(pool->main, 1);
   lua_getfield(pool->main, -1, "observed");
   require(lua_tointeger(pool->main, -1) == 500500);

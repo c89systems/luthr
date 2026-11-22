@@ -351,8 +351,6 @@ struct lua_State {
     int ftransfer;  /* offset of first value transferred */
     int ntransfer;  /* number of values transferred */
   } transferinfo;
-  uintptr_t luthr_stack_limit;
-  NativeStackContext *luthr_stack_context;
   LuaNativeRoot *native_roots;
   LuaSharingRoots *sharing_roots;  /* promotion can outlive a marking epoch */
   struct LuaCallback *callback_owner;
@@ -746,7 +744,8 @@ l_sinline int luaW_ownsheap (lua_State *L) {
   return owner != NULL && owner == luaX_token(L);
 }
 
-LUAI_FUNC void luaE_nativestackerror (lua_State *L, uintptr_t position);
+LUAI_FUNC void luaE_nativestackerror (lua_State *L, NativeStackContext *context,
+                                     uintptr_t position);
 LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);

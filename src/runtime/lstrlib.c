@@ -504,6 +504,7 @@ typedef struct MatchState {
   const char *src_end;  /* end ('\0') of source string */
   const char *p_end;  /* end ('\0') of pattern */
   lua_State *L;
+  uintptr_t stacklimit;  /* native bound of this matching invocation */
   int matchdepth;  /* control for recursive depth (to avoid C stack overflow) */
   int level;  /* total number of captures (finished or unfinished) */
   unsigned work;  /* invocation-local CPU work across retries/backtracking */
@@ -732,7 +733,7 @@ static const char *match_capture (MatchState *ms, const char *s, int l) {
 
 static const char *match (MatchState *ms, const char *s, const char *p) {
   /* Pattern recursion also runs outside interpreter C-call accounting. */
-  if (l_unlikely(luaD_nativeposition() <= ms->L->luthr_stack_limit)) {
+  if (l_unlikely(luaD_nativeposition() <= ms->stacklimit)) {
     lua_lock(ms->L);
     luaD_checknativestack(ms->L);
     lua_unlock(ms->L);
@@ -932,6 +933,7 @@ static int nospecials (MatchState *ms, const char *p, size_t l) {
 static void prepstate (MatchState *ms, lua_State *L,
                        const char *s, size_t ls, const char *p, size_t lp) {
   ms->L = L;
+  ms->stacklimit = luaD_nativelimit(luaE_getnativestackcontext());
   ms->src_init = s;
   ms->src_end = s + ls;
   ms->p_end = p + lp;

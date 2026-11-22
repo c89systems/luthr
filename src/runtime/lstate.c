@@ -239,8 +239,9 @@ uintptr_t luaE_initnativestack (void) {
   return UINTPTR_MAX;  /* retry failed discovery on the next outer entry */
 }
 
-void luaE_nativestackerror (lua_State *L, uintptr_t position) {
-  if (L->luthr_stack_limit == UINTPTR_MAX) {
+void luaE_nativestackerror (lua_State *L, NativeStackContext *context,
+                            uintptr_t position) {
+  if (context->limit == UINTPTR_MAX) {
     if (!completestate(G(L)))
       luaD_throw(L, LUA_ERRMEM);
     luaD_checkstack(L, LUA_MINSTACK);
@@ -248,12 +249,12 @@ void luaE_nativestackerror (lua_State *L, uintptr_t position) {
     L->top.p++;
     luaD_throw(L, LUA_ERRRUN);
   }
-  if (position <= L->luthr_stack_limit - 24576) {
+  if (position <= context->limit - 24576) {
     luaD_checkstack(L, LUA_MINSTACK);
     luaD_errerr(L);
   }
-  if (!L->luthr_stack_context->overflow) {
-    L->luthr_stack_context->overflow = 1;
+  if (!context->overflow) {
+    context->overflow = 1;
     luaD_checkstack(L, LUA_MINSTACK);
     luaG_runerror(L, "C stack overflow");
   }
@@ -372,8 +373,6 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->call_bytes = 0;
   L->call_blocks = NULL;
   L->nCcalls = 0;
-  L->luthr_stack_limit = 0;
-  L->luthr_stack_context = NULL;
   L->native_roots = NULL;
   L->sharing_roots = NULL;
   L->policy = NULL;

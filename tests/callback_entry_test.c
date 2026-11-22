@@ -177,7 +177,7 @@ static void call(struct fixture *fixture, int argument, int expected,
     require(result == 42);
   require(execution.native_depth == 0 && execution.managed_depth == 0 &&
           execution.protected == NULL && luaQ_current() == NULL);
-  require(fixture->callbacks[0].thread->luthr_stack_context == NULL);
+  require(luaX_boundcontext(fixture->callbacks[0].thread) == NULL);
   require(fixture->callbacks[0].entries == 0 &&
           fixture->callbacks[0].depth == 0);
 }

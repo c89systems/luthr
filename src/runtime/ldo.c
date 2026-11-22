@@ -69,6 +69,7 @@
 typedef struct lua_longjmp {
   struct lua_longjmp *previous;
   struct lua_longjmp *execution_previous;
+  NativeStackContext *context;
   LuaExecution *execution;
   unsigned execution_native_depth;
   LuaCallScope *execution_trusted;
@@ -153,14 +154,16 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
-    if (L->errorJmp->execution != luaQ_current() ||
+    NativeStackContext *context = luaE_getnativestackcontext();
+    if (L->errorJmp->context != context ||
+        L->errorJmp->execution != context->execution ||
         !pthread_equal(L->errorJmp->carrier, pthread_self())) {
       fputs("Luthr error crossed a foreign carrier's protected boundary\n", stderr);
       abort();
     }
     luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
-    luaE_getnativestackcontext()->api_region = L->errorJmp->api_region;
+    context->api_region = L->errorJmp->api_region;
     L->errorJmp->status = errcode;  /* set status */
     LUAI_THROW(L, L->errorJmp);  /* jump to it */
   }
@@ -186,6 +189,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
       source = luaW_detach(L);
       lua_lock(mainth);
       if (mainth->errorJmp != NULL &&
+          mainth->errorJmp->context == luaX_boundcontext(mainth) &&
           mainth->errorJmp->execution == luaQ_current() &&
           pthread_equal(mainth->errorJmp->carrier, pthread_self())) {
         LuaWorldScope depth;
@@ -227,7 +231,7 @@ int luaD_canselfclose (lua_State *L) {
   lua_longjmp *base = L->errorJmp;
   if (base == NULL) return context->coroutine_scopes == NULL;
   while (base->previous != NULL) base = base->previous;
-  return L->luthr_stack_context == context &&
+  return base->context == context &&
          base->execution == context->execution &&
          pthread_equal(base->carrier, pthread_self()) &&
          base->coroutine_scopes == context->coroutine_scopes;
@@ -241,7 +245,7 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
       L->errorJmp = L->errorJmp->previous;
     luaO_unwind(L->errorJmp->coroutine_scopes);
     luaA_unwind(L, L->errorJmp->object_scopes);
-    L->luthr_stack_context->overflow = L->errorJmp->luthr_stack_overflow;
+    luaX_context(L)->overflow = L->errorJmp->luthr_stack_overflow;
     L->native_roots = L->errorJmp->native_roots;
     luaW_restore(L, L->errorJmp->world_scope, L->errorJmp->native_depth);
   }
@@ -251,13 +255,13 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
 
 TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   l_uint32 oldnCcalls = L->nCcalls;
+  NativeStackContext *context = luaX_context(L);
   lua_longjmp lj;
   TStatus status;
-  if (L->errorJmp == NULL)
-    luaE_refreshnativestack(L);
   lj.status = LUA_OK;
   lj.carrier = pthread_self();
-  lj.execution = luaQ_current();
+  lj.context = context;
+  lj.execution = context->execution;
   lj.execution_native_depth = lj.execution != NULL
                               ? lj.execution->native_depth : 0;
   lj.execution_trusted = lj.execution != NULL ? lj.execution->trusted : NULL;
@@ -265,20 +269,20 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
                            ? lj.execution->protected : NULL;
   if (lj.execution != NULL)
     lj.execution->protected = &lj;
-  lj.luthr_stack_overflow = L->luthr_stack_context->overflow;
+  lj.luthr_stack_overflow = context->overflow;
   lj.native_roots = L->native_roots;
   lj.native_depth = L->native_depth;
   lj.reclaiming = L->reclaiming;
   lj.gc_frame = luaC_gcframe();
   lj.world_scope = luaW_scope(L);
   lj.object_scopes = L->object_scopes;
-  lj.coroutine_scopes = luaE_getnativestackcontext()->coroutine_scopes;
-  lj.api_region = luaE_getnativestackcontext()->api_region;
+  lj.coroutine_scopes = context->coroutine_scopes;
+  lj.api_region = context->api_region;
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
   luaC_restoregcframe(lj.gc_frame);
-  luaE_getnativestackcontext()->api_region = lj.api_region;
+  context->api_region = lj.api_region;
   L->reclaiming = lj.reclaiming;
   /* Retire the jump buffer before any cleanup callback can park this stack. */
   if (lj.execution != NULL) {
@@ -298,7 +302,7 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   L->nCcalls = oldnCcalls;
   status = lj.status;
   if (l_unlikely(status != LUA_OK))
-    L->luthr_stack_context->overflow = lj.luthr_stack_overflow;
+    context->overflow = lj.luthr_stack_overflow;
   return status;
 }
 
@@ -364,9 +368,7 @@ l_noret luaD_errerr (lua_State *L) {
 ** available CallInfos, and two "slots" in the C stack.
 */
 int luaD_checkminstack (lua_State *L) {
-  if (L->errorJmp == NULL)
-    luaE_refreshnativestack(L);
-  if (luaD_nativeposition() <= L->luthr_stack_limit)
+  if (luaD_nativeposition() <= luaD_nativelimit(luaX_context(L)))
     return 0;
   if (getCcalls(L) >= LUAI_MAXCCALLS - 2)
     return 0;  /* not enough C-stack slots */
@@ -985,8 +987,6 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
 */
 l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
   CallInfo *ci;
-  if (L->errorJmp == NULL)
-    luaE_refreshnativestack(L);
   luaD_checknativestack(L);
   L->nCcalls += inc;
   if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS)) {
@@ -1217,8 +1217,6 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   else if (L->status != LUA_YIELD)  /* ended with errors? */
     return resume_error(L, "cannot resume dead coroutine", nargs);
   L->nCcalls = calls;
-  if (l_unlikely(L->errorJmp != NULL))
-    luaE_refreshnativestack(L);
   if (getCcalls(L) >= LUAI_MAXCCALLS)
     return resume_error(L, "C stack overflow", nargs);
   L->nCcalls++;
@@ -1494,11 +1492,11 @@ int luaD_tryluacall (lua_State *L, StkId func, int nargs, int wanted,
   int ticks = 1, count = 1, i;
   if (p->sizecode < 1 || p->sizecode > 4 || isvararg(p) ||
       nargs < p->numparams || p->dispatch != NULL || gethookmask(L) ||
-      L->errorJmp == NULL || isLua(L->ci) ||
+      L->errorJmp == NULL || L->errorJmp->context != context || isLua(L->ci) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)) ||
       L->ci->next == NULL || L->stack_last.p - L->top.p <= p->maxstacksize ||
       getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
-      luaD_nativeposition() <= L->luthr_stack_limit)
+      context->limit == 0 || luaD_nativeposition() <= context->limit)
     return 0;
   first = code[0];
   op = GET_OPCODE(first);
@@ -1539,9 +1537,7 @@ int luaD_tryluacall (lua_State *L, StkId func, int nargs, int wanted,
       default: return 0;
     }
   }
-  /* Full admission normally checks for an invocation change and refreshes
-  ** the hook and native stack bounds. Only reuse a prepared activation. */
-  if (L->luthr_stack_context != context) return 0;
+  /* Full admission would apply the invocation's policy. */
   policy = luaX_contextpolicy(context);
   if (policy != NULL && policy != L->policy && policy->global == G(L)) return 0;
   policy = L->policy;

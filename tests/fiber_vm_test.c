@@ -161,7 +161,6 @@ static void poll(lua_State *state, void *user) {
   luaW_attach(state, task->world);
   if (luaE_threadcontext() == outgoing ||
       luaE_getnativestackcontext() != &task->fiber.native ||
-      state->luthr_stack_context != &task->fiber.native ||
       luaX_context(state) != &task->fiber.native ||
       luaX_token(state) != &task->fiber.native)
     abort();
@@ -403,7 +402,7 @@ static int exercise_vm(int generational) {
     if (luaL_loadstring(task->state, "return 42") != LUA_OK ||
         lua_resume(task->state, NULL, 0, &task->results) != LUA_OK ||
         lua_tointeger(task->state, -1) != 42 ||
-        task->state->luthr_stack_context == &task->fiber.native)
+        luaX_boundcontext(task->state) != NULL)
       abort();
     test_fiber_destroy(&task->fiber);
   }

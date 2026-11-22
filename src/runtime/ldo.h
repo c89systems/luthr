@@ -77,19 +77,22 @@ l_sinline uintptr_t luaD_nativeposition (void) {
   return position;
 }
 
-#define luaE_refreshnativestack(L) \
-  { NativeStackContext *context = luaX_context(L); \
-    __asm__ ("" : "+r" (context)); \
-    uintptr_t limit = context->limit; \
-    if (l_unlikely(limit == 0 || limit == UINTPTR_MAX)) \
-      context->limit = limit = luaE_initnativestack(); \
-    (L)->luthr_stack_limit = limit; \
-    (L)->luthr_stack_context = context; }
+/* Native bounds belong to the running stack, which may enter several
+** coroutines and can migrate with its execution. */
+l_sinline uintptr_t luaD_nativelimit (NativeStackContext *context) {
+  uintptr_t limit = context->limit;
+  if (l_unlikely(limit == 0 || limit == UINTPTR_MAX))
+    context->limit = limit = luaE_initnativestack();
+  return limit;
+}
 
-#define luaD_checknativestack(L) \
-  { uintptr_t position = luaD_nativeposition(); \
-    if (l_unlikely(position <= (L)->luthr_stack_limit)) \
-      luaE_nativestackerror((L), position); }
+l_sinline void luaD_checknativestack (lua_State *L) {
+  NativeStackContext *context = luaX_context(L);
+  uintptr_t limit = luaD_nativelimit(context);
+  uintptr_t position = luaD_nativeposition();
+  if (l_unlikely(position <= limit))
+    luaE_nativestackerror(L, context, position);
+}
 
 
 /* type of protected functions, to be ran by 'runprotected' */
