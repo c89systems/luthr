@@ -180,7 +180,7 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values) 
     if (!L->reclaiming && (luaC_retired(L) != NULL || L->reclaim_pages))
       luaC_reclaim(L);
   }
-  if (L->allocation_debt != 0 || L->reclaim_credit != 0 ||
+  if (L->allocation_debt.pending != 0 || L->reclaim_credit != 0 ||
       (!values && L->stack_peer != NULL))
     luaM_publishdebt(L);
   if (L->object_scopes == NULL &&

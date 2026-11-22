@@ -263,7 +263,8 @@ static void publication(lua_State *state) {
   debt = luaE_getdebt(G(state));
   /* Model an unpublished producer record before the late entrant binds. */
   luaW_trackpublisher(other);
-  other->allocation_debt = 1234;
+  other->allocation_debt.batch.total = other->allocation_debt.batch.shared =
+      1234;
   require(!other->root_waiting);
   require(pthread_create(&entrant, NULL, publication_entry, other) == 0);
   require(pthread_mutex_lock(&G(state)->world.mutex) == 0);
@@ -275,15 +276,16 @@ static void publication(lua_State *state) {
   require(pthread_mutex_unlock(&G(state)->world.mutex) == 0);
   /* Binding a gate while stopped grants no permission to touch the frozen
    * allocation record. The collector alone publishes it below. */
-  require(other->allocation_debt == 1234);
+  require(other->allocation_debt.batch.total == 1234);
   require(luaE_getdebt(G(state)) == debt);
   for (i = 0; i < 2000; i++) {
     luaC_publish(state);
     sched_yield();
   }
-  require(other->allocation_debt == 0);
+  require(other->allocation_debt.pending == 0);
   require(luaE_getdebt(G(state)) == debt + 1234);
-  other->allocation_debt = -1234; /* undo the injected accounting record */
+  other->allocation_debt.batch.total = other->allocation_debt.batch.shared =
+      -1234;
   luaM_flushdebt(other);
   require(luaE_getdebt(G(state)) == debt);
   luaW_start(state);

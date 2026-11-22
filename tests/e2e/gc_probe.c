@@ -166,7 +166,8 @@ void gc_probe_allocation(uint64_t live) {
   previous =
       __atomic_load_n(&record->logical_live_peak_bytes, __ATOMIC_RELAXED);
   {
-    l_mem observed = getgcbytes(g);
+    l_mem observed =
+        gettotalbytes(g) - __atomic_load_n(&g->GCretired, __ATOMIC_RELAXED);
     uint64_t logical = observed > 0 ? (uint64_t)observed : 0;
     while (previous < logical &&
            !__atomic_compare_exchange_n(&record->logical_live_peak_bytes,

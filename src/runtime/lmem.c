@@ -96,23 +96,35 @@ static void accountassist (lua_State *L, l_mem change) {
 }
 
 void luaM_flushdebt (lua_State *L) {
-  l_mem debt = L->allocation_debt;
+  l_mem debt = L->allocation_debt.batch.total;
+  l_mem shared = luaM_shareddebt(L);
   l_mem reclaimed = L->reclaim_credit;
-  L->allocation_debt = 0;
+  L->allocation_debt.pending = 0;
   L->reclaim_credit = 0;
-  accountassist(L, debt);
-  if (debt != 0)
-    adddebt(G(L), debt);
+  accountassist(L, shared);
+  if (debt != 0) __atomic_fetch_sub(&G(L)->GCbytes, debt, __ATOMIC_RELAXED);
+  if (shared != 0) __atomic_fetch_sub(&G(L)->GCused, shared, __ATOMIC_RELAXED);
   if (reclaimed != 0) {
     __atomic_fetch_sub(&G(L)->GCretired, reclaimed, __ATOMIC_RELAXED);
     __atomic_fetch_sub(&G(L)->GCbytes, reclaimed, __ATOMIC_RELAXED);
   }
 }
 
+void luaM_privatebytes (lua_State *L, l_mem change) {
+  l_mem debt = L->allocation_debt.batch.shared + change;
+  if (change == 0) return;
+  /* Each transfer is bounded by the size of one task nursery. */
+  lua_assert(debt >= INT32_MIN && debt <= INT32_MAX);
+  L->allocation_debt.batch.shared = cast(int32_t, debt);
+  if (debt >= DEBT_BATCH || debt <= -DEBT_BATCH)
+    luaM_flushdebt(L);
+}
+
 void luaM_publishdebt (lua_State *L) {
   lua_State *peer = L->stack_peer;
-  if (L->allocation_debt != 0 || L->reclaim_credit != 0) luaM_flushdebt(L);
-  if (peer != NULL && (peer->allocation_debt != 0 || peer->reclaim_credit != 0))
+  if (L->allocation_debt.pending != 0 || L->reclaim_credit != 0)
+    luaM_flushdebt(L);
+  if (peer != NULL && (peer->allocation_debt.pending != 0 || peer->reclaim_credit != 0))
     luaM_flushdebt(peer);
 }
 
@@ -123,8 +135,12 @@ static void accountowned (lua_State *L, l_mem change, int exclusive) {
     adddebt(G(L), change);
   }
   else {
-    L->allocation_debt += change;
-    if (L->allocation_debt >= DEBT_BATCH || L->allocation_debt <= -DEBT_BATCH)
+    int32_t total = L->allocation_debt.batch.total + cast(int32_t, change);
+    int32_t shared = L->allocation_debt.batch.shared + cast(int32_t, change);
+    L->allocation_debt.batch.total = total;
+    L->allocation_debt.batch.shared = shared;
+    if (total >= DEBT_BATCH || total <= -DEBT_BATCH ||
+        shared >= DEBT_BATCH || shared <= -DEBT_BATCH)
       luaM_flushdebt(L);
   }
 }

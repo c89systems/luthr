@@ -836,6 +836,16 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   clearNewSlice(t, oldasize, newasize);
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
+  if (L->task_tables != NULL && luaC_tasktable(t)) {
+    /* Only the installed layout belongs to the nursery. Allocations that
+    ** fail, retire an older layout, or seal the region use normal accounting
+    ** until the replacement is installed. */
+    l_mem change = cast(l_mem, nodebytes(lsize));
+    if (oldasize != newasize) change += cast(l_mem, concretesize(newasize));
+    if (retired_array != NULL) change -= cast(l_mem, concretesize(oldasize));
+    if (retired_nodes != NULL) change -= cast(l_mem, sizehash(newt.node));
+    luaC_taskresize(L, change);
+  }
   luaR_poproot(L, &image);
   if (retirement != NULL) {
     retirement->array = retired_array;

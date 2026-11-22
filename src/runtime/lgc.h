@@ -367,7 +367,7 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 #endif
 
 #define luaC_needstep(L) \
-    (luaE_getdebt(G(L)) <= -(L)->allocation_debt)
+    (luaE_getdebt(G(L)) <= -luaM_shareddebt(L))
 
 #define LUA_GC_ASSIST_BYTES 65536
 #define luaC_retired(L) __atomic_load_n(&(L)->retired, __ATOMIC_ACQUIRE)
@@ -376,7 +376,7 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 #define luaC_needassist(L) \
     ((L)->assist_debt >= LUA_GC_ASSIST_BYTES && luaC_hasreclaimers(L))
 #define luaC_cyclepressure(L) \
-    (luaP_debt(G(L)) <= -(L)->allocation_debt)
+    (luaP_debt(G(L)) <= -luaM_shareddebt(L))
 #define luaC_needtraceassist(L) \
     (luaC_tracing(L) && gcrunning(G(L)) && \
      !(L)->reclaiming && \
@@ -418,6 +418,7 @@ LUAI_FUNC void luaC_sealtask (lua_State *L);
 LUAI_FUNC void luaC_sealtasks (lua_State *L);
 LUAI_FUNC void luaC_endtask (lua_State *L);
 LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
+LUAI_FUNC void luaC_taskresize (lua_State *L, l_mem change);
 LUAI_FUNC void luaC_taskstep (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);
 

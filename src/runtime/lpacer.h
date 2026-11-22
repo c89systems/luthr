@@ -24,5 +24,6 @@ LUAI_FUNC void luaP_begin (struct global_State *g);
 /* Completed batches publish credit before releasing their participation. */
 LUAI_FUNC void luaP_work (struct global_State *g, lu_mem work);
 LUAI_FUNC lu_mem luaP_budget (lua_State *L, lu_mem requested);
+LUAI_FUNC void luaP_spend (struct global_State *g, l_mem bytes);
 
 #endif

@@ -1727,7 +1727,7 @@ void luaC_publish (lua_State *L) {
       lua_State *owner = participant->thread;
       lua_assert(owner->new_objects == NULL && owner->new_tables == NULL &&
                  owner->storage_retired == NULL &&
-                 owner->allocation_debt == 0 && owner->reclaim_credit == 0);
+                 owner->allocation_debt.pending == 0 && owner->reclaim_credit == 0);
     }
   }
 #endif
@@ -2821,18 +2821,6 @@ void luaC_step (lua_State *L) {
 }
 
 
-/* A positive API request spends the current allowance. Serialize against
-** other adjustments and pacing updates without publishing the whole heap. */
-static void chargestep (global_State *g, l_mem bytes) {
-  l_mem step = __atomic_load_n(&g->GCstep, __ATOMIC_RELAXED);
-  l_mem minimum, next;
-  do {
-    minimum = getgcbytes(g) - MAX_LMEM;
-    next = step < minimum + bytes ? minimum : step - bytes;
-  } while (!__atomic_compare_exchange_n(&g->GCstep, &step, next, 0,
-                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
-}
-
 /* Join the current cohort. A basic incremental request lends one slice;
 ** a young-generation request finishes the minor collection it joined. */
 static void stepactive (lua_State *L) {
@@ -2937,7 +2925,7 @@ int luaC_userstep (lua_State *L, l_mem bytes) {
   int status = LUA_OK;
   if (g->gcstp & (GCSTPGC | GCSTPCLS)) return -1;
   if (bytes > 0) {
-    chargestep(g, bytes);
+    luaP_spend(g, bytes);
     if (!luaC_needstep(L)) return 0;
   }
   luaC_entergc(L, &frame);

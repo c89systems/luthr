@@ -816,7 +816,7 @@ static void coalesced_gc(lua_State *state) {
   luaE_setdebt(G(state), 128);
   block = luaM_malloc_(state, 256, 0);
   require(luaE_getdebt(G(state)) > 0 &&
-          luaE_getdebt(G(state)) <= -state->allocation_debt);
+          luaE_getdebt(G(state)) <= -luaM_shareddebt(state));
   /* Unpublished local allocations still require an automatic step. */
   luaC_checkGC(state);
   require(G(state)->gcstate != GCSpause);

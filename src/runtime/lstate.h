@@ -395,7 +395,10 @@ struct lua_State {
   GCObject *new_tables;  /* scratch links in table allocation prefixes */
   uintptr_t nursery_epoch;
   size_t nursery_tables;
-  l_mem allocation_debt;
+  union {
+    struct { int32_t shared, total; } batch;
+    uint64_t pending;  /* both bounded batches are zero when no debt is pending */
+  } allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
   struct lua_State *publish_next;
   struct lua_State **publish_previous;  /* atomic membership, shard owns links */
@@ -404,6 +407,8 @@ struct lua_State {
   GCObject *task_tables;  /* task stack gate owns the cohort and its roots */
   TString *task_string_roots[32];
   size_t task_table_bytes;
+  size_t task_live_bytes;
+  size_t task_paced_bytes;  /* bytes already charged to the shared budget */
   size_t task_table_limit;
   unsigned task_string_count;
   int task_nursery_closed;
@@ -522,7 +527,7 @@ typedef struct global_State {
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   TString *operation_error;
   l_mem GCbytes;  /* atomic charged storage, including pending destruction */
-  l_mem GCused;  /* atomic logical storage, excluding retired objects */
+  l_mem GCused;  /* atomic logical storage paced by shared collection */
   l_mem GCstep;  /* atomic logical byte threshold for a collector step */
   l_mem GCretired;  /* atomic logically dead storage awaiting physical credits */
   l_mem GCmajorlive;  /* logical live storage at the last major collection */
@@ -670,6 +675,10 @@ union GCUnion {
 /* actual number of total memory allocated */
 #define gettotalbytes(g) __atomic_load_n(&(g)->GCbytes, __ATOMIC_RELAXED)
 #define getgcbytes(g) __atomic_load_n(&(g)->GCused, __ATOMIC_RELAXED)
+
+l_sinline l_mem luaM_shareddebt (const lua_State *L) {
+  return L->allocation_debt.batch.shared;
+}
 
 l_sinline l_mem luaE_getdebt (const global_State *g) {
   l_mem step = __atomic_load_n(&g->GCstep, __ATOMIC_RELAXED);

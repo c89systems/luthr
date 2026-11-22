@@ -1824,6 +1824,53 @@ static void nursery(struct fixture *f, int generational) {
   finish(f);
 }
 
+static l_mem nursery_bytes(lua_State *L) {
+  l_mem bytes;
+  lua_lock(L);
+  luaW_stop(L);
+  bytes = gettotalbytes(G(L)) - getgcbytes(G(L)) -
+          __atomic_load_n(&G(L)->GCretired, __ATOMIC_RELAXED);
+  luaW_start(L);
+  lua_unlock(L);
+  return bytes;
+}
+
+static void nursery_pacing(struct fixture *f) {
+  lua_State *L;
+  init(f, 1);
+  L = f->main;
+  lua_gc(L, LUA_GCINC);
+  require(luaL_dostring(L, "nursery_pending={}; "
+                           "nursery_weak=setmetatable({nursery_pending}, "
+                           "{__mode='v'})") == LUA_OK);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_lock(L);
+  luaE_setdebt(G(L), 768 * 1024);
+  __atomic_store_n(&G(L)->pacer.hard, getgcbytes(G(L)) + 1536 * 1024,
+                   __ATOMIC_RELAXED);
+  lua_unlock(L);
+  lua_pushnil(L);
+  lua_setglobal(L, "nursery_pending");
+
+  submit(f, 0,
+         "local row={}; for i=1,32768 do row[i]=i end; "
+         "nursery_ready=true; while not nursery_release do end; "
+         "for i=1,250000 do local scratch={i,i+1,kind='row'} end; "
+         "if nursery_weak[1] ~= nil then return -1 end; "
+         "return row[32768]",
+         0);
+  nursery_wait(L, "nursery_ready");
+  require(nursery_bytes(L) == 128 * 1024);
+  require(lua_getglobal(L, "nursery_weak") == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
+  lua_pop(L, 2);
+  lua_pushboolean(L, 1);
+  lua_setglobal(L, "nursery_release");
+  require(collect(f, 0, LUA_OK) == 32768);
+  require(nursery_bytes(L) == 0 && f->nursery_finished == 1);
+  finish(f);
+}
+
 int main(int argc, char **argv) {
   struct fixture *f = calloc(1, sizeof(*f));
   require(f != NULL && argc == 2);
@@ -1917,6 +1964,8 @@ int main(int argc, char **argv) {
     nursery(f, 0);
   else if (strcmp(argv[1], "nursery_generational") == 0)
     nursery(f, 1);
+  else if (strcmp(argv[1], "nursery_pacing") == 0)
+    nursery_pacing(f);
   else
     abort();
   require(live_stacks == 0);

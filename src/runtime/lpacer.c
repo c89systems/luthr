@@ -98,20 +98,32 @@ void luaP_work (global_State *g, lu_mem work) {
                                          __ATOMIC_RELAXED, __ATOMIC_RELAXED));
 }
 
+/* Spend shared allowance explicitly or from completed local churn. */
+void luaP_spend (global_State *g, l_mem bytes) {
+  l_mem step = __atomic_load_n(&g->GCstep, __ATOMIC_RELAXED);
+  l_mem minimum, next;
+  do {
+    minimum = getgcbytes(g) - MAX_LMEM;
+    next = step < minimum + bytes ? minimum : step - bytes;
+  } while (!__atomic_compare_exchange_n(&g->GCstep, &step, next, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+}
+
 lu_mem luaP_budget (lua_State *L, lu_mem requested) {
   global_State *g = G(L);
   LuaGCPacer *p = &g->pacer;
   l_mem bytes = getgcbytes(g);
   l_mem goal = __atomic_load_n(&p->goal, __ATOMIC_RELAXED);
   l_mem distance = goal > p->start ? goal - p->start : 0;
+  l_mem debt = luaM_shareddebt(L);
   lu_mem done = __atomic_load_n(&p->work, __ATOMIC_RELAXED);
   lu_mem target;
-  if (L->allocation_debt < 0) {
-    lu_mem pending = cast(lu_mem, 0) - cast(lu_mem, L->allocation_debt);
+  if (debt < 0) {
+    lu_mem pending = cast(lu_mem, 0) - cast(lu_mem, debt);
     bytes = pending > cast(lu_mem, MAX_LMEM - bytes)
       ? MAX_LMEM : bytes + cast(l_mem, pending);
   }
-  else bytes = L->allocation_debt < bytes ? bytes - L->allocation_debt : 0;
+  else bytes = debt < bytes ? bytes - debt : 0;
   if (distance == 0 || bytes >= goal) target = p->expected;
   else if (bytes <= p->start) target = 0;
   else {

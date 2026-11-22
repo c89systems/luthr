@@ -69,7 +69,10 @@ static void controller(lua_State *L) {
   g->pacer.goal = bytes + 65536;
   g->pacer.expected = 65536;
   require(luaP_budget(L, 65536) == 0);
-  L->allocation_debt = -32768;
+  L->allocation_debt.batch.total = -32768;
+  L->allocation_debt.batch.shared = -16384;
+  require(luaP_budget(L, 65536) == 16384);
+  L->allocation_debt.batch.shared = -32768;
   require(luaP_budget(L, 65536) == 32768);
   luaP_work(g, 16384);
   require(luaP_budget(L, 65536) == 16384);
@@ -79,9 +82,10 @@ static void controller(lua_State *L) {
   g->pacer.goal = MAX_LMEM;
   g->pacer.expected = MAX_LMEM;
   g->pacer.work = 0;
-  L->allocation_debt = -MAX_LMEM;
+  __atomic_store_n(&g->GCused, MAX_LMEM - 16384, __ATOMIC_RELAXED);
   require(luaP_budget(L, MAX_LMEM) == (lu_mem)MAX_LMEM);
-  L->allocation_debt = 0;
+  L->allocation_debt.pending = 0;
+  __atomic_store_n(&g->GCused, bytes, __ATOMIC_RELAXED);
   g->pacer = saved;
   g->GCcyclelive = cohort;
   luaE_setdebt(g, debt);
@@ -102,24 +106,25 @@ static void publication(lua_State *L, const char *kind) {
     first = luaM_alloccontrol(L, 1024);
     second = luaM_alloccontrol(peer, 2048);
     require(first != NULL && second != NULL);
-    require(L->allocation_debt == -1024 && peer->allocation_debt == -2048);
+    require(luaM_shareddebt(L) == -1024 && luaM_shareddebt(peer) == -2048);
     luaX_unlockpair(L, peer);
-    require(peer->allocation_debt == 0);
+    require(peer->allocation_debt.pending == 0);
   } else {
     lua_lock(L);
     first = luaM_alloccontrol(L, 1024);
-    require(first != NULL && L->allocation_debt == -1024);
+    require(first != NULL && luaM_shareddebt(L) == -1024);
     if (strcmp(kind, "withdrawal") == 0) {
       require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
       luaW_deactivate(L);
-      require(L->allocation_debt == 0 && gettotalbytes(G(L)) == before + 1024);
+      require(L->allocation_debt.pending == 0 &&
+              gettotalbytes(G(L)) == before + 1024);
       luaW_resume(L);
       require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
     } else
       require(strcmp(kind, "gate") == 0);
     lua_unlock(L);
   }
-  require(L->allocation_debt == 0);
+  require(L->allocation_debt.pending == 0);
   require(gettotalbytes(G(L)) == before + (second != NULL ? 3072 : 1024));
   require(luaP_debt(G(L)) == allowance - (second != NULL ? 3072 : 1024));
   lua_lock(L);
