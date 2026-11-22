@@ -350,6 +350,16 @@ OP_EXTRAARG/*	Ax	extra (larger) argument for previous opcode	*/
 
 #define NUM_OPCODES	((int)(OP_EXTRAARG) + 1)
 
+/* Private dispatch-map entries. The serialized opcode and operands keep
+** their original encoding, including the independent second instruction. */
+enum {
+  LUA_DISPATCH_BEFORE_PAIRS = 2 * NUM_OPCODES - 1,
+#define VM_PAIR(first,second) LUA_PAIR_##first##_##second,
+#include "loppairs.h"
+#undef VM_PAIR
+  LUA_DISPATCH_COUNT
+};
+
 
 
 /*===========================================================================

@@ -1373,6 +1373,10 @@ l_sinline StkId directregister (StkId base, int reg) {
 #define KC(i)	(k+GETARG_C(i))
 #define RKC(i)	((TESTARG_k(i)) ? k + GETARG_C(i) : vRC(i))
 
+#define execute_OP_MOVE(i) setobjs2s(L, RA(i), RB(i))
+#define execute_OP_GETUPVAL(i) \
+  luaF_loadupval(L, luaF_capturecell(cl, GETARG_B(i)), s2v(readRA(i)))
+
 /* Calls, returns and bulk operations consume contiguous operand ranges. This
 ** refresh belongs to the operation, including its fused iterator entries. */
 #define readrange(first,count) \
@@ -1646,20 +1650,39 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
     /* for tests, invalidate top for instructions not expecting it */
     lua_assert(luaP_isIT(i) || (cast_void(L->top.p = base), 1));
     #if !LUA_USE_JUMPTABLE
-    if (dispatch >= NUM_OPCODES) goto L_cells;
+    if (dispatch >= NUM_OPCODES && dispatch < 2 * NUM_OPCODES) goto L_cells;
+   L_dispatch:
     #endif
     vmdispatch (dispatch) {
 #define VM_CAPTURE 0
 #define vmreturn return
 #if LUA_USE_JUMPTABLE
 #define vmcase(op) L_fast_##op:
+#define directdispatch(op) goto L_fast_##op
 #else
 #define vmcase(op) case op:
+#define directdispatch(op) { dispatch = op; goto L_dispatch; }
 #endif
 #define ret fast_ret
 #define l_tforcall fast_tforcall
 #define l_tforloop fast_tforloop
 #include "lvmexecute.h"
+/* The first operation cannot suspend. A hook or poll due at the second
+** instruction uses the ordinary fetch so the VM observes the same boundary.
+** Enter the second handler with its original PCs before it can raise or park. */
+#define VM_PAIR(first,second) \
+  vmcase(LUA_PAIR_##first##_##second) { \
+    if (l_unlikely(trap || L->poll_remaining == 1)) { directdispatch(first); } \
+    execute_##first(i); \
+    --L->poll_remaining; \
+    ip = pc; \
+    i = *pc++; \
+    if ((second) == OP_MOVE) { execute_OP_MOVE(i); vmbreak; } \
+    directdispatch(second); \
+  }
+#include "loppairs.h"
+#undef VM_PAIR
+#undef directdispatch
 #undef l_tforloop
 #undef l_tforcall
 #undef ret

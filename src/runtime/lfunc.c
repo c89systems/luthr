@@ -517,10 +517,10 @@ static int capturedoperand (Proto *p, int pc, int reg) {
 /* A scalar call reads only its arguments, constants and registers it has
 ** already written. Arithmetic skips the following metamethod instruction
 ** when its operands pass the same numeric checks as the VM. */
-static lu_byte scalarticks (const Proto *p) {
+static lu_byte scalarticks (const Proto *p, int hascaptures) {
   unsigned live;
   int pc, ticks = 0;
-  if (isvararg(p) || p->dispatch != NULL ||
+  if (isvararg(p) || hascaptures ||
       p->sizecode > LUA_SCALAR_CODE_LIMIT ||
       p->maxstacksize > LUA_SCALAR_REGISTERS || p->numparams > p->maxstacksize)
     return 0;
@@ -642,10 +642,20 @@ static void scalaraffine (Proto *p) {
   }
 }
 
+static unsigned dispatchpair (unsigned first, unsigned second) {
+  switch ((first << SIZE_OP) | second) {
+#define VM_PAIR(first,second) \
+    case ((first) << SIZE_OP) | (second): return LUA_PAIR_##first##_##second;
+#include "loppairs.h"
+#undef VM_PAIR
+    default: return 0;
+  }
+}
+
 void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
-  int child, upvalue, pc;
+  int child, upvalue, pc = 0;
   lua_assert(p->dispatch == NULL);
   for (child = 0; child < p->sizep; child++) {
     Proto *nested = p->p[child];
@@ -657,7 +667,11 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       }
     }
   }
-  if (count != 0)
+  if (count == 0)
+    for (pc = 0; pc + 1 < p->sizecode; pc++)
+      if (dispatchpair(GET_OPCODE(p->code[pc]), GET_OPCODE(p->code[pc + 1])))
+        break;
+  if (count != 0 || pc + 1 < p->sizecode)
     p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
   for (pc = 0; pc < p->sizecode; pc++) {
     unsigned op = GET_OPCODE(p->code[pc]);
@@ -670,7 +684,17 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
     }
     if (p->dispatch != NULL) p->dispatch[pc] = cast_byte(op);
   }
-  p->scalar_ticks = scalarticks(p);
+  if (p->dispatch != NULL) {
+    _Static_assert(LUA_DISPATCH_COUNT <= UCHAR_MAX + 1, "byte dispatch map");
+    for (pc = 0; pc + 1 < p->sizecode; pc++) {
+      unsigned first = p->dispatch[pc], second = p->dispatch[pc + 1];
+      if (first < NUM_OPCODES && second < NUM_OPCODES) {
+        unsigned pair = dispatchpair(first, second);
+        if (pair != 0) p->dispatch[pc] = cast_byte(pair);
+      }
+    }
+  }
+  p->scalar_ticks = scalarticks(p, count != 0);
   scalaraffine(p);
 }
 

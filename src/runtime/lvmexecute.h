@@ -1,8 +1,7 @@
 /* Shared instruction definitions for register-only and capture-aware dispatch.
 ** Included with VM_CAPTURE and handler labels selected by lvm.c. See lua.h. */
       vmcase(OP_MOVE) {
-        StkId ra = RA(i);
-        setobjs2s(L, ra, RB(i));
+        execute_OP_MOVE(i);
         vmbreak;
       }
       vmcase(OP_LOADI) {
@@ -55,9 +54,7 @@
         vmbreak;
       }
       vmcase(OP_GETUPVAL) {
-        int b = GETARG_B(i);
-        StkId ra = readRA(i);
-        luaF_loadupval(L, luaF_capturecell(cl, b), s2v(ra));
+        execute_OP_GETUPVAL(i);
         vmbreak;
       }
       vmcase(OP_SETUPVAL) {

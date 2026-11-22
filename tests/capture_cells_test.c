@@ -183,12 +183,13 @@ static int select_frame(lua_State *state) {
   return 0;
 }
 
-static void require(int condition) {
-  if (!condition) {
-    fputs("capture cell invariant failed\n", stderr);
-    abort();
-  }
-}
+#define require(condition)                                                     \
+  do {                                                                         \
+    if (!(condition)) {                                                        \
+      fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition);          \
+      abort();                                                                 \
+    }                                                                          \
+  } while (0)
 
 static void run(lua_State *state, const char *source) {
   if (luaL_dostring(state, source) != LUA_OK) {
@@ -634,6 +635,60 @@ static void inspect_instruction(lua_State *state, lua_Debug *event) {
   hook_events++;
 }
 
+static void pair_hook(lua_State *state, lua_Debug *event) {
+  require(event->event == LUA_HOOKCOUNT);
+  if (++hook_events == 2) {
+    const char *name;
+    lua_pushinteger(state, 83);
+    name = lua_setlocal(state, event, 2);
+    require(name != NULL && strcmp(name, "b") == 0);
+  }
+}
+
+static void pair_poll(lua_State *state, void *context) {
+  unsigned *polls = context;
+  CallInfo *ci = state->ci;
+  require(isLua(ci) && ci->u.l.savedpc == ci_func(ci)->p->code + 1);
+  setivalue(s2v(ci->func.p + 2), 79);
+  ++*polls;
+}
+
+static void pair_boundaries(lua_State *state) {
+  unsigned polls = 0;
+  require(luaL_dostring(state, "return function(a,b) local x,y=a,b; "
+                               "return x,y end") == LUA_OK);
+  luaX_lockstate(state);
+  require(getproto(s2v(state->top.p - 1))->dispatch[0] ==
+          LUA_PAIR_OP_MOVE_OP_MOVE);
+  luaX_unlockstate(state);
+  for (int pass = 0; pass < 3; ++pass) {
+    lua_pushvalue(state, 1);
+    lua_pushinteger(state, 42);
+    lua_pushinteger(state, 57);
+    if (pass == 1) {
+      state->poll_remaining = 2;
+      state->state_poll = pair_poll;
+      state->state_poll_context = &polls;
+    } else if (pass == 2)
+      lua_sethook(state, pair_hook, LUA_MASKCOUNT, 1);
+    require(lua_pcall(state, 2, 2, 0) == LUA_OK);
+    state->state_poll = NULL;
+    lua_sethook(state, NULL, 0, 0);
+    require(lua_tointeger(state, -2) == 42);
+    require(lua_tointeger(state, -1) == (pass == 0 ? 57 : pass == 1 ? 79 : 83));
+    lua_pop(state, 2);
+  }
+  /* Two local moves, two result moves and one return. */
+  require(polls == 1 && hook_events == 5);
+  lua_pop(state, 1);
+  run(state,
+      "local receiver=setmetatable({}, {__index=function(_,key) "
+      "  coroutine.yield(key); return key+1 end}); "
+      "local co=coroutine.create(function(key) return receiver[key] end); "
+      "local ok,result=coroutine.resume(co,44); assert(ok and result==44); "
+      "ok,result=coroutine.resume(co); assert(ok and result==45)");
+}
+
 /* The same captures, conditional writes, fused iterators, stack moves and
  * yielded metamethods must work from source and fragmented portable chunks.
  * Fixed chunks remain read-only and borrowed until state destruction. Hooks
@@ -720,6 +775,8 @@ int main(int argc, char **argv) {
                "co=nil; collectgarbage('collect'); assert(read().marker==52)");
   } else if (strncmp(argv[1], "lowered_", 8) == 0)
     lowered(state, argv[1], &code);
+  else if (strcmp(argv[1], "pair_boundaries") == 0)
+    pair_boundaries(state);
   else if (strcmp(argv[1], "readers") == 0) {
     run(state, "local check=assert; "
                "local x=17; local function read() return x end; "
