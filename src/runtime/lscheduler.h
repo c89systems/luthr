@@ -61,7 +61,7 @@ struct LuaCarrier {
   LuaScheduledTask *reserved;  /* atomic; unrelated work must not enter C here */
   pthread_cond_t changed;
   LuaCarrier *idle_next;  /* scheduler mutex; unselected sleepers only */
-  int sleeping;
+  int sleeping, standby;
   unsigned cursor;
   unsigned local_dispatches, steal_cursor;  /* carrier-local fairness state */
 };
@@ -78,7 +78,7 @@ struct LuaScheduler {
   unsigned native_notices, native_peak;
   LuaExecutionSlot *slots;
   LuaCarrier *carriers;
-  LuaCarrier *idle;
+  LuaCarrier *idle, *standby;  /* scheduler mutex; ordinary and reserve sleepers */
   LuaCarrier *slot_watcher;  /* scheduler mutex; at most one timed sleeper */
   LuaScheduledTask *tasks;
   unsigned runnable;  /* atomic; no-request polls only read this word */

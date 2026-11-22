@@ -1508,6 +1508,44 @@ static void idle_notifications(struct fixture *f) {
   observe_idle = 0;
 }
 
+static int current_carrier(lua_State *L) {
+  LuaScheduledTask *task = luaQ_current()->context;
+  lua_pushinteger(L, task->carrier - task->scheduler->carriers);
+  return 1;
+}
+
+static void standby_carriers(struct fixture *f) {
+  initlimits(f, 1, 3);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "current_carrier", current_carrier);
+  lua_pushcfunction(f->main, block_binding);
+  lua_setglobal(f->main, "block_binding");
+
+  submit(f, 0, "return current_carrier()", 0);
+  require(collect(f, 0, LUA_OK) <= 1);
+  for (unsigned i = 1; i <= 3; i++)
+    submit(f, i, "return block_binding()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered != 3)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(luaSC_nativeactive(&f->scheduler) == 3);
+
+  /* Only one of the four carrier threads can execute this task. */
+  submit(f, 4, "current_carrier(); return 42", 0);
+  require(collect(f, 4, LUA_OK) == 42);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  for (unsigned i = 1; i <= 3; i++)
+    require(collect(f, i, LUA_OK) == 500500);
+  require(luaSC_nativeactive(&f->scheduler) == 0);
+  submit(f, 5, "return current_carrier()", 0);
+  require(collect(f, 5, LUA_OK) <= 1);
+  finish(f);
+}
+
 static void idle_affinity(struct fixture *f) {
   LuaScheduler *s = &f->scheduler;
   unsigned observed, i;
@@ -1681,6 +1719,8 @@ int main(int argc, char **argv) {
     startup_failures(f);
   else if (strcmp(argv[1], "idle_notifications") == 0)
     idle_notifications(f);
+  else if (strcmp(argv[1], "standby_carriers") == 0)
+    standby_carriers(f);
   else if (strcmp(argv[1], "idle_affinity") == 0)
     idle_affinity(f);
   else if (strcmp(argv[1], "callback_progress") == 0)

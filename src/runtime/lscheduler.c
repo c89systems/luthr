@@ -41,6 +41,18 @@ static void wakecarrier (LuaCarrier **link) {
   luaX_checksync(pthread_cond_signal(&carrier->changed));
 }
 
+static int serving (const LuaCarrier *carrier) {
+  return !carrier->standby || luaSC_nativeactive(carrier->scheduler) != 0;
+}
+
+static int wakesearch (LuaScheduler *s) {
+  LuaCarrier **head = &s->idle;
+  if (*head == NULL && luaSC_nativeactive(s) != 0) head = &s->standby;
+  if (*head == NULL) return 0;
+  wakecarrier(head);
+  return 1;
+}
+
 static void lock (LuaScheduler *s) {
   luaX_checksync(pthread_mutex_lock(&s->mutex));
 }
@@ -49,8 +61,10 @@ static void unlock (LuaScheduler *s) {
 }
 static void notify (LuaScheduler *s) {
   luaX_checksync(pthread_cond_broadcast(&s->changed));
-  if (s->stopping)
+  if (s->stopping) {
     while (s->idle != NULL) wakecarrier(&s->idle);
+    while (s->standby != NULL) wakecarrier(&s->standby);
+  }
 }
 static void changed (LuaScheduler *s) {
   luaX_checksync(pthread_cond_wait(&s->changed, &s->mutex));
@@ -83,25 +97,40 @@ static int eligible (LuaScheduledTask *task, LuaCarrier *carrier) {
   return !task->native_pending || reserved == NULL || reserved == task;
 }
 
+static int runnableon (LuaScheduledTask *task, LuaCarrier *carrier) {
+  return eligible(task, carrier) &&
+    (serving(carrier) ||
+     __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE) == carrier);
+}
+
 /* The engine and queue mutexes keep the queued task's routing fields stable.
 ** A pinned/native-pending task must wake an eligible carrier, not an arbitrary
 ** sleeper which might leave its required carrier asleep indefinitely. */
-static void wakequeued (LuaScheduler *s, LuaScheduledTask *task) {
+static int waketask (LuaCarrier **head, LuaScheduledTask *task) {
   LuaCarrier **link;
-  if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
-  for (link = &s->idle; *link != NULL; link = &(*link)->idle_next) {
-    if (eligible(task, *link)) {
+  for (link = head; *link != NULL; link = &(*link)->idle_next) {
+    if (runnableon(task, *link)) {
       wakecarrier(link);
-      return;
+      return 1;
     }
   }
+  return 0;
+}
+
+static void wakequeued (LuaScheduler *s, LuaScheduledTask *task) {
+  LuaCarrier *affinity;
+  if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) return;
+  if (waketask(&s->idle, task) || s->standby == NULL) return;
+  affinity = __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE);
+  if ((affinity != NULL && affinity->standby) || luaSC_nativeactive(s) != 0)
+    waketask(&s->standby, task);
 }
 
 static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
   LuaScheduledTask **link = &slot->head, *previous = NULL;
   while (*link != NULL) {
     LuaScheduledTask *task = *link;
-    if (eligible(task, carrier)) {
+    if (runnableon(task, carrier)) {
       *link = task->next;
       if (slot->tail == task) slot->tail = previous;
       task->next = NULL;
@@ -588,15 +617,17 @@ static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) 
 
 static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
   unsigned i, j;
+  if (carrier != NULL && !serving(carrier) &&
+      __atomic_load_n(&carrier->reserved, __ATOMIC_ACQUIRE) == NULL) return 0;
   for (i = 0; i < s->config.slots; i++) {
     LuaExecutionSlot *slot = &s->slots[i];
     LuaScheduledTask *task;
     int found = 0;
     luaX_checksync(pthread_mutex_lock(&slot->mutex));
     for (task = slot->head; task != NULL && !found; task = task->next) {
-      if (carrier != NULL) found = eligible(task, carrier);
+      if (carrier != NULL) found = runnableon(task, carrier);
       else for (j = 0; j < s->config.carriers; j++)
-        if (eligible(task, &s->carriers[j])) { found = 1; break; }
+        if (runnableon(task, &s->carriers[j])) { found = 1; break; }
     }
     luaX_checksync(pthread_mutex_unlock(&slot->mutex));
     if (found) return 1;
@@ -606,20 +637,25 @@ static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
 
 /* Capacity or routing changed without a newly queued task. Normal release
 ** wakes one eligible sleeper; unpin/reentry can enable several routes. */
-static void wakework (LuaScheduler *s, int all) {
+static int wakeready (LuaScheduler *s, LuaCarrier **head, int all) {
   LuaCarrier **link;
+  for (link = head; *link != NULL;) {
+    if (haswork(s, *link)) {
+      wakecarrier(link);
+      if (!all) return 1;
+    }
+    else link = &(*link)->idle_next;
+  }
+  return 0;
+}
+
+static void wakework (LuaScheduler *s, int all) {
   if (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 ||
       __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) != 0) {
     wakecollectors(s);
     return;
   }
-  for (link = &s->idle; *link != NULL;) {
-    if (haswork(s, *link)) {
-      wakecarrier(link);
-      if (!all) break;
-    }
-    else link = &(*link)->idle_next;
-  }
+  if (!wakeready(s, &s->idle, all)) wakeready(s, &s->standby, all);
   wakecollectors(s);
 }
 
@@ -632,14 +668,15 @@ static int collectorready (LuaScheduler *s) {
 
 static void wakecollectors (LuaScheduler *s) {
   unsigned i, available = 0;
-  if (s->idle == NULL || s->stopping || !collectorready(s)) return;
+  if ((s->idle == NULL && s->standby == NULL) ||
+      s->stopping || !collectorready(s)) return;
   for (i = 0; i < s->config.slots; i++)
     available += __atomic_load_n(&s->slots[i].owner, __ATOMIC_ACQUIRE) == NULL;
   if (available > s->config.slots - 1 - s->gc_active)
     available = s->config.slots - 1 - s->gc_active;
   /* Start a timed sleeper if the collector has work but needs a slot. */
   if (available == 0 && s->slot_watcher == NULL) available = 1;
-  while (available-- != 0 && s->idle != NULL) wakecarrier(&s->idle);
+  while (available != 0 && wakesearch(s)) available--;
 }
 
 void luaSC_notifygc (global_State *g) {
@@ -843,7 +880,8 @@ static void publishwakes (LuaScheduler *s, LuaWakeRun *run) {
   slot->tail = run->tail;
   slot->count += run->count;
   __atomic_fetch_add(&s->runnable, run->count, __ATOMIC_SEQ_CST);
-  for (task = run->head; task != NULL && s->idle != NULL; task = task->next)
+  for (task = run->head; task != NULL &&
+       (s->idle != NULL || s->standby != NULL); task = task->next)
     wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
   run->head = run->tail = NULL;
@@ -951,7 +989,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
 static LuaExecutionSlot *dispatchcollector (LuaCarrier *carrier) {
   LuaScheduler *s = carrier->scheduler;
   unsigned i;
-  if (!collectorready(s)) return NULL;
+  if (!serving(carrier) || !collectorready(s)) return NULL;
   for (i = 0; i < s->config.slots; i++) {
     LuaExecutionSlot *slot = &s->slots[(carrier->cursor + i) % s->config.slots];
     void *expected = NULL;
@@ -985,12 +1023,14 @@ static void recallslots (LuaScheduler *s) {
 ** a clock. Blocked calls cannot withhold capacity from the queue. */
 static void waitforwork (LuaCarrier *carrier) {
   LuaScheduler *s = carrier->scheduler;
+  LuaCarrier **head = carrier->standby ? &s->standby : &s->idle;
   lua_assert(!carrier->sleeping && carrier->idle_next == NULL);
-  carrier->idle_next = s->idle;
-  s->idle = carrier;
+  carrier->idle_next = *head;
+  *head = carrier;
   carrier->sleeping = 1;
   do {
-    if ((s->slot_watcher == NULL || s->slot_watcher == carrier) && needslots(s)) {
+    if ((s->slot_watcher == NULL || s->slot_watcher == carrier) &&
+        serving(carrier) && needslots(s)) {
       uint64_t ns = monotonicns() + NATIVE_SLOT_CHECK_NS;
       struct timespec until = {cast(time_t, ns / 1000000000),
                                 cast(long, ns % 1000000000)};
@@ -1009,7 +1049,7 @@ static void waitforwork (LuaCarrier *carrier) {
   } while (carrier->sleeping);
   if (s->slot_watcher == carrier) {
     s->slot_watcher = NULL;
-    if (s->idle != NULL && needslots(s)) wakecarrier(&s->idle);
+    if (needslots(s)) wakesearch(s);
   }
 }
 
@@ -1231,6 +1271,9 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
     LuaCarrier *carrier = &s->carriers[i];
     carrier->scheduler = s;
     carrier->cursor = i % config->slots;
+    /* One spare watches recallable offers. Additional carriers are only
+    ** needed while tasks can occupy host threads in native code. */
+    carrier->standby = i > config->slots;
     status = pthread_create(&carrier->thread, NULL, carrierentry, carrier);
     if (status != 0) break;
     s->created++;
