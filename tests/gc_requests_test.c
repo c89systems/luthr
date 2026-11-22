@@ -4,6 +4,7 @@
 #include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <ltable.h>
 #include <ltask.h>
 #include <pthread.h>
 #include <sched.h>
@@ -695,6 +696,88 @@ static void push_finalizable(lua_State *L, int index) {
   lua_rawseti(L, 1, index);
 }
 
+static void empty_minor(lua_State *L) {
+  uint64_t epoch;
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  require(lua_setmetatable(L, 1));
+  lua_newtable(L);
+  lua_pushcfunction(L, live_finalizer);
+  lua_setfield(L, 2, "__gc");
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  epoch = luaC_traceepoch(G(L));
+  for (unsigned i = 0; i < 8; i++)
+    require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(luaC_traceepoch(G(L)) == epoch);
+
+  lua_pushinteger(L, 42);
+  lua_pop(L, 1); /* Ordinary stack changes leave the cohort empty. */
+  lua_newtable(L);
+  lua_pushvalue(L, -1);
+  lua_rawseti(L, 1, 1);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(luaC_traceepoch(G(L)) != epoch && lua_istable(L, -1));
+  lua_pop(L, 1); /* The surviving table has only its weak edge left. */
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
+  lua_pop(L, 1);
+
+  push_finalizable(L, 1);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(callbacks == 1);
+
+  lua_createtable(L, 2048, 0);
+  for (int i = 1; i <= 2048; i++) {
+    lua_newtable(L);
+    lua_rawseti(L, -2, i);
+  }
+  for (unsigned i = 0; i < 4; i++)
+    require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  epoch = luaC_traceepoch(G(L));
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(luaC_traceepoch(G(L)) == epoch);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 1);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(luaC_kind(G(L)) == KGC_GENMAJOR);
+}
+
+static void minor_sweep_birth(lua_State *L) {
+  uint64_t epoch;
+  Table *child;
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  require(lua_setmetatable(L, 1));
+  lua_gc(L, LUA_GCGEN);
+  lua_lock(L);
+  (void)luaH_new(L, 0, 0); /* Dead at the initial snapshot. */
+  G(L)->pacer.goal = MAX_LMEM;
+  luaE_setdebt(G(L), 0);
+  luaC_step(L);
+  luaC_waittrace(L);
+  require(luaC_sweeping(L));
+  child = luaH_new(L, 0, 0);
+  sethvalue2s(L, L->top.p, child);
+  api_incr_top(L);
+  luaC_waitsweep(L);
+  require(!luaC_sweeping(L));
+  epoch = luaC_traceepoch(G(L));
+  lua_unlock(L);
+
+  lua_gc(L, LUA_GCSTOP);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(luaC_traceepoch(G(L)) != epoch);
+  lua_rawseti(L, 1, 1);
+  require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);
+  require(lua_rawgeti(L, 1, 1) == LUA_TNIL);
+  lua_pop(L, 1);
+}
+
 static void reachable_finalizers(lua_State *L, int late) {
   int live = late ? 16 : 8 * LUA_TRACE_BATCH;
   struct request helper = {0};
@@ -742,6 +825,14 @@ int main(int argc, char **argv) {
   unsigned round;
   int explicit_step, stop, overdue;
   require(L != NULL && argc == 2);
+  if (strcmp(argv[1], "empty_minor") == 0) {
+    empty_minor(L);
+    goto done;
+  }
+  if (strcmp(argv[1], "minor_sweep_birth") == 0) {
+    minor_sweep_birth(L);
+    goto done;
+  }
   if (strcmp(argv[1], "minor_unwind") == 0 ||
       strcmp(argv[1], "minor_finalizer") == 0) {
     explicit_minor_followers(L, strcmp(argv[1], "minor_unwind") == 0);

@@ -474,6 +474,7 @@ typedef struct LuaSweepPlan {
   l_mem addedold, base_marked;
   uint64_t epoch;
   unsigned active, busy, kind, region, phase, gray_index, finishing;
+  unsigned minor_work;  /* surviving young objects or remembered owners */
 } LuaSweepPlan;
 
 #define LUA_BARRIER_SHARDS 16
@@ -536,6 +537,7 @@ typedef struct global_State {
   unsigned gcstep_pending;  /* atomic; automatic startup requested or in progress */
   unsigned mark_state;  /* atomic stamps, allocation age and trace flags */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
+  unsigned young_work;  /* atomic births and remaining generational work */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
   uint64_t major_completed;  /* atomic count at the end of major collection */

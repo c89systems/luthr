@@ -59,6 +59,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
   lu_byte mark;
   unsigned i;
   if (thread->task_tables == NULL) return;
+  luaC_noteyoung(g);
   luaM_privatebytes(L, -cast(l_mem, thread->task_live_bytes -
                                    thread->task_paced_bytes));
   thread->task_live_bytes = thread->task_paced_bytes = 0;

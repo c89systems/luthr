@@ -56,6 +56,9 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   GCObject *main = obj2gco(mainthread(g));
   lua_assert(luaW_iscollector(L) && !luaC_tracing(L) && !luaC_sweeping(L));
   memset(plan, 0, sizeof(*plan));
+  /* The stopped cohort contains every shared birth before this boundary.
+  ** Allocations during sweeping set the birth bit for the next cycle. */
+  __atomic_store_n(&g->young_work, LUA_YOUNG_SURVIVOR, __ATOMIC_RELEASE);
   plan->epoch = epoch;
   plan->kind = kind;
   plan->page_pool = luaMP_sizeclass(sizeof(Table));
@@ -194,6 +197,7 @@ static void publish (lua_State *L, LuaSweepWork *work) {
     plan->watch.head = work->watch.head;
   }
   plan->addedold += work->addedold;
+  plan->minor_work |= work->minor_work;
   lua_assert(plan->busy != 0);
   plan->busy--;
   if (plan->busy == 0 || work->retry != NULL)
@@ -213,6 +217,10 @@ static void publishfinish (lua_State *L) {
     g->grayagain = plan->watch.head;
   }
   luaC_endsweep(L);
+  if (plan->kind != SWEEP_MAJOR && !plan->minor_work &&
+      g->tobefnz == NULL && g->finobj == g->finobjold1)
+    __atomic_fetch_and(&g->young_work, ~cast(unsigned, LUA_YOUNG_SURVIVOR),
+                       __ATOMIC_RELEASE);
   __atomic_store_n(&plan->active, 0, __ATOMIC_RELEASE);
   if (plan->kind == SWEEP_YOUNG) luaC_publishminor(g);
   luaQ_wake(&g->phase_changed, &g->phase_waiters);

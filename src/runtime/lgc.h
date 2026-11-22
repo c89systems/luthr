@@ -116,7 +116,7 @@ typedef struct LuaSweepWork {
   GCObject *retry, **retry_tail, *threads, **threads_tail;
   LuaTraceList watch;
   l_mem addedold, freed;
-  unsigned count, kind, phase, region, tables;
+  unsigned count, kind, phase, region, tables, minor_work;
   int full_page;
 } LuaSweepWork;
 
@@ -484,6 +484,15 @@ LUAI_FUNC void luaC_freeallobjects (lua_State *L);
 LUAI_FUNC void luaC_step (lua_State *L);
 LUAI_FUNC int luaC_userstep (lua_State *L, l_mem bytes);
 LUAI_FUNC void luaC_publishminor (global_State *g);
+
+enum { LUA_YOUNG_WORK = 1, LUA_YOUNG_SURVIVOR = 2 };
+
+/* Clear pending work only after the stopped sweep takes responsibility for
+** the new objects, remembered edges, finalizers, and policy changes. */
+l_sinline void luaC_noteyoung (global_State *g) {
+  if (!(__atomic_load_n(&g->young_work, __ATOMIC_RELAXED) & LUA_YOUNG_WORK))
+    __atomic_fetch_or(&g->young_work, LUA_YOUNG_WORK, __ATOMIC_RELEASE);
+}
 LUAI_FUNC void luaC_runtilstate (lua_State *L, int state, int fast);
 LUAI_FUNC void luaC_fullgc (lua_State *L, int isemergency);
 enum { SWEEP_MAJOR, SWEEP_YOUNG, SWEEP_OLD };

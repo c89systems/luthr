@@ -1667,8 +1667,14 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       int value = va_arg(argp, int);
       api_check(L, 0 <= param && param < LUA_GCPN, "invalid parameter");
       res = cast_int(luaO_applyparam(g->gcparams[param], 100));
-      if (value >= 0)
-        g->gcparams[param] = luaO_codeparam(cast_uint(value));
+      if (value >= 0) {
+        lu_byte setting = luaO_codeparam(cast_uint(value));
+        if (setting != g->gcparams[param]) {
+          g->gcparams[param] = setting;
+          if (param == LUA_GCPMINORMUL || param == LUA_GCPMINORMAJOR)
+            luaC_noteyoung(g);
+        }
+      }
       break;
     }
     default: res = -1;  /* invalid option */

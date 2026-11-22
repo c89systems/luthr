@@ -237,8 +237,10 @@ void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v) {
                                           __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
     /* A queued owner already owns its link, including private scan/sweep
     ** batches. Only a fresh claim publishes another remembered root. */
-    if (age > G_SURVIVAL_CLEAN && !testbit(marked, QUEUEDBIT))
-      luaC_publishbarrier(L, o, 1);
+    if (age > G_SURVIVAL_CLEAN) {
+      luaC_noteyoung(g);
+      if (!testbit(marked, QUEUEDBIT)) luaC_publishbarrier(L, o, 1);
+    }
     return;
   }
 }
@@ -299,6 +301,7 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
     lua_assert(page != NULL && offset == 0);
     if (!collector && L->task_owner != NULL && luaC_taskallocate(L, o, sz))
       return o;
+    luaC_noteyoung(g);
     if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
     gco2t(o)->gcstate = collector ? 0 : L->nursery_epoch;
     if (!collector) {
@@ -312,6 +315,7 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
     luaMP_young(page, epoch + 1);
     return o;
   }
+  luaC_noteyoung(g);
   if (collector) {
     (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
     if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
@@ -1538,6 +1542,8 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, changed, 0,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED));
   if (promoted) work->addedold += bytes;
+  if ((changed & AGEBITS) <= G_SURVIVAL_CLEAN ||
+      (watching && o->tt != LUA_VTHREAD)) work->minor_work = 1;
   return watching ? SWEEP_WATCH : SWEEP_LIVE;
 }
 
@@ -1667,6 +1673,7 @@ static void registerfinalizer (lua_State *L, GCObject *o) {
   global_State *g = G(L);
   if (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT), __ATOMIC_RELAXED) &
       bitmask(FINALIZEDBIT)) return;
+  luaC_noteyoung(g);
   if (luaW_iscollector(L)) {
     o->next = g->finobj;
     g->finobj = o;
@@ -1983,7 +1990,12 @@ void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
   if (work->phase == SWEEP_GRAY) {
     while (object != NULL) {
       GCObject *next = *luaC_graylink(object);
-      if (luaC_sweepgray(object)) queuework(&work->watch, object);
+      if (luaC_sweepgray(object)) {
+        queuework(&work->watch, object);
+        /* Threads stay on the root list even when they have no young edges.
+        ** Other remembered owners still need to age out of that list. */
+        if (object->tt != LUA_VTHREAD) work->minor_work = 1;
+      }
       object = next;
     }
     return;
@@ -2896,7 +2908,7 @@ void luaC_publishminor (global_State *g) {
   if (g->minor_request & 1) releaseminor(g);
 }
 
-static int joinminor (lua_State *L, uint64_t *request) {
+static int joinminor (lua_State *L, uint64_t *request, int basic) {
   global_State *g = G(L);
   uint64_t completed;
   int assist;
@@ -2905,6 +2917,16 @@ static int joinminor (lua_State *L, uint64_t *request) {
   while (g->minor_completed == completed && luaC_kind(g) == KGC_GENMINOR &&
          (!luaC_sweeping(L) || g->sweep_plan.kind == SWEEP_YOUNG)) {
     if (!(g->minor_request & 1)) {
+      /* A basic step has no shared minor work when all previous survivors
+      ** were promoted or retired and there is no remembered work left. */
+      if (basic &&
+          __atomic_load_n(&g->young_work, __ATOMIC_ACQUIRE) == 0 &&
+          !__atomic_load_n(&g->barrier_ready, __ATOMIC_ACQUIRE) &&
+          !__atomic_load_n(&g->shrink_strings, __ATOMIC_RELAXED) &&
+          !luaC_tracing(L) && !luaC_sweeping(L) && !luaW_stopped(&g->world)) {
+        luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
+        return 0;
+      }
       *request = ++g->minor_request;
       if (!luaC_tracing(L) && !luaC_sweeping(L)) luaSC_leadminor(L);
       break;
@@ -2932,7 +2954,7 @@ int luaC_userstep (lua_State *L, l_mem bytes) {
   if (luaC_kind(g) == KGC_GENMINOR && L->object_scopes == NULL &&
       !luaW_ownsheap(L)) {
     uint64_t request = 0;
-    if (joinminor(L, &request)) {
+    if (joinminor(L, &request, bytes == 0)) {
       step.epoch = luaC_traceepoch(g);
       if (request == 0) userstep(L, &step);
       else {

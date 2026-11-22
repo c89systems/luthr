@@ -110,6 +110,8 @@ int main(int argc, char **argv) {
   for (i = 0; i < 64 && G(L)->trace_epoch - epoch < 3; i++) {
     if (minor) {
       require(G(L)->gckind == KGC_GENMINOR);
+      lua_newtable(L); /* Give each step a young object to collect. */
+      lua_pop(L, 1);
       lua_gc(L, LUA_GCSTEP, (size_t)0);
       lua_gc(L, LUA_GCCOUNT);
     } else
