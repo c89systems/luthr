@@ -118,7 +118,7 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
 ** ownership is independent; successful dispatch needs no engine mutex. */
 static void enqueue (LuaScheduler *s, LuaScheduledTask *task, int firstslice) {
   LuaExecutionSlot *slot = &s->slots[task->home];
-  lua_assert(task->slot == NULL && task->native_slot == NULL);
+  lua_assert(task->slot == NULL && task->fiber.execution.allocation_cache == NULL);
   luaX_checksync(pthread_mutex_lock(&slot->mutex));
   if (firstslice && slot->head != NULL) {
     /* Keep the head ahead, then resume the first-slice task before opening
@@ -249,27 +249,26 @@ static void slotreturned (LuaScheduler *s) {
 
 static void releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
-  if (slot != NULL) {
+  int managed = task->fiber.execution.allocation_cache != NULL;
+  if (slot == NULL) return;
+  bindslot(task, NULL);
+  if (managed) {
     lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == task);
-    bindslot(task, NULL);
     __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
   }
-  else {
-    slot = task->native_slot;
-    task->native_slot = NULL;
-    if (slot == NULL || !changeslot(slot, nativeowner(task), NULL)) return;
-  }
+  else if (!changeslot(slot, nativeowner(task), NULL)) return;
   slotreturned(task->scheduler);
 }
 
 static void withdrawslot (LuaScheduledTask *task) {
   LuaScheduler *s = task->scheduler;
   LuaExecutionSlot *slot = task->slot;
-  if (slot == NULL) return;
-  lua_assert(task->native_slot == NULL &&
+  if (task->fiber.execution.allocation_cache == NULL) return;
+  lua_assert(slot != NULL &&
              __atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == task);
-  bindslot(task, NULL);
-  task->native_slot = slot;
+  /* The remembered slot can be claimed by another task. Any allocator
+  ** borrow ends before the owner word makes that slot recallable. */
+  task->fiber.execution.allocation_cache = NULL;
   __atomic_store_n(&slot->owner, nativeowner(task), __ATOMIC_SEQ_CST);
   /* A reentry registered before publication may already be asleep. A later
   ** reentry can see and claim the reservation in its final slot scan. */
@@ -334,9 +333,9 @@ static int tryslot (LuaScheduledTask *task, int reclaim) {
 static void managedenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
-  LuaExecutionSlot *previous = task->native_slot;
+  LuaExecutionSlot *previous = task->slot;
   UNUSED(L);
-  if (task->slot != NULL) return;
+  if (execution->allocation_cache != NULL) return;
   if (execution->native_depth == 0) {
     pause(task, SC_READY);
     lua_assert(task->slot != NULL);
@@ -345,11 +344,11 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     /* Compete for a free slot without entering the queue's mutex. A waiter
     ** already blocked for a slot gets priority over newer returns. */
     if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0) {
-      task->native_slot = NULL;
       if (previous != NULL && changeslot(previous, nativeowner(task), task)) {
-        bindslot(task, previous);
+        execution->allocation_cache = &previous->allocation;
         return;
       }
+      task->slot = NULL;
       if (tryslot(task, 0)) return;
     }
     else releaseslot(task);
@@ -645,7 +644,7 @@ static void requesthandoff (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
   unsigned i;
-  if (task->slot != NULL) {
+  if (execution->allocation_cache != NULL) {
     /* A free slot can run the recipient without preempting useful work.
     ** Only shorten this owner's quantum when every managed slot is busy. */
     for (i = 0; i < s->config.slots; i++)
@@ -1344,8 +1343,8 @@ int luaSC_callback (LuaScheduler *s, LuaCallback *callback,
     luaCP_release(L, call.task.policy);
     lua_unlock(L);
   }
-  lua_assert(call.task.slot == NULL && call.task.native_slot == NULL &&
-             call.task.waiter == NULL);
+  lua_assert(call.task.slot == NULL && call.task.waiter == NULL &&
+             call.task.fiber.execution.allocation_cache == NULL);
   lock(s);
   lua_assert(s->callbacks_active != 0);
   s->callbacks_active--;

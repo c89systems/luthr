@@ -38,7 +38,7 @@ struct LuaScheduledTask {
   LuaScheduledTask *next;  /* local runnable queue, never more than one */
   LuaScheduledTask *registered_next;
   LuaScheduledTask **registered_link;
-  LuaExecutionSlot *slot, *native_slot;
+  LuaExecutionSlot *slot;  /* active slot or the last native offer */
   LuaWaiter *waiter;
   LuaCarrier *carrier;  /* current dispatch; changes only after publication */
   LuaCarrier *affinity;  /* atomic reservation while pinned/inside opaque C */

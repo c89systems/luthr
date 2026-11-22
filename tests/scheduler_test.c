@@ -329,8 +329,7 @@ static lua_Integer collect(struct fixture *f, unsigned i, int expected) {
   LuaScheduledTask *task = &f->tasks[i];
   lua_Integer value;
   luaSC_wait(task);
-  require(task->slot == NULL && task->native_slot == NULL &&
-          task->fiber.execution.allocation_cache == NULL);
+  require(task->slot == NULL && task->fiber.execution.allocation_cache == NULL);
   require(task->fiber.execution.managed_depth == 0);
   require(task->fiber.execution.native_depth == 0);
   require(luaSC_collect(f->main, task, &status, &results) == LUA_OK);
@@ -754,7 +753,11 @@ static int independently_blocked(lua_State *L) {
   while (!(f->native_release & (1 << id)))
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
+  /* The native caller may have lost its last slot. Allocating must obtain
+   * a current cache borrow before it can return to the interpreter. */
+  lua_newtable(L);
   lua_pushinteger(L, 50 + id);
+  lua_setfield(L, -2, "value");
   return 1;
 }
 
@@ -765,7 +768,7 @@ static void native_return_compensation(struct fixture *f) {
   lua_pushcfunction(f->main, independently_blocked);
   lua_setglobal(f->main, "independently_blocked");
   for (i = 0; i < 2; i++) {
-    submit(f, i, "return independently_blocked()", 0);
+    submit(f, i, "return independently_blocked().value", 0);
     require(pthread_mutex_lock(&f->mutex) == 0);
     while (f->native_entered != i + 1)
       require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
