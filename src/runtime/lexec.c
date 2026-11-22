@@ -63,19 +63,32 @@ int luaQ_unpincarrier (LuaCarrierPin *pin) {
 void luaQ_entermanaged (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     checkcarrier(execution);
-    /* The callback may park before any state gate/world participation exists. */
-    if (execution->managed_depth == 0 && execution->managed_enter != NULL)
-      execution->managed_enter(execution, L);
-    checkcarrier(execution);
+    if (execution->managed_depth == 0) {
+      /* Admission may park before taking the state gate. A slot already
+      ** assigned to this execution needs no scheduler entry. */
+      if (execution->scheduler != NULL) {
+        if (execution->allocation_cache == NULL) {
+          luaSC_entermanaged(execution);
+          checkcarrier(execution);
+        }
+      }
+      else if (execution->managed_enter != NULL) {
+        execution->managed_enter(execution, L);
+        checkcarrier(execution);
+      }
+    }
     execution->managed_depth++;
   }
 }
 
 int luaQ_tryentermanaged (LuaExecution *execution) {
   checkcarrier(execution);
-  if (execution->managed_depth == 0 && execution->managed_enter != NULL &&
-      (execution->scheduler == NULL || !luaSC_trymanaged(execution)))
-    return 0;
+  if (execution->managed_depth == 0) {
+    if (execution->scheduler != NULL) {
+      if (!luaSC_trymanaged(execution)) return 0;
+    }
+    else if (execution->managed_enter != NULL) return 0;
+  }
   execution->managed_depth++;
   return 1;
 }
@@ -83,8 +96,13 @@ int luaQ_tryentermanaged (LuaExecution *execution) {
 void luaQ_leavemanaged (LuaExecution *execution) {
   if (execution != NULL) {
     lua_assert(execution->managed_depth != 0);
-    if (--execution->managed_depth == 0 && execution->managed_leave != NULL)
-      execution->managed_leave(execution);
+    if (--execution->managed_depth == 0) {
+      if (execution->scheduler != NULL) {
+        if (execution->native_depth != 0) luaSC_leavemanaged(execution);
+      }
+      else if (execution->managed_leave != NULL)
+        execution->managed_leave(execution);
+    }
   }
 }
 
@@ -92,9 +110,20 @@ void luaQ_beginnative (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     checkcarrier(execution);
     /* Admission runs before the foreign activation exists. */
-    if (execution->native_enter != NULL)
+    if (execution->scheduler != NULL) {
+      if (execution->native_depth == 0) {
+        LuaScheduledTask *task = execution->context;
+        if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == 0 ||
+            execution->managed_depth == 0) {
+          luaSC_enternative(task, L);
+          checkcarrier(execution);
+        }
+      }
+    }
+    else if (execution->native_enter != NULL) {
       execution->native_enter(execution, L);
-    checkcarrier(execution);
+      checkcarrier(execution);
+    }
     execution->native_depth++;
   }
 }
@@ -103,7 +132,15 @@ void luaQ_endnative (lua_State *L, LuaExecution *execution) {
   if (execution != NULL) {
     lua_assert(execution->native_depth != 0);
     execution->native_depth--;
-    if (execution->native_leave != NULL)
+    if (execution->scheduler != NULL) {
+      if (execution->native_depth == 0) {
+        LuaScheduledTask *task = execution->context;
+        lua_assert(!task->native_pending &&
+                   __atomic_load_n(&task->native, __ATOMIC_RELAXED) != 0);
+        task->native_used = 1;
+      }
+    }
+    else if (execution->native_leave != NULL)
       execution->native_leave(execution, L);
   }
 }
@@ -112,7 +149,8 @@ void luaQ_restorenative (LuaExecution *execution, lua_State *L, unsigned depth) 
   if (execution != NULL) {
     unsigned previous = execution->native_depth;
     execution->native_depth = depth;
-    if (execution->native_restore != NULL)
+    if (execution->scheduler != NULL) luaSC_restorenative(execution);
+    else if (execution->native_restore != NULL)
       execution->native_restore(execution, L, previous);
   }
 }

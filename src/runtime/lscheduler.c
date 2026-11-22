@@ -374,11 +374,10 @@ int luaSC_trymanaged (LuaExecution *execution) {
      reclaimoffer(execution));
 }
 
-static void managedenter (LuaExecution *execution, lua_State *L) {
+void luaSC_entermanaged (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
-  UNUSED(L);
-  if (execution->allocation_cache != NULL) return;
+  lua_assert(execution->allocation_cache == NULL);
   if (execution->native_depth == 0) {
     pause(task, SC_READY);
     lua_assert(task->slot != NULL);
@@ -405,13 +404,13 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
   }
 }
 
-static void managedleave (LuaExecution *execution) {
+void luaSC_leavemanaged (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
+  lua_assert(execution->native_depth != 0);
   /* Retain a slot through owner-local host/API sequences. Parking and native
   ** withdrawal release it. Ordinary API calls don't transact on a VM permit. */
-  if (execution->native_depth != 0 &&
-      (execution->trusted == NULL ||
-       execution->native_depth > execution->trusted->native_depth)) {
+  if (execution->trusted == NULL ||
+      execution->native_depth > execution->trusted->native_depth) {
     if (task->external) releaseslot(task);
     else withdrawslot(task);
   }
@@ -540,9 +539,9 @@ static void __attribute__((noinline)) enternewnative (LuaExecution *execution,
   if (!managed) releaseslot(task); /* trusted hook/adapter now enters opaque C */
 }
 
-static void nativeenter (LuaExecution *execution, lua_State *L) {
-  LuaScheduledTask *task = execution->context;
-  if (execution->native_depth != 0) return;
+void luaSC_enternative (LuaScheduledTask *task, lua_State *L) {
+  LuaExecution *execution = &task->fiber.execution;
+  lua_assert(execution->native_depth == 0);
   lua_assert(!task->native_pending);
   if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == 0)
     enternewnative(execution, L);
@@ -595,20 +594,8 @@ static void dropcachednative (LuaScheduledTask *task, int handoff) {
   }
 }
 
-static void nativeleave (LuaExecution *execution, lua_State *L) {
+void luaSC_restorenative (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
-  UNUSED(L);
-  if (execution->native_depth == 0) {
-    lua_assert(!task->native_pending &&
-               __atomic_load_n(&task->native, __ATOMIC_RELAXED) != 0);
-    task->native_used = 1;
-  }
-}
-
-static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) {
-  LuaScheduledTask *task = execution->context;
-  UNUSED(L);
-  UNUSED(old);
   if (execution->native_depth == 0) {
     task->native_pending = 0;
     dropcachednative(task, 1);
@@ -1298,11 +1285,6 @@ static void configureexecution (LuaScheduler *s, LuaScheduledTask *task) {
   execution->context = task;
   execution->scheduler = s;
   execution->policy = task->policy;
-  execution->managed_enter = managedenter;
-  execution->managed_leave = managedleave;
-  execution->native_enter = nativeenter;
-  execution->native_leave = nativeleave;
-  execution->native_restore = nativerestore;
   execution->poll = poll;
   execution->request_handoff = requesthandoff;
   execution->wait = resourcewait;

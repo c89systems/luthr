@@ -103,6 +103,10 @@ struct LuaScheduler {
 ** their physical stack; queued tasks never own a carrier. */
 LUAI_FUNC int luaSC_init (lua_State *, LuaScheduler *, const LuaSchedulerConfig *);
 LUAI_FUNC unsigned luaSC_nativeactive (const LuaScheduler *);
+LUAI_FUNC void luaSC_entermanaged (LuaExecution *);
+LUAI_FUNC void luaSC_leavemanaged (LuaExecution *);
+LUAI_FUNC void luaSC_enternative (LuaScheduledTask *, lua_State *);
+LUAI_FUNC void luaSC_restorenative (LuaExecution *);
 /* Reuse held capacity or reclaim the task's previous slot without waiting. */
 LUAI_FUNC int luaSC_trymanaged (LuaExecution *);
 /* Caller owns world.mutex and has volunteered to complete a new minor. */
