@@ -179,8 +179,7 @@ static int watchlayout (lua_State *L, Table *table, LuaTableWriter *writer) {
 /* Preserve the whole Lua frame while the coroutine is off the active set. */
 static ptrdiff_t parkaccess (lua_State *L) {
   ptrdiff_t saved_top = -1;
-  lua_assert(G(L)->world.heap_depth == 0 ||
-             !luaX_isowner(L, &G(L)->world.heap_owner));
+  lua_assert(!luaW_ownsheap(L));
   if (isLua(L->ci) && L->top.p < L->ci->top.p) {
     saved_top = savestack(L, L->top.p);
     L->top.p = L->ci->top.p;

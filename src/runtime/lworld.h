@@ -51,7 +51,7 @@ typedef struct LuaWorld {
   unsigned storage_scanners;  /* atomic count above the collector wait bit */
   unsigned storage_waiters;  /* mutex-owned count behind the request bit */
   unsigned storage_scan_waiters;  /* mutex-owned count behind the scan wait bit */
-  unsigned heap_depth;
+  unsigned heap_depth;  /* owner-only after the outermost grant */
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
 } LuaWorld;
 
@@ -65,6 +65,10 @@ l_sinline uint64_t luaW_armepoch (const LuaWorld *world) {
 
 l_sinline int luaW_stopped (const LuaWorld *world) {
   return (luaW_control(world) & LUA_WORLD_STOPPED) != 0;
+}
+
+l_sinline int luaW_heapheld (const LuaWorld *world) {
+  return __atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) != NULL;
 }
 
 l_sinline uint64_t luaW_epoch (uint64_t control) {

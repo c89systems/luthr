@@ -1076,7 +1076,7 @@ static int traceavailable (lua_State *L) {
   return luaC_tracerunnable(G(L)) ||
     (__atomic_load_n(&G(L)->trace_busy, __ATOMIC_ACQUIRE) == 0 &&
      !luaC_waitingstacks(G(L)) &&
-     __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == NULL);
+     !luaW_heapheld(&G(L)->world));
 }
 
 void luaC_assisttrace (lua_State *L) {

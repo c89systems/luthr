@@ -68,8 +68,7 @@ static void *allocate(void *context, void *pointer, size_t old_size,
   (void)old_size;
   check(pthread_mutex_lock(&fixture->mutex));
   if (fixture->active_phase &&
-      (!luaQ_isowner(&G(fixture->main)->world.heap_owner) ||
-       G(fixture->main)->world.heap_depth == 0)) {
+      !luaQ_isowner(&G(fixture->main)->world.heap_owner)) {
     fputs("GC experiment: allocation without metadata ownership\n", stderr);
     abort();
   }
@@ -339,7 +338,7 @@ int main(int argc, char **argv) {
       luaW_activecount(world) != 0 || luaW_stopped(world) ||
       fixture.worker->native_depth != 0 || fixture.worker->world_depth != 0 ||
       fixture.main->native_depth != 0 || fixture.main->world_depth != 0 ||
-      world->heap_depth != 0 || fixture.worker->heap_waiting != 0 ||
+      luaW_heapheld(world) || fixture.worker->heap_waiting != 0 ||
       fixture.main->heap_waiting != 0;
   fixture.failed |= fixture.worker_status != LUA_OK ||
                     fixture.worker_results != 2 || fixture.finalized[1] != 0 ||

@@ -1200,7 +1200,7 @@ int main(int argc, char **argv) {
         check(pthread_mutex_unlock(&world->mutex));
         sched_yield();
       }
-      failed |= luaW_activecount(world) != 1 || world->heap_depth != 0 ||
+      failed |= luaW_activecount(world) != 1 || luaW_heapheld(world) ||
                 fixture.actors[1].state->native_depth == 0 ||
                 __atomic_load_n(&G(main_state)->allocator.owner,
                                 __ATOMIC_ACQUIRE) != fixture.failure_owner;

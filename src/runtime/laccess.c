@@ -132,8 +132,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
       luaA_watchlock(lock);
       if (luaW_stopped(world) || !(scope->held = tryaccess(L, lock, object))) {
         /* Never acquire an unrelated object behind metadata ownership. */
-        lua_assert(world->heap_depth == 0 ||
-                   !luaX_isowner(L, &world->heap_owner));
+        lua_assert(!luaW_ownsheap(L));
         lua_assert(luaW_active(L->admission) != 0);
         L->native_depth++;
         L->object_waiting++;

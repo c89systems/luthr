@@ -228,7 +228,7 @@ static void arm_release(lua_State *L, int young, int withdraw) {
   require(pthread_mutex_lock(&world->mutex) == 0);
   while (world->heap_head == NULL)
     luaQ_wait(mutator, &world->mutex, &world->changed, &world->waiters);
-  require(world->heap_depth == 0);
+  require(!luaW_heapheld(world));
   require(pthread_mutex_unlock(&world->mutex) == 0);
   if (withdraw)
     lua_unlock(mutator);
@@ -450,6 +450,7 @@ static void explicit_minor_followers(lua_State *L, int unwind) {
 
 static void explicit_trace_slice(lua_State *L) {
   struct request helper = {0};
+  LuaWorld *world = &G(L)->world;
   pthread_t worker;
   unsigned steps;
   lu_mem work;
@@ -468,11 +469,20 @@ static void explicit_trace_slice(lua_State *L) {
   work = __atomic_load_n(&G(L)->pacer.work, __ATOMIC_RELAXED);
   /* Payload work must finish while another participant holds metadata. */
   luaW_heapenter(L);
+  require(pthread_mutex_lock(&world->mutex) == 0);
+  /* Owner-local nesting completes while the world mutex is occupied. */
+  luaW_heapenter(L);
+  require(luaW_trycollectenter(L));
+  luaW_heapleave(L);
+  luaW_heapleave(L);
+  require(luaW_ownsheap(L) && luaW_scope(L).heap == 1);
+  require(pthread_mutex_unlock(&world->mutex) == 0);
   require(pthread_create(&worker, NULL, request, &helper) == 0);
   require(pthread_join(worker, NULL) == 0);
   require(helper.stops == 0 && luaC_tracing(L));
   require(__atomic_load_n(&G(L)->pacer.work, __ATOMIC_RELAXED) > work);
   luaW_heapleave(L);
+  require(!luaW_heapheld(world));
   lua_unlock(L);
   for (steps = 0; steps < 1000; steps++)
     if (lua_gc(L, LUA_GCSTEP, (size_t)0) == 1)

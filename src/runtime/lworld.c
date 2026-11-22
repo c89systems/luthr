@@ -26,11 +26,21 @@ typedef struct LuaHeapWaiter {
 
 static void notifyrendezvous (global_State *g, lua_State *L);
 
+/* The owner updates nesting. The queue only checks for zero under its
+** mutex, which also serializes transitions into and out of ownership. */
+l_sinline unsigned heapcount (const LuaWorld *world) {
+  return __atomic_load_n(&world->heap_depth, __ATOMIC_RELAXED);
+}
+
+l_sinline void setheapcount (LuaWorld *world, unsigned depth) {
+  __atomic_store_n(&world->heap_depth, depth, __ATOMIC_RELAXED);
+}
+
 /* With no execution holding metadata, an open arm still owns the phase.
 ** Grant the next queued request after it publishes readiness. */
 static void grantheap (LuaWorld *world, lua_State *L) {
   LuaHeapWaiter *next;
-  lua_assert(world->heap_depth == 0);
+  lua_assert(heapcount(world) == 0);
   next = world->heap_head;
   if (next == NULL || (luaW_control(world) & LUA_WORLD_ARM_TRACE)) {
     __atomic_store_n(&world->heap_owner.token, NULL, __ATOMIC_RELEASE);
@@ -38,7 +48,7 @@ static void grantheap (LuaWorld *world, lua_State *L) {
   }
   world->heap_head = next->next;
   if (world->heap_head == NULL) world->heap_tail = &world->heap_head;
-  world->heap_depth = 1;
+  setheapcount(world, 1);
   __atomic_store_n(&world->heap_owner.token, next->owner, __ATOMIC_RELEASE);
   if (L != NULL && next->waiters != NULL && next->waiters->execution != NULL)
     luaQ_requesthandoff(L);
@@ -125,7 +135,7 @@ void luaW_destroy (global_State *g) {
   int i;
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
              world->participants == NULL &&
-             world->heap_depth == 0 && world->waiters == NULL &&
+             !luaW_heapheld(world) && world->waiters == NULL &&
              world->resume_waiters == NULL && world->rendezvous_waiters == NULL &&
              !(luaW_control(world) & LUA_WORLD_ARM_TRACE) &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
@@ -287,7 +297,7 @@ static void notifyrendezvous (global_State *g, lua_State *L) {
     luaC_publishtraceplan(g);
     __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_ARM_TRACE),
                        __ATOMIC_SEQ_CST);
-    if (world->heap_depth == 0) grantheap(world, L);
+    if (heapcount(world) == 0) grantheap(world, L);
     luaQ_wake(&g->phase_changed, &g->phase_waiters);
     luaSC_notifygc(g);
     return;
@@ -511,52 +521,51 @@ int luaW_iscollector (lua_State *L) {
 ** The outermost acquisition must be a GC-safe boundary, before mutation. */
 static void heapenter (lua_State *L, int collector) {
   LuaWorld *world = &G(L)->world;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  if (world->heap_depth != 0 &&
-      luaX_isowner(L, &world->heap_owner)) {
-    world->heap_depth++;
+  NativeStackContext *context = luaX_context(L);
+  if (__atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) == context) {
+    setheapcount(world, heapcount(world) + 1);
+    return;
   }
-  else {
-    if (world->heap_depth != 0 ||
-        (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
-      LuaHeapWaiter wait = {NULL, NULL, NULL, PTHREAD_COND_INITIALIZER, 0};
-      lua_assert(L->world_depth == 0 &&
-        luaW_active(L->admission) != 0);
-      L->native_depth++;
-      L->heap_waiting++;
-      wait.owner = luaX_token(L);
-      wait.collector = collector;
-      if (collector) {
-        LuaHeapWaiter **link = &world->heap_head;
-        /* Allocation refills must not postpone an overdue collection behind
-        ** a whole fanout of ordinary metadata requests. Preserve FIFO within
-        ** each class, and never revoke a grant already handed to a waiter. */
-        while (*link != NULL && (*link)->collector) link = &(*link)->next;
-        wait.next = *link;
-        *link = &wait;
-        if (wait.next == NULL) world->heap_tail = &wait.next;
-      }
-      else {
-        *world->heap_tail = &wait;
-        world->heap_tail = &wait.next;
-      }
-      luaW_deactivate(L);
-      luaQ_wake(&world->changed, &world->waiters);
-      while (!luaX_isowner(L, &world->heap_owner))
-        luaQ_wait(L, &world->mutex, &wait.changed, &wait.waiters);
-      /* Ownership is reserved directly for this recipient. Fresh arrivals
-      ** cannot steal it while its saved stack waits for execution capacity. */
-      lua_assert(world->heap_depth == 1 && !luaW_stopped(world));
-      luaX_checksync(pthread_cond_destroy(&wait.changed));
-      luaW_resume(L);
-      luaC_checksnapshot(L);
-      L->heap_waiting--;
-      L->native_depth--;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (heapcount(world) != 0 ||
+      (luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
+    LuaHeapWaiter wait = {NULL, NULL, NULL, PTHREAD_COND_INITIALIZER, 0};
+    lua_assert(L->world_depth == 0 &&
+      luaW_active(L->admission) != 0);
+    L->native_depth++;
+    L->heap_waiting++;
+    wait.owner = context;
+    wait.collector = collector;
+    if (collector) {
+      LuaHeapWaiter **link = &world->heap_head;
+      /* Allocation refills must not postpone an overdue collection behind
+      ** a whole fanout of ordinary metadata requests. Preserve FIFO within
+      ** each class, and never revoke a grant already handed to a waiter. */
+      while (*link != NULL && (*link)->collector) link = &(*link)->next;
+      wait.next = *link;
+      *link = &wait;
+      if (wait.next == NULL) world->heap_tail = &wait.next;
     }
     else {
-      world->heap_depth = 1;
-      __atomic_store_n(&world->heap_owner.token, luaX_token(L), __ATOMIC_RELEASE);
+      *world->heap_tail = &wait;
+      world->heap_tail = &wait.next;
     }
+    luaW_deactivate(L);
+    luaQ_wake(&world->changed, &world->waiters);
+    while (__atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) != context)
+      luaQ_wait(L, &world->mutex, &wait.changed, &wait.waiters);
+    /* Ownership is reserved directly for this recipient. Fresh arrivals
+    ** cannot steal it while its saved stack waits for execution capacity. */
+    lua_assert(heapcount(world) == 1 && !luaW_stopped(world));
+    luaX_checksync(pthread_cond_destroy(&wait.changed));
+    luaW_resume(L);
+    luaC_checksnapshot(L);
+    L->heap_waiting--;
+    L->native_depth--;
+  }
+  else {
+    setheapcount(world, 1);
+    __atomic_store_n(&world->heap_owner.token, context, __ATOMIC_RELEASE);
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
@@ -571,16 +580,17 @@ void luaW_collectenter (lua_State *L) {
 
 int luaW_trycollectenter (lua_State *L) {
   LuaWorld *world = &G(L)->world;
+  NativeStackContext *context = luaX_context(L);
   int acquired = 0;
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  if (world->heap_depth != 0 && luaX_isowner(L, &world->heap_owner)) {
-    world->heap_depth++;
-    acquired = 1;
+  if (__atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) == context) {
+    setheapcount(world, heapcount(world) + 1);
+    return 1;
   }
-  else if (world->heap_depth == 0 &&
-           !(luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
-    world->heap_depth = 1;
-    __atomic_store_n(&world->heap_owner.token, luaX_token(L), __ATOMIC_RELEASE);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  if (heapcount(world) == 0 &&
+      !(luaW_control(world) & (LUA_WORLD_STOPPED | LUA_WORLD_ARM_TRACE))) {
+    setheapcount(world, 1);
+    __atomic_store_n(&world->heap_owner.token, context, __ATOMIC_RELEASE);
     acquired = 1;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -589,16 +599,21 @@ int luaW_trycollectenter (lua_State *L) {
 
 void luaW_heapleave (lua_State *L) {
   LuaWorld *world = &G(L)->world;
+  unsigned depth = heapcount(world);
+  lua_assert(luaW_ownsheap(L) && depth != 0);
+  if (depth > 1) {
+    setheapcount(world, depth - 1);
+    return;
+  }
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  lua_assert(world->heap_depth != 0 &&
-             luaX_isowner(L, &world->heap_owner));
-  if (--world->heap_depth == 0) grantheap(world, L);
+  setheapcount(world, 0);
+  grantheap(world, L);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
 static unsigned heapdepth (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  return luaW_ownsheap(L) ? world->heap_depth : 0;
+  return luaW_ownsheap(L) ? heapcount(world) : 0;
 }
 
 void luaW_waitcollector (lua_State *L, int reason) {

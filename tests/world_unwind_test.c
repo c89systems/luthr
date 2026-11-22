@@ -119,7 +119,7 @@ static int exercise_forwarding(lua_State *state, struct context *context) {
   (void)lua_gc(state, LUA_GCCOLLECT);
   return context->finalized != 1 || state->native_depth != 0 ||
          state->world_depth != 0 || luaW_activecount(&G(state)->world) != 0 ||
-         luaW_stopped(&G(state)->world) || G(state)->world.heap_depth != 0 ||
+         luaW_stopped(&G(state)->world) || luaW_heapheld(&G(state)->world) ||
          state->heap_waiting != 0;
 }
 
@@ -156,7 +156,7 @@ static void *run(void *user) {
       (context->oom_case && context->allocation_failures == 0) ||
       state->native_depth != 0 || state->world_depth != 0 ||
       luaW_activecount(&G(state)->world) != 0 ||
-      luaW_stopped(&G(state)->world) || G(state)->world.heap_depth != 0 ||
+      luaW_stopped(&G(state)->world) || luaW_heapheld(&G(state)->world) ||
       state->heap_waiting != 0 || G(state)->gcemergency != 0 ||
       G(state)->gcstopem != 0;
   context->reject_growth = 0;
