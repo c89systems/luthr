@@ -734,12 +734,7 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
 */
 l_sinline CallInfo *prepCallInfo (lua_State *L, StkId func, unsigned status,
                                                 StkId top) {
-  CallInfo *ci = L->ci = next_ci(L);  /* new frame */
-  ci->func.p = func;
-  lua_assert((status & ~(CIST_NRESULTS | CIST_C | MAX_CCMT)) == 0);
-  ci->callstatus = status;
-  ci->top.p = top;
-  return ci;
+  return luaD_initframe(L, next_ci(L), func, status, top);
 }
 
 
@@ -754,7 +749,14 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   int n;  /* number of returns */
   LuaCallScope call;
   CallInfo *ci;
-  ptrdiff_t function = savestack(L, func);
+  ptrdiff_t function;
+#if !defined(HARDSTACKTESTS)
+  if (!managed && luaW_trycallnative(L, func, status, f, &n)) {
+    ci = L->ci;
+    goto returned;
+  }
+#endif
+  function = savestack(L, func);
   luaQ_begincall(L, managed, &call);
   func = restorestack(L, function);
   checkstackp(L, LUA_MINSTACK, func);  /* ensure minimum stack size */
@@ -768,6 +770,9 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   luaQ_entercall(L, &call);
   n = (*f)(L);  /* do the actual call */
   luaQ_leavecall(L, &call);
+#if !defined(HARDSTACKTESTS)
+ returned:
+#endif
   api_checknelems(L, n);
   luaD_poscall(L, ci, n);
   return n;

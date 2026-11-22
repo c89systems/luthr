@@ -52,6 +52,17 @@
     ptrdiff_t t__ = savestack(L, p),  /* save 'p' */ \
     p = restorestack(L, t__))  /* 'pos' part: restore 'p' */
 
+/* The frame already exists and the caller owns the stack reservation. */
+l_sinline CallInfo *luaD_initframe (lua_State *L, CallInfo *ci, StkId func,
+                                    unsigned status, StkId top) {
+  lua_assert((status & ~(CIST_NRESULTS | CIST_C | MAX_CCMT)) == 0);
+  L->ci = ci;
+  ci->func.p = func;
+  ci->callstatus = status;
+  ci->top.p = top;
+  return ci;
+}
+
 
 /*
 ** Maximum depth for nested C calls, syntactical nested non-terminals,
@@ -106,6 +117,10 @@ LUAI_FUNC TStatus luaD_protectedparser (lua_State *L, ZIO *z,
 LUAI_FUNC void luaD_hook (lua_State *L, int event, int line,
                                         int fTransfer, int nTransfer);
 LUAI_FUNC void luaD_hookcall (lua_State *L, CallInfo *ci);
+#if !defined(HARDSTACKTESTS)
+LUAI_FUNC int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
+                                  lua_CFunction f, int *results);
+#endif
 LUAI_FUNC int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
                                               int narg1, int delta);
 LUAI_FUNC CallInfo *luaD_precall (lua_State *L, StkId func, int nResults);

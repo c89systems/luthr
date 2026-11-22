@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "laccess.h"
 #include "lapi.h"
+#include "ldebug.h"
 #include "lgate.h"
 #include "ldo.h"
 #include "lgc.h"
@@ -179,22 +180,33 @@ carrierentry void luaX_lockstate (lua_State *L) {
   preparecall(L, context);
 }
 
-static LuaScheduledTask *offerstack (lua_State *L, LuaExecution *execution) {
+l_sinline void publishoffer (lua_State *L, NativeStackContext *context,
+                              LuaExecution *execution, LuaScheduledTask *task,
+                              uintptr_t offer) {
+  lua_assert(task->stack_offer == 0);
+  task->stack_offer = offer;
+  execution->allocation_cache = NULL;
+  execution->managed_depth = 0;
+  luaX_releaseto(L, cast(uintptr_t, context) | LUA_GATE_MANAGED, offer);
+  /* A waiter that scanned before the combined withdrawal must be woken. */
+  if (__atomic_load_n(&task->scheduler->reentry_waiting, __ATOMIC_SEQ_CST) != 0)
+    luaSC_releaseslot(task);
+}
+
+static int offerstack (lua_State *L, NativeStackContext *context,
+                       LuaExecution *execution) {
   LuaScheduledTask *task;
   if (execution == NULL || execution->scheduler == NULL ||
       execution->managed_depth != 1 || execution->allocation_cache == NULL ||
       execution->native_depth == 0 ||
       (execution->trusted != NULL &&
        execution->native_depth <= execution->trusted->native_depth))
-    return NULL;
+    return 0;
   task = execution->context;
   if (task->external || task->root.thread != L || task->slot->stack_offer == 0)
-    return NULL;
-  lua_assert(task->stack_offer == 0);
-  task->stack_offer = task->slot->stack_offer;
-  execution->allocation_cache = NULL;
-  execution->managed_depth = 0;
-  return task;
+    return 0;
+  publishoffer(L, context, execution, task, task->slot->stack_offer);
+  return 1;
 }
 
 static void unlockstate (lua_State *L, NativeStackContext *context, int values,
@@ -215,16 +227,7 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values,
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   lua_assert(L->admission == &L->participation);
-  if (detach) {
-    LuaScheduledTask *task = offerstack(L, execution);
-    if (task != NULL) {
-      luaX_releaseto(L, cast(uintptr_t, context) | LUA_GATE_MANAGED, task->stack_offer);
-      /* A waiter that scanned before the combined withdrawal must be woken. */
-      if (__atomic_load_n(&task->scheduler->reentry_waiting, __ATOMIC_SEQ_CST) != 0)
-        luaSC_releaseslot(task);
-      return;
-    }
-  }
+  if (detach && offerstack(L, context, execution)) return;
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L, context, LUA_GATE_MANAGED);
@@ -278,10 +281,14 @@ static int reclaimstack (lua_State *L, NativeStackContext *context) {
   return 1;
 }
 
-static void attach (lua_State *L, LuaWorldScope scope,
-                    NativeStackContext *context) {
+l_sinline void attachstack (lua_State *L, NativeStackContext *context) {
   if (!reclaimstack(L, context)) lockstate(L, context);
   preparecall(L, context);
+}
+
+static void attach (lua_State *L, LuaWorldScope scope,
+                    NativeStackContext *context) {
+  attachstack(L, context);
   if (scope.collection != 0 || scope.heap != 0 || luaW_ownsheap(L))
     luaW_restore(L, scope, L->native_depth);
   lua_assert(L->native_depth != 0);
@@ -299,6 +306,57 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
   attach(L, scope, context);
   if (context->execution != NULL) luaQ_endnative(L, context->execution);
 }
+
+#if !defined(HARDSTACKTESTS)
+/* A cached permit pins this execution before the frame is built. Keep its
+** ordinary stack publication and slow reentry, with no detached scope to
+** spill when there is no inherited heap or API ownership. */
+int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
+                        lua_CFunction f, int *results) {
+  NativeStackContext *context = luaX_boundcontext(L);
+  LuaExecution *execution = context->execution;
+  LuaScheduledTask *task;
+  CallInfo *ci = L->ci->next;
+  uintptr_t offer;
+  int n;
+  if (execution == NULL || execution->scheduler == NULL ||
+      execution->managed_depth != 1 || execution->native_depth != 0 ||
+      execution->trusted != NULL || execution->allocation_cache == NULL ||
+      context->api_region != NULL || ci == NULL ||
+      L->stack_last.p - L->top.p <= LUA_MINSTACK ||
+      L->native_depth != 0 || L->world_depth != 0 ||
+      L->task_tables != NULL || L->object_scopes != NULL)
+    return 0;
+  task = execution->context;
+  if (task->root.thread != L || task->external || task->native_pending ||
+      !__atomic_load_n(&task->native, __ATOMIC_RELAXED) ||
+      (offer = task->slot->stack_offer) == 0)
+    return 0;
+  if (L->storage_retired != NULL || luaC_retired(L) != NULL ||
+      L->reclaim_pages || L->allocation_debt.pending != 0 ||
+      L->reclaim_credit != 0 || L->stack_peer != NULL ||
+      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0 ||
+      __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context ||
+      (gethookmask(L) & LUA_MASKCALL))
+    return 0;
+  lua_assert(context == luaQ_ownertoken());
+  luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
+  execution->native_depth = 1;
+  L->native_depth = 1;
+  publishoffer(L, context, execution, task, offer);
+  n = (*f)(L);
+  attachstack(L, context);
+  if (__atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context)
+    luaW_restore(L, (LuaWorldScope){0}, L->native_depth);
+  lua_assert(context->api_region == NULL && execution->native_depth == 1 &&
+             L->native_depth == 1 && L->ci == ci);
+  L->native_depth = 0;
+  execution->native_depth = 0;
+  task->native_used = 1;
+  *results = n;
+  return 1;
+}
+#endif
 
 int luaX_tryworker (lua_State *L) {
   LuaExecution *execution = luaQ_current();

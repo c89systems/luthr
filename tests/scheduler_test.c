@@ -972,14 +972,22 @@ static void native_leaf_return(struct fixture *f) {
   finish(f);
 }
 
+static int warm_native_permit(lua_State *L) {
+  (void)L;
+  return 0;
+}
+
 static void native_recall_during_stack_borrow(struct fixture *f) {
   lua_State *target;
   int reservation;
   init(f, 1);
+  lua_pushcfunction(f->main, warm_native_permit);
+  lua_setglobal(f->main, "warm_native_permit");
   lua_pushcfunction(f->main, blocked_leaf);
   lua_setglobal(f->main, "blocked_leaf");
   submit(f, 0,
-         "local value={answer=51}; blocked_leaf(value); return value.answer",
+         "local value={answer=51}; warm_native_permit(); blocked_leaf(value); "
+         "return value.answer",
          0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
