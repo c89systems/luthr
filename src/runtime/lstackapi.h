@@ -44,7 +44,6 @@ enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
 
 LUAI_FUNC uintptr_t luaX_valueenterslow (lua_State *L, int reserved);
 LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
-LUAI_FUNC void luaX_releaseaftertrace (lua_State *L, uintptr_t reservation);
 
 /* Stack-only scopes can borrow stack slots and immutable payloads. Heap
 ** mutation, allocation, parking, and other stack reservations require
@@ -67,13 +66,6 @@ l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
 l_sinline void luaX_valueleave (lua_State *L, uintptr_t owner) {
   if (owner == LUA_VALUE_STACK) luaX_releasegate(L, LUA_GATE_STACK);
   else if (owner != 0) luaX_valueleaveslow(L, owner);
-}
-
-/* A callback token is its owner-bound reservation plus the local tracing bit. */
-l_sinline void luaX_callleave (lua_State *L, uintptr_t owner) {
-  if (l_unlikely(owner & LUA_VALUE_TRACING))
-    luaX_releaseaftertrace(L, owner & ~cast(uintptr_t, LUA_VALUE_TRACING));
-  else luaX_releasegate(L, owner);
 }
 
 /* If managed capacity requires a new reservation, release the stack so the

@@ -68,4 +68,10 @@ LUAI_FUNC void luaA_unref (lua_State *L, int idx, int ref);
                      L->tbclist.p < L->top.p - (n), \
 			  "not enough free elements in the stack")
 
+#define api_checkresults(L,na,nr) \
+  (api_check(L, (nr) == LUA_MULTRET || L->ci->top.p - L->top.p >= (nr) - (na), \
+             "results from function overflow current stack size"), \
+   api_check(L, LUA_MULTRET <= (nr) && (nr) <= MAXRESULTS, \
+             "invalid number of results"))
+
 #endif

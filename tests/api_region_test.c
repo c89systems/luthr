@@ -118,35 +118,43 @@ static void metadata(lua_State *state, int foreign) {
   }
 }
 
+static void reentry(lua_State *state, int protected) {
+  unsigned ticks = (unsigned)lua_tointeger(state, 3);
+  int second_argument = lua_gettop(state) == 4;
+  int i;
+  for (i = 0; i < 3; i++) {
+    unsigned before;
+    if (i == 1) {
+      /* The warm call fits once before the next required poll. */
+      luaX_lockstate(state);
+      state->poll_remaining = ticks != 0 ? 2 * ticks : 1024;
+      luaX_unlockstate(state);
+    }
+    lua_pushvalue(state, 1);
+    lua_pushinteger(state, 41);
+    if (second_argument)
+      lua_pushvalue(state, 4);
+    else
+      lua_pushinteger(state, 1);
+    before = admissions;
+    if (protected)
+      require(lua_pcall(state, 2, 1, 0) == LUA_OK);
+    else
+      lua_call(state, 2, 1);
+    if (i != 0)
+      require(ticks == 0 ? admissions > before
+                         : admissions == before + (i == 2));
+    require(lua_rawequal(state, 2, -1));
+    require(lua_isinteger(state, -1) == lua_isinteger(state, 2));
+    lua_pop(state, 1);
+  }
+}
+
 static int foreign(lua_State *state) {
   check_api(state, 1);
   if (lua_gettop(state) != 0) {
-    unsigned ticks = (unsigned)lua_tointeger(state, 3);
-    int second_argument = lua_gettop(state) == 4;
-    int i;
-    for (i = 0; i < 3; i++) {
-      unsigned before;
-      if (i == 1) {
-        /* The warm call fits once before the next required poll. */
-        luaX_lockstate(state);
-        state->poll_remaining = ticks != 0 ? 2 * ticks : 1024;
-        luaX_unlockstate(state);
-      }
-      lua_pushvalue(state, 1);
-      lua_pushinteger(state, 41);
-      if (second_argument)
-        lua_pushvalue(state, 4);
-      else
-        lua_pushinteger(state, 1);
-      before = admissions;
-      lua_call(state, 2, 1);
-      if (i != 0)
-        require(ticks == 0 ? admissions > before
-                           : admissions == before + (i == 2));
-      require(lua_rawequal(state, 2, -1));
-      require(lua_isinteger(state, -1) == lua_isinteger(state, 2));
-      lua_pop(state, 1);
-    }
+    reentry(state, 0);
+    reentry(state, 1);
   }
   return 0;
 }
@@ -157,7 +165,15 @@ static void request_slot(LuaExecution *execution, lua_State *state) {
   (*requests)++;
 }
 
+static int foreign_pcall(lua_State *state) {
+  int status = lua_pcall(state, lua_gettop(state) - 1, 1, 0);
+  lua_pushinteger(state, status);
+  return 2;
+}
+
 static void scalar_values(lua_State *state) {
+  lua_pushcfunction(state, foreign_pcall);
+  lua_setglobal(state, "foreign_pcall");
   require(luaL_dostring(state,
                         "probe(function(x) return x end,41,1); "
                         "probe(function(x) return x+1 end,42,2); "
@@ -179,16 +195,18 @@ static void scalar_values(lua_State *state) {
                         "probe(function(x) local a,b,c; return b end,nil,2); "
                         "probe(function(x,y) local sum=x+y; return sum*3 end,"
                         "(41+math.maxinteger)*3,3,math.maxinteger); "
-                        "probe(payload,129,0,arg); assert(calls==3); "
+                        "probe(payload,129,0,arg); assert(calls==6); "
                         "assert(payload(41,3)==129 and payload(41,arg)==129); "
-                        "assert(calls==4); "
+                        "assert(calls==7); "
                         "local hooks=0; debug.sethook(function() "
                         "if debug.getinfo(2,'f').func==payload then "
                         "hooks=hooks+1 end end,'c'); "
                         "probe(payload,43,0); assert(payload(41,1)==43); "
-                        "debug.sethook(); assert(hooks==4); "
+                        "debug.sethook(); assert(hooks==7); "
                         "local ok,err=pcall(probe,payload,0,0,{}); "
                         "assert(not ok and err:find('arithmetic')); "
+                        "local err,status=foreign_pcall(payload,41,{}); "
+                        "assert(status==2 and err:find('arithmetic')); "
                         "probe(function() return 42 end,42,2); "
                         "probe(function() return 42.0 end,42.0,2); "
                         "probe(function() return 'literal' end,'literal',2); "

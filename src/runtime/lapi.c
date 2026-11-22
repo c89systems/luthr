@@ -1400,42 +1400,19 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
 */
 
 
-#define checkresults(L,na,nr) \
-     (api_check(L, (nr) == LUA_MULTRET \
-               || (L->ci->top.p - L->top.p >= (nr) - (na)), \
-	"results from function overflow current stack size"), \
-      api_check(L, LUA_MULTRET <= (nr) && (nr) <= MAXRESULTS,  \
-                   "invalid number of results"))
-
-
 LUA_API void lua_callk (lua_State *L, int nargs, int nresults,
                         lua_KContext ctx, lua_KFunction k) {
   StkId func;
-  LuaCallEntry entry = {0};
-  if (k == NULL) entry = luaX_callenter(L, nargs);
+  if (k == NULL) {
+    if (luaX_callenter(L, nargs, nresults)) return;
+  }
   else lua_lock(L);
- retry:
   api_check(L, k == NULL || !isLua(L->ci),
     "cannot use continuations inside hooks");
   api_checkpop(L, nargs + 1);
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
-  checkresults(L, nargs, nresults);
+  api_checkresults(L, nargs, nresults);
   func = L->top.p - (nargs+1);
-  if (entry.owner != 0) {
-    NativeStackContext *activation = luaX_gateowner(entry.owner);
-    if (luaD_tryscalarcall(L, func, entry.proto, nargs, nresults, activation)) {
-      adjustresults(L, nresults);
-      luaX_callleave(L, entry.owner);
-      return;
-    }
-    if (!luaX_callpromote(L, activation)) {
-      luaX_callleave(L, entry.owner);
-      lua_lock(L);
-      entry.owner = 0;
-      goto retry;
-    }
-    func = L->top.p - (nargs+1);  /* entry may move the stack */
-  }
   if (k != NULL && yieldable(L)) {  /* need to prepare continuation? */
     L->ci->u.c.k = k;  /* save continuation */
     L->ci->u.c.ctx = ctx;  /* save context */
@@ -1470,12 +1447,15 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
   struct CallS c;
   TStatus status;
   ptrdiff_t func;
-  lua_lock(L);
+  if (k == NULL && errfunc == 0) {
+    if (luaX_callenter(L, nargs, nresults)) return LUA_OK;
+  }
+  else lua_lock(L);
   api_check(L, k == NULL || !isLua(L->ci),
     "cannot use continuations inside hooks");
   api_checkpop(L, nargs + 1);
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
-  checkresults(L, nargs, nresults);
+  api_checkresults(L, nargs, nresults);
   if (errfunc == 0)
     func = 0;
   else {
