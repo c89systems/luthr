@@ -2992,8 +2992,10 @@ static void userstep (lua_State *L, void *argument) {
 ** request numbers distinguish the current driver from an older caller
 ** which may still be unwinding or running post-collection callbacks. */
 static void releaseminor (global_State *g) {
+  LuaScheduler *s = __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE);
   lua_assert(g->minor_request & 1);
   g->minor_request++;
+  if (s != NULL) __atomic_store_n(&s->minor_driver, NULL, __ATOMIC_RELEASE);
   luaQ_wake(&g->phase_changed, &g->minor_waiters);
 }
 
@@ -3012,6 +3014,7 @@ static int joinminor (lua_State *L, uint64_t *request) {
          (!luaC_sweeping(L) || g->sweep_plan.kind == SWEEP_YOUNG)) {
     if (!(g->minor_request & 1)) {
       *request = ++g->minor_request;
+      if (!luaC_tracing(L) && !luaC_sweeping(L)) luaSC_leadminor(L);
       break;
     }
     /* An abandoned request publishes no completion. Try again as a driver. */

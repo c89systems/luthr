@@ -50,6 +50,7 @@ struct LuaScheduledTask {
   int native;  /* atomic permit grant, held through both active use and reuse */
   int native_pending, native_notified, external;
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
+  uint64_t minor_deadline;  /* owner's initial slice for an explicit minor */
 };
 
 struct LuaCarrier {
@@ -92,6 +93,7 @@ struct LuaScheduler {
   int closed, stopping, ready;
   void (*completed)(void *);
   void *completion_context;
+  LuaExecution *minor_driver;  /* atomic; driver still using its first slice */
 };
 
 /* Explicit private limits until final workload sizing. carriers must cover
@@ -103,6 +105,8 @@ LUAI_FUNC int luaSC_init (lua_State *, LuaScheduler *, const LuaSchedulerConfig 
 LUAI_FUNC unsigned luaSC_nativeactive (const LuaScheduler *);
 /* Reuse held capacity or reclaim the task's previous slot without waiting. */
 LUAI_FUNC int luaSC_trymanaged (LuaExecution *);
+/* Caller owns world.mutex and has volunteered to complete a new minor. */
+LUAI_FUNC void luaSC_leadminor (lua_State *L);
 LUAI_FUNC int luaSC_submit (LuaScheduler *, LuaScheduledTask *, lua_State *, int);
 /* Completion is acknowledged only after the final outgoing context is saved.
 ** Waiting doesn't join an opaque native activation or discard its outcome. */

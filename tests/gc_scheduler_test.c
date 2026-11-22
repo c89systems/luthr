@@ -28,9 +28,11 @@ static struct {
   int native_release;
   unsigned after_pause;
   unsigned workers, batches;
+  int minor_polled, minor_assist;
 } probe = {.mutex = PTHREAD_MUTEX_INITIALIZER,
            .changed = PTHREAD_COND_INITIALIZER};
 static LuaScheduler *root_scheduler;
+static LuaScheduledTask *minor_task;
 
 void __real_luaW_armtrace(lua_State *);
 void __wrap_luaW_armtrace(lua_State *L) {
@@ -52,6 +54,8 @@ static void observe(lua_State *L, int sweep) {
   }
   if (worker) {
     probe.batches++;
+    if (minor_task != NULL)
+      require(pthread_cond_broadcast(&probe.changed) == 0);
     if (probe.pause && probe.release && !probe.paused)
       probe.after_pause++;
     if (probe.armed == 1 && !probe.entered) {
@@ -75,6 +79,32 @@ static void observe(lua_State *L, int sweep) {
       require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
   }
   require(pthread_mutex_unlock(&probe.mutex) == 0);
+}
+
+void __real_luaQ_poll(lua_State *);
+void __wrap_luaQ_poll(lua_State *L) {
+  int wait_helper = 0;
+  if (minor_task != NULL && luaQ_current() == &minor_task->fiber.execution &&
+      luaC_scanready(G(L)) && luaC_workerready(G(L))) {
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    if (!probe.minor_polled) {
+      require(probe.batches == 0);
+      probe.minor_polled = 1;
+      wait_helper = probe.minor_assist;
+    }
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
+  __real_luaQ_poll(L);
+  if (wait_helper) {
+    struct timespec deadline;
+    require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 10;
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    while (probe.batches == 0)
+      require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
+              0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+  }
 }
 
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
@@ -157,6 +187,13 @@ int main(int argc, char **argv) {
     config.carriers = 4;
     config.native_limit = 2;
   }
+  if (strncmp(argv[1], "minor_", 6) == 0) {
+    minor_task = &task;
+    probe.armed = 2;
+    probe.minor_assist = strcmp(argv[1], "minor_assist_generational") == 0;
+    if (!probe.minor_assist)
+      config.quantum_polls = 1000000;
+  }
   probe.sweep = strncmp(argv[1], "sweep_", 6) == 0;
   luaL_openlibs(L);
   lua_gc(L, strstr(argv[1], "generational") ? LUA_GCGEN : LUA_GCINC);
@@ -183,6 +220,24 @@ int main(int argc, char **argv) {
     lua_remove(task_state, 1);
   }
   require(luaSC_init(L, &scheduler, &config) == 0);
+  if (minor_task != NULL) {
+    require(luaL_loadstring(task_state,
+                            "local major = collectgarbage('step',0); "
+                            "return major == false") == LUA_OK);
+    lua_remove(task_state, 1);
+    lua_gc(L, LUA_GCRESTART);
+    require(luaSC_submit(&scheduler, &task, task_state, 0) == LUA_OK);
+    luaSC_wait(&task);
+    require(luaSC_collect(receiver, &task, &status, &results) == LUA_OK);
+    require(status == LUA_OK && results == 1 && lua_toboolean(receiver, -1));
+    require(lua_rawlen(L, 1) == 16000);
+    require(luaSC_shutdown(&scheduler) == LUA_OK);
+    require(luaSC_destroy(L, &scheduler) == 0);
+    require(probe.minor_polled);
+    require((probe.batches != 0) == probe.minor_assist);
+    lua_close(L);
+    return 0;
+  }
   if (strcmp(argv[1], "roots") == 0) {
     uintptr_t collectors[2];
     for (unsigned i = 0; i < 2; ++i)

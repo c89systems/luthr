@@ -308,10 +308,11 @@ set_target_properties(gc_scheduler_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_scheduler_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_scheduler_test PRIVATE luthr_static)
 target_link_options(gc_scheduler_test PRIVATE -Wl,--wrap=luaC_scantrace
-  -Wl,--wrap=luaC_scansweep -Wl,--wrap=luaW_armtrace)
+  -Wl,--wrap=luaC_scansweep -Wl,--wrap=luaW_armtrace -Wl,--wrap=luaQ_poll)
 foreach(case IN ITEMS mark_incremental mark_generational sweep_incremental sweep_generational admission roots blocked_native
     mark_pause_incremental mark_pause_generational sweep_pause_incremental sweep_pause_generational
-    single_incremental single_generational stopped_incremental)
+    single_incremental single_generational stopped_incremental
+    minor_inline_generational minor_assist_generational)
   add_test(NAME gc_scheduler_${case} COMMAND gc_scheduler_test ${case})
   set_tests_properties(gc_scheduler_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)

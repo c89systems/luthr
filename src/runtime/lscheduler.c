@@ -626,6 +626,7 @@ static void wakework (LuaScheduler *s, int all) {
 
 static int collectorready (LuaScheduler *s) {
   return s->gc_active < s->config.slots - 1 && luaC_workerready(s->global) &&
+    __atomic_load_n(&s->minor_driver, __ATOMIC_ACQUIRE) == NULL &&
     !luaW_stopped(&s->global->world) &&
     __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0;
 }
@@ -646,6 +647,7 @@ void luaSC_notifygc (global_State *g) {
   LuaScheduler *s = __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE);
   if (s == NULL || !__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE) ||
       s->config.slots == 1 || !luaC_workerready(g) ||
+      __atomic_load_n(&s->minor_driver, __ATOMIC_ACQUIRE) != NULL ||
       luaW_stopped(&g->world)) return;
   lock(s);
   wakecollectors(s);
@@ -671,6 +673,19 @@ static uint64_t monotonicns (void) {
   struct timespec now;
   luaX_checksync(clock_gettime(CLOCK_MONOTONIC, &now));
   return cast(uint64_t, now.tv_sec) * 1000000000 + cast(uint64_t, now.tv_nsec);
+}
+
+/* A synchronous minor has a driver even when all other requesters park.
+** Let that driver claim short batches locally before waking idle carriers. */
+void luaSC_leadminor (lua_State *L) {
+  LuaExecution *execution = luaX_execution(L);
+  LuaScheduler *s = execution != NULL ? execution->scheduler : NULL;
+  LuaScheduledTask *task;
+  if (s == NULL || s->global != G(L) || s->config.slots == 1) return;
+  task = execution->context;
+  task->minor_deadline = s->config.quantum_polls != 0
+    ? UINT64_MAX : monotonicns() + DEFAULT_SLICE_NS;
+  __atomic_store_n(&s->minor_driver, execution, __ATOMIC_RELEASE);
 }
 
 /* Limit reuse by time under contention, and return the permit once a Lua
@@ -705,6 +720,16 @@ static void poll (LuaExecution *execution, lua_State *L) {
   pollnative(task, L);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
+  if (l_unlikely(task->minor_deadline != 0)) {
+    LuaExecution *driver = __atomic_load_n(&s->minor_driver, __ATOMIC_ACQUIRE);
+    if (driver != execution) task->minor_deadline = 0;
+    else if (!timed || monotonicns() >= task->minor_deadline) {
+      task->minor_deadline = 0;
+      if (__atomic_compare_exchange_n(&s->minor_driver, &driver, NULL, 0,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        luaSC_notifygc(s->global);
+    }
+  }
   /* Read publication before the runnable predicate: observing its completion
   ** also publishes the recipient's queue entry to the following load. */
   publishing = __atomic_load_n(&s->pending_ready, __ATOMIC_ACQUIRE);
