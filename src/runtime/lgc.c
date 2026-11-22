@@ -201,7 +201,8 @@ static int iscleared (LuaTraceWork *work, const GCObject *o) {
 void luaC_traceobject (lua_State *L, GCObject *o) {
   if (!luaC_tracing(L)) return;
   if (!claimmark(G(L), o)) return;
-  __atomic_fetch_add(&G(L)->trace_changes, 1, __ATOMIC_RELAXED);
+  /* A new ephemeron round that observes this claim must also see its colour. */
+  __atomic_fetch_add(&G(L)->trace_changes, 1, __ATOMIC_RELEASE);
   luaC_publishbarrier(L, o, 0);
 }
 

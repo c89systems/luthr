@@ -35,6 +35,7 @@ static struct collection *collecting;
 static lua_State *weak_marker;
 static GCObject *weak_table, *weak_key, *weak_target;
 static unsigned weak_deferred_seen, weak_rescans, weak_target_scanned;
+static unsigned weak_round_stops;
 static unsigned weak_retries[TRACE_VERIFY + 1];
 static int retry_weak;
 static struct parallel_scan {
@@ -92,6 +93,9 @@ void __wrap_luaW_stop(lua_State *L) {
   if (collecting != NULL && L == collecting->collector && L->world_depth == 0 &&
       luaC_tracing(L))
     collecting->stops++;
+  if (L == weak_marker && luaC_tracephase(G(L)) == TRACE_MARK &&
+      G(L)->trace_plan.again == NULL && G(L)->ephemeron != NULL)
+    weak_round_stops++;
   __real_luaW_stop(L);
 }
 
@@ -1078,6 +1082,7 @@ static void ephemerons(void) {
   weak_marker = L;
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
   require(weak_deferred_seen && weak_rescans && weak_target_scanned);
+  require(weak_round_stops == 0);
   lua_pushvalue(L, 3);
   require(lua_rawget(L, 2) == LUA_TTABLE);
   require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
