@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "laccess.h"
+#include "lapi.h"
 #include "lgate.h"
 #include "ldo.h"
 #include "lgc.h"
@@ -291,31 +292,40 @@ carrierentry void luaX_apienter (lua_State *L) {
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
 }
 
-carrierentry uintptr_t luaX_callenter (lua_State *L) {
+carrierentry LuaCallEntry luaX_callenter (lua_State *L, int nargs) {
   NativeStackContext *context = luaE_resolvestack(&thread_context);
   LuaExecution *execution = context->execution;
   uintptr_t owner;
-  if (execution != NULL && execution->native_depth != 0 &&
-      context->api_region == NULL) {
+  if (context->api_region == NULL &&
+      (execution == NULL || execution->native_depth != 0)) {
     uintptr_t expected = 0;
     uintptr_t reservation = cast(uintptr_t, context) | LUA_GATE_MANAGED;
-    /* Publish an owner once. This first phase can inspect the stack, but
-    ** entering the storage epoch and borrowing heap data requires a slot. */
+    /* Publish an owner once. Stack access can proceed from this reservation.
+    ** Borrowing heap storage requires managed entry. */
     if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected, reservation,
                                      0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
       if (l_likely(!luaW_stopped(&G(L)->world))) {
-        if (luaC_tracing(L)) {
-          luaC_checksnapshot(L);
-          return reservation | LUA_VALUE_TRACING;
+        const TValue *func;
+        api_checkpop(L, nargs + 1);
+        func = s2v(L->top.p - (nargs + 1));
+        if (ttisLclosure(func)) {
+          const Proto *proto = clLvalue(func)->p;
+          if (proto->scalar_ticks != 0) {
+            if (luaC_tracing(L)) {
+              luaC_checksnapshot(L);
+              reservation |= LUA_VALUE_TRACING;
+            }
+            return (LuaCallEntry){reservation, proto};
+          }
         }
-        return reservation;
+        if (luaX_callpromote(L, context)) return (LuaCallEntry){0};
       }
       release(L, context, LUA_GATE_MANAGED);
     }
   }
   owner = apienter(L, context);
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
-  return 0;
+  return (LuaCallEntry){0};
 }
 
 void luaX_releaseaftertrace (lua_State *L, uintptr_t reservation) {
@@ -325,7 +335,8 @@ void luaX_releaseaftertrace (lua_State *L, uintptr_t reservation) {
 }
 
 int luaX_callpromote (lua_State *L, NativeStackContext *context) {
-  if (!luaQ_tryentermanaged(context->execution)) return 0;
+  if (context->execution != NULL &&
+      !luaQ_tryentermanaged(context->execution)) return 0;
   luaW_enter(L);
   preparecall(L, context);
   return 1;

@@ -50,9 +50,13 @@ LUAI_FUNC int luaX_tryworker (lua_State *L);
 ** physical state gates themselves remain strictly nonrecursive. */
 LUAI_FUNC void luaX_apienter (lua_State *L);
 LUAI_FUNC void luaX_apileave (lua_State *L);
-/* A detached callback may reserve its stack before taking managed capacity.
-** A zero return has already entered the full API scope. */
-LUAI_FUNC uintptr_t luaX_callenter (lua_State *L);
+typedef struct LuaCallEntry {
+  uintptr_t owner;
+  const struct Proto *proto;
+} LuaCallEntry;
+/* A tentative entry carries a stack reservation and a scalar prototype.
+** An empty entry already holds the full API scope. */
+LUAI_FUNC LuaCallEntry luaX_callenter (lua_State *L, int nargs);
 /* On failure the caller must release the reservation before blocking. */
 LUAI_FUNC int luaX_callpromote (lua_State *L, struct NativeStackContext *context);
 /* Nonblocking collector reservation. 0 means busy, 1 is a new reservation,

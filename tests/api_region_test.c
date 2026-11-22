@@ -157,30 +157,7 @@ static void request_slot(LuaExecution *execution, lua_State *state) {
   (*requests)++;
 }
 
-static void native_values(lua_State *state) {
-  unsigned requests = 0;
-  LuaExecution execution = {
-      .context = &requests, .managed_enter = request_slot, .native_depth = 1};
-  NativeStackContext context = {.execution = &execution,
-                                .limit = luaE_initnativestack()};
-  NativeStackContext *previous;
-  const char *string;
-  size_t length;
-  lua_gc(state, LUA_GCSTOP);
-  lua_pushliteral(state, "rooted across a native entry");
-  previous = luaE_setnativestackcontext(&context);
-  check_api(state, 0);
-  lua_pushvalue(state, 1);
-  string = lua_tolstring(state, -1, &length);
-  require(length == strlen("rooted across a native entry") &&
-          strcmp(string, "rooted across a native entry") == 0);
-  lua_pop(state, 1);
-  require(requests == 0);
-  require(lua_type(state, LUA_REGISTRYINDEX) == LUA_TTABLE && requests == 1);
-  lua_pushinteger(state, 1234);
-  require(strcmp(lua_tostring(state, -1), "1234") == 0 && requests == 2);
-  lua_pop(state, 1);
-  require(requests == 2 && execution.managed_depth == 0);
+static void scalar_values(lua_State *state) {
   require(luaL_dostring(state,
                         "probe(function(x) return x end,41,1); "
                         "probe(function(x) return x+1 end,42,2); "
@@ -210,6 +187,8 @@ static void native_values(lua_State *state) {
                         "hooks=hooks+1 end end,'c'); "
                         "probe(payload,43,0); assert(payload(41,1)==43); "
                         "debug.sethook(); assert(hooks==4); "
+                        "local ok,err=pcall(probe,payload,0,0,{}); "
+                        "assert(not ok and err:find('arithmetic')); "
                         "probe(function() return 42 end,42,2); "
                         "probe(function() return 42.0 end,42.0,2); "
                         "probe(function() return 'literal' end,'literal',2); "
@@ -217,6 +196,34 @@ static void native_values(lua_State *state) {
                         "probe(function() return false end,false,2); "
                         "probe(function() return nil end,nil,2); "
                         "probe(function() end,nil,1)") == LUA_OK);
+  require(state->native_depth == 0);
+}
+
+static void native_values(lua_State *state) {
+  unsigned requests = 0;
+  LuaExecution execution = {
+      .context = &requests, .managed_enter = request_slot, .native_depth = 1};
+  NativeStackContext context = {.execution = &execution,
+                                .limit = luaE_initnativestack()};
+  NativeStackContext *previous;
+  const char *string;
+  size_t length;
+  lua_gc(state, LUA_GCSTOP);
+  lua_pushliteral(state, "rooted across a native entry");
+  previous = luaE_setnativestackcontext(&context);
+  check_api(state, 0);
+  lua_pushvalue(state, 1);
+  string = lua_tolstring(state, -1, &length);
+  require(length == strlen("rooted across a native entry") &&
+          strcmp(string, "rooted across a native entry") == 0);
+  lua_pop(state, 1);
+  require(requests == 0);
+  require(lua_type(state, LUA_REGISTRYINDEX) == LUA_TTABLE && requests == 1);
+  lua_pushinteger(state, 1234);
+  require(strcmp(lua_tostring(state, -1), "1234") == 0 && requests == 2);
+  lua_pop(state, 1);
+  require(requests == 2 && execution.managed_depth == 0);
+  scalar_values(state);
   require(execution.managed_depth == 0);
   require(luaE_setnativestackcontext(previous) == &context);
   lua_gc(state, LUA_GCCOLLECT);
@@ -364,8 +371,10 @@ int main(int argc, char **argv) {
   } else
     require(luaL_dostring(state, source) == LUA_OK);
   require(checks != 0 && state->native_depth == 0);
-  if (is_foreign)
+  if (is_foreign) {
+    scalar_values(state);
     native_values(state);
+  }
   require(luaE_getnativestackcontext()->api_region == NULL);
   lua_close(state);
   return 0;
