@@ -47,7 +47,8 @@ struct LuaScheduledTask {
   unsigned dispatches, handoffs, migrations, parks, early_wakes;
   int native_used;  /* an outer native call returned since the last Lua poll */
   int nargs, reason, complete, notified, published;
-  int native, native_pending, native_notified, external;  /* permit and routing */
+  int native;  /* atomic permit grant, held through both active use and reuse */
+  int native_pending, native_notified, external;
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
 };
 

@@ -23,7 +23,6 @@ static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
 static void dropcachednative (LuaScheduledTask *task, int handoff);
 
-enum { NATIVE_ACTIVE = 1, NATIVE_CACHED = 2 };
 enum { NATIVE_SLOT_TAG = 1 };
 _Static_assert(_Alignof(LuaScheduledTask) > NATIVE_SLOT_TAG &&
                _Alignof(LuaCarrier) > NATIVE_SLOT_TAG &&
@@ -418,7 +417,7 @@ static LuaWaiter *selectnative (LuaScheduler *s, int transfer) {
   lua_assert(!__atomic_load_n(&task->native, __ATOMIC_RELAXED) &&
              !task->native_notified);
   if (transfer)
-    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
+    __atomic_store_n(&task->native, 1, __ATOMIC_RELAXED);
   else {
     if (__atomic_load_n(&s->native, __ATOMIC_SEQ_CST) / NATIVE_PERMIT +
         __atomic_load_n(&s->native_notices, __ATOMIC_SEQ_CST) >=
@@ -441,7 +440,7 @@ static int awaitnative (lua_State *L, LuaScheduledTask *task) {
   while (!__atomic_load_n(&task->native, __ATOMIC_RELAXED) && !stopped) {
     __atomic_fetch_or(&s->native, NATIVE_WAITING, __ATOMIC_SEQ_CST);
     if (trynative(s)) {
-      __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
+      __atomic_store_n(&task->native, 1, __ATOMIC_RELAXED);
       break;
     }
     stopped = luaQ_waitstopfifo(L, &s->native_mutex, &s->native_waiters);
@@ -482,7 +481,7 @@ static void __attribute__((noinline)) enternewnative (LuaExecution *execution,
     if (managed) luaW_attach(L, depth);
   }
   if (trynative(s))
-    __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
+    __atomic_store_n(&task->native, 1, __ATOMIC_RELAXED);
   else {
     if (managed) {
       depth = luaW_detach(L);  /* no foreign activation exists yet */
@@ -496,22 +495,19 @@ static void __attribute__((noinline)) enternewnative (LuaExecution *execution,
     }
   }
   if (!pincarrier(execution)) abort();
-  task->native_pending = 0;
+  /* Admission still owns this grant if reattachment parks for GC. */
   if (detached) luaW_attach(L, depth);
+  task->native_pending = 0;
   if (!managed) releaseslot(task); /* trusted hook/adapter now enters opaque C */
 }
 
 static void nativeenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   if (execution->native_depth != 0) return;
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_CACHED) {
+  lua_assert(!task->native_pending);
+  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == 0)
     enternewnative(execution, L);
-    return;
-  }
-  /* A cached permit still owns this carrier. Only a fresh admission needs
-  ** routing, an admission wait or a saved stack scope. */
-  __atomic_store_n(&task->native, NATIVE_ACTIVE, __ATOMIC_RELAXED);
-  if (execution->managed_depth == 0) releaseslot(task);
+  else if (execution->managed_depth == 0) releaseslot(task);
 }
 
 static void returnnative (LuaScheduledTask *task, int handoff) {
@@ -542,11 +538,16 @@ static void returnnative (LuaScheduledTask *task, int handoff) {
   if (waiter != NULL) luaQ_wakewaiter(waiter);
 }
 
+/* A grant belongs to admission until it finishes, including a grant by
+** another execution while the waiter's context is still being saved. */
+l_sinline int cachednative (const LuaScheduledTask *task) {
+  return __atomic_load_n(&task->native, __ATOMIC_RELAXED) != 0 &&
+    task->fiber.execution.native_depth == 0 && !task->native_pending;
+}
+
 /* A cached permit cannot follow a task into a park. */
 static void dropcachednative (LuaScheduledTask *task, int handoff) {
-  /* A waiter is still parking when another execution can grant its permit.
-  ** Only its own execution can cache one or return a cached one. */
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == NATIVE_CACHED) {
+  if (cachednative(task)) {
     task->native_deadline = 0;
     task->native_used = 0;
     returnnative(task, handoff);
@@ -558,19 +559,21 @@ static void dropcachednative (LuaScheduledTask *task, int handoff) {
 static void nativeleave (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   UNUSED(L);
-  if (execution->native_depth != 0 ||
-      __atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_ACTIVE) return;
-  /* Consecutive calls reuse the permit and routing until a poll or park. */
-  task->native_used = 1;
-  __atomic_store_n(&task->native, NATIVE_CACHED, __ATOMIC_RELAXED);
+  if (execution->native_depth == 0) {
+    lua_assert(!task->native_pending &&
+               __atomic_load_n(&task->native, __ATOMIC_RELAXED) != 0);
+    task->native_used = 1;
+  }
 }
 
 static void nativerestore (LuaExecution *execution, lua_State *L, unsigned old) {
   LuaScheduledTask *task = execution->context;
+  UNUSED(L);
   UNUSED(old);
-  if (execution->native_depth == 0) task->native_pending = 0;
-  nativeleave(execution, L);
-  if (execution->native_depth == 0) dropcachednative(task, 1);
+  if (execution->native_depth == 0) {
+    task->native_pending = 0;
+    dropcachednative(task, 1);
+  }
 }
 
 static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
@@ -664,8 +667,7 @@ static uint64_t monotonicns (void) {
 ** its own, so it releases the cached permit immediately. */
 static void pollnative (LuaScheduledTask *task, lua_State *L) {
   LuaScheduler *s = task->scheduler;
-  if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) != NATIVE_CACHED)
-    return;
+  if (!cachednative(task)) return;
   if (task->native_used && isLua(L->ci)) {
     task->native_used = 0;
     if (__atomic_load_n(&s->native, __ATOMIC_ACQUIRE) & NATIVE_WAITING) {

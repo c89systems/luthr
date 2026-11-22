@@ -32,6 +32,7 @@ struct fixture {
   unsigned started, seen[TASKS];
   unsigned waiting, native_entered, native_release;
   unsigned admission_pause, admission_paused, admission_release;
+  unsigned hold_grant_attach, grant_attach_seen, grant_attach_release;
   int admission_fifo, cancel_grant;
   unsigned pause_hold, pause_seen, pause_release;
   unsigned finalized;
@@ -54,6 +55,24 @@ static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
 static pthread_t idle_host;
+
+void __real_luaW_attach(lua_State *, LuaWorldScope);
+void __wrap_luaW_attach(lua_State *L, LuaWorldScope scope) {
+  struct fixture *f = fixture;
+  if (f != NULL && f->hold_grant_attach) {
+    LuaExecution *execution = luaQ_current();
+    if (execution == &f->tasks[1].fiber.execution &&
+        __atomic_load_n(&f->tasks[1].native, __ATOMIC_RELAXED) != 0) {
+      require(pthread_mutex_lock(&f->mutex) == 0);
+      f->grant_attach_seen = 1;
+      require(pthread_cond_broadcast(&f->changed) == 0);
+      while (!f->grant_attach_release)
+        require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+      require(pthread_mutex_unlock(&f->mutex) == 0);
+    }
+  }
+  __real_luaW_attach(L, scope);
+}
 
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
@@ -916,6 +935,50 @@ static int release_native_permit(lua_State *L) {
   return 0;
 }
 
+static void native_grant_stopped_world(struct fixture *f) {
+  LuaScheduler *s = &f->scheduler;
+  f->hold_grant_attach = 1;
+  initlimits(f, 2, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_pushcfunction(f->main, block_binding);
+  lua_setglobal(f->main, "block_binding");
+  managed(f->main, "release_native_permit", release_native_permit);
+  submit(f, 0, "local n=block_binding(); release_native_permit(); return n", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "return block_binding()", 0);
+  wait_for_permit(f, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->grant_attach_seen)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 500500);
+
+  /* Stop the world after admission grants the permit, before the binding
+   * starts. The entrant must keep its grant while attachment parks. */
+  lua_lock(f->main);
+  luaW_stop(f->main);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->grant_attach_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(pthread_mutex_lock(&s->mutex) == 0);
+  while (!f->tasks[1].published)
+    require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
+  require(luaSC_nativeactive(s) == 1);
+  require(pthread_mutex_unlock(&s->mutex) == 0);
+  luaW_start(f->main);
+  lua_unlock(f->main);
+
+  require(collect(f, 1, LUA_OK) == 500500);
+  require(f->native_entered == 2 && luaSC_nativeactive(s) == 0);
+  finish(f);
+}
+
 static void native_fifo(struct fixture *f, int mode) {
   LuaScheduler *s = &f->scheduler;
   int cancel_grant = mode == CANCEL_GRANT;
@@ -1426,6 +1489,8 @@ int main(int argc, char **argv) {
     native_saturation(f, 1, 0);
   else if (strcmp(argv[1], "early_native_return") == 0)
     native_saturation(f, 0, 1);
+  else if (strcmp(argv[1], "native_grant_stopped_world") == 0)
+    native_grant_stopped_world(f);
   else if (strcmp(argv[1], "native_fifo") == 0)
     native_fifo(f, FIFO_ADMISSION);
   else if (strcmp(argv[1], "cancel_granted_native") == 0)
