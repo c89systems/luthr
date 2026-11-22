@@ -624,8 +624,9 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
   else {
     size_t newasizeb = concretesize(newasize);
     unsigned tomove = oldasize < newasize ? oldasize : newasize;
-    Value *np = cast(Value *,
-                  luaM_realloc_(L, NULL, 0, newasizeb));
+    Value *np;
+    if (L->task_tables != NULL) luaC_taskbacking(L, t, newasizeb);
+    np = cast(Value *, luaM_realloc_(L, NULL, 0, newasizeb));
     if (np == NULL)  /* allocation error? */
       return NULL;
     np += newasize;  /* shift pointer to the end of value segment */
@@ -790,6 +791,8 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     luaG_runerror(L, "table overflow");
   if (lsize > MAXHBITS || (lsize >= 0 && (1u << lsize) > MAXHSIZE))
     luaG_runerror(L, "table overflow");
+  if (L->task_tables != NULL && lsize >= 0)
+    luaC_taskbacking(L, t, nodebytes(lsize));
   /* create new hash part with appropriate size into 'newt' */
   newt.flags = 0;
   newt.inline_bytes = 0;

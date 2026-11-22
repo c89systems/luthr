@@ -907,9 +907,7 @@ static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
     cl->managed = cast_byte(managed);
     for (i = 0; i < n; i++) {
       luaA_store(L, &cl->upvalue[i], s2v(L->top.p - n + i));
-      if (ttistable(&cl->upvalue[i]))
-        luaC_nurseryedge(L, obj2gco(cl), gcvalue(&cl->upvalue[i]));
-      luaC_tracevalue(L, &cl->upvalue[i]);
+      luaC_barrier(L, cl, &cl->upvalue[i]);
     }
     L->top.p -= n;
     setclCvalue(L, s2v(L->top.p), cl);

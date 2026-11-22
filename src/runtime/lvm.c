@@ -1490,6 +1490,8 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
   L->top.p = ci->func.p + 2 + GETARG_A(i);
   table = luaH_new(L, array, hash);
   sethvalue2s(L, L->top.p - 1, table);
+  if (L->task_tables != NULL && L->task_table_bytes >= L->task_table_limit)
+    luaC_taskstep(L);
   luaC_condGC(L, (void)0, (void)0);
   luaX_pollrequests(L);
 }

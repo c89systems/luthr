@@ -14,6 +14,8 @@ static void enqueue (lua_State *L, GCObject *object, GCObject **pending) {
   owner = __atomic_load_n(state, __ATOMIC_ACQUIRE);
   if (owner & LUA_OBJECT_SHARED) return;
   lua_assert(owner == cast(uintptr_t, L));
+  if (object->tt == LUA_VTABLE && luaC_tasktable(gco2t(object)))
+    luaC_sealtask(L);
   /* The queue is a temporary root even for a graph reached through weak edges.
   ** Table ownership resolves the current weak cutoff before enqueueing them. */
   luaC_tracepointer(L, object);

@@ -269,6 +269,7 @@ void luaF_joincaptures (lua_State *L, LClosure *to, int target,
 UpVal *luaF_findupval (lua_State *L, StkId level) {
   UpVal **pp;
   UpVal *p;
+  if (L->task_tables != NULL) luaC_sealtask(L);
   lua_assert(isLua(L->ci) && level > L->ci->func.p && level < L->ci->top.p);
   pp = &L->openupval;
   while ((p = *pp) != NULL && uplevel(p) >= level) {  /* search for it */

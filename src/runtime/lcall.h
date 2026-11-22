@@ -8,8 +8,11 @@
 /* Admission can park. In particular, reserve foreign execution capacity
 ** before building a frame or reading arguments that can move with the stack. */
 l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
-  NativeStackContext *context = luaX_context(L);
-  LuaExecution *execution = context->execution;
+  NativeStackContext *context;
+  LuaExecution *execution;
+  if (l_unlikely(L->task_tables != NULL)) luaC_sealtask(L);
+  context = luaX_context(L);
+  execution = context->execution;
   scope->context = context;
   scope->managed = managed;
   if (execution != NULL) {

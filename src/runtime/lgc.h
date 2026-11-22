@@ -245,7 +245,20 @@ static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
   return !(state & LUA_MARK_ACTIVE) &&
          luaC_unmarked(state, __atomic_load_n(marked, __ATOMIC_RELAXED));
 }
-#define isdead(g,o) luaC_deadmark((g), &(o)->marked)
+
+enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_TASK = 8,
+       NURSERY_STEP = 16 };
+
+l_sinline int luaC_tasktable (const Table *table) {
+  return (__atomic_load_n(&table->gcstate, __ATOMIC_ACQUIRE) &
+          (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);
+}
+
+l_sinline int luaC_objectdead (global_State *g, const GCObject *object) {
+  return luaC_deadmark(g, &object->marked) &&
+         (object->tt != LUA_VTABLE || !luaC_tasktable(gco2t(object)));
+}
+#define isdead(g,o) luaC_objectdead((g), cast(const GCObject *, (o)))
 
 static inline lu_byte luaC_stamp (unsigned state, lu_byte marked) {
   unsigned bits = state & LUA_MARK_YOUNG ? bitmask(MINORBIT)
@@ -389,7 +402,6 @@ static inline void luaC_revive (global_State *g, GCObject *o) {
 /* more often than not, 'pre'/'pos' are empty */
 #define luaC_checkGC(L)		luaC_condGC(L,(void)0,(void)0)
 
-enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_STEP = 8 };
 enum {
   LUA_WEAK_MODE_SHIFT = 1,
   LUA_WEAK_CLEARED_SHIFT = 3,
@@ -399,6 +411,15 @@ enum {
 
 #define luaC_tablestate(t) __atomic_load_n(&(t)->gcstate, __ATOMIC_ACQUIRE)
 #define luaC_settablestate(t,v) __atomic_store_n(&(t)->gcstate, (v), __ATOMIC_RELEASE)
+
+LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);
+LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
+LUAI_FUNC void luaC_sealtask (lua_State *L);
+LUAI_FUNC void luaC_sealtasks (lua_State *L);
+LUAI_FUNC void luaC_endtask (lua_State *L);
+LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
+LUAI_FUNC void luaC_taskstep (lua_State *L);
+LUAI_FUNC void luaC_collectnursery (lua_State *L);
 
 l_sinline int luaC_weakvalid (global_State *g, uint64_t state) {
   return (state & (~cast(uint64_t, LUA_WEAK_STAMP_STEP - 1) | NURSERY_TAG)) ==
@@ -434,6 +455,7 @@ l_sinline void luaC_nurseryedge (lua_State *L, GCObject *owner, GCObject *value)
 static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
+  if (L->task_tables != NULL && luaC_taskedge(L, owner, value)) return 0;
   /* The shared trace publishes all newborns before local work can resume. */
   if (luaC_tracingglobal(G(L))) return 1;
   luaC_nurseryedge(L, owner, value);

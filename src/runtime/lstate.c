@@ -395,6 +395,10 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->new_tables = NULL;
   L->nursery_epoch = NURSERY_TAG;
   L->nursery_tables = 0;
+  L->task_tables = NULL;
+  L->task_table_bytes = L->task_table_limit = 0;
+  L->task_string_count = 0;
+  L->task_nursery_closed = 0;
   L->allocation_debt = 0;
   L->reclaim_credit = 0;
   L->publish_next = NULL;

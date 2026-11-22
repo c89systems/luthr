@@ -275,6 +275,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     GCObject *other = mt ? obj2gco(mt) : owner;
     int pair = owner != other;
     int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
+    if (ttistable(object) && luaC_tasktable(hvalue(object))) luaC_sealtask(L);
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
     if (mt != NULL) luaA_publish(L, owner, &rooted_mt.value);

@@ -297,6 +297,8 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
     uint64_t epoch = g->sweep_plan.epoch;
     uintptr_t flags = LUA_BLOCK_TABLE;
     lua_assert(page != NULL && offset == 0);
+    if (!collector && L->task_owner != NULL && luaC_taskallocate(L, o, sz))
+      return o;
     if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
     gco2t(o)->gcstate = collector ? 0 : L->nursery_epoch;
     if (!collector) {
@@ -355,6 +357,7 @@ static int claimmark (global_State *g, GCObject *o) {
   unsigned state = luaC_markstate(g);
   lu_byte marked = getmarked(o);
   lu_byte claimed;
+  if (o->tt == LUA_VTABLE && luaC_tasktable(gco2t(o))) return 0;
   do {
     if (!luaC_unmarked(state, marked)) return 0;
     claimed = cast_byte(luaC_stamp(state, marked) | bitmask(QUEUEDBIT));
@@ -2211,6 +2214,7 @@ static void retire_table_pages (lua_State *L) {
 */
 void luaC_freeallobjects (lua_State *L) {
   global_State *g = G(L);
+  luaC_sealtasks(L);
   g->gcstp = GCSTPCLS;  /* no extra finalizers after here */
   if (luaC_tracing(L)) {
     lu_byte emergency = g->gcemergency;
@@ -2647,107 +2651,6 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int concurrent) 
 #define luai_tracegc(L,f)		((void)0)
 #endif
 
-static void marknursery (lua_State *L, GCObject *object, GCObject **gray) {
-  Table *t = gco2t(object);
-  if (luaC_nurserytable(L, t) && !(luaC_tablestate(t) & NURSERY_LIVE)) {
-    luaC_settablestate(t, luaC_tablestate(t) | NURSERY_LIVE);
-    t->gclist = *gray;
-    *gray = object;
-  }
-}
-
-/* The admitted stack owns these nursery links. Quiescence detaches them
-** before the shared collector can reuse a table's allocation prefix. */
-static void collectnursery (lua_State *L) {
-  enum { NURSERY_MIN_TABLES = 32, NURSERY_SCAN_LIMIT = 16384,
-         NURSERY_SCANS_PER_CYCLE = 16 };
-  global_State *g = G(L);
-  GCObject *gray = NULL, *dead = NULL, *o, **link;
-  StkId slot;
-  size_t remaining, slots, unpinned = 0;
-  if (L->nursery_tables < NURSERY_MIN_TABLES ||
-      L->openupval != NULL || L->native_roots != NULL ||
-      L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
-      g->tobefnz != NULL || luaW_stopped(&g->world) ||
-      g->gcparams[LUA_GCPSTEPSIZE] == 0 || g->gcparams[LUA_GCPSTEPMUL] == 0 ||
-      __atomic_load_n(&g->pacer.nursery_scans, __ATOMIC_RELAXED) >=
-        NURSERY_SCANS_PER_CYCLE)
-    return;
-  /* Bound both directory walks, the stack cleanup, and every possible edge
-  ** visit before changing any local mark state. Large cohorts use shared GC. */
-  slots = cast_sizet(L->stack_last.p - L->stack.p) + EXTRA_STACK;
-  if (slots >= NURSERY_SCAN_LIMIT) return;
-  remaining = NURSERY_SCAN_LIMIT - slots;
-  for (o = L->new_tables; o != NULL; o = luaC_allocnext(o)) {
-    if (--remaining == 0) return;
-    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
-      Table *t = gco2t(o);
-      unsigned nodes = allocsizenode(t);
-      if (t->asize >= remaining || nodes >= remaining - t->asize) return;
-      remaining -= t->asize + nodes;
-      unpinned += (luaC_tablestate(t) & NURSERY_ROOT) == 0;
-    }
-  }
-  if (unpinned < NURSERY_MIN_TABLES) return;
-  /* Even if private churn repays its own debt, automatic shared tracing
-  ** must still discover dead public objects, weak edges and finalizers. */
-  if (__atomic_fetch_add(&g->pacer.nursery_scans, 1, __ATOMIC_RELAXED) >=
-        NURSERY_SCANS_PER_CYCLE)
-    return;
-  for (slot = L->stack.p; slot < L->top.p; slot++)
-    if (ttistable(s2v(slot))) marknursery(L, gcvalue(s2v(slot)), &gray);
-  for (o = L->new_tables; o != NULL; o = luaC_allocnext(o))
-    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
-        (luaC_tablestate(gco2t(o)) & NURSERY_ROOT))
-      marknursery(L, o, &gray);
-  while (gray != NULL) {
-    Table *t = gco2t(gray);
-    unsigned i;
-    gray = t->gclist;
-    if (t->metatable != NULL) marknursery(L, obj2gco(t->metatable), &gray);
-    for (i = 0; i < t->asize; i++)
-      if (*getArrTag(t, i) == ctb(LUA_VTABLE))
-        marknursery(L, getArrVal(t, i)->gc, &gray);
-    for (i = 0; i < allocsizenode(t); i++) {
-      Node *node = gnode(t, i);
-      if (isempty(gval(node))) continue;
-      if (keytt(node) == ctb(LUA_VTABLE)) marknursery(L, gckey(node), &gray);
-      if (ttistable(gval(node))) marknursery(L, gcvalue(gval(node)), &gray);
-    }
-  }
-  link = &L->new_tables;
-  while ((o = *link) != NULL) {
-    if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
-      Table *t = gco2t(o);
-      if (!(luaC_tablestate(t) & NURSERY_LIVE)) {
-        LuaAllocBlock *block = cast(LuaAllocBlock *, t) - 1;
-        *link = luaC_allocnext(o);
-        /* Freeing an external part can release admission. Detach the slot
-        ** from the shared sweep directory before any such free. */
-        __atomic_store_n(&block->block.page, cast(uintptr_t, luaMP_page(block)),
-                         __ATOMIC_RELAXED);
-        o->next = dead;
-        dead = o;
-        L->nursery_tables--;
-        continue;
-      }
-      luaC_settablestate(t, luaC_tablestate(t) & ~cast(uint64_t, NURSERY_LIVE));
-    }
-    link = luaC_alloclink(o);
-  }
-  if (dead == NULL) return;
-  /* Obsolete registers must not expose dangling pointers when a later
-  ** safepoint widens top. Detach all dead objects before a backing free waits. */
-  for (slot = L->top.p; slot < L->stack_last.p + EXTRA_STACK; slot++)
-    setnilvalue2s(slot);
-  do {
-    o = dead;
-    dead = o->next;
-    luaH_free(L, gco2t(o));
-  } while (dead != NULL);
-  luaM_flushdebt(L);
-}
-
 /* Ordinary bounded traces use the barrier handshake. The first major after a
 ** young trace closes admission so outstanding remembered publications give
 ** up their intrusive links before rotating the major mark stamp. */
@@ -2874,7 +2777,7 @@ void luaC_step (lua_State *L) {
   if ((!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
   if (automatic) {
-    collectnursery(L);
+    luaC_collectnursery(L);
     if (!gcrunning(g) || luaC_tracing(L) || luaC_sweeping(L) ||
         (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
   }
@@ -3085,6 +2988,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
   int kind;
   uint64_t interrupted;
   luaW_stop(L);
+  luaC_sealtasks(L);
   luaC_entergc(L, &frame);
   lua_assert(!g->gcemergency);
   interrupted = g->trace_interrupt;

@@ -401,6 +401,12 @@ struct lua_State {
   struct lua_State **publish_previous;  /* atomic membership, shard owns links */
   LuaStringCache *strcache;  /* weak API string cache, allocated on first use */
   LuaAllocationCache allocation;
+  GCObject *task_tables;  /* task stack gate owns the cohort and its roots */
+  TString *task_string_roots[32];
+  size_t task_table_bytes;
+  size_t task_table_limit;
+  unsigned task_string_count;
+  int task_nursery_closed;
 };
 
 

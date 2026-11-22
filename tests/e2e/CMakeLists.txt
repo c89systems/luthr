@@ -119,6 +119,14 @@ foreach(runtime IN ITEMS upstream luthr embedded)
   endforeach()
 endforeach()
 
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME lua_scheduled_nursery_cap_${collector}
+    COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+      independent_tables "${collector}" 8 0 32 18000 2 1 0)
+  set_tests_properties(lua_scheduled_nursery_cap_${collector}
+    PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 90)
+endforeach()
+
 set(scheduled_arguments
   "-Dupstream=$<TARGET_FILE:scheduled_upstream>" "-Dluthr=$<TARGET_FILE:scheduled_luthr>"
   "-Dembedded=$<TARGET_FILE:scheduled_embedded>"

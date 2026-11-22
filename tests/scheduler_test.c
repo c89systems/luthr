@@ -4,6 +4,7 @@
 #include <lauxlib.h>
 #include <lscheduler.h>
 #include <lualib.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +36,7 @@ struct fixture {
   unsigned hold_grant_attach, grant_attach_seen, grant_attach_release;
   int admission_fifo, cancel_grant;
   unsigned pause_hold, pause_seen, pause_release;
-  unsigned finalized;
+  unsigned finalized, nursery_finished;
   unsigned native_callback_done;
   unsigned idle_entries, host_channel_entries;
   lua_State *metadata_peer;
@@ -55,6 +56,16 @@ static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
 static pthread_t idle_host;
+
+void __real_luaC_endtask(lua_State *);
+void __wrap_luaC_endtask(lua_State *L) {
+  struct fixture *f = fixture;
+  if (f != NULL && f->tasks[0].root.thread == L) {
+    require(L->task_tables != NULL);
+    f->nursery_finished++;
+  }
+  __real_luaC_endtask(L);
+}
 
 void __real_luaW_attach(lua_State *, LuaWorldScope);
 void __wrap_luaW_attach(lua_State *L, LuaWorldScope scope) {
@@ -1721,6 +1732,98 @@ static void startup_failures(struct fixture *f) {
   require(f->live == 0);
 }
 
+static void nursery_wait(lua_State *L, const char *name) {
+  for (;;) {
+    int ready;
+    lua_getglobal(L, name);
+    ready = lua_toboolean(L, -1);
+    lua_pop(L, 1);
+    if (ready)
+      return;
+    sched_yield();
+  }
+}
+
+static int nursery_native(lua_State *L) {
+  lua_pushvalue(L, 1);
+  lua_setglobal(L, "nursery_native_root");
+  return lua_getfield(L, 1, "answer") == LUA_TNUMBER;
+}
+
+static void nursery(struct fixture *f, int generational) {
+  int status, results;
+  init(f, 2);
+  luaL_openlibs(f->main);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  submit(f, 0,
+         "local n=...; local name='nursery field '..n; "
+         "local root={[name]=42}; root.self=root; name=nil; "
+         "for i=1,50000 do local row={i,i+1,kind='row'}; "
+         "assert(row[2]==i+1) end; "
+         "nursery_ready=true; while not nursery_release do end; "
+         "return root.self['nursery field '..n]",
+         17);
+  nursery_wait(f->main, "nursery_ready");
+  for (unsigned i = 0; i < 4; i++)
+    lua_gc(f->main, LUA_GCSTEP, (size_t)0);
+  lua_pushboolean(f->main, 1);
+  lua_setglobal(f->main, "nursery_release");
+  require(collect(f, 0, LUA_OK) == 42 && f->nursery_finished == 1);
+
+  submit(f, 1,
+         "local result={}; result.self=result; "
+         "result.child={answer=42}; return result",
+         0);
+  luaSC_wait(&f->tasks[1]);
+  require(luaSC_collect(f->main, &f->tasks[1], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_getfield(f->main, -1, "self") == LUA_TTABLE);
+  require(lua_rawequal(f->main, -1, -2));
+  require(lua_getfield(f->main, -1, "child") == LUA_TTABLE);
+  require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 4);
+
+  submit(f, 2,
+         "local root={child={answer=42}}; nursery_export=root; "
+         "nursery_second_ready=true; while not nursery_second_release do end; "
+         "return root.child.answer",
+         0);
+  nursery_wait(f->main, "nursery_second_ready");
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_getglobal(f->main, "nursery_export") == LUA_TTABLE);
+  require(lua_getfield(f->main, -1, "child") == LUA_TTABLE);
+  require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 3);
+  lua_pushboolean(f->main, 1);
+  lua_setglobal(f->main, "nursery_second_release");
+  require(collect(f, 2, LUA_OK) == 42);
+
+  submit(f, 3,
+         "local root={answer=42}; "
+         "nursery_third_ready=true; while not nursery_third_release do end; "
+         "return root.answer",
+         0);
+  nursery_wait(f->main, "nursery_third_ready");
+  lua_gc(f->main, LUA_GCCOLLECT);
+  lua_pushboolean(f->main, 1);
+  lua_setglobal(f->main, "nursery_third_release");
+  require(collect(f, 3, LUA_OK) == 42);
+
+  lua_pushcfunction(f->main, nursery_native);
+  lua_setglobal(f->main, "nursery_native");
+  submit(f, 4, "local root={answer=42}; return nursery_native(root)", 0);
+  require(collect(f, 4, LUA_OK) == 42);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_getglobal(f->main, "nursery_native_root") == LUA_TTABLE);
+  require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 2);
+  finish(f);
+}
+
 int main(int argc, char **argv) {
   struct fixture *f = calloc(1, sizeof(*f));
   require(f != NULL && argc == 2);
@@ -1810,6 +1913,10 @@ int main(int argc, char **argv) {
     parked_wait(f, 0);
   else if (strcmp(argv[1], "cancel_parked") == 0)
     parked_wait(f, 1);
+  else if (strcmp(argv[1], "nursery_incremental") == 0)
+    nursery(f, 0);
+  else if (strcmp(argv[1], "nursery_generational") == 0)
+    nursery(f, 1);
   else
     abort();
   require(live_stacks == 0);
