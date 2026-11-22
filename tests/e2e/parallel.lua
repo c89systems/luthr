@@ -69,7 +69,7 @@ local workloads={
     return sum
   end,
 }
-if kind=='native_callbacks' or kind=='native_direct' then
+if kind=='native_callbacks' or kind=='native_direct' or kind=='native_leaf' then
   local native=require('compat_fixture')
   local function add(value) return value+1 end
   workloads[kind]=function()

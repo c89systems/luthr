@@ -211,8 +211,10 @@ set(closures_iterations 50000)
 set(allocation_gc_iterations 5000)
 set(native_callbacks_iterations 18000)
 set(native_direct_iterations 18000)
+set(native_leaf_iterations 18000)
+set(native_workloads native_callbacks native_direct native_leaf)
 foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
-    shared_growth shared_reads closures allocation_gc native_callbacks native_direct)
+    shared_growth shared_reads closures allocation_gc ${native_workloads})
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")
   if(iterations LESS 1)
     set(iterations 1)
@@ -224,7 +226,7 @@ foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
       set(reference_wall "${median_wall_ns}")
       file(APPEND "${output_dir}/summary.csv"
         "upstream,${workload},${collector},1,0,${tasks},${iterations},${delay},${samples},${medians},${reference_wall},1.000,1.000\n")
-      if(workload STREQUAL "native_callbacks" OR workload STREQUAL "native_direct")
+      if(workload IN_LIST native_workloads)
         scheduled_measure(embedded 1 0 "${delay}")
         benchmark_ratio("${median_wall_ns}" "${reference_wall}" ratio)
         file(APPEND "${output_dir}/summary.csv"

@@ -101,6 +101,11 @@ static int direct_callback(lua_State *L) {
   return 1;
 }
 
+static int leaf_callback(lua_State *L) {
+  (void)L;
+  return 1; /* return the last argument without accessing the Lua API */
+}
+
 static int pause_native(lua_State *L) {
   struct timespec remaining = {delay_us / 1000000, (delay_us % 1000000) * 1000};
   (void)L;
@@ -203,10 +208,11 @@ int main(int argc, char **argv) {
   require(L != NULL);
   luaL_openlibs(L);
   int direct = strcmp(argv[2], "native_direct") == 0;
-  if (direct || strcmp(argv[2], "native_callbacks") == 0) {
+  int leaf = strcmp(argv[2], "native_leaf") == 0;
+  if (direct || leaf || strcmp(argv[2], "native_callbacks") == 0) {
     luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
-    if (direct) {
-      lua_pushcfunction(L, direct_callback);
+    if (direct || leaf) {
+      lua_pushcfunction(L, direct ? direct_callback : leaf_callback);
       lua_setfield(L, -2, "callback");
     }
     lua_pop(L, 1);
