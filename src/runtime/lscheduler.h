@@ -101,6 +101,8 @@ struct LuaScheduler {
 ** their physical stack; queued tasks never own a carrier. */
 LUAI_FUNC int luaSC_init (lua_State *, LuaScheduler *, const LuaSchedulerConfig *);
 LUAI_FUNC unsigned luaSC_nativeactive (const LuaScheduler *);
+/* Reuse held capacity or reclaim the task's previous slot without waiting. */
+LUAI_FUNC int luaSC_trymanaged (LuaExecution *);
 LUAI_FUNC int luaSC_submit (LuaScheduler *, LuaScheduledTask *, lua_State *, int);
 /* Completion is acknowledged only after the final outgoing context is saved.
 ** Waiting doesn't join an opaque native activation or discard its outcome. */

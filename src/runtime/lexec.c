@@ -5,6 +5,7 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lexec.h"
+#include "lscheduler.h"
 #include "lstate.h"
 #include "ltask.h"
 #include <stdlib.h>
@@ -68,6 +69,15 @@ void luaQ_entermanaged (lua_State *L, LuaExecution *execution) {
     checkcarrier(execution);
     execution->managed_depth++;
   }
+}
+
+int luaQ_tryentermanaged (LuaExecution *execution) {
+  checkcarrier(execution);
+  if (execution->managed_depth == 0 && execution->managed_enter != NULL &&
+      (execution->scheduler == NULL || !luaSC_trymanaged(execution)))
+    return 0;
+  execution->managed_depth++;
+  return 1;
 }
 
 void luaQ_leavemanaged (LuaExecution *execution) {

@@ -1413,9 +1413,8 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
 LUA_API void lua_callk (lua_State *L, int nargs, int nresults,
                         lua_KContext ctx, lua_KFunction k) {
   StkId func;
-  NativeStackContext *activation;
   uintptr_t owner = 0;
-  if (k == NULL) owner = luaX_callenter(L, &activation);
+  if (k == NULL) owner = luaX_callenter(L);
   else lua_lock(L);
  retry:
   api_check(L, k == NULL || !isLua(L->ci),
@@ -1424,17 +1423,21 @@ LUA_API void lua_callk (lua_State *L, int nargs, int nresults,
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
   checkresults(L, nargs, nresults);
   func = L->top.p - (nargs+1);
-  if ((owner & LUA_VALUE_STACK) && ttisLclosure(s2v(func)) &&
-      luaD_tryluacall(L, func, nargs, nresults, activation)) {
-    adjustresults(L, nresults);
-    luaX_valueleave(L, owner);
-    return;
-  }
   if (owner != 0) {
-    luaX_valueleave(L, owner);
-    lua_lock(L);
-    owner = 0;
-    goto retry;
+    NativeStackContext *activation = luaX_gateowner(owner);
+    if (ttisLclosure(s2v(func)) &&
+        luaD_tryluacall(L, func, nargs, nresults, activation)) {
+      adjustresults(L, nresults);
+      luaX_callleave(L, owner);
+      return;
+    }
+    if (!luaX_callpromote(L, activation)) {
+      luaX_callleave(L, owner);
+      lua_lock(L);
+      owner = 0;
+      goto retry;
+    }
+    func = L->top.p - (nargs+1);  /* entry may move the stack */
   }
   if (k != NULL && yieldable(L)) {  /* need to prepare continuation? */
     L->ci->u.c.k = k;  /* save continuation */

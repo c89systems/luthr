@@ -144,6 +144,7 @@ LUAI_FUNC int luaQ_unpincarrier (LuaCarrierPin *pin);
 ** Ordinary native functions remain foreign by default. */
 LUAI_FUNC void luaQ_pushmanaged (lua_State *L, lua_CFunction function, int n);
 LUAI_FUNC void luaQ_entermanaged (lua_State *L, LuaExecution *execution);
+LUAI_FUNC int luaQ_tryentermanaged (LuaExecution *execution);
 LUAI_FUNC void luaQ_leavemanaged (LuaExecution *execution);
 /* Native admission can precede stack ownership. The caller supplies either
 ** its bound execution or the ambient driver; L may be NULL at that boundary. */

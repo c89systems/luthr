@@ -1272,6 +1272,65 @@ static void callback_progress(struct fixture *f, int timed) {
   finish(f);
 }
 
+static int invoke_callback(lua_State *L) {
+  struct fixture *f = fixture;
+  int wait = lua_toboolean(L, 2);
+  lua_settop(L, 1);
+  if (wait) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    f->native_entered++;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    while (!f->native_release)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
+  lua_call(L, 0, 1);
+  return 1;
+}
+
+static int inspect_waiting_callback(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_State *target = f->tasks[1].root.thread;
+  int reservation;
+  mark_running(L);
+  while (__atomic_load_n(&f->scheduler.reentry_waiting, __ATOMIC_ACQUIRE) != 1)
+    sched_yield();
+  /* The only slot is occupied. A callback waiting for it must leave its
+   * stack available for root scanning. */
+  reservation = luaX_tryreserve(target);
+  require(reservation == 1);
+  luaX_endreserve(target, reservation);
+  return 0;
+}
+
+static void synchronous_callback(struct fixture *f) {
+  init(f, 1);
+  managed(f->main, "inspect_waiting_callback", inspect_waiting_callback);
+  lua_pushcfunction(f->main, invoke_callback);
+  lua_setglobal(f->main, "invoke_callback");
+  const char *source = "return invoke_callback(function() "
+                       "  local t = {}; for i = 1, 40 do t[i] = {i} end; "
+                       "  collectgarbage('collect'); return t[40][1] + #t "
+                       "end, ... ~= 0)";
+  submit(f, 0, source, 0);
+  require(collect(f, 0, LUA_OK) == 80);
+  submit(f, 1, source, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered == 0)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 2, "inspect_waiting_callback(); return 42", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->waiting == 0)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 2, LUA_OK) == 42);
+  require(collect(f, 1, LUA_OK) == 80);
+  finish(f);
+}
+
 static int hold_for_native_returns(lua_State *L) {
   mark_running(L);
   while (__atomic_load_n(&fixture->scheduler.reentry_waiting,
@@ -1524,6 +1583,8 @@ int main(int argc, char **argv) {
     callback_progress(f, 0);
   else if (strcmp(argv[1], "timed_callback_progress") == 0)
     callback_progress(f, 1);
+  else if (strcmp(argv[1], "synchronous_callback") == 0)
+    synchronous_callback(f);
   else if (strcmp(argv[1], "simultaneous_reentry") == 0)
     simultaneous_reentry(f);
   else if (strcmp(argv[1], "parked") == 0)

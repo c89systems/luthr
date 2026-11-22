@@ -330,10 +330,25 @@ static int tryslot (LuaScheduledTask *task, int reclaim) {
   return 0;
 }
 
+static int reclaimoffer (LuaExecution *execution) {
+  LuaScheduledTask *task = execution->context;
+  LuaExecutionSlot *slot = task->slot;
+  if (slot == NULL || !changeslot(slot, nativeowner(task), task)) return 0;
+  execution->allocation_cache = &slot->allocation;
+  return 1;
+}
+
+int luaSC_trymanaged (LuaExecution *execution) {
+  LuaScheduler *s = execution->scheduler;
+  lua_assert(s != NULL && execution->native_depth != 0);
+  return execution->allocation_cache != NULL ||
+    (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0 &&
+     reclaimoffer(execution));
+}
+
 static void managedenter (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
-  LuaExecutionSlot *previous = task->slot;
   UNUSED(L);
   if (execution->allocation_cache != NULL) return;
   if (execution->native_depth == 0) {
@@ -344,10 +359,7 @@ static void managedenter (LuaExecution *execution, lua_State *L) {
     /* Compete for a free slot without entering the queue's mutex. A waiter
     ** already blocked for a slot gets priority over newer returns. */
     if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0) {
-      if (previous != NULL && changeslot(previous, nativeowner(task), task)) {
-        execution->allocation_cache = &previous->allocation;
-        return;
-      }
+      if (reclaimoffer(execution)) return;
       task->slot = NULL;
       if (tryslot(task, 0)) return;
     }

@@ -291,22 +291,44 @@ carrierentry void luaX_apienter (lua_State *L) {
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
 }
 
-carrierentry uintptr_t luaX_callenter (lua_State *L,
-                                       NativeStackContext **activation) {
+carrierentry uintptr_t luaX_callenter (lua_State *L) {
   NativeStackContext *context = luaE_resolvestack(&thread_context);
   LuaExecution *execution = context->execution;
   uintptr_t owner;
   if (execution != NULL && execution->native_depth != 0 &&
       context->api_region == NULL) {
-    owner = luaX_valueenter(L, 1);
-    if (owner & LUA_VALUE_STACK) {
-      *activation = context;
-      return owner;
+    uintptr_t expected = 0;
+    uintptr_t reservation = cast(uintptr_t, context) | LUA_GATE_MANAGED;
+    /* Publish an owner once. This first phase can inspect the stack, but
+    ** entering the storage epoch and borrowing heap data requires a slot. */
+    if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected, reservation,
+                                     0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+      if (l_likely(!luaW_stopped(&G(L)->world))) {
+        if (luaC_tracing(L)) {
+          luaC_checksnapshot(L);
+          return reservation | LUA_VALUE_TRACING;
+        }
+        return reservation;
+      }
+      release(L, context, LUA_GATE_MANAGED);
     }
   }
-  else owner = apienter(L, context);
+  owner = apienter(L, context);
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
   return 0;
+}
+
+void luaX_releaseaftertrace (lua_State *L, uintptr_t reservation) {
+  if (__atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
+    luaSC_notifygc(G(L));
+  luaX_releasegate(L, reservation);
+}
+
+int luaX_callpromote (lua_State *L, NativeStackContext *context) {
+  if (!luaQ_tryentermanaged(context->execution)) return 0;
+  luaW_enter(L);
+  preparecall(L, context);
+  return 1;
 }
 
 void luaX_apileave (lua_State *L) {
@@ -332,9 +354,7 @@ carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
 void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
   if (owner & LUA_VALUE_STACK) {
     lua_assert(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
-    if (__atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
-      luaSC_notifygc(G(L));
-    luaX_releasegate(L, LUA_GATE_STACK);
+    luaX_releaseaftertrace(L, LUA_GATE_STACK);
   }
   else unlockstate(L, cast(NativeStackContext *, owner), 1);
 }
