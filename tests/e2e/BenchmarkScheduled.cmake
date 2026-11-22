@@ -210,7 +210,7 @@ set(shared_reads_iterations 500000)
 set(closures_iterations 50000)
 set(allocation_gc_iterations 5000)
 set(native_workloads native_callbacks native_direct native_leaf native_identity
-  native_scalar native_scalar_direct)
+  native_scalar native_scalar_direct native_protected)
 foreach(workload IN LISTS native_workloads)
   set(${workload}_iterations 18000)
 endforeach()

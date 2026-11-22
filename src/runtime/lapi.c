@@ -1490,6 +1490,17 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
     func = savestack(L, o);
   }
   c.func = L->top.p - (nargs+1);  /* function to be called */
+  /* A committed scalar call cannot yield, raise or invoke the error
+  ** handler. A rejected probe still needs the ordinary protected frame. */
+  if (ttisLclosure(s2v(c.func))) {
+    const Proto *p = clLvalue(s2v(c.func))->p;
+    if (p->scalar_ticks != 0 &&
+        luaD_tryscalarcall(L, c.func, p, nargs, nresults, luaX_boundcontext(L))) {
+      adjustresults(L, nresults);
+      lua_unlock(L);
+      return LUA_OK;
+    }
+  }
   if (k == NULL || !yieldable(L)) {  /* no continuation or no yieldable? */
     c.nresults = nresults;  /* do a 'conventional' protected call */
     status = luaD_pcall(L, f_call, &c, savestack(L, c.func), func);

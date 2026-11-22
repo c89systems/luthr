@@ -101,6 +101,12 @@ static int direct_callback(lua_State *L) {
   return 1;
 }
 
+static int protected_callback(lua_State *L) {
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+    return lua_error(L);
+  return 1;
+}
+
 static int leaf_callback(lua_State *L) {
   (void)L;
   return 1; /* return the last argument without accessing the Lua API */
@@ -207,13 +213,18 @@ int main(int argc, char **argv) {
   L = lua_newstate(allocate, &memory, 0);
   require(L != NULL);
   luaL_openlibs(L);
-  int direct = strcmp(argv[2], "native_direct") == 0 ||
-               strcmp(argv[2], "native_scalar_direct") == 0;
-  int leaf = strcmp(argv[2], "native_leaf") == 0;
+  lua_CFunction override = NULL;
+  if (strcmp(argv[2], "native_direct") == 0 ||
+      strcmp(argv[2], "native_scalar_direct") == 0)
+    override = direct_callback;
+  else if (strcmp(argv[2], "native_protected") == 0)
+    override = protected_callback;
+  else if (strcmp(argv[2], "native_leaf") == 0)
+    override = leaf_callback;
   if (strncmp(argv[2], "native_", 7) == 0) {
     luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
-    if (direct || leaf) {
-      lua_pushcfunction(L, direct ? direct_callback : leaf_callback);
+    if (override != NULL) {
+      lua_pushcfunction(L, override);
       lua_setfield(L, -2, "callback");
     }
     lua_pop(L, 1);

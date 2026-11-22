@@ -71,7 +71,7 @@ local workloads={
 }
 local native_add=kind=='native_callbacks' or kind=='native_direct'
 local native_identity=kind=='native_identity' or kind=='native_leaf'
-local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct'
+local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
 if native_add or native_identity or native_scalar then
   local native=require('compat_fixture')
   local payload
