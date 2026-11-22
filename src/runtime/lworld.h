@@ -53,6 +53,7 @@ typedef struct LuaWorld {
   unsigned storage_scan_waiters;  /* mutex-owned count behind the scan wait bit */
   unsigned heap_depth;  /* owner-only after the outermost grant */
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
+  LuaParticipation *rendezvous_cursor;  /* world.mutex, unchecked suffix */
 } LuaWorld;
 
 l_sinline uint64_t luaW_control (const LuaWorld *world) {

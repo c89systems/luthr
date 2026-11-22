@@ -25,6 +25,7 @@ struct fixture {
   unsigned queued[4];
   unsigned paused, resume;
   unsigned grown;
+  unsigned late_ready, late_continue, stop_complete, stop_resume;
   int mode;
 };
 struct invocation {
@@ -37,6 +38,20 @@ static __thread int role;
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
 __typeof__(luaW_leave) __real_luaW_leave;
+__typeof__(luaW_enter) __real_luaW_enter;
+
+void __wrap_luaW_enter(lua_State *state) {
+  struct fixture *fixture = current;
+  if (role == 3 && fixture != NULL && fixture->mode == RENDEZVOUS) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->late_ready = 1;
+    require(pthread_cond_broadcast(&fixture->changed) == 0);
+    while (!fixture->late_continue)
+      require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
+  __real_luaW_enter(state);
+}
 
 static void pause_owner(struct fixture *fixture) {
   require(pthread_mutex_lock(&fixture->mutex) == 0);
@@ -60,7 +75,7 @@ void __wrap_luaQ_wait(lua_State *state, pthread_mutex_t *mutex,
   int measured =
       fixture != NULL && fixture->mode != RETIRE &&
       mutex == &G(state)->world.mutex &&
-      (state == fixture->state || (fixture->mode == RENDEZVOUS && role == 2));
+      (state == fixture->state || (fixture->mode == RENDEZVOUS && role >= 2));
   if (measured) {
     require(pthread_mutex_lock(&fixture->mutex) == 0);
     fixture->waiters = waiters;
@@ -300,19 +315,39 @@ static void *hold_gate(void *argument) {
 
 static void *stop_world(void *argument) {
   lua_State *state = argument;
+  struct fixture *fixture = current;
   role = 2;
   luaX_lockstate(state);
   luaW_stop(state);
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  fixture->stop_complete = 1;
+  require(pthread_cond_broadcast(&fixture->changed) == 0);
+  while (!fixture->stop_resume)
+    require(pthread_cond_wait(&fixture->changed, &fixture->mutex) == 0);
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
   luaW_start(state);
+  luaX_unlockstate(state);
+  return NULL;
+}
+
+static void *enter_late(void *argument) {
+  lua_State *state = argument;
+  role = 3;
+  luaX_lockstate(state);
+  setivalue(s2v(state->top.p), 43);
+  state->top.p++;
   luaX_unlockstate(state);
   return NULL;
 }
 
 static void rendezvous(lua_State *parent, struct fixture *fixture) {
   LuaWorld *world = &G(parent)->world;
-  pthread_t holder, collector;
+  pthread_t holder, collector, entrant;
   lua_State *last = lua_newthread(parent);
   fixture->state = lua_newthread(parent);
+  /* This idle entry is visited first. Its later gate reservation cannot
+   * access the stack before observing the stop. */
+  lua_State *late = lua_newthread(parent);
   luaX_lockstate(last);
   require(pthread_create(&holder, NULL, hold_gate, fixture) == 0);
   wait_flag(fixture, &fixture->paused);
@@ -323,16 +358,30 @@ static void rendezvous(lua_State *parent, struct fixture *fixture) {
   luaQ_wake(&world->changed, &world->waiters);
   require(*fixture->waiters != NULL);
   require(pthread_mutex_unlock(&world->mutex) == 0);
+  require(pthread_create(&entrant, NULL, enter_late, late) == 0);
+  wait_flag(fixture, &fixture->late_ready);
   resume_owner(fixture);
   require(pthread_join(holder, NULL) == 0);
   require(pthread_mutex_lock(&world->mutex) == 0);
-  require(luaW_activecount(world) == 1 && *fixture->waiters != NULL);
+  require(luaW_activecount(world) == 2 && *fixture->waiters != NULL);
   require(pthread_mutex_unlock(&world->mutex) == 0);
   luaX_unlockstate(last);
+  wait_flag(fixture, &fixture->stop_complete);
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  fixture->late_continue = 1;
+  require(pthread_cond_broadcast(&fixture->changed) == 0);
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  wait_flag(fixture, &fixture->queued[3]);
+  require(pthread_mutex_lock(&fixture->mutex) == 0);
+  fixture->stop_resume = 1;
+  require(pthread_cond_broadcast(&fixture->changed) == 0);
+  require(pthread_mutex_unlock(&fixture->mutex) == 0);
   require(pthread_join(collector, NULL) == 0);
+  require(pthread_join(entrant, NULL) == 0);
   require(!luaW_stopped(world));
   require(lua_gettop(fixture->state) == 1 &&
           lua_tointeger(fixture->state, 1) == 42);
+  require(lua_gettop(late) == 1 && lua_tointeger(late, 1) == 43);
 }
 
 static int one(lua_State *state) {

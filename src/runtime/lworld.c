@@ -60,6 +60,7 @@ int luaW_init (global_State *g) {
   int status, i;
   world->control = 0;
   world->entry_waiting = 0;
+  world->rendezvous_cursor = NULL;
   world->heap_depth = 0;
   world->heap_owner.token = world->collector.token = NULL;
   world->participants = NULL;
@@ -134,7 +135,7 @@ void luaW_destroy (global_State *g) {
   LuaWorld *world = &g->world;
   int i;
   lua_assert(!luaW_stopped(world) && world->entry_waiting == 0 &&
-             world->participants == NULL &&
+             world->participants == NULL && world->rendezvous_cursor == NULL &&
              !luaW_heapheld(world) && world->waiters == NULL &&
              world->resume_waiters == NULL && world->rendezvous_waiters == NULL &&
              !(luaW_control(world) & LUA_WORLD_ARM_TRACE) &&
@@ -220,6 +221,10 @@ void luaW_unregister (lua_State *L) {
       participant->next->previous = participant->previous;
     participant->previous = NULL;
   }
+  if (world->rendezvous_cursor == participant) {
+    world->rendezvous_cursor = participant->next;
+    notifyrendezvous(G(L), NULL);
+  }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
@@ -259,16 +264,18 @@ void luaW_activate (lua_State *L) {
   UNUSED(previous);
 }
 
-/* The epoch is published before the arm request. An entry racing with the
-** directory walk either appears active there or sees the published request
-** before its first heap access. Stack-only scopes cannot mutate heap edges. */
-static int tracearmed (LuaWorld *world) {
+/* Start the walk after publishing the request. An entrant whose gate was
+** already passed must see the request before accessing Lua storage. During
+** trace arming, only managed gates can owe heap publication. */
+l_sinline int rendezvousready (LuaWorld *world, int arming) {
   LuaParticipation *part;
-  uint64_t epoch = luaW_armepoch(world);
-  for (part = world->participants; part != NULL; part = part->next)
-    if (part->trace_armed != epoch &&
-        (__atomic_load_n(&part->thread->stack_gate.word, __ATOMIC_SEQ_CST) &
-          LUA_GATE_MANAGED)) return 0;
+  unsigned active = arming ? LUA_GATE_MANAGED : LUA_GATE_ACTIVE;
+  uint64_t epoch = arming ? luaW_armepoch(world) : 0;
+  while ((part = world->rendezvous_cursor) != NULL) {
+    if ((__atomic_load_n(&part->thread->stack_gate.word, __ATOMIC_SEQ_CST) &
+         active) && (!arming || part->trace_armed != epoch)) return 0;
+    world->rendezvous_cursor = part->next;
+  }
   return 1;
 }
 
@@ -293,7 +300,7 @@ static void notifyrendezvous (global_State *g, lua_State *L) {
   LuaWorld *world = &g->world;
   uint64_t control = luaW_control(world);
   if (control & LUA_WORLD_ARM_TRACE) {
-    if (!tracearmed(world)) return;
+    if (!rendezvousready(world, 1)) return;
     luaC_publishtraceplan(g);
     __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_ARM_TRACE),
                        __ATOMIC_SEQ_CST);
@@ -304,7 +311,7 @@ static void notifyrendezvous (global_State *g, lua_State *L) {
   }
   if (world->rendezvous_waiters == NULL) return;
   if (control & LUA_WORLD_STOPPED) {
-    if (luaW_activecount(world) != 0) return;
+    if (!rendezvousready(world, 0)) return;
   }
   else if (world->entry_waiting != 0) return;
   luaQ_wake(&world->rendezvous, &world->rendezvous_waiters);
@@ -333,6 +340,8 @@ void luaW_armtrace (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   lua_assert(luaW_ownsheap(L) && L->world_depth == 0);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(world->rendezvous_cursor == NULL);
+  world->rendezvous_cursor = world->participants;
   __atomic_store_n(&world->arm_epoch, luaC_traceepoch(G(L)), __ATOMIC_RELEASE);
   __atomic_fetch_or(&world->control, LUA_WORLD_ARM_TRACE, __ATOMIC_SEQ_CST);
   acknowledge(L);
@@ -463,15 +472,20 @@ void luaW_stop (lua_State *L) {
   {
     LuaParticipation *participant;
     unsigned active = 0;
+    lua_assert(world->rendezvous_cursor == NULL);
     for (participant = world->participants; participant != NULL;
-         participant = participant->next)
-      if (!participant->collector)
-        active += luaW_active(participant);
+         participant = participant->next) {
+      if (luaW_active(participant)) {
+        if (world->rendezvous_cursor == NULL && participant != L->admission)
+          world->rendezvous_cursor = participant;
+        active += !participant->collector;
+      }
+    }
     if (active > G(L)->pacer.parallelism) G(L)->pacer.parallelism = active;
   }
   luaQ_wake(&world->changed, &world->waiters);
   luaW_deactivate(L);
-  while (luaW_activecount(world) != 0)
+  while (!rendezvousready(world, 0))
     luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
