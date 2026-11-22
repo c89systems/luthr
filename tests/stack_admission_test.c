@@ -134,19 +134,28 @@ static void grow_during_metadata(lua_State *parent, struct fixture *fixture) {
           lua_tointeger(fixture->state, 1) == 42);
 }
 
-static void fifo(lua_State *parent, struct fixture *fixture) {
+static void fifo(lua_State *parent, struct fixture *fixture, int stackonly) {
   pthread_t threads[3];
   struct invocation calls[3];
   unsigned i;
+  uintptr_t owner = 0;
   fixture->state = lua_newthread(parent);
-  luaX_lockstate(fixture->state);
+  if (stackonly) {
+    lua_gc(parent, LUA_GCSTOP);
+    owner = luaX_valueenter(fixture->state, 1);
+    require(owner == LUA_VALUE_STACK);
+  } else
+    luaX_lockstate(fixture->state);
   for (i = 0; i < 2; i++) {
     calls[i].fixture = fixture;
     calls[i].role = (int)i + 1;
     require(pthread_create(&threads[i], NULL, invoke, &calls[i]) == 0);
     wait_flag(fixture, &fixture->queued[i + 1]);
   }
-  luaX_unlockstate(fixture->state);
+  if (stackonly)
+    luaX_valueleave(fixture->state, owner);
+  else
+    luaX_unlockstate(fixture->state);
   wait_flag(fixture, &fixture->paused);
   require(luaX_tryreserve(fixture->state) == 0);
   calls[2].fixture = fixture;
@@ -385,7 +394,7 @@ int main(int argc, char **argv) {
     lua_gc(state, LUA_GCGEN);
   current = &fixture;
   if (strncmp(argv[1], "fifo_", 5) == 0)
-    fifo(state, &fixture);
+    fifo(state, &fixture, strncmp(argv[1], "fifo_stack_", 11) == 0);
   else if (strncmp(argv[1], "reuse_", 6) == 0)
     reuse_frames(state);
   else if (strncmp(argv[1], "grow_", 5) == 0) {
