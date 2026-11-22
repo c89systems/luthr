@@ -46,12 +46,14 @@ do
   local function identity(x) return x end
   local function add(x,y) return x+y end
   local function increment(x) return x+1 end
+  local function affine(x) return 1000000000-((x+3)*7-1) end
+  local function nonlinear(x) return (x+3)*x-1 end
   local function decrease(x) return x-1000 end
   local function multiply(x,y) return x*y end
   local function constant() return 'literal result' end
   local function empty() end
   local token = {}
-  local dumped = assert(load(string.dump(increment,true),'=dumped','b'))
+  local dumped = assert(load(string.dump(affine,true),'=dumped','b'))
   for i=1,1100 do
     assert(call(1,identity,token,i)==token)
     local values = table.pack(call(4,identity,i))
@@ -60,16 +62,22 @@ do
     assert(select('#',call(0,constant))==0)
     assert(select('#',call(-1,empty))==0)
     assert(select('#',call(-1,identity,token))==1)
-    assert(call(1,dumped,i)==i+1)
+    assert(call(1,dumped,i)==999999980-7*i)
     assert(call(1,decrease,i)==i-1000)
   end
   assert(call(1,identity)==nil)
   assert(call(1,constant)=='literal result')
   assert(call(1,increment,math.maxinteger)==math.mininteger)
+  for _,x in ipairs({math.mininteger,math.maxinteger,-1,0,19,2.0^53}) do
+    local y = call(1,affine,x)
+    assert(y==affine(x) and math.type(y)==math.type(x))
+    assert(call(1,nonlinear,x)==nonlinear(x))
+  end
   assert(call(1,add,1.5,2)==3.5)
   assert(call(1,multiply,6,7)==42)
   local value = setmetatable({}, {__add=function(_,b) return b+41 end})
   assert(call(1,increment,value)==42)
+  assert(call(1,affine,value)==1000000000-((3+41)*7-1))
   assert(call(1,add,value,1)==42)
   assert(call(1,function(...) return select('#',...) end,1,2,3)==3)
 

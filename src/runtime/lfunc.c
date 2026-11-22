@@ -565,6 +565,82 @@ static lu_byte scalarticks (const Proto *p) {
   return 0;
 }
 
+typedef struct IntegerExpr {
+  lua_Unsigned scale, bias;
+} IntegerExpr;
+
+/* The bounded-call verifier has checked every register and branch boundary.
+** Integer arithmetic wraps, so these identities also hold across overflow.
+** Folding never removes a dynamic type check except for the guarded input. */
+static void scalaraffine (Proto *p) {
+  IntegerExpr reg[LUA_SCALAR_REGISTERS];
+  const Instruction *pc = p->code;
+  if (p->numparams != 1 || p->scalar_ticks <= 1) return;
+  reg[0] = (IntegerExpr){1, 0};
+  for (;;) {
+    Instruction i = *pc++;
+    OpCode op = GET_OPCODE(i);
+    unsigned a = GETARG_A(i);
+    IntegerExpr left, right;
+    int arithmetic;
+    switch (op) {
+      case OP_RETURN1: {
+        lua_Integer scale = l_castU2S(reg[a].scale);
+        lua_Integer bias = l_castU2S(reg[a].bias);
+        if (scale != 0 && scale >= INT16_MIN && scale <= INT16_MAX &&
+            bias >= INT32_MIN && bias <= INT32_MAX) {
+          p->scalar_scale = cast(int16_t, scale);
+          p->scalar_bias = cast(int32_t, bias);
+        }
+        return;
+      }
+      case OP_MOVE:
+        reg[a] = reg[GETARG_B(i)];
+        continue;
+      case OP_LOADI:
+        reg[a] = (IntegerExpr){0, l_castS2U(GETARG_sBx(i))};
+        continue;
+      case OP_LOADK: {
+        const TValue *k = p->k + GETARG_Bx(i);
+        if (!ttisinteger(k)) return;
+        reg[a] = (IntegerExpr){0, l_castS2U(ivalue(k))};
+        continue;
+      }
+      case OP_UNM:
+        left = reg[GETARG_B(i)];
+        reg[a] = (IntegerExpr){0u - left.scale, 0u - left.bias};
+        continue;
+      case OP_ADDI:
+        right = (IntegerExpr){0, l_castS2U(GETARG_sC(i))};
+        arithmetic = LUA_OPADD;
+        break;
+      case OP_ADDK: case OP_SUBK: case OP_MULK: {
+        const TValue *k = p->k + GETARG_C(i);
+        if (!ttisinteger(k)) return;
+        right = (IntegerExpr){0, l_castS2U(ivalue(k))};
+        arithmetic = LUA_OPADD + (op - OP_ADDK);
+        break;
+      }
+      case OP_ADD: case OP_SUB: case OP_MUL:
+        right = reg[GETARG_C(i)];
+        arithmetic = LUA_OPADD + (op - OP_ADD);
+        break;
+      default: return;
+    }
+    left = reg[GETARG_B(i)];
+    if (arithmetic == LUA_OPADD)
+      reg[a] = (IntegerExpr){left.scale + right.scale, left.bias + right.bias};
+    else if (arithmetic == LUA_OPSUB)
+      reg[a] = (IntegerExpr){left.scale - right.scale, left.bias - right.bias};
+    else {
+      if (left.scale != 0 && right.scale != 0) return;
+      reg[a] = (IntegerExpr){left.scale * right.bias + left.bias * right.scale,
+                            left.bias * right.bias};
+    }
+    pc++;  /* integer operands make the metamethod instruction unreachable */
+  }
+}
+
 void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
@@ -594,6 +670,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
     if (p->dispatch != NULL) p->dispatch[pc] = cast_byte(op);
   }
   p->scalar_ticks = scalarticks(p);
+  scalaraffine(p);
 }
 
 
@@ -617,6 +694,8 @@ Proto *luaF_newproto (lua_State *L) {
   f->flag = 0;
   f->maxstacksize = 0;
   f->scalar_ticks = 0;
+  f->scalar_scale = 0;
+  f->scalar_bias = 0;
   f->locvars = NULL;
   f->sizelocvars = 0;
   f->linedefined = 0;

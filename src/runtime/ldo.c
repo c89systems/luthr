@@ -1482,10 +1482,10 @@ static int scalararith (lua_State *L, const Proto *p, const TValue *registers,
   return luaO_rawarith(L, arithmetic, left, right, result);
 }
 
-/* Keep scratch registers off the direct-return path. The original arguments
-** and closure keep all references live while the body runs. */
-static int __attribute__((noinline)) scalarbody (lua_State *L, StkId args,
-                                                 const Proto *p, TValue *result) {
+/* The original arguments and closure keep all references live while this
+** body runs. Allocate scratch registers only when interpretation is needed. */
+static int __attribute__((noinline)) interpretscalar (lua_State *L, StkId args,
+                                                       const Proto *p, TValue *result) {
   const Instruction *pc = p->code;
   TValue registers[LUA_SCALAR_REGISTERS];
   int i;
@@ -1533,6 +1533,17 @@ static int __attribute__((noinline)) scalarbody (lua_State *L, StkId args,
       default: return -1;
     }
   }
+}
+
+static int __attribute__((noinline)) scalarbody (lua_State *L, StkId args,
+                                                 const Proto *p, TValue *result) {
+  int scale = p->scalar_scale;
+  if (scale != 0 && ttisinteger(s2v(args))) {
+    lua_Integer scaled = intop(*, ivalue(s2v(args)), scale);
+    setivalue(result, intop(+, scaled, p->scalar_bias));
+    return 1;
+  }
+  return interpretscalar(L, args, p, result);
 }
 
 /* Until the result is committed, the ordinary call can restart with its

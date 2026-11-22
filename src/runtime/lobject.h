@@ -623,6 +623,7 @@ typedef struct Proto {
   lu_byte flag;
   lu_byte maxstacksize;  /* number of registers needed by this function */
   lu_byte scalar_ticks;  /* instructions executed by a bounded scalar call */
+  int16_t scalar_scale;  /* optional single-integer-argument transform */
   int sizeupvalues;  /* size of 'upvalues' */
   int sizek;  /* size of 'k' */
   int sizecode;
@@ -632,6 +633,7 @@ typedef struct Proto {
   int sizeabslineinfo;  /* size of 'abslineinfo' */
   int linedefined;  /* debug information  */
   int lastlinedefined;  /* debug information  */
+  int32_t scalar_bias;
   TValue *k;  /* constants used by the function */
   Instruction *code;  /* opcodes */
   lu_byte *dispatch;  /* immutable capture dispatch; NULL without local captures */
