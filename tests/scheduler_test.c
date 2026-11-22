@@ -790,6 +790,56 @@ static void native_return_compensation(struct fixture *f) {
   finish(f);
 }
 
+static int blocked_leaf(lua_State *L) {
+  struct fixture *f = fixture;
+  (void)L;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->native_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 0;
+}
+
+static int inspect_leaf_return(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_State *target = f->tasks[0].root.thread;
+  int reservation;
+  mark_running(L);
+  while (__atomic_load_n(&f->scheduler.reentry_waiting, __ATOMIC_ACQUIRE) == 0)
+    sched_yield();
+  /* The worker holds the leaf's old slot. The return must leave its stack
+   * available for root scanning while it waits for managed capacity. */
+  reservation = luaX_tryreserve(target);
+  require(reservation == 1);
+  luaX_endreserve(target, reservation);
+  return 0;
+}
+
+static void native_leaf_return(struct fixture *f) {
+  init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "inspect_leaf_return", inspect_leaf_return);
+  lua_pushcfunction(f->main, blocked_leaf);
+  lua_setglobal(f->main, "blocked_leaf");
+  submit(f, 0, "blocked_leaf(); return 51", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "inspect_leaf_return(); return 52", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  require(collect(f, 1, LUA_OK) == 52);
+  finish(f);
+}
+
 static void voluntary(struct fixture *f) {
   init(f, 1);
   submit(f, 0, "for i=1,5 do coroutine.yield(i) end; return 42", 0);
@@ -1543,6 +1593,8 @@ int main(int argc, char **argv) {
     parallel_native_compensation(f);
   else if (strcmp(argv[1], "native_return_compensation") == 0)
     native_return_compensation(f);
+  else if (strcmp(argv[1], "native_leaf_return") == 0)
+    native_leaf_return(f);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
