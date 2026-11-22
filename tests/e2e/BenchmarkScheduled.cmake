@@ -210,10 +210,11 @@ set(shared_reads_iterations 500000)
 set(closures_iterations 50000)
 set(allocation_gc_iterations 5000)
 set(native_workloads native_callbacks native_direct native_leaf native_identity
-  native_scalar native_scalar_direct native_protected)
+  native_scalar native_scalar_direct native_protected native_streaming)
 foreach(workload IN LISTS native_workloads)
   set(${workload}_iterations 18000)
 endforeach()
+set(native_streaming_iterations 6000)
 foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
     shared_growth shared_reads closures allocation_gc ${native_workloads})
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")

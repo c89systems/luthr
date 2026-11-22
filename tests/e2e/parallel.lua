@@ -72,6 +72,25 @@ local workloads={
 local native_add=kind=='native_callbacks' or kind=='native_direct'
 local native_identity=kind=='native_identity' or kind=='native_leaf'
 local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
+if kind=='native_streaming' then
+  local native=require('compat_fixture')
+  local chunk=string.rep('x',128)
+  total=n*#chunk
+  workloads[kind]=function()
+    local sent,received=0,0
+    local bytes=native.pump(function()
+      assert(sent==received)
+      if sent==n then return nil end
+      sent=sent+1
+      return chunk
+    end,function(value)
+      assert(value==chunk and sent==received+1)
+      received=received+1
+    end,#chunk)
+    assert(received==n)
+    return bytes
+  end
+end
 if native_add or native_identity or native_scalar then
   local native=require('compat_fixture')
   local payload
