@@ -8,20 +8,22 @@
 
 LUAI_FUNC l_noret luaX_badrelease (void);
 
-l_sinline void luaX_releasegate (lua_State *L, uintptr_t reservation) {
+l_sinline void luaX_releaseto (lua_State *L, uintptr_t reservation,
+                               uintptr_t offer) {
   global_State *g = G(L);
   uintptr_t stack = cast(uintptr_t, L);
   int managed = (reservation & LUA_GATE_MANAGED) != 0;
   uint64_t armed = managed ? L->participation.trace_armed : 0;
   uint64_t control;
   unsigned requests;
-  /* Only a waiter can add its bit to a held reservation. Preserve that bit.
-  ** After the subtraction, the collector can reclaim L. */
-  uintptr_t previous = __atomic_fetch_sub(&L->stack_gate.word, reservation,
+  /* Preserve waiter registration and any independent slot offer. Withdrawal
+  ** into a new offer starts with an exclusive slot. */
+  uintptr_t previous = __atomic_fetch_sub(&L->stack_gate.word, reservation - offer,
                                           __ATOMIC_SEQ_CST);
-  if (l_unlikely((previous & ~cast(uintptr_t, LUA_GATE_WAITING | LUA_GATE_DORMANT))
-                 != reservation))
+  if (l_unlikely((previous & ~(cast(uintptr_t, LUA_GATE_WAITING | LUA_GATE_DORMANT) |
+                               LUA_GATE_OFFER_MASK)) != reservation))
     luaX_badrelease();
+  lua_assert(offer == 0 || !(previous & LUA_GATE_OFFER_MASK));
   control = luaW_control(&g->world);
   requests = LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS;
   if (!(reservation & LUA_GATE_STACK)) requests |= LUA_WORLD_STORAGE_WAIT;
@@ -31,6 +33,10 @@ l_sinline void luaX_releasegate (lua_State *L, uintptr_t reservation) {
                  ((control & LUA_WORLD_ARM_TRACE) && managed &&
                   armed != luaW_armepoch(&g->world))))
     luaW_leave(g, stack, previous & LUA_GATE_FLAGS, control);
+}
+
+l_sinline void luaX_releasegate (lua_State *L, uintptr_t reservation) {
+  luaX_releaseto(L, reservation, 0);
 }
 
 /* A stack-only token carries the obligations of this admission. */
@@ -44,10 +50,12 @@ LUAI_FUNC void luaX_releaseaftertrace (lua_State *L, uintptr_t reservation);
 ** mutation, allocation, parking, and other stack reservations require
 ** managed admission. */
 l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
-  uintptr_t expected = 0;
-  if (stackonly && __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) == 0 &&
-      __atomic_compare_exchange_n(&L->stack_gate.word, &expected, LUA_GATE_STACK,
-                                  0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+  if (stackonly) {
+    uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+    if ((expected & ~LUA_GATE_OFFER_MASK) != 0 ||
+        !__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
+          expected | LUA_GATE_STACK, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+      return luaX_valueenterslow(L, 0);
     /* A stop sees this reservation or precedes the control-word check. */
     if (l_likely(!luaW_stopped(&G(L)->world) && !luaC_tracing(L)))
       return LUA_VALUE_STACK;

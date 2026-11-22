@@ -74,13 +74,21 @@ void luaX_destroygate (LuaStackGate *gate) {
   gate->ready = 0;
 }
 
+l_sinline int trygate (LuaStackGate *gate, uintptr_t *expected,
+                       uintptr_t desired, int order) {
+  while ((*expected & ~LUA_GATE_OFFER_MASK) == 0) {
+    if (__atomic_compare_exchange_n(&gate->word, expected, desired | *expected,
+                                     0, order, __ATOMIC_RELAXED)) return 1;
+  }
+  return 0;
+}
+
 static void reserve (lua_State *L, NativeStackContext *context,
                       uintptr_t active) {
   LuaStackGate *gate = &L->stack_gate;
   uintptr_t expected = 0;
   uintptr_t desired = cast(uintptr_t, context) | active;
-  if (!__atomic_compare_exchange_n(&gate->word, &expected, desired, 0,
-                                    __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+  if (!trygate(gate, &expected, desired, __ATOMIC_SEQ_CST)) {
     LuaWorld *world = &G(L)->world;
     LuaGateWaiter wait = {NULL};
     /* Recursive entry is a boundary error. Waiting would deadlock. */
@@ -95,14 +103,16 @@ static void reserve (lua_State *L, NativeStackContext *context,
     ** and wakes the world queue, or our recheck sees an already free gate. */
     __atomic_fetch_or(&gate->word, LUA_GATE_WAITING, __ATOMIC_SEQ_CST);
     for (;;) {
-      uintptr_t dormant = __atomic_load_n(&gate->word, __ATOMIC_RELAXED) &
-                          LUA_GATE_DORMANT;
-      uintptr_t next = (desired & ~(dormant ? active : 0)) | dormant |
-                       (wait.next != NULL ? LUA_GATE_WAITING : 0);
-      expected = LUA_GATE_WAITING | dormant;
-      if (gate->head == &wait &&
-          __atomic_compare_exchange_n(&gate->word, &expected, next, 0,
-                                      __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+      uintptr_t idle = LUA_GATE_WAITING | LUA_GATE_DORMANT | LUA_GATE_OFFER_MASK;
+      expected = __atomic_load_n(&gate->word, __ATOMIC_RELAXED);
+      if (gate->head == &wait && !(expected & ~idle)) {
+        uintptr_t dormant = expected & LUA_GATE_DORMANT;
+        uintptr_t next = (desired & ~(dormant ? active : 0)) |
+          (expected & (LUA_GATE_DORMANT | LUA_GATE_OFFER_MASK)) |
+          (wait.next != NULL ? LUA_GATE_WAITING : 0);
+        if (!__atomic_compare_exchange_n(&gate->word, &expected, next, 0,
+                                         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+          continue;  /* a slot recall is not a stack owner and need not wake us */
         gate->head = wait.next;
         if (gate->head == NULL) gate->tail = &gate->head;
         if (dormant) {
@@ -135,8 +145,7 @@ carrierentry int luaX_tryreserve (lua_State *target) {
   NativeStackContext *context = luaE_resolvestack(thread);
   uintptr_t expected = 0;
   uintptr_t owner = cast(uintptr_t, context);
-  if (__atomic_compare_exchange_n(&gate->word, &expected, owner, 0,
-                                   __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
+  if (trygate(gate, &expected, owner, __ATOMIC_ACQUIRE)) return 1;
   if (expected == LUA_GATE_DORMANT &&
       __atomic_compare_exchange_n(&gate->word, &expected, owner | LUA_GATE_DORMANT,
                                   0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
@@ -170,7 +179,26 @@ carrierentry void luaX_lockstate (lua_State *L) {
   preparecall(L, context);
 }
 
-static void unlockstate (lua_State *L, NativeStackContext *context, int values) {
+static LuaScheduledTask *offerstack (lua_State *L, LuaExecution *execution) {
+  LuaScheduledTask *task;
+  if (execution == NULL || execution->scheduler == NULL ||
+      execution->managed_depth != 1 || execution->allocation_cache == NULL ||
+      execution->native_depth == 0 ||
+      (execution->trusted != NULL &&
+       execution->native_depth <= execution->trusted->native_depth))
+    return NULL;
+  task = execution->context;
+  if (task->external || task->root.thread != L || task->slot->stack_offer == 0)
+    return NULL;
+  lua_assert(task->stack_offer == 0);
+  task->stack_offer = task->slot->stack_offer;
+  execution->allocation_cache = NULL;
+  execution->managed_depth = 0;
+  return task;
+}
+
+static void unlockstate (lua_State *L, NativeStackContext *context, int values,
+                         int detach) {
   LuaExecution *execution = context->execution;
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
@@ -187,6 +215,16 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values) 
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   lua_assert(L->admission == &L->participation);
+  if (detach) {
+    LuaScheduledTask *task = offerstack(L, execution);
+    if (task != NULL) {
+      luaX_releaseto(L, cast(uintptr_t, context) | LUA_GATE_MANAGED, task->stack_offer);
+      /* A waiter that scanned before the combined withdrawal must be woken. */
+      if (__atomic_load_n(&task->scheduler->reentry_waiting, __ATOMIC_SEQ_CST) != 0)
+        luaSC_releaseslot(task);
+      return;
+    }
+  }
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L, context, LUA_GATE_MANAGED);
@@ -194,7 +232,7 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values) 
 }
 
 void luaX_unlockstate (lua_State *L) {
-  unlockstate(L, luaQ_ownertoken(), 0);
+  unlockstate(L, luaQ_ownertoken(), 0, 0);
 }
 
 /* Leaving managed execution retains the stack as a root. The owner is
@@ -212,13 +250,37 @@ LuaWorldScope luaW_detach (lua_State *L) {
   scope = luaW_ownsheap(L) ? luaW_suspend(L) : (LuaWorldScope){0};
   scope.api_region = context->api_region;
   context->api_region = NULL;
-  unlockstate(L, context, 0);
+  unlockstate(L, context, 0, 1);
   return scope;
+}
+
+static int reclaimstack (lua_State *L, NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  LuaScheduledTask *task;
+  uintptr_t offer;
+  if (execution == NULL || execution->scheduler == NULL ||
+      execution->managed_depth != 0 ||
+      __atomic_load_n(&execution->scheduler->reentry_waiting,
+                      __ATOMIC_ACQUIRE) != 0) return 0;
+  task = execution->context;
+  offer = task->stack_offer;
+  if (offer == 0 || task->root.thread != L) return 0;
+  /* A published offer belongs to an already pinned native activation. */
+  lua_assert(execution->pin_depth == 0 ||
+             pthread_equal(execution->pinned_carrier, pthread_self()));
+  if (!__atomic_compare_exchange_n(&L->stack_gate.word, &offer,
+        cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
+        __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return 0;
+  task->stack_offer = 0;
+  execution->allocation_cache = &task->slot->allocation;
+  execution->managed_depth = 1;
+  luaW_enter(L);
+  return 1;
 }
 
 static void attach (lua_State *L, LuaWorldScope scope,
                     NativeStackContext *context) {
-  lockstate(L, context);
+  if (!reclaimstack(L, context)) lockstate(L, context);
   preparecall(L, context);
   if (scope.collection != 0 || scope.heap != 0 || luaW_ownsheap(L))
     luaW_restore(L, scope, L->native_depth);
@@ -273,7 +335,8 @@ static void managestack (lua_State *L, NativeStackContext *context) {
   uintptr_t owner = cast(uintptr_t, context);
   uintptr_t old = __atomic_fetch_xor(&gate->word, owner | LUA_GATE_ACTIVE,
                                     __ATOMIC_SEQ_CST);
-  lua_assert((old & ~cast(uintptr_t, LUA_GATE_WAITING)) == LUA_GATE_STACK);
+  lua_assert((old & ~(cast(uintptr_t, LUA_GATE_WAITING) | LUA_GATE_OFFER_MASK)) ==
+             LUA_GATE_STACK);
   UNUSED(old);
   luaW_enter(L);
 }
@@ -298,12 +361,11 @@ carrierentry LuaCallEntry luaX_callenter (lua_State *L, int nargs) {
   uintptr_t owner;
   if (context->api_region == NULL &&
       (execution == NULL || execution->native_depth != 0)) {
-    uintptr_t expected = 0;
+    uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
     uintptr_t reservation = cast(uintptr_t, context) | LUA_GATE_MANAGED;
     /* Publish an owner once. Stack access can proceed from this reservation.
     ** Borrowing heap storage requires managed entry. */
-    if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected, reservation,
-                                     0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+    if (trygate(&L->stack_gate, &expected, reservation, __ATOMIC_SEQ_CST)) {
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         const TValue *func;
         api_checkpop(L, nargs + 1);
@@ -345,7 +407,7 @@ int luaX_callpromote (lua_State *L, NativeStackContext *context) {
 void luaX_apileave (lua_State *L) {
   NativeStackContext *context = luaX_boundcontext(L);
   lua_assert(context != NULL && context == luaQ_ownertoken());
-  if (context->api_region == NULL) unlockstate(L, context, 0);
+  if (context->api_region == NULL) unlockstate(L, context, 0, 0);
 }
 
 carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
@@ -367,7 +429,7 @@ void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
     lua_assert(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
     luaX_releaseaftertrace(L, LUA_GATE_STACK);
   }
-  else unlockstate(L, cast(NativeStackContext *, owner), 1);
+  else unlockstate(L, cast(NativeStackContext *, owner), 1, 0);
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {

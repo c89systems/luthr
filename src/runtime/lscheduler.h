@@ -20,7 +20,8 @@ typedef struct LuaSchedulerConfig {
 } LuaSchedulerConfig;
 
 struct LuaExecutionSlot {
-  void *owner;  /* atomic permission; a tagged task is a recallable native reservation */
+  void *owner;  /* atomic allocation-cache permission and task identity */
+  uintptr_t stack_offer;  /* encoded slot identity for combined withdrawals */
   pthread_mutex_t mutex;
   LuaScheduledTask *head, *tail;
   unsigned count;
@@ -39,6 +40,7 @@ struct LuaScheduledTask {
   LuaScheduledTask *registered_next;
   LuaScheduledTask **registered_link;
   LuaExecutionSlot *slot;  /* active slot or the last native offer */
+  uintptr_t stack_offer;  /* last offer published in the root's stack gate */
   LuaWaiter *waiter;
   LuaCarrier *carrier;  /* current dispatch; changes only after publication */
   LuaCarrier *affinity;  /* atomic reservation while pinned/inside opaque C */
@@ -105,6 +107,7 @@ LUAI_FUNC int luaSC_init (lua_State *, LuaScheduler *, const LuaSchedulerConfig 
 LUAI_FUNC unsigned luaSC_nativeactive (const LuaScheduler *);
 LUAI_FUNC void luaSC_entermanaged (LuaExecution *);
 LUAI_FUNC void luaSC_leavemanaged (LuaExecution *);
+LUAI_FUNC void luaSC_releaseslot (LuaScheduledTask *);
 LUAI_FUNC void luaSC_enternative (LuaScheduledTask *, lua_State *);
 LUAI_FUNC void luaSC_restorenative (LuaExecution *);
 /* Reuse held capacity or reclaim the task's previous slot without waiting. */

@@ -23,12 +23,12 @@ static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
 static void dropcachednative (LuaScheduledTask *task, int handoff);
 
-enum { NATIVE_SLOT_TAG = 1 };
-_Static_assert(_Alignof(LuaScheduledTask) > NATIVE_SLOT_TAG &&
-               _Alignof(LuaCarrier) > NATIVE_SLOT_TAG &&
-               _Alignof(LuaExecution) > NATIVE_SLOT_TAG &&
-               _Alignof(NativeStackContext) > NATIVE_SLOT_TAG,
-               "slot owners must leave the native reservation bit free");
+enum { NATIVE_SLOT_TAG = 1, TASK_SLOT_TAG = 2, SLOT_TAGS = 3 };
+_Static_assert(_Alignof(LuaScheduledTask) > SLOT_TAGS &&
+               _Alignof(LuaCarrier) > SLOT_TAGS &&
+               _Alignof(LuaExecution) > SLOT_TAGS &&
+               _Alignof(NativeStackContext) > SLOT_TAGS,
+               "slot owners must leave their tag bits free");
 
 /* Remove a selected sleeper before signalling it, so later submissions choose
 ** another carrier even if this one has not yet reacquired the engine mutex. */
@@ -236,19 +236,47 @@ static void bindslot (LuaScheduledTask *task, LuaExecutionSlot *slot) {
   task->fiber.execution.allocation_cache = slot != NULL ? &slot->allocation : NULL;
 }
 
-/* The slot owner doubles as the allocation cache's permission word. A
-** native reservation keeps that cache idle until someone claims the slot. */
-static void *nativeowner (LuaScheduledTask *task) {
-  return cast(void *, cast(uintptr_t, task) | NATIVE_SLOT_TAG);
+static void *taskowner (LuaScheduledTask *task) {
+  return task->external ? cast(void *, task)
+         : cast(void *, cast(uintptr_t, task) | TASK_SLOT_TAG);
 }
 
-static int isnativeowner (void *owner) {
-  return (cast(uintptr_t, owner) & NATIVE_SLOT_TAG) != 0;
+/* A nested coroutine or an unencoded slot offers capacity here instead of
+** publishing an offer on the scheduled root's stack gate. */
+static void *nativeowner (LuaScheduledTask *task) {
+  return cast(void *, cast(uintptr_t, task) | NATIVE_SLOT_TAG);
 }
 
 static int changeslot (LuaExecutionSlot *slot, void *previous, void *next) {
   return __atomic_compare_exchange_n(&slot->owner, &previous, next, 0,
                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static int takeoffer (LuaScheduledTask *task, uintptr_t offer) {
+  LuaStackGate *gate = &task->root.thread->stack_gate;
+  uintptr_t word = __atomic_load_n(&gate->word, __ATOMIC_SEQ_CST);
+  do {
+    if ((word & LUA_GATE_OFFER_MASK) != offer) return 0;
+  } while (!__atomic_compare_exchange_n(&gate->word, &word,
+               word & ~LUA_GATE_OFFER_MASK, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return 1;
+}
+
+/* Callers hold the scheduler mutex. The task record cannot disappear and
+** an incomplete task still owns its root. The gate identifies this slot,
+** even if the task released and later acquired capacity while we looked. */
+static int recallslot (LuaExecutionSlot *slot, void *owner, void *next) {
+  uintptr_t tagged = cast(uintptr_t, owner);
+  if (tagged & NATIVE_SLOT_TAG) return changeslot(slot, owner, next);
+  if ((tagged & TASK_SLOT_TAG) && slot->stack_offer != 0) {
+    LuaScheduledTask *task = cast(LuaScheduledTask *, tagged & ~cast(uintptr_t, SLOT_TAGS));
+    if (!task->complete && takeoffer(task, slot->stack_offer)) {
+      lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == owner);
+      __atomic_store_n(&slot->owner, next, __ATOMIC_SEQ_CST);
+      return 1;
+    }
+  }
+  return 0;
 }
 
 /* A slot has become available. Give a blocked native return first access.
@@ -279,13 +307,16 @@ static void slotreturned (LuaScheduler *s) {
   }
 }
 
-static void releaseslot (LuaScheduledTask *task) {
+void luaSC_releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
   int managed = task->fiber.execution.allocation_cache != NULL;
+  uintptr_t offer = task->stack_offer;
   if (slot == NULL) return;
   bindslot(task, NULL);
-  if (managed) {
-    lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == task);
+  task->stack_offer = 0;
+  if (offer != 0 && !takeoffer(task, offer)) return;
+  if (managed || offer != 0) {
+    lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == taskowner(task));
     __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
   }
   else if (!changeslot(slot, nativeowner(task), NULL)) return;
@@ -297,7 +328,7 @@ static void withdrawslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
   if (task->fiber.execution.allocation_cache == NULL) return;
   lua_assert(slot != NULL &&
-             __atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == task);
+             __atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == taskowner(task));
   /* The remembered slot can be claimed by another task. Any allocator
   ** borrow ends before the owner word makes that slot recallable. */
   task->fiber.execution.allocation_cache = NULL;
@@ -305,7 +336,7 @@ static void withdrawslot (LuaScheduledTask *task) {
   /* A reentry registered before publication may already be asleep. A later
   ** reentry can see and claim the reservation in its final slot scan. */
   if (__atomic_load_n(&s->reentry_waiting, __ATOMIC_SEQ_CST) != 0)
-    releaseslot(task);
+    luaSC_releaseslot(task);
 }
 
 /* Reservation hooks cannot acquire a bookkeeping mutex. */
@@ -340,7 +371,7 @@ static void pause (LuaScheduledTask *task, int reason) {
   lua_assert(execution->native_depth == 0 || affinity != NULL);
   UNUSED(affinity);
   dropcachednative(task, 1);
-  releaseslot(task);
+  luaSC_releaseslot(task);
   task->reason = reason;
   luaCT_pause(&task->fiber);
   if (execution->native_depth == 0) luaD_rebindexecution(execution);
@@ -353,8 +384,9 @@ static int tryslot (LuaScheduledTask *task, int reclaim) {
   for (i = 0; i < s->config.slots; i++) {
     LuaExecutionSlot *slot = &s->slots[(task->home + i) % s->config.slots];
     void *owner = __atomic_load_n(&slot->owner, __ATOMIC_SEQ_CST);
-    if ((owner == NULL || (reclaim && isnativeowner(owner))) &&
-        changeslot(slot, owner, task)) {
+    void *next = taskowner(task);
+    if (owner == NULL ? changeslot(slot, NULL, next)
+                      : reclaim && recallslot(slot, owner, next)) {
       bindslot(task, slot);
       return 1;
     }
@@ -365,7 +397,11 @@ static int tryslot (LuaScheduledTask *task, int reclaim) {
 static int reclaimoffer (LuaExecution *execution) {
   LuaScheduledTask *task = execution->context;
   LuaExecutionSlot *slot = task->slot;
-  if (slot == NULL || !changeslot(slot, nativeowner(task), task)) return 0;
+  uintptr_t offer = task->stack_offer;
+  if (slot == NULL) return 0;
+  task->stack_offer = 0;
+  if (offer != 0 ? !takeoffer(task, offer)
+                 : !changeslot(slot, nativeowner(task), taskowner(task))) return 0;
   execution->allocation_cache = &slot->allocation;
   return 1;
 }
@@ -394,7 +430,7 @@ void luaSC_entermanaged (LuaExecution *execution) {
       task->slot = NULL;
       if (tryslot(task, 0)) return;
     }
-    else releaseslot(task);
+    else luaSC_releaseslot(task);
     /* A synchronous reentry cannot move an opaque native activation. There
     ** are slots + native_limit carriers, so a waiting callback cannot occupy
     ** the last carrier able to dispatch queued managed work. */
@@ -415,7 +451,7 @@ void luaSC_leavemanaged (LuaExecution *execution) {
   ** withdrawal release it. Ordinary API calls don't transact on a VM permit. */
   if (execution->trusted == NULL ||
       execution->native_depth > execution->trusted->native_depth) {
-    if (task->external) releaseslot(task);
+    if (task->external) luaSC_releaseslot(task);
     else withdrawslot(task);
   }
 }
@@ -540,7 +576,7 @@ static void __attribute__((noinline)) enternewnative (LuaExecution *execution,
   /* Admission still owns this grant if reattachment parks for GC. */
   if (detached) luaW_attach(L, depth);
   task->native_pending = 0;
-  if (!managed) releaseslot(task); /* trusted hook/adapter now enters opaque C */
+  if (!managed) luaSC_releaseslot(task); /* trusted hook/adapter now enters opaque C */
 }
 
 void luaSC_enternative (LuaScheduledTask *task, lua_State *L) {
@@ -549,7 +585,7 @@ void luaSC_enternative (LuaScheduledTask *task, lua_State *L) {
   lua_assert(!task->native_pending);
   if (__atomic_load_n(&task->native, __ATOMIC_RELAXED) == 0)
     enternewnative(execution, L);
-  else if (execution->managed_depth == 0) releaseslot(task);
+  else if (execution->managed_depth == 0) luaSC_releaseslot(task);
 }
 
 static void returnnative (LuaScheduledTask *task, int handoff) {
@@ -796,7 +832,7 @@ static void poll (LuaExecution *execution, lua_State *L) {
   }
   task->slice_deadline = 0;
   depth = luaW_detach(L);
-  releaseslot(task);  /* a requested handoff retires trusted helper capacity too */
+  luaSC_releaseslot(task);  /* retire trusted helper capacity too */
   task->handoffs++;
   if (task->external) {
     unsigned epoch;
@@ -820,7 +856,7 @@ static void resourcewait (LuaExecution *execution, pthread_mutex_t *mutex,
                           LuaWaiter *waiter) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
-  releaseslot(task);
+  luaSC_releaseslot(task);
   lock(s);
   lua_assert(task->waiter == NULL);
   task->waiter = waiter;
@@ -974,7 +1010,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
       continue;
     }
     __atomic_fetch_sub(&s->runnable, 1, __ATOMIC_SEQ_CST);
-    __atomic_store_n(&slot->owner, task, __ATOMIC_RELEASE);
+    __atomic_store_n(&slot->owner, taskowner(task), __ATOMIC_RELEASE);
     bindslot(task, slot);
     task->slice_deadline = 0;
     task->home = index;
@@ -1016,7 +1052,7 @@ static void recallslots (LuaScheduler *s) {
   for (i = 0; i < s->config.slots; i++) {
     LuaExecutionSlot *slot = &s->slots[i];
     void *owner = __atomic_load_n(&slot->owner, __ATOMIC_ACQUIRE);
-    if (isnativeowner(owner) && changeslot(slot, owner, NULL)) released++;
+    if (recallslot(slot, owner, NULL)) released++;
   }
   if (released != 0) wakework(s, released > 1);
 }
@@ -1262,6 +1298,8 @@ int luaSC_init (lua_State *L, LuaScheduler *s, const LuaSchedulerConfig *config)
   for (i = 0; i < config->slots; i++) {
     s->slots[i].allocation.global = G(L);
     s->slots[i].allocation.permission = &s->slots[i].owner;
+    if (i < LUA_GATE_OFFER_MASK >> LUA_GATE_OFFER_SHIFT)
+      s->slots[i].stack_offer = (cast(uintptr_t, i) + 1) << LUA_GATE_OFFER_SHIFT;
     s->slots[i].allocation.slot_pages = &s->slots[i].stack_pages;
     s->slots[i].allocation.returned = cachereturned;
     s->slots[i].allocation.context = s;

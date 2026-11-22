@@ -27,6 +27,12 @@ enum {
   LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING | LUA_GATE_DORMANT
 };
 
+/* A scheduled root can publish its inactive stack and its recallable slot
+** in one word. Linux x86-64 userspace addresses use at most 56 bits.
+** A zero code means no offer; slots beyond this encoding remain ordinary. */
+#define LUA_GATE_OFFER_SHIFT 56
+#define LUA_GATE_OFFER_MASK (UINTPTR_MAX << LUA_GATE_OFFER_SHIFT)
+
 typedef struct LuaStackGate {
   uintptr_t word;
   struct LuaGateWaiter *head;
@@ -36,7 +42,7 @@ typedef struct LuaStackGate {
 
 l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
   return cast(struct NativeStackContext *,
-              word & ~cast(uintptr_t, LUA_GATE_FLAGS));
+              word & ~(cast(uintptr_t, LUA_GATE_FLAGS) | LUA_GATE_OFFER_MASK));
 }
 
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);

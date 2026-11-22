@@ -972,6 +972,39 @@ static void native_leaf_return(struct fixture *f) {
   finish(f);
 }
 
+static void native_recall_during_stack_borrow(struct fixture *f) {
+  lua_State *target;
+  int reservation;
+  init(f, 1);
+  lua_pushcfunction(f->main, blocked_leaf);
+  lua_setglobal(f->main, "blocked_leaf");
+  submit(f, 0,
+         "local value={answer=51}; blocked_leaf(value); return value.answer",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  target = f->tasks[0].root.thread;
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  reservation = luaX_tryreserve(target);
+  require(reservation == 1);
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  /* The independent task can use the sole slot while this stack stays held. */
+  submit(f, 1, "return 52", 0);
+  require(collect(f, 1, LUA_OK) == 52);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  while (!(__atomic_load_n(&target->stack_gate.word, __ATOMIC_ACQUIRE) &
+           LUA_GATE_WAITING))
+    sched_yield();
+  luaX_endreserve(target, reservation);
+  require(collect(f, 0, LUA_OK) == 51);
+  finish(f);
+}
+
 static void voluntary(struct fixture *f) {
   init(f, 1);
   submit(f, 0, "for i=1,5 do coroutine.yield(i) end; return 42", 0);
@@ -1910,6 +1943,8 @@ int main(int argc, char **argv) {
     native_return_compensation(f, 1);
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
+  else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
+    native_recall_during_stack_borrow(f);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
