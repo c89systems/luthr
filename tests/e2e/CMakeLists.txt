@@ -75,7 +75,8 @@ foreach(runtime IN ITEMS upstream luthr)
   endforeach()
 endforeach()
 
-set(native_workloads native_callbacks native_direct native_leaf)
+set(native_workloads native_callbacks native_direct native_leaf native_identity
+  native_scalar native_scalar_direct)
 set(scheduled_workloads integers independent_tables shared_table shared_hash
   shared_growth shared_reads closures allocation_gc ${native_workloads})
 foreach(runtime IN ITEMS upstream luthr embedded)

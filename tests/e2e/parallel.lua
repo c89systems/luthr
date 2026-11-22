@@ -69,19 +69,31 @@ local workloads={
     return sum
   end,
 }
-if kind=='native_callbacks' or kind=='native_direct' or kind=='native_leaf' then
+local native_add=kind=='native_callbacks' or kind=='native_direct'
+local native_identity=kind=='native_identity' or kind=='native_leaf'
+local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct'
+if native_add or native_identity or native_scalar then
   local native=require('compat_fixture')
-  local function add(value) return value+1 end
+  local payload
+  if native_identity then
+    payload=function(value) return value end
+  elseif native_scalar then
+    payload=function(value) return (value+3)*7-value+1 end
+    total=6*total+22*n
+  else
+    payload=function(value) return value+1 end
+    total=total+n
+  end
   workloads[kind]=function()
     local sum=0
-    for i=1,n do sum=sum+native.callback(add,i) end
+    for i=1,n do sum=sum+native.callback(payload,i) end
     return sum
   end
 end
 local work=assert(workloads[kind],'unknown workload')
 if kind=='independent_tables' then total=total*3 end
 if kind=='shared_reads' then total=n end
-if kind=='allocation_gc' or kind=='allocation_only' or kind=='native_callbacks' or kind=='native_direct' then total=total+n end
+if kind=='allocation_gc' or kind=='allocation_only' then total=total+n end
 local function prepare()
   if kind=='shared_reads' then
     shared.value=1

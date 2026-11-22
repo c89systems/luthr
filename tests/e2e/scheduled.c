@@ -207,9 +207,10 @@ int main(int argc, char **argv) {
   L = lua_newstate(allocate, &memory, 0);
   require(L != NULL);
   luaL_openlibs(L);
-  int direct = strcmp(argv[2], "native_direct") == 0;
+  int direct = strcmp(argv[2], "native_direct") == 0 ||
+               strcmp(argv[2], "native_scalar_direct") == 0;
   int leaf = strcmp(argv[2], "native_leaf") == 0;
-  if (direct || leaf || strcmp(argv[2], "native_callbacks") == 0) {
+  if (strncmp(argv[2], "native_", 7) == 0) {
     luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
     if (direct || leaf) {
       lua_pushcfunction(L, direct ? direct_callback : leaf_callback);
