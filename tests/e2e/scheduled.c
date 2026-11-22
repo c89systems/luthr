@@ -112,6 +112,15 @@ static int leaf_callback(lua_State *L) {
   return 1; /* return the last argument without accessing the Lua API */
 }
 
+static int stack_callback(lua_State *L) {
+  for (unsigned i = 0; i < 4; ++i) {
+    lua_pushvalue(L, -1);
+    require(lua_type(L, -1) == LUA_TNUMBER);
+    lua_pop(L, 1);
+  }
+  return 1;
+}
+
 static int pause_native(lua_State *L) {
   struct timespec remaining = {delay_us / 1000000, (delay_us % 1000000) * 1000};
   (void)L;
@@ -221,6 +230,8 @@ int main(int argc, char **argv) {
     override = protected_callback;
   else if (strcmp(argv[2], "native_leaf") == 0)
     override = leaf_callback;
+  else if (strcmp(argv[2], "native_stack") == 0)
+    override = stack_callback;
   if (strncmp(argv[2], "native_", 7) == 0) {
     luaL_requiref(L, "compat_fixture", luaopen_compat_fixture, 0);
     if (override != NULL) {

@@ -70,7 +70,7 @@ local workloads={
   end,
 }
 local native_add=kind=='native_callbacks' or kind=='native_direct'
-local native_identity=kind=='native_identity' or kind=='native_leaf'
+local native_identity=kind=='native_identity'
 local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
 if kind=='native_streaming' then
   local native=require('compat_fixture')
@@ -89,6 +89,14 @@ if kind=='native_streaming' then
     end,#chunk)
     assert(received==n)
     return bytes
+  end
+end
+if kind=='native_leaf' or kind=='native_stack' then
+  local callback=require('compat_fixture').callback
+  workloads[kind]=function()
+    local sum=0
+    for i=1,n do sum=sum+callback(i) end
+    return sum
   end
 end
 if native_add or native_identity or native_scalar then
