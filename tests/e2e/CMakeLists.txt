@@ -149,7 +149,7 @@ target_link_libraries(gc_handoff_probe_test PRIVATE luthr_static)
 foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter luaW_trycollectenter luaW_heapleave
     luaAL_realloc
     luaC_step luaC_userstep luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
-    luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector
+    luaM_reclaimpages luaQ_wait luaC_assistreclaim luaW_waitcollector luaCT_pause
     luaC_tracebatch luaC_scantrace luaC_assisttrace luaC_polltrace luaC_snapshot luaC_checksnapshot luaC_finishtrace
     luaC_sweepbatch luaC_sweeppayload luaSC_collectidle luaC_scansweep luaC_pollsweep luaC_assistsweep luaQ_wake)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")

@@ -60,6 +60,8 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   trace_retry_upvalues trace_retry_closures trace_retry_userdata
   mark_peak_bytes sweep_peak_bytes reclaim_peak_bytes idle_peak_bytes trace_peak_workers
   startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
+  minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
+  minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns
   phase_waits phase_wait_ns trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
   sweep_paused_records sweep_poll_calls sweep_assist_calls sweep_peak_workers root_snapshot_calls root_snapshot_ns
   heap_deferred_entries
@@ -84,6 +86,8 @@ string(JSON metadata SET "${metadata}" timing
   "\"Total CPU/wall includes cleanup and final collection. Execution and cleanup times are separate fields; GC probe counters cover execution only.\"")
 string(JSON metadata SET "${metadata}" metadata_handoff
   "\"Metadata grant until recipient resumes, a subset of summed metadata wait time; includes collector and mutator grants.\"")
+string(JSON metadata SET "${metadata}" minor_wait
+  "\"Minor wait timers split each notified wait at the start and end of wake publication. For scheduled fibers, post-publication time is split again when the fiber resumes, before execution capacity and the predicate mutex are restored. Wake time counts publication once per batch.\"")
 string(JSON metadata SET "${metadata}" notes
   "\"Counters are invocation-local wall durations. Coordination includes nested waits/publication/drain. Wait sums can exceed elapsed time. Collector body includes object destruction and trace assists, excludes coordination and page reclamation, and can include scheduler suspension. Trace batches exclude cooperative suspension; roots are measured separately. Stopped time starts after quiescence and ends before resumed root work. Object reclamation is a subset of collector body, including work after collection calls return. Stopped disables automatic collection; explicit steps still run. Compare wrapped profile with identical unwrapped static control for probe overhead.\"")
 foreach(input IN ITEMS upstream shared control profile library script)
@@ -110,8 +114,9 @@ file(WRITE "${output_dir}/metadata.json" "${metadata}\n")
 set(integers_iterations 500000)
 set(independent_tables_iterations 5000)
 set(allocation_only_iterations 5000)
+set(allocation_gc_iterations 5000)
 set(gc_profile_paths)
-foreach(workload IN ITEMS integers independent_tables allocation_only)
+foreach(workload IN ITEMS integers independent_tables allocation_only allocation_gc)
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")
   if(iterations LESS 1)
     set(iterations 1)
@@ -121,6 +126,9 @@ foreach(workload IN ITEMS integers independent_tables allocation_only)
     foreach(automatic_gc IN ITEMS running stopped)
       set(extra)
       if(automatic_gc STREQUAL "stopped")
+        if(workload STREQUAL "allocation_gc")
+          continue()
+        endif()
         set(extra stopped)
       endif()
       foreach(runtime IN ITEMS upstream shared control profile)

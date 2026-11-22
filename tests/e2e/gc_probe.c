@@ -45,6 +45,16 @@ struct metadata_wait {
 static struct metadata_wait *metadata_waiters;
 static pthread_mutex_t metadata_probe_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* These registrations belong to the bound VM's world mutex. A task's
+ * luaQ_wait call returns under that mutex, after the wake publisher exits. */
+struct minor_wait {
+  struct minor_wait *next;
+  uint64_t wake_start, wake_end, dispatched;
+  int first;
+};
+static struct minor_wait *minor_waiters;
+static LuaWaiter **minor_queue;
+
 static uint64_t now(void) {
   struct timespec stamp;
   if (clock_gettime(CLOCK_MONOTONIC, &stamp) != 0)
@@ -65,6 +75,7 @@ void gc_probe_bind(lua_State *L, GcProbe *record) {
   /* Called before carriers start; immutable until they have been joined. */
   host = L;
   host_probe = record;
+  minor_queue = L != NULL ? &G(L)->minor_waiters : NULL;
 }
 
 void *__real_luaAL_realloc(lua_State *, void *, size_t, size_t);
@@ -303,6 +314,19 @@ void __wrap_luaW_heapleave(lua_State *L) {
 }
 
 void __wrap_luaQ_wake(pthread_cond_t *changed, LuaWaiter **waiters) {
+  if (waiters == minor_queue && minor_waiters != NULL) {
+    struct minor_wait *wait = minor_waiters;
+    uint64_t started = now(), ended;
+    minor_waiters = NULL;
+    wait->first = 1;
+    __real_luaQ_wake(changed, waiters);
+    ended = now();
+    for (; wait != NULL; wait = wait->next) {
+      wait->wake_start = started;
+      wait->wake_end = ended;
+    }
+    return;
+  }
   if (host != NULL) {
     struct metadata_wait *wait;
     luaX_checksync(pthread_mutex_lock(&metadata_probe_mutex));
@@ -770,12 +794,70 @@ void __wrap_luaW_waitcollector(lua_State *L, int reason) {
   }
 }
 
+static void waitminor(lua_State *L, GcProbe *record, pthread_mutex_t *mutex,
+                      pthread_cond_t *changed, LuaWaiter **waiters) {
+  struct minor_wait pending = {.next = minor_waiters};
+  uint64_t started = now();
+  if (record->minor_wait != NULL)
+    abort();
+  record->minor_wait = &pending;
+  minor_waiters = &pending;
+  __real_luaQ_wait(L, mutex, changed, waiters);
+  record->minor_wait = NULL;
+  if (pending.wake_end != 0) {
+    uint64_t publish = pending.wake_end - pending.wake_start;
+    uint64_t restored = now();
+    record->minor_woken++;
+    record->minor_before_wake_ns += pending.wake_start - started;
+    record->minor_during_wake_ns += publish;
+    record->minor_after_wake_ns += restored - pending.wake_end;
+    if (pending.dispatched != 0) {
+      uint64_t dispatch = pending.dispatched > pending.wake_end
+                              ? pending.dispatched
+                              : pending.wake_end;
+      record->minor_fiber_woken++;
+      record->minor_dispatch_ns += dispatch - pending.wake_end;
+      record->minor_restore_ns += restored - dispatch;
+    }
+    record->minor_wake_batches += pending.first;
+    if (pending.first)
+      record->minor_wake_ns += publish;
+  } else {
+    struct minor_wait **link = &minor_waiters;
+    while (*link != &pending)
+      link = &(*link)->next;
+    *link = pending.next;
+  }
+}
+
+void __real_luaCT_pause(LuaFiber *);
+void __wrap_luaCT_pause(LuaFiber *fiber) {
+  struct minor_wait *wait = NULL;
+  LuaExecution *execution = &fiber->execution;
+  if (execution->scheduler != NULL &&
+      &execution->scheduler->global->minor_waiters == minor_queue) {
+    const LuaScheduledTask *task = execution->context;
+    if (task->waiter != NULL) {
+      GcProbe *record = luthr_policy_get_context(execution->policy);
+      if (record != NULL)
+        wait = record->minor_wait;
+    }
+  }
+  __real_luaCT_pause(fiber);
+  if (wait != NULL)
+    wait->dispatched = now();
+}
+
 void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
                       pthread_cond_t *changed, LuaWaiter **waiters) {
   GcProbe *record = probe(L);
   struct metadata_wait pending = {0};
   uint64_t started = 0;
   int category = 0;
+  if (record != NULL && waiters == minor_queue) {
+    waitminor(L, record, mutex, changed, waiters);
+    return;
+  }
   if (record != NULL && mutex == &G(L)->allocator.mutex) {
     started = now();
     category = 4;

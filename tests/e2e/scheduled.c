@@ -462,6 +462,9 @@ int main(int argc, char **argv) {
 #ifdef LUTHR_BENCH_SCHEDULER
   require(luthr_lua_scheduler_free(scheduler) == LUTHR_LUA_RUNTIME_OK);
 #endif
+#ifdef LUTHR_BENCH_GC_PROBE
+  gc_probe_bind(NULL, NULL);
+#endif
   lua_close(L);
   require(memory.live == 0);
   free(latencies);

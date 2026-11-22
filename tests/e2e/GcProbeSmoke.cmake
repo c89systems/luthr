@@ -1,8 +1,10 @@
 include("${CMAKE_CURRENT_LIST_DIR}/BenchmarkGc.cmake")
 file(STRINGS "${output_dir}/summary.csv" header LIMIT_COUNT 1)
-foreach(field IN ITEMS metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns)
+foreach(field IN ITEMS metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns
+    minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
+    minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns)
   if(NOT header MATCHES "(^|,)gc_${field}(,|$)")
-    message(FATAL_ERROR "Metadata handoff metric is missing from summary: ${field}")
+    message(FATAL_ERROR "GC wait metric is missing from summary: ${field}")
   endif()
 endforeach()
 # The quick matrix can fit below the collector's debt threshold. These bounded
@@ -64,11 +66,15 @@ foreach(path IN LISTS gc_profile_paths)
         trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
         sweep_ns sweep_scan_ns sweep_records sweep_paused_records
         startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
+        minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
+        minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns
         phase_waits phase_wait_ns trace_waits trace_wait_ns reclaim_waits reclaim_wait_ns
         metadata_waits metadata_wait_ns metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns)
       string(JSON ${field} GET "${row}" "gc_${field}")
     endforeach()
     math(EXPR classified "${stop_gc} + ${stop_barrier} + ${stop_other}")
+    math(EXPR minor_measured "${minor_before_wake_ns} + ${minor_during_wake_ns} + ${minor_after_wake_ns}")
+    math(EXPR minor_fiber "${minor_dispatch_ns} + ${minor_restore_ns}")
     foreach(clock IN ITEMS cpu wall)
       string(JSON total GET "${row}" "${clock}_ns")
       string(JSON execution GET "${row}" "execution_${clock}_ns")
@@ -95,7 +101,10 @@ foreach(path IN LISTS gc_profile_paths)
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
         sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
         metadata_handoffs GREATER metadata_waits OR metadata_handoff_ns GREATER metadata_wait_ns OR
-        metadata_handoff_max_ns GREATER metadata_handoff_ns)
+        metadata_handoff_max_ns GREATER metadata_handoff_ns OR
+        minor_woken GREATER minor_waits OR minor_measured GREATER minor_wait_ns OR
+        NOT minor_fiber_woken EQUAL minor_woken OR NOT minor_fiber EQUAL minor_after_wake_ns OR
+        minor_wake_batches GREATER minor_woken OR minor_wake_ns GREATER minor_during_wake_ns)
       message(FATAL_ERROR "Invalid GC probe accounting: ${path}: ${row}")
     endif()
     foreach(reason IN ITEMS startup arm minor phase trace reclaim)

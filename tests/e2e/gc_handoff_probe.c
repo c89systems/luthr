@@ -86,6 +86,36 @@ static void transfer(lua_State *state, struct fixture *fixture) {
   require(pthread_join(worker, NULL) == 0);
 }
 
+static void *notify_minor(void *context) {
+  struct fixture *fixture = context;
+  global_State *g = G(fixture->owner);
+  require(pthread_mutex_lock(&g->world.mutex) == 0);
+  require(g->minor_waiters != NULL);
+  fixture->ready = 1;
+  luaQ_wake(&g->phase_changed, &g->minor_waiters);
+  require(pthread_mutex_unlock(&g->world.mutex) == 0);
+  return NULL;
+}
+
+static void minor_notification(lua_State *state, struct fixture *fixture,
+                               GcProbe *record) {
+  global_State *g = G(state);
+  pthread_t worker;
+  fixture->ready = 0;
+  record->enabled = 1;
+  require(pthread_mutex_lock(&g->world.mutex) == 0);
+  require(pthread_create(&worker, NULL, notify_minor, fixture) == 0);
+  while (!fixture->ready)
+    luaQ_wait(state, &g->world.mutex, &g->phase_changed, &g->minor_waiters);
+  require(pthread_mutex_unlock(&g->world.mutex) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  record->enabled = 0;
+  require(record->minor_woken == 1 && record->minor_wake_batches == 1);
+  require(record->minor_wake_ns == record->minor_during_wake_ns);
+  require(record->minor_fiber_woken == 0 && record->minor_dispatch_ns == 0 &&
+          record->minor_restore_ns == 0);
+}
+
 int main(void) {
   lua_State *state = luaL_newstate();
   struct fixture fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
@@ -119,6 +149,7 @@ int main(void) {
   require(record.metadata_handoffs == 2 * TRANSFERS &&
           record.metadata_handoff_ns == handoff_ns &&
           record.metadata_wait_ns == wait_ns);
+  minor_notification(state, &fixture, &record);
   gc_probe_bind(NULL, NULL);
   lua_close(state);
   require(pthread_cond_destroy(&fixture.changed) == 0);

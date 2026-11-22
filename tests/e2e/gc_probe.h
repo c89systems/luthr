@@ -16,6 +16,9 @@
   X(trace_calls) X(trace_ns) X(trace_scan_ns) X(trace_work_bytes) X(trace_cycles) \
   X(startup_waits) X(startup_wait_ns) \
   X(arm_waits) X(arm_wait_ns) X(minor_waits) X(minor_wait_ns) \
+  X(minor_woken) X(minor_before_wake_ns) X(minor_during_wake_ns) X(minor_after_wake_ns) \
+  X(minor_fiber_woken) X(minor_dispatch_ns) X(minor_restore_ns) \
+  X(minor_wake_batches) X(minor_wake_ns) \
   X(phase_waits) X(phase_wait_ns) \
   X(trace_assist_calls) X(trace_poll_calls) X(trace_waits) X(trace_wait_ns) \
   X(trace_zero_progress_batches) X(trace_retry_tables) X(trace_retry_threads) \
@@ -51,6 +54,7 @@ typedef struct GcProbe {
 #undef GC_PROBE_FIELD
   uint64_t coordination_start;
   uint64_t stopped_start;
+  struct minor_wait *minor_wait;
   unsigned coordination_depth, gc_depth, root_depth, reason, operation;
   int enabled;
 } GcProbe;
