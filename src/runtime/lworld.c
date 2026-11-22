@@ -514,7 +514,7 @@ void luaW_start (lua_State *L) {
   luaQ_wake(&world->resumed, &world->resume_waiters);
   luaQ_wake(&world->changed, &world->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  luaSC_notifygc(G(L));
+  luaSC_worldresumed(G(L));
   luaC_checksnapshot(L);
   luaW_heapleave(L);
 }

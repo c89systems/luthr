@@ -97,8 +97,10 @@ static int eligible (LuaScheduledTask *task, LuaCarrier *carrier) {
   return !task->native_pending || reserved == NULL || reserved == task;
 }
 
-static int runnableon (LuaScheduledTask *task, LuaCarrier *carrier) {
-  return eligible(task, carrier) &&
+static int runnableon (LuaScheduledTask *task, LuaCarrier *carrier, int stopped) {
+  /* Resource continuations can release a reservation or complete the stop.
+  ** Fresh and voluntarily yielded tasks would only park at admission. */
+  return (!stopped || task->reason == SC_RESOURCE) && eligible(task, carrier) &&
     (serving(carrier) ||
      __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE) == carrier);
 }
@@ -108,8 +110,9 @@ static int runnableon (LuaScheduledTask *task, LuaCarrier *carrier) {
 ** sleeper which might leave its required carrier asleep indefinitely. */
 static int waketask (LuaCarrier **head, LuaScheduledTask *task) {
   LuaCarrier **link;
+  int stopped = luaW_stopped(&task->scheduler->global->world);
   for (link = head; *link != NULL; link = &(*link)->idle_next) {
-    if (runnableon(task, *link)) {
+    if (runnableon(task, *link, stopped)) {
       wakecarrier(link);
       return 1;
     }
@@ -128,9 +131,10 @@ static void wakequeued (LuaScheduler *s, LuaScheduledTask *task) {
 
 static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
   LuaScheduledTask **link = &slot->head, *previous = NULL;
+  int stopped = luaW_stopped(&carrier->scheduler->global->world);
   while (*link != NULL) {
     LuaScheduledTask *task = *link;
-    if (runnableon(task, carrier)) {
+    if (runnableon(task, carrier, stopped)) {
       *link = task->next;
       if (slot->tail == task) slot->tail = previous;
       task->next = NULL;
@@ -604,6 +608,7 @@ void luaSC_restorenative (LuaExecution *execution) {
 
 static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
   unsigned i, j;
+  int stopped = luaW_stopped(&s->global->world);
   if (carrier != NULL && !serving(carrier) &&
       __atomic_load_n(&carrier->reserved, __ATOMIC_ACQUIRE) == NULL) return 0;
   for (i = 0; i < s->config.slots; i++) {
@@ -612,9 +617,9 @@ static int haswork (LuaScheduler *s, LuaCarrier *carrier) {
     int found = 0;
     luaX_checksync(pthread_mutex_lock(&slot->mutex));
     for (task = slot->head; task != NULL && !found; task = task->next) {
-      if (carrier != NULL) found = runnableon(task, carrier);
+      if (carrier != NULL) found = runnableon(task, carrier, stopped);
       else for (j = 0; j < s->config.carriers; j++)
-        if (runnableon(task, &s->carriers[j])) { found = 1; break; }
+        if (runnableon(task, &s->carriers[j], stopped)) { found = 1; break; }
     }
     luaX_checksync(pthread_mutex_unlock(&slot->mutex));
     if (found) return 1;
@@ -674,6 +679,16 @@ void luaSC_notifygc (global_State *g) {
       luaW_stopped(&g->world)) return;
   lock(s);
   wakecollectors(s);
+  unlock(s);
+}
+
+void luaSC_worldresumed (global_State *g) {
+  LuaScheduler *s = __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE);
+  if (s == NULL || !__atomic_load_n(&s->ready, __ATOMIC_ACQUIRE) ||
+      (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) == 0 &&
+       (s->config.slots == 1 || !luaC_workerready(g)))) return;
+  lock(s);
+  wakework(s, 1);
   unlock(s);
 }
 
@@ -992,7 +1007,8 @@ static LuaExecutionSlot *dispatchcollector (LuaCarrier *carrier) {
 static int needslots (LuaScheduler *s) {
   return !s->stopping &&
     __atomic_load_n(&s->reentry_waiting, __ATOMIC_ACQUIRE) == 0 &&
-    (__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) != 0 || collectorready(s));
+    ((__atomic_load_n(&s->runnable, __ATOMIC_ACQUIRE) != 0 &&
+      (!luaW_stopped(&s->global->world) || haswork(s, NULL))) || collectorready(s));
 }
 
 static void recallslots (LuaScheduler *s) {

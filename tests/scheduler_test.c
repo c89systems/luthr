@@ -695,6 +695,51 @@ static void wake_waiters(struct fixture *f) {
   finish(f);
 }
 
+static int park_at_stop(lua_State *L) {
+  LuaWorld *world = &G(L)->world;
+  mark_running(L);
+  while (!luaW_stopped(world))
+    sched_yield();
+  return event_wait(L);
+}
+
+static void stopped_dispatch(struct fixture *f) {
+  LuaScheduler *s = &f->scheduler;
+  init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "park_at_stop", park_at_stop);
+  submit(f, 0, "park_at_stop(); return 42", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "return 43", 0);
+  lua_lock(f->main);
+  luaW_stop(f->main);
+  for (;;) {
+    require(pthread_mutex_lock(&s->mutex) == 0);
+    if (f->tasks[0].published && s->idle != NULL) {
+      /* The dispatcher has had a chance to run the queued task. */
+      require(f->tasks[1].dispatches == 0);
+      require(pthread_mutex_unlock(&s->mutex) == 0);
+      break;
+    }
+    require(pthread_mutex_unlock(&s->mutex) == 0);
+    sched_yield();
+  }
+  luaW_start(f->main);
+  lua_unlock(f->main);
+  /* The existing task is parked on its own resource. Only reopening the
+   * world can dispatch the fresh task. */
+  require(collect(f, 1, LUA_OK) == 43);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  luaQ_wake(&f->changed, &f->waiters);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  finish(f);
+}
+
 static int block_binding(lua_State *L) {
   struct fixture *f = fixture;
   pthread_t carrier = pthread_self();
@@ -1699,6 +1744,8 @@ int main(int argc, char **argv) {
     wake_before_publication(f, 1);
   else if (strcmp(argv[1], "wake_waiters") == 0)
     wake_waiters(f);
+  else if (strcmp(argv[1], "stopped_dispatch") == 0)
+    stopped_dispatch(f);
   else if (strcmp(argv[1], "native") == 0)
     native_progress(f, 0);
   else if (strcmp(argv[1], "native_reentry") == 0)

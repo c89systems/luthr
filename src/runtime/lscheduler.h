@@ -130,6 +130,7 @@ LUAI_FUNC int luaSC_callback (LuaScheduler *, LuaCallback *,
 LUAI_FUNC int luaSC_destroy (lua_State *, LuaScheduler *);
 /* An admitted mutator, world.mutex, or quiescence retains the engine. */
 LUAI_FUNC void luaSC_notifygc (global_State *);
+LUAI_FUNC void luaSC_worldresumed (global_State *);
 /* Wake consecutive waiters belonging to one engine under the predicate lock.
 ** Return the first waiter belonging to a different owner. */
 LUAI_FUNC LuaWaiter *luaSC_wakewaiters (LuaWaiter *);
