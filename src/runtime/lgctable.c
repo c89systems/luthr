@@ -17,7 +17,7 @@ static int snapshot (Table *table, Table *view, Table **metatable,
   *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   if (*sequence & 1) return 0;
   view->array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-  view->asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
+  view->asize = view->array != NULL ? arrayheader(view->array)->size : 0;
   view->node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   *metatable = __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE);
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == *sequence;

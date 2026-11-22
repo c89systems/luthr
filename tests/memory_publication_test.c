@@ -93,7 +93,7 @@ void *__wrap_luaM_realloc_(lua_State *state, void *oldblock, size_t old,
                            size_t size) {
   void *block = __real_luaM_realloc_(state, oldblock, old, size);
   if (resize_probe.armed && state == resize_probe.owner && oldblock == NULL &&
-      size == sizeof(Value) + 1 + sizeof(unsigned)) {
+      size == sizeof(Value) + 1 + sizeof(LuaArrayHeader)) {
     resize_probe.armed = 0;
     state->native_depth++;
     require(pthread_mutex_lock(&G(state)->world.mutex) == 0);

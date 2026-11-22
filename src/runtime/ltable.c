@@ -79,7 +79,7 @@ typedef union {
 ** MAXASIZEB is the maximum number of elements in the array part such
 ** that the size of the array fits in 'size_t'.
 */
-#define MAXASIZEB	((MAX_SIZET - sizeof(unsigned) - 2 * sizeof(uint64_t)) / \
+#define MAXASIZEB	((MAX_SIZET - sizeof(LuaArrayHeader) - 2 * sizeof(uint64_t)) / \
                          (sizeof(Value) + 2))
 
 
@@ -577,8 +577,8 @@ static void numusehash (Node *nodes, Counters *ct) {
 static size_t arraypayload (unsigned int size) {
   if (size == 0)
     return 0;
-  else  /* space for the two arrays plus an unsigned in between */
-    return size * (sizeof(Value) + 1) + sizeof(unsigned);
+  else
+    return size * (sizeof(Value) + 1) + sizeof(LuaArrayHeader);
 }
 
 static size_t concretesize (unsigned int size) {
@@ -600,7 +600,7 @@ static void resizecards (const Table *t, Value *array, unsigned size,
     }
   }
   else {
-    const lu_byte *tags = cast(lu_byte *, array) + sizeof(unsigned);
+    const lu_byte *tags = arraytag(array, 0);
     for (i = 0; i < copied; i++) {
       if (tags[i] & BIT_ISCOLLECTABLE) cards[i / LUA_ARRAY_CARD_SLOTS] = 0;
     }
@@ -637,6 +637,9 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
       lua_assert(tomoveb > 0);
       memcpy(np - tomove, op - tomove, tomoveb);
     }
+    arrayheader(np)->size = newasize;
+    arrayheader(np)->hint = newasize / 2u;
+    memset(arraytag(np, tomove), LUA_VEMPTY, newasize - tomove);
     if (newasize >= LUA_ARRAY_CARD_MIN)
       resizecards(t, np, newasize, tomove);
     return np;
@@ -743,15 +746,6 @@ static void reinsertOldSlice (Table *t, unsigned oldasize,
 
 
 /*
-** Clear new slice of the array.
-*/
-static void clearNewSlice (Table *t, unsigned oldasize, unsigned newasize) {
-  for (; oldasize < newasize; oldasize++)
-    __atomic_store_n(getArrTag(t, oldasize), LUA_VEMPTY, __ATOMIC_RELEASE);
-}
-
-
-/*
 ** Resize table 't' for the new given sizes. Both allocations (for
 ** the hash part and for the array part) can fail, which creates some
 ** subtleties. If the first allocation, for the hash part, fails, an
@@ -831,9 +825,8 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   exchangehashpart(t, &newt);  /* 't' has the new hash ('newt' has the old) */
   __atomic_store_n(&t->array, newarray, __ATOMIC_RELEASE);
   __atomic_store_n(&t->asize, newasize, __ATOMIC_RELEASE);
-  if (newarray != NULL)
-    *lenhint(t) = newasize / 2u;  /* set an initial hint */
-  clearNewSlice(t, oldasize, newasize);
+  if (newarray != NULL && oldasize == newasize)
+    *lenhint(t) = newasize / 2u;  /* reset the retained image's hint */
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
   if (L->task_tables != NULL && luaC_tasktable(t)) {
@@ -1032,6 +1025,7 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
     if (asize != 0) {
       t->array = cast(Value *, storage) + asize;
       t->asize = asize;
+      arrayheader(t->array)->size = asize;
       *lenhint(t) = asize / 2u;
       memset(getArrTag(t, 0), LUA_VEMPTY, asize);
     }
@@ -1588,15 +1582,19 @@ l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
   return probehash(table, base, key, scalar, layout, slot, slot->part, revision);
 }
 
+/* Storage admission retains the backing image until both the slot and the
+** layout have been validated. Its bound stays valid during a resize. */
+l_sinline unsigned retainedarrayindex (Value *array, lua_Integer key) {
+  return array != NULL ? luaH_indexin(key, arrayheader(array)->size) : 0;
+}
+
 l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
                              LuaTableSlot *slot, int writing) {
-  unsigned asize = __atomic_load_n(&table->asize, __ATOMIC_ACQUIRE);
-  unsigned k = luaH_indexin(ivalue(key), asize);
+  Value *array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
+  unsigned k = retainedarrayindex(array, ivalue(key));
   if (k != 0) {
-    Value *array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-    if (!sameversion(table, layout)) return 0;
     slot->payload = array - k;
-    slot->tag = cast(lu_byte *, array) + sizeof(unsigned) + k - 1;
+    slot->tag = arraytag(array, k - 1);
     return 1;
   }
   return findhashslot(table, key, LUA_VNUMINT, layout, slot, writing);
@@ -1852,11 +1850,13 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
     luaH_releasewriter(L, table, writer);
     return 0;
   }
-  luaC_tracevalue(L, key);
-  if (node != NULL && luaC_tracing(L) && keyiscollectable(node))
-    luaC_traceobject(L, gckey(node));
+  if (node != NULL) {
+    luaC_tracevalue(L, key);
+    if (luaC_tracing(L) && keyiscollectable(node))
+      luaC_traceobject(L, gckey(node));
+  }
   luaH_elementstore(L, table, slot.payload, slot.tag, value);
-  if (node == NULL)
+  if (node == NULL && iscollectable(value))
     luaH_dirtyarray(table, cast_uint(table->array - 1 - slot.payload), value);
   if (node != NULL && keyisshrstr(node))
     invalidatemethod(L, table, keystrval(node));
@@ -2416,11 +2416,35 @@ lu_byte luaH_get (lua_State *L, Table *t, const TValue *key, TValue *res) {
   return getrooted(L, t, key, res);
 }
 
+static int __attribute__((noinline)) readsharedinthash (
+    lua_State *L, Table *t, lua_Integer key, TValue *res, lu_byte *tag,
+    uint64_t sequence) {
+  TValue index;
+  LuaTableSlot slot = {0};
+  setivalue(&index, key);
+  if (!findhashslot(t, &index, LUA_VNUMINT, sequence, &slot, 0) ||
+      !readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
+  *tag = finishsharedread(L, t, res, *tag, sequence);
+  return 1;
+}
+
 int luaH_trygetsharedint (lua_State *L, Table *t, lua_Integer key, TValue *res,
                            lu_byte *tag) {
-  TValue index;
-  setivalue(&index, key);
-  return trygetshared(L, t, &index, LUA_VNUMINT, res, tag);
+  uint64_t sequence;
+  Value *array;
+  unsigned index;
+  TValue value;
+  lu_byte found;
+  if (!readsequence(L, t, &sequence)) return 0;
+  array = __atomic_load_n(&t->array, __ATOMIC_ACQUIRE);
+  index = retainedarrayindex(array, key);
+  if (index == 0) return readsharedinthash(L, t, key, res, tag, sequence);
+  if (!luaH_readvalue(G(L), array - index, arraytag(array, index - 1),
+                      &value, sequence) || !sameversion(t, sequence)) return 0;
+  found = rawtt(&value);
+  if (!tagisempty(found)) setobj(L, res, &value);
+  *tag = finishsharedread(L, t, res, found, sequence);
+  return 1;
 }
 
 lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {

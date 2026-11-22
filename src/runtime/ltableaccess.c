@@ -266,8 +266,12 @@ int luaH_waitlayout (lua_State *L, Table *table) {
 void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag,
                          const TValue *value) {
   TValue old;
-  old.value_ = *payload;
   old.tt_ = *tag;
+  if (old.tt_ == value->tt_ && !iscollectable(value)) {
+    __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
+    return;
+  }
+  old.value_ = *payload;
   lua_assert(old.tt_ == value->tt_ ||
     (__atomic_load_n(&luaH_writer(G(L), payload)->sequence, __ATOMIC_RELAXED) & 1));
   luaC_prewrite(L, &old, value);

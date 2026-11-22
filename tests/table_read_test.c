@@ -957,6 +957,9 @@ static void *mixed_reader(void *argument) {
     require(lua_rawgeti(state, 1, 16) == LUA_TNUMBER);
     require(lua_tointeger(state, -1) == 84);
     lua_pop(state, 1);
+    /* This empty slot only exists in the larger array image. */
+    require(lua_rawgeti(state, 1, 31) == LUA_TNIL);
+    lua_pop(state, 1);
   }
   return NULL;
 }

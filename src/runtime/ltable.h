@@ -107,7 +107,7 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 
              Values                              Tags
   --------------------------------------------------------
-  ...  |   Value 1     |   Value 0     |unsigned|0|1|...
+  ...  |   Value 1     |   Value 0     | header |0|1|...
   --------------------------------------------------------
                                        ^ t->array
 
@@ -115,8 +115,16 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
 ** and 'getArrVal'.
 */
 
+typedef struct LuaArrayHeader {
+  unsigned hint;  /* length search hint, under layout ownership */
+  unsigned size;  /* immutable capacity of this backing allocation */
+} LuaArrayHeader;
+
+#define arrayheader(a) cast(LuaArrayHeader *, (a))
+#define arraytag(a,k) (cast(lu_byte *, (a)) + sizeof(LuaArrayHeader) + (k))
+
 /* Computes the address of the tag for the abstract C-index 'k' */
-#define getArrTag(t,k)	(cast(lu_byte*, (t)->array) + sizeof(unsigned) + (k))
+#define getArrTag(t,k)	arraytag((t)->array, (k))
 
 /* Computes the address of the value for the abstract C-index 'k' */
 #define getArrVal(t,k)	((t)->array - 1 - (k))
@@ -129,7 +137,7 @@ enum { LUA_ARRAY_CARD_SLOTS = 64, LUA_ARRAY_CARD_MIN = 256 };
 #define LUA_ARRAY_CARD_SCANNING (UINT64_MAX - 1)
 
 l_sinline size_t luaH_cardoffset (unsigned size) {
-  size_t bytes = sizeof(unsigned) + cast_sizet(size);
+  size_t bytes = sizeof(LuaArrayHeader) + cast_sizet(size);
   return (bytes + sizeof(uint64_t) - 1) & ~(sizeof(uint64_t) - 1);
 }
 
@@ -149,11 +157,11 @@ l_sinline void luaH_dirtyarray (Table *t, unsigned index, const TValue *value) {
 
 
 /*
-** The unsigned between the two arrays is used as a hint for #t;
+** The header between the two arrays holds the hint for #t;
 ** see luaH_getn. It is stored there to avoid wasting space in
 ** the structure Table for tables with no array part.
 */
-#define lenhint(t)	cast(unsigned*, (t)->array)
+#define lenhint(t)	(&arrayheader((t)->array)->hint)
 
 
 /*
