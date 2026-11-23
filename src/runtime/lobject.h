@@ -409,13 +409,15 @@ typedef struct GCObject {
 #define LSTRFIX		-2  /* fixed external long string */
 #define LSTRMEM		-3  /* external long string with deallocation */
 
+/* Flags in 'extra' for long strings. Short strings use it for tokens. */
+enum { LSTR_ZEROHASH = 1, LSTR_TASK = 2, LSTR_TASKLIVE = 4 };
 
 /*
 ** Header for a string value.
 */
 typedef struct TString {
   CommonHeader;
-  lu_byte extra;  /* reserved short string or cached zero long-string hash */
+  lu_byte extra;  /* reserved short string or long-string flags */
   ls_byte shrlen;  /* length for short strings, negative for long strings */
   unsigned int hash;
   union {

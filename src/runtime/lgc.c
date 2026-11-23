@@ -277,12 +277,34 @@ void luaC_fix (lua_State *L, GCObject *o) {
 }
 
 
-/*
-** create a new collectable object (with given type, size, and offset)
-** and retain it in this coroutine's construction list. Collection publishes
-** complete lists under quiescence, before any tracing or reclamation.
-*/
-GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
+/* The caller owns the new list. Outside quiescence it joins the current
+** coroutine's construction list until the collector can publish it. */
+static void publishobjects (lua_State *L, GCObject *head, GCObject *tail,
+                            GCObject **link, int collector) {
+  global_State *g = G(L);
+  luaC_noteyoung(g);
+  if (collector) {
+    *link = g->allgc;
+    if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
+      g->sweep_plan.append = link;
+    g->allgc = head;
+  }
+  else {
+    *link = L->new_objects;
+    if (L->new_objects == NULL) {
+      luaW_trackpublisher(L);
+      L->new_objects_tail = tail;
+    }
+    L->new_objects = head;
+  }
+}
+
+void luaC_publishobjects (lua_State *L, GCObject *head, GCObject *tail) {
+  publishobjects(L, head, tail, luaC_alloclink(tail), luaW_iscollector(L));
+}
+
+static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
+                           int taskstring) {
   global_State *g = G(L);
   char *p;
   GCObject *o;
@@ -292,6 +314,7 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   setmarked(o, luaC_newmark(g));
   o->tt = tt;
   o->next = NULL;
+  if (tt == LUA_VLNGSTR) gco2ts(o)->extra = 0;
   collector = luaW_iscollector(L);
   if (tt == LUA_VTABLE) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
@@ -315,24 +338,20 @@ GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
     luaMP_young(page, epoch + 1);
     return o;
   }
-  luaC_noteyoung(g);
-  if (collector) {
-    (cast(LuaAllocBlock *, p) - 1)->block.link.object = g->allgc;
-    if (luaC_sweeping(L) && g->sweep_plan.append == &g->allgc)
-      g->sweep_plan.append = &(cast(LuaAllocBlock *, p) - 1)->block.link.object;
-    g->allgc = o;
-  }
-  else {
-    (cast(LuaAllocBlock *, p) - 1)->block.link.object = L->new_objects;
-    if (L->new_objects == NULL) {
-      luaW_trackpublisher(L);
-      L->new_objects_tail = o;
-    }
-    L->new_objects = o;
-  }
+  if (taskstring && !collector && L->task_owner != NULL &&
+      luaC_taskallocate(L, o, sz)) return o;
+  publishobjects(L, o, o, &(cast(LuaAllocBlock *, p) - 1)->block.link.object,
+                 collector);
   return o;
 }
 
+GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
+  return newobjdt(L, tt, sz, offset, 0);
+}
+
+GCObject *luaC_newresultstring (lua_State *L, size_t size) {
+  return newobjdt(L, LUA_VLNGSTR, size, 0, size <= LUA_ALLOC_MAX);
+}
 
 /*
 ** create a new collectable object with no offset.
@@ -361,7 +380,7 @@ static int claimmark (global_State *g, GCObject *o) {
   unsigned state = luaC_markstate(g);
   lu_byte marked = getmarked(o);
   lu_byte claimed;
-  if (o->tt == LUA_VTABLE && luaC_tasktable(gco2t(o))) return 0;
+  if (luaC_taskobject(o)) return 0;
   do {
     if (!luaC_unmarked(state, marked)) return 0;
     claimed = cast_byte(luaC_stamp(state, marked) | bitmask(QUEUEDBIT));

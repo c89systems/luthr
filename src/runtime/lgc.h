@@ -254,9 +254,19 @@ l_sinline int luaC_tasktable (const Table *table) {
           (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);
 }
 
+l_sinline int luaC_taskstring (const GCObject *object) {
+  return object->tt == LUA_VLNGSTR &&
+         (__atomic_load_n(&gco2ts(object)->extra, __ATOMIC_ACQUIRE) & LSTR_TASK);
+}
+
+l_sinline int luaC_taskobject (const GCObject *object) {
+  return object->tt == LUA_VTABLE ? luaC_tasktable(gco2t(object))
+                                 : luaC_taskstring(object);
+}
+
 l_sinline int luaC_objectdead (global_State *g, const GCObject *object) {
   return luaC_deadmark(g, &object->marked) &&
-         (object->tt != LUA_VTABLE || !luaC_tasktable(gco2t(object)));
+         !luaC_taskobject(object);
 }
 #define isdead(g,o) luaC_objectdead((g), cast(const GCObject *, (o)))
 
@@ -420,7 +430,21 @@ LUAI_FUNC void luaC_endtask (lua_State *L);
 LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
 LUAI_FUNC void luaC_taskresize (lua_State *L, l_mem change);
 LUAI_FUNC void luaC_taskstep (lua_State *L);
+LUAI_FUNC void luaC_freetaskroots (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);
+
+l_sinline size_t luaC_taskrootsize (unsigned capacity) {
+  return capacity * (sizeof(uintptr_t) + 2 * sizeof(uint16_t));
+}
+
+l_sinline size_t luaC_taskrootbytes (const lua_State *L) {
+  return L->task_root_capacity > LUA_TASK_INLINE_ROOTS
+    ? luaC_taskrootsize(L->task_root_capacity) : 0;
+}
+
+l_sinline int luaC_taskrootpressure (const lua_State *L) {
+  return L->task_root_count >= L->task_root_capacity - 1;
+}
 
 l_sinline int luaC_weakvalid (global_State *g, uint64_t state) {
   return (state & (~cast(uint64_t, LUA_WEAK_STAMP_STEP - 1) | NURSERY_TAG)) ==
@@ -456,7 +480,7 @@ l_sinline void luaC_nurseryedge (lua_State *L, GCObject *owner, GCObject *value)
 static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
-  if (L->task_tables != NULL && luaC_taskedge(L, owner, value)) return 0;
+  if (L->task_objects != NULL && luaC_taskedge(L, owner, value)) return 0;
   /* The shared trace publishes all newborns before local work can resume. */
   if (luaC_tracingglobal(G(L))) return 1;
   luaC_nurseryedge(L, owner, value);
@@ -519,6 +543,8 @@ LUAI_FUNC int luaC_sweepgray (GCObject *object);
 LUAI_FUNC GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz);
 LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
                                                  size_t offset);
+LUAI_FUNC GCObject *luaC_newresultstring (lua_State *L, size_t size);
+LUAI_FUNC void luaC_publishobjects (lua_State *L, GCObject *head, GCObject *tail);
 LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
 /* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);

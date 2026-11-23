@@ -62,7 +62,7 @@ void __real_luaC_endtask(lua_State *);
 void __wrap_luaC_endtask(lua_State *L) {
   struct fixture *f = fixture;
   if (f != NULL && f->tasks[0].root.thread == L) {
-    require(L->task_tables != NULL);
+    require(L->task_objects != NULL);
     f->nursery_finished++;
   }
   __real_luaC_endtask(L);
@@ -1875,6 +1875,8 @@ static int nursery_roundtrip(lua_State *L) {
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(memcmp(bytes + length - 14, "private record", 14) == 0);
+  lua_pushvalue(L, -1);
+  lua_xmove(L, f->main, 1);
   lua_pushvalue(L, 2);
   lua_xmove(L, f->main, 1);
   lua_pushinteger(L, 42);
@@ -1888,12 +1890,14 @@ static void nursery_native_call(struct fixture *f, int generational) {
   lua_pushcfunction(f->main, nursery_roundtrip);
   lua_setglobal(f->main, "nursery_roundtrip");
   submit(f, 0,
+         "local sample={('private record'):rep(12)}; "
+         "local private,edges=nursery_inspect(sample); "
          "local row={child={answer=42,note=('child only'):rep(16)},"
          "           payload=('private record'):rep(12)}; "
          "assert(nursery_inspect(row)); "
-         "return nursery_roundtrip(function(value) "
+         "local result=nursery_roundtrip(function(value) "
          "  return nursery_inspect(value),value.child.answer "
-         "end,row)",
+         "end,row); assert(private and edges==0); return result",
          0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
@@ -1909,6 +1913,7 @@ static void nursery_native_call(struct fixture *f, int generational) {
   lua_gc(f->main, LUA_GCCOLLECT);
   require(lua_getfield(f->main, -1, "payload") == LUA_TSTRING);
   require(lua_rawlen(f->main, -1) == 168);
+  require(lua_tostring(f->main, -1) == lua_tostring(f->main, -3));
   lua_pop(f->main, 1);
   require(lua_getfield(f->main, -1, "child") == LUA_TTABLE);
   require(lua_getfield(f->main, -1, "note") == LUA_TSTRING);
@@ -1916,7 +1921,7 @@ static void nursery_native_call(struct fixture *f, int generational) {
   lua_pop(f->main, 1);
   require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
   require(lua_tointeger(f->main, -1) == 42);
-  lua_pop(f->main, 3);
+  lua_pop(f->main, 4);
   finish(f);
 }
 
@@ -1957,19 +1962,48 @@ static void nursery_edges(struct fixture *f, int generational) {
   lua_gc(f->main, LUA_GCCOLLECT);
   require(luaL_dostring(f->main, "assert(nursery_weak[1]==nil)") == LUA_OK);
 
+  require(luaL_dostring(f->main, "nursery_shared={}; "
+                                 "for i=1,192 do "
+                                 "  nursery_shared[i]=('record '..i):rep(12) "
+                                 "end") == LUA_OK);
   submit(f, 1,
          "local retained={}; assert(nursery_inspect(retained)); "
-         "for i=1,40 do retained[i]=('record '..i):rep(12) end; "
-         "assert(not nursery_inspect(retained)); return retained",
+         "for i=1,192 do retained[i]=nursery_shared[i] end; "
+         "local private,edges=nursery_inspect(retained); "
+         "assert(private and edges==192); "
+         "for i=1,96 do retained[i]=nil end; "
+         "local own=('private'):rep(12); "
+         "retained[193]=own; "
+         "retained[own]=own; "
+         "for i=1,3200 do local text=own..own; assert(#text==168) end; "
+         "private,edges=nursery_inspect(retained); "
+         "assert(private and edges==96 and retained[own]==own); "
+         "return retained",
          0);
   luaSC_wait(&f->tasks[1]);
   require(luaSC_collect(f->main, &f->tasks[1], &status, &results) == LUA_OK);
   require(status == LUA_OK && results == 1);
   lua_gc(f->main, LUA_GCCOLLECT);
-  require(lua_geti(f->main, -1, 40) == LUA_TSTRING);
-  require(lua_rawlen(f->main, -1) == 108);
-  require(strncmp(lua_tostring(f->main, -1), "record 40", 9) == 0);
+  for (unsigned i = 1; i <= 96; i++) {
+    require(lua_geti(f->main, -1, i) == LUA_TNIL);
+    lua_pop(f->main, 1);
+  }
+  for (unsigned i = 97; i <= 192; i++) {
+    char prefix[16];
+    int length = snprintf(prefix, sizeof(prefix), "record %u", i);
+    require(length > 0 && (size_t)length < sizeof(prefix));
+    require(lua_geti(f->main, -1, i) == LUA_TSTRING);
+    require(lua_rawlen(f->main, -1) == (size_t)length * 12);
+    require(strncmp(lua_tostring(f->main, -1), prefix, (size_t)length) == 0);
+    lua_pop(f->main, 1);
+  }
+  require(lua_geti(f->main, -1, 193) == LUA_TSTRING);
+  require(lua_rawlen(f->main, -1) == 84);
+  lua_pushvalue(f->main, -1);
+  require(lua_rawget(f->main, -3) == LUA_TSTRING);
+  require(lua_rawequal(f->main, -2, -1));
   lua_pop(f->main, 2);
+  lua_pop(f->main, 1);
   finish(f);
 }
 

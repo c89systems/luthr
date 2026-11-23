@@ -131,10 +131,10 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
   if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
     return;
   luaC_traceobject(L, obj2gco(thread));
-  if (thread->task_tables != NULL) {
+  if (thread->task_objects != NULL) {
     unsigned i;
     for (i = 0; i < thread->task_root_count; i++)
-      luaC_traceobject(L, thread->task_roots[i]);
+      luaC_traceobject(L, cast(GCObject *, thread->task_roots[i]));
   }
   if (thread->stack.p != NULL) {
     /* Open private bindings live on the stack. For shared bindings, a

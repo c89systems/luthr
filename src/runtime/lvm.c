@@ -804,7 +804,7 @@ void luaV_concat (lua_State *L, int total) {
         ts = luaS_newlstr(L, buff, tl);
       }
       else {  /* long string; copy strings directly to final result */
-        ts = luaS_createlngstrobj(L, tl);
+        ts = luaS_createlngstrobj(L, tl, 1);
         copy2buff(top, n, getlngstr(ts));
         luaS_finishlongstr(ts);
       }
@@ -1494,7 +1494,7 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
   L->top.p = ci->func.p + 2 + GETARG_A(i);
   table = luaH_new(L, array, hash);
   sethvalue2s(L, L->top.p - 1, table);
-  if (L->task_tables != NULL && L->task_table_bytes >= L->task_table_limit)
+  if (L->task_objects != NULL && L->task_nursery_bytes >= L->task_nursery_limit)
     luaC_taskstep(L);
   luaC_condGC(L, (void)0, (void)0);
   luaX_pollrequests(L);
@@ -1515,6 +1515,7 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
     if (L->top.p < ci->top.p) L->top.p = ci->top.p; \
     L->poll_remaining = 1024; \
     luaX_poll(L); \
+    if (L->task_nursery_pending) luaC_taskstep(L); \
     updatebase(ci); \
     L->top.p = restorestack(L, top); \
     updatetrap(ci); \

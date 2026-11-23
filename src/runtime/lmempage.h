@@ -60,7 +60,7 @@ LUAI_FUNC void luaMP_publish (struct global_State *g, LuaAllocPage *page);
 LUAI_FUNC void luaMP_return (struct global_State *g, LuaAllocBlock *block);
 LUAI_FUNC void luaMP_returnbatch (struct global_State *g, LuaAllocPage *page,
                                 LuaAllocBlock *first, LuaAllocBlock *last);
-LUAI_FUNC void luaM_freetablebatch (lua_State *L, LuaAllocPage *page,
+LUAI_FUNC void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                                   LuaAllocBlock *first, LuaAllocBlock *last,
                                   unsigned count, l_mem bytes);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);

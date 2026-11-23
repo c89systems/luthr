@@ -172,7 +172,7 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
     luaC_objbarrier(L, p, ts);
   }
   else {  /* create internal copy */
-    *sl = ts = luaS_createlngstrobj(L, size);  /* create string */
+    *sl = ts = luaS_createlngstrobj(L, size, 0);  /* create string */
     luaC_objbarrier(L, p, ts);
     loadVector(S, getlngstr(ts), size + 1);  /* load directly in final place */
     luaS_finishlongstr(ts);

@@ -328,6 +328,8 @@ typedef union LuaAllocationDebt {
   uint64_t pending;
 } LuaAllocationDebt;
 
+#define LUA_TASK_INLINE_ROOTS 32u
+
 struct lua_State {
   CommonHeader;
   lu_byte allowhook;
@@ -406,15 +408,20 @@ struct lua_State {
   struct lua_State **publish_previous;  /* atomic membership, shard owns links */
   LuaStringCache *strcache;  /* weak API string cache, allocated on first use */
   LuaAllocationCache allocation;
-  GCObject *task_tables;  /* task stack gate owns the cohort and its roots */
-  GCObject *task_roots[32];  /* outgoing edges into the shared collector */
-  size_t task_table_bytes;
+  GCObject *task_objects;  /* task stack gate owns the cohort and its roots */
+  uintptr_t task_root_inline[LUA_TASK_INLINE_ROOTS];
+  size_t task_nursery_bytes;
   size_t task_live_bytes;
   size_t task_paced_bytes;  /* bytes already charged to the shared budget */
-  size_t task_table_limit;
+  size_t task_nursery_limit;
   unsigned task_root_count;
   int task_nursery_closed;
   uint64_t withdrawn_debt;  /* bounded accounting retained across opaque C */
+  uintptr_t *task_roots;  /* dense outgoing roots for shared snapshots */
+  uint16_t *task_root_index;  /* hash slots contain dense indices plus one */
+  unsigned task_root_capacity;
+  lu_byte task_nursery_pending;
+  uint16_t task_root_inline_index[2 * LUA_TASK_INLINE_ROOTS];
 };
 
 

@@ -33,8 +33,13 @@ static void value (lua_State *L, const TValue *edge, GCObject **pending) {
 void luaA_share (lua_State *L, GCObject *object) {
   LuaSharingRoots roots;
   uintptr_t *initial;
-  if (object == NULL || (initial = luaA_sharing(object)) == NULL ||
-      (__atomic_load_n(initial, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)) return;
+  if (object == NULL) return;
+  initial = luaA_sharing(object);
+  if (initial == NULL) {
+    if (luaC_taskstring(object)) luaC_sealtask(L);
+    return;
+  }
+  if (__atomic_load_n(initial, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) return;
   roots.previous = L->sharing_roots;
   roots.pending = roots.current = NULL;
   L->sharing_roots = &roots;

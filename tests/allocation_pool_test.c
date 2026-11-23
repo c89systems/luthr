@@ -296,8 +296,8 @@ static void return_batch(struct return_wave *wave) {
       last->block.link.next = next;
       last = next;
     }
-    luaM_freetablebatch(wave->state, page, first, last, end - start,
-                        (end - start) * BYTES);
+    luaM_freeobjectbatch(wave->state, page, first, last, end - start,
+                         (end - start) * BYTES);
     start = end;
   }
 }

@@ -689,7 +689,7 @@ l_sinline void returnpooled (lua_State *L, LuaAllocPage *page,
   else luaMP_returnbatch(G(L), page, first, last);
 }
 
-void luaM_freetablebatch (lua_State *L, LuaAllocPage *page,
+void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                           LuaAllocBlock *first, LuaAllocBlock *last,
                           unsigned count, l_mem bytes) {
   lua_assert(count != 0 && bytes > 0);

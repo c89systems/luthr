@@ -36,6 +36,9 @@
 */
 #define sizestrshr(l)  \
 	(offsetof(TString, contents) + ((l) + 1) * sizeof(char))
+#define REGULAR_STRING_HEADER \
+  (offsetof(TString, storage) + sizeof(unsigned int))
+#define sizestrreg(l) (REGULAR_STRING_HEADER + (l) + 1)
 
 
 #define luaS_newliteral(L, s)	(luaS_newlstr(L, "" s, \
@@ -74,7 +77,7 @@ LUAI_FUNC Udata *luaS_newudata (lua_State *L, size_t s,
                                               unsigned short nuvalue);
 LUAI_FUNC TString *luaS_newlstr (lua_State *L, const char *str, size_t l);
 LUAI_FUNC TString *luaS_new (lua_State *L, const char *str);
-LUAI_FUNC TString *luaS_createlngstrobj (lua_State *L, size_t l);
+LUAI_FUNC TString *luaS_createlngstrobj (lua_State *L, size_t l, int result);
 LUAI_FUNC TString *luaS_newextlstr (lua_State *L,
 		const char *s, size_t len, lua_Alloc falloc, void *ud);
 LUAI_FUNC size_t luaS_sizelngstr (size_t len, int kind);

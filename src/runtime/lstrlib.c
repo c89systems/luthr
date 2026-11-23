@@ -79,7 +79,7 @@ static void pushownedstring (lua_State *L, unsigned *work,
   }
   else {
     LuaNativeRoot result;
-    TString *ts = luaS_createlngstrobj(L, len);
+    TString *ts = luaS_createlngstrobj(L, len, 1);
     luaR_pushroot(L, &result);
     setsvalue(L, &result.value, ts);
     lua_unlock(L);
@@ -200,7 +200,7 @@ static char *startresult (lua_State *L, StringResult *result, size_t len) {
   TString *string;
   if (len <= LUAI_MAXSHORTLEN) return result->small;
   lua_lock(L);
-  string = luaS_createlngstrobj(L, len);
+  string = luaS_createlngstrobj(L, len, 1);
   luaR_pushroot(L, &result->root);
   setsvalue(L, &result->root.value, string);
   lua_unlock(L);

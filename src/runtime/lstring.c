@@ -28,8 +28,6 @@
 ** Maximum size for string table.
 */
 #define MAXSTRTB	cast_int(luaM_limitN(INT_MAX, TString*))
-#define REGULAR_STRING_HEADER \
-  (offsetof(TString, storage) + sizeof(unsigned int))
 
 /* Low hash bits select a partition; the remaining bits select its bucket. */
 #define stringtableof(g,h) (&(g)->strt[(h) % LUA_STRING_SHARDS])
@@ -61,12 +59,12 @@ static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
 
 unsigned luaS_computelonghash (TString *ts) {
   unsigned hash;
-  if (__atomic_load_n(&ts->extra, __ATOMIC_RELAXED)) return 0;
+  if (__atomic_load_n(&ts->extra, __ATOMIC_RELAXED) & LSTR_ZEROHASH) return 0;
   lua_assert(ts->shrlen == LSTRREG && ts->u.lnglen <= LUA_NATIVE_WORK_SLICE);
   /* Both the seed and contents are immutable. Concurrent first users may
   ** compute the same hash without waiting or reading one another's input. */
   hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->storage.seed);
-  if (hash == 0) __atomic_store_n(&ts->extra, 1, __ATOMIC_RELAXED);
+  if (hash == 0) __atomic_fetch_or(&ts->extra, LSTR_ZEROHASH, __ATOMIC_RELAXED);
   else __atomic_store_n(&ts->hash, hash, __ATOMIC_RELAXED);
   return hash;
 }
@@ -176,7 +174,7 @@ size_t luaS_sizelngstr (size_t len, int kind) {
   switch (kind) {
     case LSTRREG:  /* regular long string */
       /* don't need 'falloc'/'ud', but need space for content */
-      return REGULAR_STRING_HEADER + (len + 1) * sizeof(char);
+      return sizestrreg(len);
     case LSTRFIX:  /* fixed external long string */
       /* don't need 'falloc'/'ud' */
       return offsetof(TString, storage);
@@ -249,11 +247,15 @@ void luaS_init (lua_State *L) {
 }
 
 
-TString *luaS_createlngstrobj (lua_State *L, size_t l) {
+TString *luaS_createlngstrobj (lua_State *L, size_t l, int result) {
   TString *ts;
+  GCObject *object;
   if (l_unlikely(l >= MAX_SIZE - sizeof(TString)))
     luaM_toobig(L);
-  ts = createstrobj(L, luaS_sizelngstr(l, LSTRREG), LUA_VLNGSTR, 0);
+  object = result ? luaC_newresultstring(L, sizestrreg(l))
+                  : luaC_newobj(L, LUA_VLNGSTR, sizestrreg(l));
+  ts = gco2ts(object);
+  ts->hash = 0;
   ts->u.lnglen = l;
   ts->shrlen = LSTRREG;  /* signals that it is a regular long string */
   ts->storage.seed = G(L)->seed;
@@ -339,7 +341,7 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
   if (l <= LUAI_MAXSHORTLEN)  /* short string? */
     return internshrstr(L, str, l);
   else {
-    TString *ts = luaS_createlngstrobj(L, l);
+    TString *ts = luaS_createlngstrobj(L, l, 0);
     memcpy(getlngstr(ts), str, l * sizeof(char));
     luaS_finishlongstr(ts);
     return ts;

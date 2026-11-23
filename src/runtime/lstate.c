@@ -395,10 +395,15 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->new_tables = NULL;
   L->nursery_epoch = NURSERY_TAG;
   L->nursery_tables = 0;
-  L->task_tables = NULL;
-  L->task_table_bytes = L->task_table_limit = 0;
+  L->task_objects = NULL;
+  L->task_nursery_bytes = L->task_nursery_limit = 0;
   L->task_live_bytes = L->task_paced_bytes = 0;
   L->task_root_count = 0;
+  L->task_roots = L->task_root_inline;
+  L->task_root_index = L->task_root_inline_index;
+  L->task_root_capacity = LUA_TASK_INLINE_ROOTS;
+  L->task_nursery_pending = 0;
+  memset(L->task_root_inline_index, 0, sizeof(L->task_root_inline_index));
   L->task_nursery_closed = 0;
   L->allocation_debt.pending = 0;
   L->withdrawn_debt = 0;
@@ -447,7 +452,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
 
 
 lu_mem luaE_threadsize (lua_State *L) {
-  lu_mem sz = cast(lu_mem, sizeof(LX)) + L->call_bytes;
+  lu_mem sz = cast(lu_mem, sizeof(LX)) + L->call_bytes + luaC_taskrootbytes(L);
   if (L->stack.p != NULL)
     sz += cast_uint(stacksize(L) + EXTRA_STACK) * sizeof(StackValue);
   if (L->strcache != NULL) sz += sizeof(*L->strcache);
@@ -583,6 +588,8 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
                      cast_sizet(stacksize(thread) + EXTRA_STACK));
   if (thread->strcache != NULL)
     luaM_retire_(L, thread->strcache, sizeof(*thread->strcache));
+  if (luaC_taskrootbytes(thread) != 0)
+    luaM_retire_(L, thread->task_roots, luaC_taskrootbytes(thread));
   luaM_retire_(L, fromstate(thread), sizeof(LX));
 }
 
@@ -595,6 +602,8 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   luai_userstatefree(L, L1);
   freestack(L, L1);
   if (L1->strcache != NULL) luaM_free(L, L1->strcache);
+  if (luaC_taskrootbytes(L1) != 0)
+    luaM_free_(L, L1->task_roots, luaC_taskrootbytes(L1));
   {
     LuaPolicy *policy = L1->policy;
     L1->policy = NULL;

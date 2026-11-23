@@ -7,7 +7,7 @@
 
 /* Admission can park. In particular, reserve foreign execution capacity
 ** before building a frame or reading arguments that can move with the stack.
-** Private tables stay with their coroutine. APIs that publish a value to
+** Private objects stay with their coroutine. APIs that publish a value to
 ** another stack or shared heap object use the usual escape barriers. */
 l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
   NativeStackContext *context;
