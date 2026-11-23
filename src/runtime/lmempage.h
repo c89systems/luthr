@@ -13,6 +13,7 @@ struct LuaExecution;
 struct GCObject;
 
 typedef struct LuaAllocPage LuaAllocPage;
+#define LUA_PAGE_TRACE_WORDS 16
 typedef union LuaAllocBlock LuaAllocBlock;
 union LuaAllocBlock {
   struct {
@@ -41,6 +42,10 @@ struct LuaAllocPage {
   unsigned blockbytes;  /* payload capacity, excluding the block header */
   unsigned pool;
   unsigned state;  /* protected by the allocation pool mutex */
+  LuaAllocPage *trace_next;  /* owned by the page notice until it is retired */
+  uint64_t trace_slots[LUA_PAGE_TRACE_WORDS];  /* atomic pending mark slots */
+  unsigned trace_pending;  /* atomic word summary and notice ownership */
+  unsigned trace_scale;  /* reciprocal of the slot stride in 16-bit units */
 };
 
 #define LUA_PAGE_NOTIFIED cast(uintptr_t, 1)

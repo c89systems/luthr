@@ -839,6 +839,13 @@ static void preparepage (LuaAllocPage *page,
   page->used = 0;
   page->bytes = bytes;
   page->table_epoch = 0;
+  page->trace_next = NULL;
+  memset(page->trace_slots, 0, sizeof(page->trace_slots));
+  page->trace_pending = 0;
+  {
+    unsigned stride = blockbytes + sizeof(LuaAllocBlock);
+    page->trace_scale = (LUA_ALLOC_PAGE_MAX + stride - 1) / stride;
+  }
 }
 
 static LuaAllocPage *installpage (lua_State *L, LuaAllocPage *page,

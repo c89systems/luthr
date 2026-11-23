@@ -68,8 +68,9 @@ static void *allocate(void *context, void *pointer, size_t old_size,
   (void)old_size;
   check(pthread_mutex_lock(&fixture->mutex));
   if (fixture->active_phase &&
-      !luaQ_isowner(&G(fixture->main)->world.heap_owner)) {
-    fputs("GC experiment: allocation without metadata ownership\n", stderr);
+      __atomic_load_n(&G(fixture->main)->allocator.owner, __ATOMIC_ACQUIRE) !=
+          luaQ_ownertoken()) {
+    fputs("GC rendezvous: allocator callback without admission\n", stderr);
     abort();
   }
   check(pthread_mutex_unlock(&fixture->mutex));

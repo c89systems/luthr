@@ -404,6 +404,8 @@ void luaC_linktrace (global_State *g, GCObject *o) {
     g->GCmarked += luaC_objsize(o);
     nw2black(o);
   }
+  else if (o->tt == LUA_VTABLE && (luaC_markstate(g) & LUA_MARK_ACTIVE))
+    luaC_queuetracepage(g, o);
   else {
     *luaC_graylink(o) = g->gray;
     g->gray = o;
@@ -430,6 +432,12 @@ static void markwork (LuaTraceWork *work, GCObject *object) {
     work->marked += luaC_objsize(object);
     nw2black(object);
   }
+  else if (work->local_remaining != 0) {
+    work->local_remaining--;
+    *luaC_graylink(object) = work->local;
+    work->local = object;
+  }
+  else if (object->tt == LUA_VTABLE) luaC_stagetracepage(work, object);
   else queuework(&work->gray, object);
 }
 
@@ -502,7 +510,7 @@ static void markmt (global_State *g) {
 
 
 static void cleargraylists (global_State *g) {
-  lua_assert(g->trace_stacks == NULL);
+  lua_assert(g->trace_stacks == NULL && !luaC_pagetracepending(g));
   g->gray = g->grayagain = NULL;
   g->weak = g->allweak = g->ephemeron = NULL;
   g->trace_deferred = NULL;
@@ -562,7 +570,7 @@ static void starttrace (lua_State *L, unsigned finish) {
     stamps |= LUA_MARK_YOUNG;
     /* The preceding sweep left queued roots for the new epoch. Make them
     ** available alongside stack roots at the initial trace boundary. */
-    lua_assert(g->gray == NULL);
+    lua_assert(g->gray == NULL && !luaC_pagetracepending(g));
     g->gray = g->grayagain;
     g->grayagain = NULL;
   }
@@ -1196,7 +1204,7 @@ unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit) {
 
 void luaC_readytrace (global_State *g) {
   LuaTracePlan *plan = &g->trace_plan;
-  unsigned ready = g->gray != NULL || plan->next != NULL ||
+  unsigned ready = g->gray != NULL || luaC_pagetracepending(g) || plan->next != NULL ||
     plan->pending != NULL || (plan->finalizers != NULL &&
       (plan->phase == TRACE_FINALIZERS || !iswhite(g, *plan->finalizers)));
   __atomic_store_n(&g->trace_workers, ready, __ATOMIC_RELEASE);
@@ -1316,7 +1324,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   else if (plan->phase == TRACE_FINALIZERS)
     work->scanned += discoverfinalizers(g, limit) * sizeof(GCObject);
   work->scanned += cast(lu_mem, g->GCmarked - marked);
-  if (g->gray == NULL && g->trace_deferred != NULL) {
+  if (g->gray == NULL && !luaC_pagetracepending(g) && g->trace_deferred != NULL) {
     g->gray = g->trace_deferred;
     g->trace_deferred = NULL;
   }
@@ -1336,6 +1344,9 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
     }
     finishstackqueue(g);
   }
+  work->object_count = work->count;
+  if (work->count < limit)
+    luaC_claimtracepage(work, limit);
   if (work->count == 0 &&
       (plan->phase == TRACE_EPHEMERONS || plan->phase == TRACE_VALUES ||
        plan->phase == TRACE_CLEAR)) {
@@ -1351,6 +1362,7 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
       else object = takeweak(&plan->deferred, &plan->tail);
       work->objects[work->count++] = object;
     }
+    work->object_count = work->count;
   }
   if (work->count != 0)
     __atomic_fetch_add(&g->trace_busy, 1, __ATOMIC_RELAXED);
@@ -1364,11 +1376,12 @@ static void deferscan (LuaTraceWork *work, GCObject *object) {
 }
 
 void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
-  unsigned attempted = 0;
   unsigned index;
   int quiescent = luaW_iscollector(L);
   lua_assert(__atomic_load_n(&G(L)->trace_busy, __ATOMIC_RELAXED));
-  for (index = 0; index < work->count; index++, attempted++) {
+  lua_assert(work->count <= limit);
+  work->local_remaining = limit - work->count;
+  for (index = 0; index < work->object_count; index++) {
     GCObject *object = work->objects[index];
     if (work->phase == TRACE_MARK) {
       if (!scantrace(L, work, object, quiescent))
@@ -1390,13 +1403,29 @@ void luaC_scantrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
       if (reservation) luaA_endscan(L, object, reservation);
     }
   }
-  /* Consume locally produced edges before returning to the shared queue. */
-  while (work->gray.head != NULL && attempted++ < limit) {
-    GCObject *object = work->gray.head;
-    work->gray.head = *luaC_graylink(object);
+  for (index = 0; index < work->page_count; index++) {
+    const LuaTracePageSlice *slice = &work->pages[index];
+    size_t stride = sizeof(LuaAllocBlock) + slice->page->blockbytes;
+    char *first = cast_charp(slice->page) + LUA_ALLOC_PAGE_HEADER +
+      slice->word * 64 * stride + sizeof(LuaAllocBlock);
+    uint64_t bits = slice->bits;
+    do {
+      unsigned slot = cast_uint(__builtin_ctzll(bits));
+      GCObject *object = cast(GCObject *, first + slot * stride);
+      lua_assert(object->tt == LUA_VTABLE && isgray(object));
+      if (!scantrace(L, work, object, quiescent))
+        deferscan(work, object);
+    } while ((bits &= bits - 1) != 0);
+  }
+  /* Narrow chains can keep scanning within this claim. Wide frontiers
+  ** publish their excess discoveries as page bits during the same walk. */
+  while (work->local != NULL) {
+    GCObject *object = work->local;
+    work->local = *luaC_graylink(object);
     if (!scantrace(L, work, object, quiescent))
       deferscan(work, object);
   }
+  luaC_flushtracepage(work);
 }
 
 static void publishwork (LuaTraceList *list, GCObject **head) {
@@ -2328,7 +2357,7 @@ void luaC_finishtrace (lua_State *L) {
   }
   endtrace(L);
   g->trace_plan.finish = 0;
-  lua_assert(g->gray == NULL);
+  lua_assert(g->gray == NULL && !luaC_pagetracepending(g));
   if (finish == TRACE_YOUNG) {
     finishyoung(L, g, marked);
   }

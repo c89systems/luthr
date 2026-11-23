@@ -40,7 +40,8 @@ static void prepare(lua_State *L) {
   /* Major tracing now runs with workers admitted. Bring these retained
    * owners to black before testing writes; minor collections still use the
    * remembered-owner protocol between their marking epochs. */
-  while (luaC_tracing(L) && (G(L)->gray != NULL || G(L)->barrier_ready != 0)) {
+  while (luaC_tracing(L) && (G(L)->gray != NULL || G(L)->barrier_ready != 0 ||
+                             luaC_pagetracepending(G(L)))) {
     require(batches++ < 10000);
     luaC_tracebatch(L, 64);
   }

@@ -767,6 +767,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->sweep_workers = 0;
   g->trace_deferred = NULL;
   g->trace_stacks = NULL;
+  g->trace_pages = g->trace_page_incoming = NULL;
   setivalue(&g->nilvalue, 0);  /* to signal that state is not yet built */
   setgcparam(g, PAUSE, LUAI_GCPAUSE);
   setgcparam(g, STEPMUL, LUAI_GCMUL);

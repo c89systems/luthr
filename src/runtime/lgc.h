@@ -99,6 +99,13 @@ l_sinline int luaC_scanready (global_State *g) {
 /* A batch owns its payloads until it publishes every list and counter. It
 ** must not yield or park while these private references are outstanding. */
 #define LUA_TRACE_BATCH 64
+#define LUA_TRACE_PAGE_SLICES 4
+typedef struct LuaTracePageSlice {
+  LuaAllocPage *page;
+  uint64_t bits;
+  unsigned word;
+} LuaTracePageSlice;
+
 typedef struct LuaTraceWork {
   global_State *global;
   LuaTraceList gray, grayagain, weak, allweak, ephemeron, deferred, stacks;
@@ -107,8 +114,25 @@ typedef struct LuaTraceWork {
   uint64_t claims;
   l_mem marked;
   lu_mem scanned;
-  unsigned count, phase, direction, changed;
+  unsigned count, object_count, phase, direction, changed;
+  GCObject *local;  /* discoveries that fit in this claim's remaining budget */
+  unsigned local_remaining;
+  LuaTracePageSlice pages[LUA_TRACE_PAGE_SLICES];
+  unsigned page_count;
+  LuaAllocPage *staged_page;
+  uint64_t staged_bits;
+  unsigned staged_word;
 } LuaTraceWork;
+
+l_sinline int luaC_pagetracepending (global_State *g) {
+  return g->trace_pages != NULL ||
+    __atomic_load_n(&g->trace_page_incoming, __ATOMIC_ACQUIRE) != NULL;
+}
+
+LUAI_FUNC void luaC_queuetracepage (global_State *g, GCObject *object);
+LUAI_FUNC void luaC_stagetracepage (LuaTraceWork *work, GCObject *object);
+LUAI_FUNC void luaC_flushtracepage (LuaTraceWork *work);
+LUAI_FUNC void luaC_claimtracepage (LuaTraceWork *work, unsigned limit);
 
 typedef struct LuaSweepWork {
   LuaAllocPage *page;

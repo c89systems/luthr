@@ -49,10 +49,12 @@ void luaC_drainbarriers (lua_State *L) {
     object = __atomic_exchange_n(&producer->back, NULL, __ATOMIC_ACQUIRE);
     while (object != NULL) {
       GCObject *next = luaC_barriernext(object);
-      GCObject **queue = luaC_tracing(L) ? &g->gray : &g->grayagain;
       lua_assert(isgray(object));
-      *luaC_graylink(object) = *queue;
-      *queue = object;
+      if (luaC_tracing(L)) luaC_linktrace(g, object);
+      else {
+        *luaC_graylink(object) = g->grayagain;
+        g->grayagain = object;
+      }
       object = next;
     }
     object = __atomic_exchange_n(&producer->forward, NULL, __ATOMIC_ACQUIRE);

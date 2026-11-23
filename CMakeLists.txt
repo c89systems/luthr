@@ -71,7 +71,7 @@ add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 set(lua_sources
   laccess lallocator lapi lbarrier lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc lgcobject lgctable llex lmem lmemcache lmempage lobject lopcodes
   lpacer lparser lpipe lpolicy lreclaim lscheduler lschedulergc lsharing lstate lsweep ltable ltableaccess ltablestorage ltask ltm ltrace lcollector lundump lvm lnursery ltablelist lstring lworld lzio lauxlib lbaselib lcorolib
-  ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit)
+  ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit ltracepage)
 list(TRANSFORM lua_sources PREPEND "src/runtime/")
 list(TRANSFORM lua_sources APPEND ".c")
 add_library(luthr_lua_objects OBJECT ${lua_sources} src/runtime/lcontext_x86_64.S)

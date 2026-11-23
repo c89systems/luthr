@@ -633,6 +633,8 @@ typedef struct global_State {
   struct LuaAllocPage *allocation_spare[LUA_ALLOC_BINS];  /* detached pages */
   struct LuaAllocPage **allocation_spare_tail[LUA_ALLOC_BINS];
   size_t allocation_spare_bytes;
+  struct LuaAllocPage *trace_page_incoming;  /* atomic producer stack */
+  struct LuaAllocPage *trace_pages;  /* imported under trace_mutex */
 } global_State;
 
 

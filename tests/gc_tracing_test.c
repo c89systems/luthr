@@ -251,7 +251,7 @@ static void begin(lua_State *L) {
   global_State *g = G(L);
   lua_lock(L);
   luaW_stop(L);
-  require(g->gray == NULL && g->grayagain == NULL);
+  require(g->gray == NULL && g->grayagain == NULL && !luaC_pagetracepending(g));
   luaC_runtilstate(L, GCSpropagate, 1);
   require(luaC_tracing(L));
   g->pacer.hard = MAX_LMEM; /* This fixture supplies its own phase driver. */
@@ -264,7 +264,8 @@ static void drain(lua_State *L) {
   lua_lock(L);
   for (rounds = 0; rounds < 10000; rounds++) {
     luaC_tracebatch(L, 64);
-    if (G(L)->gray == NULL && G(L)->barrier_ready == 0)
+    if (G(L)->gray == NULL && !luaC_pagetracepending(G(L)) &&
+        G(L)->barrier_ready == 0)
       break;
   }
   require(rounds < 10000);
@@ -278,6 +279,38 @@ static void finish(lua_State *L) {
   lua_unlock(L);
   lua_gc(L, LUA_GCCOLLECT);
   lua_close(L);
+}
+
+static void page_frontier(void) {
+  enum { ENTRIES = 4096 };
+  lua_State *L = newstate();
+  Table *root;
+  unsigned i, rounds;
+  lua_createtable(L, ENTRIES, 0);
+  root = (Table *)lua_topointer(L, 1);
+  for (i = 1; i <= ENTRIES; i++) {
+    lua_createtable(L, 1, 0);
+    lua_createtable(L, 0, i % 2 ? 1 : 3);
+    lua_rawseti(L, -2, 1);
+    lua_rawseti(L, 1, i);
+  }
+  begin(L);
+  lua_lock(L);
+  for (rounds = 0; rounds < 10000; rounds++) {
+    luaC_tracebatch(L, 1 + rounds % 7);
+    if (G(L)->gray == NULL && !luaC_pagetracepending(G(L)) &&
+        G(L)->barrier_ready == 0)
+      break;
+  }
+  require(rounds < 10000);
+  /* Inspect the original graph before any API reads can shade a missed edge. */
+  for (i = 0; i < ENTRIES; i++) {
+    GCObject *child = getArrVal(root, i)->gc;
+    GCObject *leaf = getArrVal(gco2t(child), 0)->gc;
+    require(isblack(G(L), child) && isblack(G(L), leaf));
+  }
+  lua_unlock(L);
+  finish(L);
 }
 
 static void read_before_weakening(int array) {
@@ -1326,6 +1359,8 @@ int main(int argc, char **argv) {
     weak_retry();
   else if (strcmp(argv[1], "weak_stamp_wrap") == 0)
     weak_stamp_wrap();
+  else if (strcmp(argv[1], "page_frontier") == 0)
+    page_frontier();
   else if (strncmp(argv[1], "parallel_", 9) == 0)
     parallel_marking(argv[1]);
   else if (strncmp(argv[1], "weak", 4) == 0)

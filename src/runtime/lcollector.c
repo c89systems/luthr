@@ -65,7 +65,7 @@ static void advanceclosedtrace (lua_State *L) {
   while (luaC_tracing(L) && plan->finish != 0) {
     if (plan->phase == TRACE_INIT)
       luaC_initialtrace(L);
-    if (g->gray != NULL || g->trace_deferred != NULL ||
+    if (g->gray != NULL || luaC_pagetracepending(g) || g->trace_deferred != NULL ||
         g->trace_stacks != NULL) break;
     if (plan->again != NULL) {
       g->gray = plan->again;
