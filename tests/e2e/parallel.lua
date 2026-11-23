@@ -23,6 +23,18 @@ local workloads={
     for i=1,n do sum=sum+rows[i][1]+rows[i][2][1] end
     return sum
   end,
+  retained_chain=function()
+    local link
+    for i=1,n do link={previous=link,value=i} end
+    local sum=0
+    for i=n,1,-1 do
+      assert(link and link.value==i)
+      sum=sum+link.value
+      link=link.previous
+    end
+    assert(link==nil)
+    return sum
+  end,
   shared_table=function(id)
     local base=(id-1)*n
     for i=1,n do shared[base+i]=i end

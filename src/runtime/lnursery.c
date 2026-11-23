@@ -639,6 +639,7 @@ void luaC_collectnursery (lua_State *L) {
   global_State *g = G(L);
   GCObject *gray = NULL, *o;
   size_t remaining, slots, unpinned = 0;
+  unsigned i;
   if (L->nursery_tables < NURSERY_MIN_TABLES ||
       L->openupval != NULL || L->native_roots != NULL ||
       L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
@@ -649,7 +650,8 @@ void luaC_collectnursery (lua_State *L) {
     return;
   /* Bound both directory walks, the stack cleanup, and every possible edge
   ** visit before changing any local mark state. Large cohorts use shared GC. */
-  slots = cast_sizet(L->stack_last.p - L->stack.p) + EXTRA_STACK;
+  slots = cast_sizet(L->stack_last.p - L->stack.p) + EXTRA_STACK +
+    L->task_root_count;
   if (slots >= NURSERY_SCAN_LIMIT) return;
   remaining = NURSERY_SCAN_LIMIT - slots;
   for (o = L->new_tables; o != NULL; o = luaC_allocnext(o)) {
@@ -672,6 +674,12 @@ void luaC_collectnursery (lua_State *L) {
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
         (luaC_tablestate(gco2t(o)) & NURSERY_ROOT))
       marknursery(L, o, &gray, NURSERY_CONSTRUCTION);
+  /* A task can reopen its private cohort while construction tables from
+  ** before the handoff remain unpublished. Its outgoing edges are roots
+  ** even when no stack slot points directly into that older cohort. */
+  for (i = 0; i < L->task_root_count; i++)
+    marknursery(L, cast(GCObject *, L->task_roots[i]), &gray,
+                NURSERY_CONSTRUCTION);
   tracenursery(L, gray, NURSERY_CONSTRUCTION);
   sweepnursery(L, &L->new_tables, NURSERY_CONSTRUCTION);
 }
