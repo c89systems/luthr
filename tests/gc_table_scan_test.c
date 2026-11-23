@@ -27,7 +27,8 @@ static struct {
   Table *table;
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write, fields, list, cards, scalar_cards, promotion;
+      remember, first_write, fields, record, list, cards, scalar_cards,
+      promotion;
   int retirement, drained;
   uint64_t initial_layout;
   unsigned chunks;
@@ -132,6 +133,8 @@ unsigned __wrap_luaH_tracechunk(global_State *g, const Table *view,
 void __real_luaC_traceedges(LuaTraceWork *, GCObject **, unsigned)
     __attribute__((weak));
 void __wrap_luaC_traceedges(LuaTraceWork *work, GCObject **edges, unsigned n) {
+  if (scanning && probe.record)
+    hold();
   __real_luaC_traceedges(work, edges, n);
   if (scanning && probe.relocate && hash_chunk && first_chunk == 0)
     hold();
@@ -227,6 +230,10 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 84);
     lua_rawseti(L, -2, 1);
     lua_setfield(L, probe.index, "replaced");
+    if (probe.record) {
+      lua_pushinteger(L, 85);
+      lua_setfield(L, probe.index, "extra");
+    }
   } else if (probe.list) {
     lua_pushvalue(L, probe.index);
     lua_newtable(L);
@@ -304,7 +311,8 @@ int main(int argc, char **argv) {
   probe.scalar_cards = strncmp(argv[1], "scalar_cards_", 13) == 0;
   probe.promotion = strcmp(argv[1], "promotion_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
-  probe.fields = strncmp(argv[1], "fields", 6) == 0;
+  probe.record = strncmp(argv[1], "record_", 7) == 0;
+  probe.fields = probe.record || strncmp(argv[1], "fields", 6) == 0;
   probe.list = strncmp(argv[1], "list_", 5) == 0;
   probe.retirement = strncmp(argv[1], "retirement", 10) == 0;
   small = strncmp(argv[1], "first_write_small", 17) == 0;
@@ -318,11 +326,15 @@ int main(int argc, char **argv) {
     lua_newtable(L);
     lua_gc(L, LUA_GCCOLLECT);
   }
-  lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
-                  probe.relocate ? 64
-                  : probe.fields ? 8
-                  : small        ? 2
-                                 : 0);
+  if (probe.record) {
+    require(luaL_loadstring(L, "return {replaced=1, deleted=1}") == LUA_OK);
+    require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  } else
+    lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
+                    probe.relocate ? 64
+                    : probe.fields ? 8
+                    : small        ? 2
+                                   : 0);
   probe.table = (Table *)lua_topointer(L, -1);
   if (probe.relocate) {
     require(sizenode(probe.table) == 64);
@@ -351,7 +363,8 @@ int main(int argc, char **argv) {
     lua_gc(L, LUA_GCCOUNT);
     require(getage(obj2gco(probe.table)) == G_SURVIVAL);
   } else if (probe.fields) {
-    require(argc == 3);
+    require(probe.record ? luaH_recordkeys(probe.table->node) != NULL
+                         : argc == 3);
     lua_newtable(L);
     probe.child = (GCObject *)lua_topointer(L, -1);
     lua_setfield(L, 3, "replaced");
@@ -517,6 +530,12 @@ int main(int argc, char **argv) {
       require(lua_tointeger(probe.writer, -1) == 44);
     }
   } else if (probe.fields) {
+    if (probe.record) {
+      require(luaH_recordkeys(probe.table->node) == NULL);
+      require(lua_getfield(probe.writer, probe.index, "extra") == LUA_TNUMBER);
+      require(lua_tointeger(probe.writer, -1) == 85);
+      lua_pop(probe.writer, 1);
+    }
     require(lua_getfield(probe.writer, probe.index, "deleted") == LUA_TNIL);
     lua_pop(probe.writer, 1);
     require(lua_getfield(probe.writer, probe.index, "replaced") == LUA_TTABLE);

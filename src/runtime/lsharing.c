@@ -65,8 +65,15 @@ void luaA_share (lua_State *L, GCObject *object) {
       switch (current->tt) {
         case LUA_VTABLE: {
           Table *table = gco2t(current);
+          Table *keys = luaH_recordkeys(table->node);
           unsigned p, parts = luaH_hashparts(table);
           enqueue(L, cast(GCObject *, table->metatable), &roots.pending);
+          if (keys != NULL) {
+            TValue *values = luaH_recordvalues(table);
+            for (i = 0; i < keys->asize; i++)
+              value(L, values + i, &roots.pending);
+            break;
+          }
           for (i = 0; i < table->asize; i++)
             if (*getArrTag(table, i) & BIT_ISCOLLECTABLE)
               enqueue(L, getArrVal(table, i)->gc, &roots.pending);

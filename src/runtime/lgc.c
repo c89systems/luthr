@@ -721,7 +721,7 @@ static void traverseweakvalue (LuaTraceWork *work, Table *h) {
   unsigned p, parts = luaH_hashparts(h);
   /* if there is array part, assume it may have white values (it is not
      worth traversing it now just to check) */
-  int hasclears = (h->asize > 0);
+  int hasclears = h->asize > 0 || luaH_recordkeys(h->node) != NULL;
   for (p = 0; p < parts; ++p) {
     Node *n = luaH_hashnodes(h, p), *limit = n + luaH_nodesize(n);
     for (; n < limit; n++) {
@@ -761,6 +761,19 @@ static int traversearray (LuaTraceWork *work, Table *h) {
   return marked;
 }
 
+static int traverserecord (LuaTraceWork *work, Table *h, Table *keys) {
+  TValue *values = luaH_recordvalues(h);
+  unsigned i;
+  int marked = 0;
+  for (i = 0; i < keys->asize; i++) {
+    if (valiswhite(work->global, values + i)) {
+      markwork(work, gcvalue(values + i));
+      marked = 1;
+    }
+  }
+  return marked;
+}
+
 
 /*
 ** Traverse an ephemeron table and link it to proper list. Returns true
@@ -779,7 +792,10 @@ static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
   int hasclears = 0;  /* true if table has white keys */
   int hasww = 0;  /* true if table has entry "white-key -> white-value" */
   unsigned p, parts = luaH_hashparts(h);
-  int marked = traversearray(work, h);  /* traverse array part */
+  Table *keys = luaH_recordkeys(h->node);
+  /* Compact records have only short-string keys, which are never weak. */
+  int marked = keys != NULL ? traverserecord(work, h, keys)
+                            : traversearray(work, h);
   /* Alternate direction between convergence rounds to shorten long chains. */
   for (p = 0; p < parts; ++p) {
     Node *nodes = luaH_hashnodes(h, inv ? parts - 1 - p : p);
@@ -813,6 +829,12 @@ static int traverseephemeron (LuaTraceWork *work, Table *h, int inv) {
 
 static void traversestrongtable (LuaTraceWork *work, Table *h) {
   unsigned p, parts = luaH_hashparts(h);
+  Table *keys = luaH_recordkeys(h->node);
+  if (keys != NULL) {
+    traverserecord(work, h, keys);
+    genlink(work, obj2gco(h));
+    return;
+  }
   traversearray(work, h);
   for (p = 0; p < parts; ++p) {
     Node *n = luaH_hashnodes(h, p), *limit = n + luaH_nodesize(n);
@@ -883,7 +905,9 @@ static int preparemode (lua_State *L, Table *h) {
 
 static l_mem traversetable (LuaTraceWork *work, Table *h) {
   global_State *g = work->global;
+  Table *keys = luaH_recordkeys(h->node);
   traceobjectN(work, h->metatable);
+  if (keys != NULL) markwork(work, obj2gco(keys));
   switch (getmode(g, h)) {
     case 0:  /* not weak */
       traversestrongtable(work, h);
@@ -901,7 +925,8 @@ static l_mem traversetable (LuaTraceWork *work, Table *h) {
         linkwork(&work->allweak, obj2gco(h));
       break;
   }
-  return 1 + 2 * luaH_hashsize(h) + h->asize;
+  return keys != NULL ? 2 + keys->asize
+                      : 1 + 2 * luaH_hashsize(h) + h->asize;
 }
 
 

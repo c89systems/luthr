@@ -136,7 +136,7 @@
         Instruction extra = *pc++;
         readRA(i);  /* materialize a captured destination before allocation */
         savepc(ci);
-        createtable(L, ci, i, extra);
+        createtable(L, ci, ip, i, extra);
         updatebase(ci);
         updatetrap(ci);
         vmbreak;

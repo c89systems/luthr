@@ -132,6 +132,7 @@ static int scanarray (lua_State *L, LuaTraceWork *work, Table *table,
 
 int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   Table view, *metatable;
+  Table *keys;
   LuaHashDirectory *directory;
   unsigned i, parts;
   lu_mem bytes;
@@ -148,6 +149,25 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   }
   mode = strongmode(L, table, metatable, sequence);
   if (mode != 1) return mode;
+  keys = luaH_recordkeys(view.node);
+  if (keys != NULL) {
+    GCObject *edges[LUA_RECORD_MAX_FIELDS + 2];
+    TValue *values = luaH_recordvalues(table);
+    unsigned count = 1;
+    edges[0] = obj2gco(keys);
+    if (metatable != NULL) edges[count++] = obj2gco(metatable);
+    for (i = 0; i < keys->asize; i++) {
+      lu_byte tag = __atomic_load_n(&values[i].tt_, __ATOMIC_ACQUIRE);
+      if (tag & BIT_ISCOLLECTABLE)
+        __atomic_load(&values[i].value_.gc, &edges[count++], __ATOMIC_ACQUIRE);
+    }
+    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+      return 0;
+    luaC_traceedges(work, edges, count);
+    work->marked += sizeof(*table) + table->inline_bytes;
+    luaC_finishstrong(work, obj2gco(table), 0);
+    return 1;
+  }
   directory = luaH_hashdir(view.node);
   if (metatable != NULL) {
     GCObject *edge = obj2gco(metatable);

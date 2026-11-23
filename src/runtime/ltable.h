@@ -31,7 +31,23 @@
 
 
 LUAI_DDEC(const Node luaH_dummynode;)
-#define isdummy(t)		((t)->node == &luaH_dummynode)
+
+/* A compact record owns its values inline. Its immutable key array is a
+** separate collectable table, shared by the constructor's instances. */
+#define LUA_RECORD_TAG cast(uintptr_t, 2)
+enum { LUA_RECORD_MAX_FIELDS = 4 };
+
+l_sinline Table *luaH_recordkeys (const Node *image) {
+  uintptr_t address = cast(uintptr_t, image);
+  return address & LUA_RECORD_TAG
+    ? cast(Table *, address & ~LUA_RECORD_TAG) : NULL;
+}
+
+l_sinline TValue *luaH_recordvalues (Table *table) {
+  return cast(TValue *, table + 1);
+}
+
+#define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))
 
 /* The tag distinguishes a directory from a single node image without
 ** expanding every small table. Once installed, the directory stays put. */
@@ -59,7 +75,8 @@ l_sinline LuaHashDirectory *luaH_hashdir (const Node *image) {
 }
 
 l_sinline unsigned luaH_nodesize (const Node *nodes) {
-  return nodes == &luaH_dummynode ? 0 : twoto(nodes->u.lsize);
+  return nodes == &luaH_dummynode || luaH_recordkeys(nodes) != NULL
+    ? 0 : twoto(nodes->u.lsize);
 }
 
 l_sinline unsigned luaH_hashparts (const Table *table) {
@@ -70,6 +87,7 @@ l_sinline unsigned luaH_hashparts (const Table *table) {
 l_sinline Node *luaH_hashnodes (const Table *table, unsigned index) {
   Node *image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   LuaHashDirectory *directory = luaH_hashdir(image);
+  if (luaH_recordkeys(image) != NULL) return cast(Node *, &luaH_dummynode);
   return directory == NULL ? image :
     __atomic_load_n(&directory->parts[index].nodes, __ATOMIC_ACQUIRE);
 }
@@ -128,6 +146,13 @@ typedef struct LuaArrayHeader {
 
 /* Computes the address of the value for the abstract C-index 'k' */
 #define getArrVal(t,k)	((t)->array - 1 - (k))
+
+l_sinline unsigned luaH_recordindex (const Table *keys, const TString *key) {
+  unsigned i;
+  for (i = 0; i < keys->asize; i++)
+    if (cast(const void *, getArrVal(keys, i)->gc) == key) return i;
+  return keys->asize;
+}
 
 /* Large arrays carry one stamp per group of slots. Scalar cards have
 ** never held a reference in this image. Other cards are zero when dirty,
@@ -219,6 +244,7 @@ LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value);
 
 LUAI_FUNC Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize);
+LUAI_FUNC Table *luaH_newrecord (lua_State *, Table *);
 #define LUA_TABLE_INLINE_LIMIT 192
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);

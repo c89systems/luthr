@@ -620,6 +620,11 @@ typedef struct AbsLineInfo {
 */
 #define needvatab(p)	((p)->flag |= PF_VATAB)
 
+typedef struct LuaRecordSite {
+  struct Table *keys;  /* immutable array of interned field names */
+  int pc;             /* constructor instruction in the portable code */
+} LuaRecordSite;
+
 /*
 ** Function Prototypes
 */
@@ -643,6 +648,8 @@ typedef struct Proto {
   TValue *k;  /* constants used by the function */
   Instruction *code;  /* opcodes */
   lu_byte *dispatch;  /* immutable overrides for captured operands and pairs */
+  LuaRecordSite *records;  /* sorted by constructor instruction */
+  int sizerecords;
   struct Proto **p;  /* functions defined inside the function */
   Upvaldesc *upvalues;  /* upvalue information */
   ls_byte *lineinfo;  /* information about source lines (debug information) */

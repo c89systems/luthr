@@ -85,8 +85,11 @@ l_sinline int luaH_trygetshortstr (lua_State *L, Table *table, TString *key,
     return luaH_trygetsharedshortstr(L, table, key, result, tag);
   nodes = table->node;
   lua_assert(luaH_hashdir(nodes) == NULL);
-  found = luaH_hashvalue(luaH_shortslot(luaH_shortposition(nodes, key), key),
-                         result);
+  if (luaH_recordkeys(nodes) != NULL)
+    found = luaH_hashvalue(luaH_Hgetshortstr(table, key), result);
+  else
+    found = luaH_hashvalue(luaH_shortslot(luaH_shortposition(nodes, key), key),
+                           result);
   *tag = luaH_privatevalue(L, table, result, found);
   return 1;
 }

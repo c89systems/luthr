@@ -25,6 +25,7 @@
 #include "lopcodes.h"
 #include "lstate.h"
 #include "lroots.h"
+#include "ltable.h"
 
 
 
@@ -651,6 +652,62 @@ static unsigned dispatchpair (unsigned first, unsigned second) {
   }
 }
 
+/* The hints name possible fields. An extra assignment or a different key
+** uses the ordinary dictionary image. Loading and dumping keep Lua code. */
+static unsigned recordfields (const Proto *p, int pc, lu_byte *fields) {
+  Instruction insn = p->code[pc];
+  unsigned hash, count = 0, reg;
+  int at;
+  if (GET_OPCODE(insn) != OP_NEWTABLE || TESTARG_k(insn) ||
+      GETARG_vC(insn) != 0) return 0;
+  hash = cast_uint(GETARG_vB(insn));
+  if (hash < 2 || hash > 3) return 0;
+  hash = 1u << (hash - 1);
+  reg = cast_uint(GETARG_A(insn));
+  for (at = pc + 2; at < p->sizecode && at - pc <= 16; at++) {
+    unsigned op = GET_OPCODE(p->code[at]);
+    if (op == OP_SETFIELD && cast_uint(GETARG_A(p->code[at])) == reg) {
+      unsigned i, key = cast_uint(GETARG_B(p->code[at]));
+      if (key >= cast_uint(p->sizek) || !ttisshrstring(&p->k[key])) return 0;
+      for (i = 0; i < count; i++)
+        if (tsvalue(&p->k[fields[i]]) == tsvalue(&p->k[key])) break;
+      if (i == count) fields[count++] = cast_byte(key);
+      if (count == hash) return count;
+    }
+    else if (op == OP_NEWTABLE || op == OP_RETURN || op == OP_RETURN0 ||
+             op == OP_RETURN1 || op == OP_TAILCALL || op == OP_JMP)
+      break;
+  }
+  return count > hash / 2 ? count : 0;
+}
+
+static void lowerrecords (lua_State *L, Proto *p) {
+  lu_byte fields[LUA_RECORD_MAX_FIELDS];
+  int pc, sites = 0;
+  for (pc = 0; pc < p->sizecode; pc++)
+    if (recordfields(p, pc, fields) != 0) sites++;
+  if (sites == 0) return;
+  p->records = luaM_newvectorchecked(L, sites, LuaRecordSite);
+  p->sizerecords = sites;
+  for (pc = 0; pc < sites; pc++) p->records[pc].keys = NULL;
+  sites = 0;
+  for (pc = 0; pc < p->sizecode; pc++) {
+    unsigned i, count = recordfields(p, pc, fields);
+    Table *keys;
+    if (count == 0) continue;
+    keys = luaH_new(L, count, 0);
+    p->records[sites].keys = keys;
+    p->records[sites++].pc = pc;
+    luaC_objbarrier(L, p, keys);
+    for (i = 0; i < count; i++) {
+      const TValue *key = &p->k[fields[i]];
+      obj2arr(keys, i, key);
+      luaC_barrierback(L, obj2gco(keys), key);
+    }
+    luaA_share(L, obj2gco(keys));
+  }
+}
+
 void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
@@ -695,6 +752,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
   }
   p->scalar_ticks = scalarticks(p, count != 0);
   scalaraffine(p);
+  lowerrecords(L, p);
 }
 
 
@@ -707,6 +765,8 @@ Proto *luaF_newproto (lua_State *L) {
   f->sizep = 0;
   f->code = NULL;
   f->dispatch = NULL;
+  f->records = NULL;
+  f->sizerecords = 0;
   f->sizecode = 0;
   f->lineinfo = NULL;
   f->sizelineinfo = 0;
@@ -744,6 +804,7 @@ lu_mem luaF_protosize (Proto *p) {
             + cast_uint(p->sizeupvalues) * sizeof(Upvaldesc);
   if (p->dispatch != NULL)
     sz += cast_uint(p->sizecode) * sizeof(lu_byte);
+  sz += cast_uint(p->sizerecords) * sizeof(LuaRecordSite);
   if (!(p->flag & PF_FIXED)) {
     sz += cast_uint(p->sizecode) * sizeof(Instruction);
     sz += cast_uint(p->sizelineinfo) * sizeof(lu_byte);
@@ -754,6 +815,7 @@ lu_mem luaF_protosize (Proto *p) {
 
 
 void luaF_retireproto (lua_State *L, Proto *f) {
+  luaM_retirearray(L, f->records, cast_sizet(f->sizerecords));
   if (f->dispatch != NULL)
     luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {
@@ -769,6 +831,7 @@ void luaF_retireproto (lua_State *L, Proto *f) {
 }
 
 void luaF_freeproto (lua_State *L, Proto *f) {
+  luaM_freearray(L, f->records, cast_sizet(f->sizerecords));
   if (f->dispatch != NULL)
     luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {

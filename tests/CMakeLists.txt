@@ -402,7 +402,7 @@ target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
   -Wl,--wrap=luaC_finishstrong -Wl,--wrap=luaM_free_ -Wl,--wrap=luaHS_scanend
   -Wl,--undefined=luaC_scanstrong)
 foreach(collector IN ITEMS incremental generational)
-  foreach(case IN ITEMS array list metatable relocate pause first_write first_write_small scalar_cards)
+  foreach(case IN ITEMS array list metatable relocate pause first_write first_write_small scalar_cards record)
     add_test(NAME gc_table_scan_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector})
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
@@ -536,7 +536,7 @@ set_target_properties(object_layout_test PROPERTIES C_STANDARD 99)
 target_compile_options(object_layout_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(object_layout_test PRIVATE luthr_static)
 foreach(collector IN ITEMS incremental generational)
-  foreach(kind IN ITEMS closure capture cell managed userdata userdata_values table_lua table_api)
+  foreach(kind IN ITEMS closure capture cell managed userdata userdata_values table_lua table_api table_record)
     add_test(NAME object_layout_${kind}_${collector}
       COMMAND object_layout_test ${kind} ${collector})
     set_tests_properties(object_layout_${kind}_${collector} PROPERTIES

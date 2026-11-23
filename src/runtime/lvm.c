@@ -1482,17 +1482,31 @@ l_sinline StkId directregister (StkId base, int reg) {
 /* Allocation can park and relocate registers. Keep this operation out of
 ** both dispatch loops, with the destination recoverable from the saved top. */
 static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
-                                                 Instruction i, Instruction extra) {
+                                     const Instruction *at, Instruction i,
+                                     Instruction extra) {
   unsigned hash = cast_uint(GETARG_vB(i));
   unsigned array = cast_uint(GETARG_vC(i));
+  const Proto *proto = ci_func(ci)->p;
+  Table *keys = NULL;
   Table *table;
   if (hash != 0) hash = 1u << (hash - 1);  /* log2(hash size) + 1 */
   if (TESTARG_k(i)) {
     lua_assert(GETARG_Ax(extra) != 0);
     array += cast_uint(GETARG_Ax(extra)) * (MAXARG_vC + 1);
   }
+  if (hash != 0 && array == 0 && proto->sizerecords != 0) {
+    int index = cast_int(at - proto->code);
+    int low = 0, high = proto->sizerecords;
+    while (low < high) {
+      int middle = low + (high - low) / 2;
+      if (proto->records[middle].pc < index) low = middle + 1;
+      else high = middle;
+    }
+    if (low < proto->sizerecords && proto->records[low].pc == index)
+      keys = proto->records[low].keys;
+  }
   L->top.p = ci->func.p + 2 + GETARG_A(i);
-  table = luaH_new(L, array, hash);
+  table = keys != NULL ? luaH_newrecord(L, keys) : luaH_new(L, array, hash);
   sethvalue2s(L, L->top.p - 1, table);
   if (L->task_objects != NULL && L->task_nursery_bytes >= L->task_nursery_limit)
     luaC_taskstep(L);

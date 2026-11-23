@@ -3,6 +3,7 @@
 #include <lfunc.h>
 #include <lmempage.h>
 #include <ltable.h>
+#include <lualib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,6 +94,129 @@ static void small_table(lua_State *L, lua_State *other, int from_lua) {
   lua_gc(L, LUA_GCCOLLECT);
 }
 
+static void run_chunk(lua_State *L, const char *source, int results) {
+  int status = luaL_loadstring(L, source);
+  if (status == LUA_OK)
+    status = lua_pcall(L, 0, results, 0);
+  if (status != LUA_OK)
+    fprintf(stderr, "%s\n", lua_tostring(L, -1));
+  require(status == LUA_OK);
+}
+
+static void record_table(lua_State *L, lua_State *other) {
+  const Table *record, *second, *keys, *metatable;
+  luaL_openlibs(L);
+  run_chunk(L,
+            "local function make(n) return {key=n, value=n+1} end; "
+            "make = assert(load(string.dump(make), 'record', 'b')); "
+            "return make(10), make(20)",
+            2);
+  record = lua_topointer(L, 2);
+  second = lua_topointer(L, 3);
+  keys = luaH_recordkeys(record->node);
+  require(keys != NULL && keys == luaH_recordkeys(second->node));
+  require(record != second && lua_rawlen(L, 2) == 0);
+  budget(record, 112);
+  lua_pop(L, 1);
+  lua_pushexternalstring(L, "key", 3, NULL, NULL);
+  require(lua_rawget(L, 2) == LUA_TNUMBER && lua_tointeger(L, -1) == 10);
+  lua_pop(L, 1);
+  lua_xmove(L, other, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_topointer(other, 1) == record);
+  require(luaH_recordkeys(record->node) == keys);
+  lua_pushexternalstring(other, "key", 3, NULL, NULL);
+  require(lua_rawget(other, 1) == LUA_TNUMBER &&
+          lua_tointeger(other, -1) == 10);
+  lua_pop(other, 1);
+  lua_pushexternalstring(other, "key", 3, NULL, NULL);
+  lua_pushinteger(other, 42);
+  lua_rawset(other, 1);
+  lua_getfield(other, 1, "key");
+  require(lua_tointeger(other, -1) == 42);
+  lua_pop(other, 1);
+  lua_pushnil(other);
+  lua_rawseti(other, 1, 9999);
+  require(luaH_recordkeys(record->node) == keys);
+  lua_pushnil(other);
+  require(lua_next(other, 1));
+  lua_pop(other, 1);
+  lua_pushvalue(other, -1);
+  lua_pushnil(other);
+  lua_rawset(other, 1);
+  require(lua_next(other, 1));
+  lua_pop(other, 1);
+  require(lua_next(other, 1) == 0);
+  lua_pushinteger(other, 43);
+  lua_rawseti(other, 1, 1);
+  require(luaH_recordkeys(record->node) == NULL);
+  require(lua_topointer(other, 1) == record);
+  require(lua_rawgeti(other, 1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(other, -1) == 43);
+  lua_pop(other, 1);
+  lua_pop(other, 1);
+
+  run_chunk(L,
+            "local r = {key=1, value=2}; "
+            "local index, newindex = {value=11, extra=12}, {}; "
+            "local m = {__index=index, __newindex=newindex}; "
+            "return r,m",
+            2);
+  record = lua_topointer(L, 2);
+  metatable = lua_topointer(L, 3);
+  keys = luaH_recordkeys(record->node);
+  require(keys != NULL && luaH_recordkeys(metatable->node) != NULL);
+  require(lua_setmetatable(L, 2));
+  require(keys == luaH_recordkeys(record->node));
+  lua_setglobal(L, "record_fixture");
+  run_chunk(L,
+            "local t = record_fixture; record_fixture = nil; "
+            "local m = getmetatable(t); "
+            "t.key = 3; assert(rawget(t,'key') == 3); "
+            "rawset(t,'value',nil); assert(t.value == 11 and t.extra == 12); "
+            "t.value = 8; t.extra = 9; "
+            "assert(rawget(t,'value') == nil and rawget(t,'extra') == nil); "
+            "assert(m.__newindex.value == 8 and m.__newindex.extra == 9); "
+            "return t",
+            1);
+  require(luaH_recordkeys(record->node) == keys);
+  lua_pushliteral(L, "extra");
+  lua_pushinteger(L, 14);
+  lua_rawset(L, 2);
+  require(luaH_recordkeys(record->node) == NULL);
+  require(lua_getfield(L, 2, "key") == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 3);
+  lua_pop(L, 1);
+  lua_pop(L, 1);
+
+  run_chunk(L,
+            "local function make(mode) "
+            "  local key, value = {}, 'weak-'..mode; "
+            "  local record = {key=key, value=value}; "
+            "  return setmetatable(record, {__mode=mode, sentinel=true}) "
+            "end; return make('k'), make('v'), make('kv')",
+            3);
+  for (int i = 2; i <= 4; i++) {
+    const Table *weak = lua_topointer(L, i);
+    require(luaH_recordkeys(weak->node) != NULL);
+  }
+  lua_xmove(L, other, 3);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCCOLLECT);
+  for (int i = 1; i <= 3; i++) {
+    const Table *weak = lua_topointer(other, i);
+    require(luaH_recordkeys(weak->node) != NULL);
+    require(lua_getfield(other, i, "key") == (i == 1 ? LUA_TTABLE : LUA_TNIL));
+    lua_pop(other, 1);
+    require(lua_getfield(other, i, "value") == LUA_TSTRING);
+    require(strcmp(lua_tostring(other, -1), i == 1   ? "weak-k"
+                                            : i == 2 ? "weak-v"
+                                                     : "weak-kv") == 0);
+    lua_pop(other, 1);
+  }
+  lua_pop(other, 3);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate(), *other;
   int userdata, capture;
@@ -100,9 +224,13 @@ int main(int argc, char **argv) {
   lua_gc(L, strcmp(argv[2], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   other = lua_newthread(L);
   if (strncmp(argv[1], "table_", 6) == 0) {
-    require(strcmp(argv[1], "table_lua") == 0 ||
-            strcmp(argv[1], "table_api") == 0);
-    small_table(L, other, strcmp(argv[1], "table_lua") == 0);
+    if (strcmp(argv[1], "table_record") == 0)
+      record_table(L, other);
+    else {
+      require(strcmp(argv[1], "table_lua") == 0 ||
+              strcmp(argv[1], "table_api") == 0);
+      small_table(L, other, strcmp(argv[1], "table_lua") == 0);
+    }
     lua_close(L);
     return 0;
   }

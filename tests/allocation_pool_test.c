@@ -405,14 +405,15 @@ static lua_State *spare_fixture(void) {
   lua_State *L = luaL_newstate();
   require(L != NULL);
   lua_gc(L, LUA_GCSTOP);
+  /* Fill more than the 16 MiB resident spare budget with compact rows. */
   require(luaL_loadstring(
               L,
               "local rows = {} "
-              "for i = 1, 120000 do rows[i] = {k=i, v=i*2} end "
+              "for i = 1, 160000 do rows[i] = {k=i, v=i*2} end "
               "for i = 1, #rows do "
               "  if rows[i].k ~= i or rows[i].v ~= i*2 then return false end "
               "end "
-              "return #rows == 120000") == LUA_OK);
+              "return #rows == 160000") == LUA_OK);
   return L;
 }
 

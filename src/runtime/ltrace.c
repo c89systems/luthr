@@ -69,7 +69,15 @@ l_sinline void traceviewarray (lua_State *L, const Table *view,
 
 void luaC_traceview (lua_State *L, const Table *view) {
   unsigned p, parts;
+  const Table *keys;
   if (!luaC_tracing(L)) return;
+  keys = luaH_recordkeys(view->node);
+  if (keys != NULL) {
+    const TValue *values = cast(const TValue *, view + 1);
+    luaC_traceobject(L, cast(GCObject *, keys));
+    for (p = 0; p < keys->asize; p++) luaC_tracevalue(L, values + p);
+    return;
+  }
   if (view->asize < LUA_ARRAY_CARD_MIN)
     traceviewarray(L, view, 0, view->asize);
   else {
@@ -103,6 +111,9 @@ void luaC_snapshotproto (lua_State *L, Proto *proto) {
   if (__atomic_load_n(&proto->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
     return;
   if (proto->source != NULL) luaC_traceobject(L, obj2gco(proto->source));
+  for (i = 0; i < proto->sizerecords; i++)
+    if (proto->records[i].keys != NULL)
+      luaC_traceobject(L, obj2gco(proto->records[i].keys));
   for (i = 0; i < proto->sizek; i++) luaC_tracevalue(L, &proto->k[i]);
   for (i = 0; i < proto->sizeupvalues; i++)
     if (proto->upvalues[i].name != NULL)
@@ -263,6 +274,7 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   unsigned cutoff = __atomic_load_n(&G(L)->trace_weakcutoff, __ATOMIC_ACQUIRE);
   unsigned pending, i, p, parts;
   uint64_t state;
+  Table *keys;
   if (cutoff == 0) return;
   state = luaC_tablestate(table);
   if (!luaC_weakvalid(G(L), state)) return;
@@ -273,7 +285,17 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   pending = (cutoff & luaC_weakmode(state)) &
             ~cast_uint(state >> LUA_WEAK_CLEARED_SHIFT);
   if (pending == 0) return;
-  if (pending & 1) {
+  keys = luaH_recordkeys(table->node);
+  if (keys != NULL) {
+    /* The descriptor owns interned names and has no weak key edges. */
+    TValue *values = luaH_recordvalues(table);
+    if (pending & 1) {
+      for (i = 0; i < keys->asize; i++)
+        if (iscollectable(values + i) && weakdead(L, gcvalue(values + i)))
+          setempty(values + i);
+    }
+  }
+  else if (pending & 1) {
     for (i = 0; i < table->asize; i++) {
       lu_byte *tag = getArrTag(table, i);
       if ((*tag & BIT_ISCOLLECTABLE) &&

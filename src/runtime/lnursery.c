@@ -520,10 +520,19 @@ static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
       marknursery(L, gcvalue(s2v(slot)), &gray, scan);
   while (gray != NULL) {
     Table *t = gco2t(gray);
+    Table *keys = luaH_recordkeys(t->node);
     unsigned i;
     gray = t->gclist;
     if (t->metatable != NULL)
       visitnursery(L, obj2gco(t->metatable), &gray, scan);
+    if (keys != NULL) {
+      TValue *values = luaH_recordvalues(t);
+      visitnursery(L, obj2gco(keys), &gray, scan);
+      for (i = 0; i < keys->asize; i++)
+        if (nurseryedge(rawtt(values + i), scan))
+          visitnursery(L, gcvalue(values + i), &gray, scan);
+      continue;
+    }
     for (i = 0; i < t->asize; i++)
       if (nurseryedge(*getArrTag(t, i), scan))
         visitnursery(L, getArrVal(t, i)->gc, &gray, scan);
@@ -682,7 +691,9 @@ void luaC_collectnursery (lua_State *L) {
     if (--remaining == 0) return;
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o))) {
       Table *t = gco2t(o);
+      Table *keys = luaH_recordkeys(t->node);
       unsigned nodes = allocsizenode(t);
+      if (keys != NULL) nodes += keys->asize + 1;
       if (t->asize >= remaining || nodes >= remaining - t->asize) return;
       remaining -= t->asize + nodes;
       unpinned += (luaC_tablestate(t) & NURSERY_ROOT) == 0;
