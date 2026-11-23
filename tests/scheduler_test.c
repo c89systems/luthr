@@ -488,20 +488,10 @@ static int mark_running(lua_State *L) {
 
 enum { SLICE_PEERS = 3 };
 
-static int first_slice_peer(lua_State *L) {
-  LuaScheduler *scheduler = &fixture->scheduler;
-  /* A spare carrier may take this task before the interrupted fiber is
-   * saved. Keep the other two peers queued until that fiber is published. */
-  require(pthread_mutex_lock(&scheduler->mutex) == 0);
-  while (__atomic_load_n(&scheduler->runnable, __ATOMIC_ACQUIRE) < SLICE_PEERS)
-    require(pthread_cond_wait(&scheduler->changed, &scheduler->mutex) == 0);
-  require(pthread_mutex_unlock(&scheduler->mutex) == 0);
-  return started(L);
-}
-
 static int poll_slice(lua_State *L) {
   struct fixture *f = fixture;
   uint64_t slice_ns = (uint64_t)luaL_checkinteger(L, 1);
+  uint64_t retained_ns = (uint64_t)luaL_optinteger(L, 2, 0);
   lua_lock(L);
   while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) <
          SLICE_PEERS)
@@ -512,38 +502,47 @@ static int poll_slice(lua_State *L) {
   __atomic_fetch_add(&f->poll_time_ns, slice_ns - 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
   require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
+  if (retained_ns != 0) {
+    __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
+    __atomic_fetch_add(&f->poll_time_ns, retained_ns - slice_ns - 1,
+                       __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
+  }
   __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
-  /* The queue head stays ahead at publication. If a spare carrier already
-   * took peer 1, peer 2 can also run ahead. Later slices rotate behind all
-   * three peers. */
-  require(__atomic_load_n(&f->seen[1], __ATOMIC_ACQUIRE) == 1);
-  require(__atomic_load_n(&f->seen[SLICE_PEERS], __ATOMIC_ACQUIRE) ==
-          (slice_ns == 250000 ? 0u : 1u));
+  /* Already queued peers run before the preempted task resumes. */
+  for (unsigned i = 1; i <= SLICE_PEERS; i++)
+    require(__atomic_load_n(&f->seen[i], __ATOMIC_ACQUIRE) == 1);
   lua_unlock(L);
   return 0;
 }
 
-static void timed_slice(struct fixture *f, int continuation) {
+static void timed_slice(struct fixture *f, int continuation, int retained) {
+  const char *chunk = continuation
+                          ? "coroutine.yield(); mark_running(); "
+                            "poll_slice(...); return 10"
+                          : "mark_running(); poll_slice(...); return 10";
   f->poll_time_ns = 1;
   init(f, 1);
   f->scheduler.config.quantum_polls = 0;
-  lua_gc(f->main, LUA_GCSTOP);
+  if (retained)
+    chunk = "local rows={}; for i=1,8192 do rows[i]={i,i+1} end; "
+            "coroutine.yield(); mark_running(); poll_slice(...,40000000); "
+            "return rows[8192][2]-8183";
+  else
+    lua_gc(f->main, LUA_GCSTOP);
   managed(f->main, "poll_slice", poll_slice);
-  managed(f->main, "first_slice_peer", first_slice_peer);
   managed(f->main, "started", started);
   managed(f->main, "mark_running", mark_running);
-  submit(f, 0,
-         continuation
-             ? "coroutine.yield(); mark_running(); poll_slice(...); return 10"
-             : "mark_running(); poll_slice(...); return 10",
-         continuation ? 10000000 : 250000);
+  submit(f, 0, chunk, continuation ? 10000000 : 250000);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (f->waiting == 0)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  submit(f, 1, "first_slice_peer(...); return ...", 1);
-  for (unsigned i = 2; i <= SLICE_PEERS; i++)
+  for (unsigned i = 1; i <= SLICE_PEERS; i++)
     submit(f, i, "started(...); return ...", (int)i);
   require(collect(f, 0, LUA_OK) == 10);
   for (unsigned i = 1; i <= SLICE_PEERS; i++)
@@ -2433,9 +2432,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "timed_metadata_progress") == 0)
     metadata_progress(f, 0);
   else if (strcmp(argv[1], "timed_slice") == 0)
-    timed_slice(f, 0);
+    timed_slice(f, 0, 0);
   else if (strcmp(argv[1], "timed_continuation_slice") == 0)
-    timed_slice(f, 1);
+    timed_slice(f, 1, 0);
+  else if (strcmp(argv[1], "timed_retained_slice") == 0)
+    timed_slice(f, 1, 1);
   else if (strcmp(argv[1], "early_incremental") == 0)
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)

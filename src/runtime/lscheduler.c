@@ -11,11 +11,13 @@
 #include <string.h>
 #include <time.h>
 
-enum { SC_READY, SC_FIRST_SLICE, SC_RESOURCE, SC_DONE };
+enum { SC_READY, SC_RESOURCE, SC_DONE };
 enum {
   DEFAULT_SLICE_NS = 2 * 1000 * 1000,
   FIRST_SERIAL_SLICE_NS = 250 * 1000,
   SERIAL_SLICE_NS = 10 * 1000 * 1000,
+  RETAINED_SERIAL_SLICE_NS = 40 * 1000 * 1000,
+  RETAINED_HEAP_BYTES = 128 * 1024,
   NATIVE_SLOT_CHECK_NS = 100 * 1000
 };
 
@@ -149,19 +151,11 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
 
 /* Caller retains scheduler.mutex on host/wake/publication paths. Queue
 ** ownership is independent; successful dispatch needs no engine mutex. */
-static void enqueue (LuaScheduler *s, LuaScheduledTask *task, int firstslice) {
+static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   LuaExecutionSlot *slot = &s->slots[task->home];
   lua_assert(task->slot == NULL && task->fiber.execution.allocation_cache == NULL);
   luaX_checksync(pthread_mutex_lock(&slot->mutex));
-  if (firstslice && slot->head != NULL) {
-    /* Keep the head ahead, then resume the first-slice task before opening
-    ** more live graphs. Subsequent slices rotate through the full queue. */
-    lua_assert(task->next == NULL);
-    task->next = slot->head->next;
-    slot->head->next = task;
-    if (slot->tail == slot->head) slot->tail = task;
-  }
-  else append(&slot->head, &slot->tail, task);
+  append(&slot->head, &slot->tail, task);
   slot->count++;
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   wakequeued(s, task);
@@ -794,6 +788,9 @@ static void poll (LuaExecution *execution, lua_State *L) {
   pollnative(task, L);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
+  if (timed && serial && !task->retained_heap && L->task_owner == &task->root &&
+      L->task_old_bytes >= RETAINED_HEAP_BYTES)
+    task->retained_heap = 1;
   if (l_unlikely(task->minor_deadline != 0)) {
     LuaExecution *driver = __atomic_load_n(&s->minor_driver, __ATOMIC_ACQUIRE);
     if (driver != execution) task->minor_deadline = 0;
@@ -829,6 +826,15 @@ static void poll (LuaExecution *execution, lua_State *L) {
       task->slice_deadline = now + slice;
     }
     if (now < task->slice_deadline) return;
+    /* Let a proven large working set finish before opening more live graphs.
+    ** The first serial slice still starts peers promptly. Resource handoffs
+    ** can interrupt the extension and the deadline never moves forward. */
+    if (serial && task->dispatches != 1 && task->retained_heap &&
+        L->task_owner == &task->root &&
+        reentry == 0 && publishing == 0 &&
+        __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0 &&
+        now - task->slice_deadline < RETAINED_SERIAL_SLICE_NS - SERIAL_SLICE_NS)
+      return;
   }
   task->slice_deadline = 0;
   depth = luaW_detach(L);
@@ -847,8 +853,7 @@ static void poll (LuaExecution *execution, lua_State *L) {
     __atomic_fetch_sub(&s->external_yields, 1, __ATOMIC_RELEASE);
     unlock(s);
   }
-  else pause(task, timed && serial && task->dispatches == 1 && reentry == 0
-                   ? SC_FIRST_SLICE : SC_READY);
+  else pause(task, SC_READY);
   luaW_attach(L, depth);
 }
 
@@ -898,7 +903,7 @@ static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
   LuaScheduledTask *ready;
   lock(s);
   ready = readywaiter(s, waiter);
-  if (ready != NULL) enqueue(s, ready, 0);
+  if (ready != NULL) enqueue(s, ready);
   notify(s);
   unlock(s);
 }
@@ -1131,12 +1136,12 @@ static void *carrierentry (void *argument) {
     }
     else if (task->reason == SC_RESOURCE) {
       if (task->notified) {
-        enqueue(s, task, 0);
+        enqueue(s, task);
         __atomic_fetch_sub(&s->pending_ready, 1, __ATOMIC_RELEASE);
       }
       else task->published = 1;
     }
-    else enqueue(s, task, task->reason == SC_FIRST_SLICE);
+    else enqueue(s, task);
     notify(s);
     unlock(s);
   }
@@ -1376,7 +1381,7 @@ int luaSC_submit (LuaScheduler *s, LuaScheduledTask *task, lua_State *L,
       s->tasks = task;
       s->submitted++;
       s->outstanding++;
-      enqueue(s, task, 0);
+      enqueue(s, task);
       notify(s);
     }
   }

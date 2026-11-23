@@ -51,6 +51,7 @@ struct LuaScheduledTask {
   int nargs, reason, complete, notified, published;
   int native;  /* atomic permit grant, held through both active use and reuse */
   int native_pending, native_notified, external;
+  lu_byte retained_heap;  /* the scheduler observed a large private live set */
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
   uint64_t minor_deadline;  /* owner's initial slice for an explicit minor */
 };
