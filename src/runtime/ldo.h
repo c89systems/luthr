@@ -63,6 +63,12 @@ l_sinline CallInfo *luaD_initframe (lua_State *L, CallInfo *ci, StkId func,
   return ci;
 }
 
+l_sinline void luaD_initluaframe (CallInfo *ci, const Instruction *code) {
+  ci->u.l.savedpc = code;
+  ci->u.l.captures = 0;
+  ci->u.l.rootpc = NULL;
+}
+
 
 /*
 ** Maximum depth for nested C calls, syntactical nested non-terminals,

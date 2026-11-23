@@ -965,9 +965,7 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
       int fsize = p->maxstacksize;  /* frame size */
       checkstackp(L, fsize, func);
       L->ci = ci = prepCallInfo(L, func, status, func + 1 + fsize);
-      ci->u.l.savedpc = p->code;  /* starting point */
-      ci->u.l.captures = 0;
-      ci->u.l.rootpc = NULL;
+      luaD_initluaframe(ci, p->code);
       for (; narg < nfixparams; narg++)
         setnilvalue2s(L->top.p++);  /* complete missing arguments */
       lua_assert(ci->top.p <= L->stack_last.p);

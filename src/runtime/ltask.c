@@ -142,7 +142,7 @@ void luaTK_throwstop (lua_State *L) {
   luaD_throw(L, LUA_ERRRUN);
 }
 
-static void __attribute__((noinline)) deliverstop (lua_State *L) {
+void __attribute__((noinline)) luaTK_deliverstop (lua_State *L) {
   LuaTaskRoot *task = luaTK_pendingon(L, luaX_execution(L));
   int deliver;
   if (task == NULL) return;
@@ -154,7 +154,7 @@ static void __attribute__((noinline)) deliverstop (lua_State *L) {
 }
 
 void luaTK_checkstop (lua_State *L) {
-  if (l_unlikely(luaTK_hasstops(L))) deliverstop(L);
+  if (l_unlikely(luaTK_hasstops(L))) luaTK_deliverstop(L);
 }
 
 static int driver (LuaTaskRoot *task) {

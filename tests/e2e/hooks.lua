@@ -17,6 +17,28 @@ for padding=0,2047 do
 end
 collectgarbage('restart')
 
+do
+  local function target(a,b) return a,b end
+  local function operands() return 'original',nil,'extra' end
+  local first,second=target('first','second')
+  assert(first=='first' and second=='second')
+
+  local calls={}
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func==target then
+      calls[#calls+1]=event
+      if event=='call' then assert(debug.setlocal(2,1,'rewritten')=='a') end
+    end
+  end,'cr')
+  local a,b,c=target(operands())
+  debug.sethook()
+  assert(a=='rewritten' and b==nil and c==nil)
+  assert(table.concat(calls,',')=='call,return')
+
+  first,second=target('first')
+  assert(first=='first' and second==nil)
+end
+
 local gaps={1,124,127,128,255,256,1000}
 local active=true
 local finalized=0

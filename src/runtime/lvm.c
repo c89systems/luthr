@@ -1613,6 +1613,7 @@ __attribute__((optimize("no-gcse", "no-crossjumping")))
 #endif
 void luaV_execute (lua_State *L, CallInfo *ci) {
   LClosure *cl;
+  const Proto *p;
   TValue *k;
   StkId base;
   const Instruction *code, *pc, *ip;
@@ -1623,13 +1624,21 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #include "ljumptab.h"
 #endif
  startfunc:
-  luaTK_checkstop(L);
+  cl = ci_func(ci);
+  p = cl->p;
+#if !defined(HARDSTACKTESTS)
+ startclosure:
+#endif
+  if (l_unlikely(luaTK_hasstops(L))) luaTK_deliverstop(L);
   trap = gethookmask(L);
+  goto loadframe;
  returning:  /* trap already set */
   cl = ci_func(ci);
-  k = cl->p->k;
-  code = cl->p->code;
-  dispatchmap = cl->p->dispatch;
+  p = cl->p;
+ loadframe:
+  k = p->k;
+  code = p->code;
+  dispatchmap = p->dispatch;
   pc = ci->u.l.savedpc;
   if (l_unlikely(trap))
     trap = luaG_tracecall(L);

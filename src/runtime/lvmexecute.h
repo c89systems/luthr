@@ -461,6 +461,22 @@
         }
         L->top.p = ra + b;
         savepc(ci);  /* in case of errors */
+#if !VM_CAPTURE && !defined(HARDSTACKTESTS)
+        /* Enter a Lua closure directly when its arguments and frame fit. */
+        if (ttisLclosure(s2v(ra))) {
+          LClosure *closure = clLvalue(s2v(ra));
+          const Proto *callee = closure->p;
+          int fsize = callee->maxstacksize;
+          if (ci->next != NULL && b > callee->numparams &&
+              L->stack_last.p - L->top.p > fsize) {
+            ci = luaD_initframe(L, ci->next, ra, GETARG_C(i), ra + 1 + fsize);
+            luaD_initluaframe(ci, callee->code);
+            cl = closure;
+            p = callee;
+            goto startclosure;
+          }
+        }
+#endif
         if ((newci = luaD_precall(L, ra, nresults)) == NULL)
           updatetrap(ci);  /* C call; nothing else to be done */
         else {  /* Lua call: run function in this same C frame */

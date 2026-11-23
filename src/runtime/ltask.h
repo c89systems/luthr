@@ -99,6 +99,7 @@ LUAI_FUNC int luaTK_shutdown (struct global_State *global);
 ** Unprotected sibling calls defer delivery until a protected boundary is owned.
 ** Never call this while resource bookkeeping still needs retirement. */
 LUAI_FUNC void luaTK_checkstop (lua_State *L);
+LUAI_FUNC void luaTK_deliverstop (lua_State *L);
 /* The wait has already established eligibility; all its leases are retired. */
 LUAI_FUNC l_noret luaTK_throwstop (lua_State *L);
 
