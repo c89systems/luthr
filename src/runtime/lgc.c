@@ -1256,14 +1256,15 @@ void luaC_readytrace (global_State *g) {
 }
 
 /* Check admission hints without borrowing any stack storage. The scan still
-** acquires the gate or world.mutex before reading a stack. */
+** acquires the gate or world.mutex before reading a stack. An offered slot
+** leaves the stack available to a collector. */
 static int stackready (global_State *g, GCObject *object) {
   lua_State *thread = gco2th(object);
   return __atomic_load_n(&thread->trace_snapshot, __ATOMIC_SEQ_CST) ==
            luaC_traceepoch(g) ||
          __atomic_load_n(&thread->root_waiting, __ATOMIC_SEQ_CST) ||
          (__atomic_load_n(&thread->stack_gate.word, __ATOMIC_SEQ_CST) &
-          ~cast(uintptr_t, LUA_GATE_DORMANT)) == 0;
+          ~(LUA_GATE_OFFER_MASK | LUA_GATE_DORMANT)) == 0;
 }
 
 static void finishstackqueue (global_State *g) {

@@ -6,6 +6,7 @@
 #include <lgc.h>
 #include <lmem.h>
 #include <lroots.h>
+#include <lstackapi.h>
 #include <lstate.h>
 #include <ltable.h>
 #include <lualib.h>
@@ -459,7 +460,16 @@ static void stack_snapshot(void) {
   finish(L);
 }
 
-enum { STACK_RELEASE, STACK_SNAPSHOT, STACK_REOPEN, STACK_COLLECT, STACK_PARK };
+enum {
+  STACK_RELEASE,
+  STACK_OFFER,
+  STACK_SNAPSHOT,
+  STACK_REOPEN,
+  STACK_COLLECT,
+  STACK_PARK
+};
+
+#define TEST_SLOT_OFFER ((uintptr_t)1 << LUA_GATE_OFFER_SHIFT)
 
 struct stack_wait {
   pthread_mutex_t mutex;
@@ -498,7 +508,12 @@ static void *reserve_stack(void *context) {
     }
   }
   require(pthread_mutex_unlock(&wait->mutex) == 0);
-  luaX_endreserve(wait->thread, reservation);
+  if (wait->action == STACK_OFFER) {
+    /* Mirror a managed stack withdrawal that also publishes its slot. */
+    luaX_releaseto(wait->thread, (uintptr_t)luaQ_ownertoken(), TEST_SLOT_OFFER);
+  } else {
+    luaX_endreserve(wait->thread, reservation);
+  }
   return NULL;
 }
 
@@ -558,6 +573,9 @@ static void wait_for_stack(int action) {
   require(!luaC_waitingstacks(g));
   drain(L);
   require(isblack(g, child));
+  if (action == STACK_OFFER)
+    require(__atomic_exchange_n(&wait.thread->stack_gate.word, 0,
+                                __ATOMIC_SEQ_CST) == TEST_SLOT_OFFER);
   finish(L);
   require(pthread_cond_destroy(&wait.changed) == 0);
   require(pthread_mutex_destroy(&wait.mutex) == 0);
@@ -1327,6 +1345,8 @@ int main(int argc, char **argv) {
     wait_for_stack(STACK_SNAPSHOT);
   else if (strcmp(argv[1], "stack_wait_release") == 0)
     wait_for_stack(STACK_RELEASE);
+  else if (strcmp(argv[1], "stack_wait_offer") == 0)
+    wait_for_stack(STACK_OFFER);
   else if (strcmp(argv[1], "stack_wait_reopen") == 0)
     wait_for_stack(STACK_REOPEN);
   else if (strcmp(argv[1], "stack_wait_collect") == 0)
