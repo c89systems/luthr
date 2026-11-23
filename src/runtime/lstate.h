@@ -612,6 +612,9 @@ typedef struct global_State {
   pthread_mutex_t slot_allocation_mutex[LUA_ALLOC_SLOT_POOLS];
   struct LuaAllocPage *slot_allocation_pages[LUA_ALLOC_SLOT_POOLS];
   struct LuaAllocPage *slot_allocation_available[LUA_ALLOC_SLOT_POOLS];
+  struct LuaAllocPage *allocation_spare[LUA_ALLOC_BINS];  /* detached pages */
+  struct LuaAllocPage **allocation_spare_tail[LUA_ALLOC_BINS];
+  size_t allocation_spare_bytes;
 } global_State;
 
 

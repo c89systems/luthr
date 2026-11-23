@@ -37,6 +37,8 @@ LUAI_FUNC void luaM_releasecache (lua_State *L, struct LuaAllocationCache *cache
 /* Drain a finite changed-page snapshot without stopping mutators. Idle caches
 ** lend ownership; active caches retain their pending notices. */
 LUAI_FUNC void luaM_reclaimpages (lua_State *L);
+/* Exclusive teardown, allocator replacement, or allocation pressure. */
+LUAI_FUNC void luaM_drainsparepages (lua_State *L);
 /* The sweep claim proved that every slot on this unowned page is dead. */
 LUAI_FUNC void luaM_releasepage (lua_State *L, struct LuaAllocPage *page,
                                 l_mem bytes);

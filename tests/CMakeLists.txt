@@ -240,8 +240,9 @@ set_target_properties(allocation_pool_test PROPERTIES C_STANDARD 99)
 target_compile_options(allocation_pool_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(allocation_pool_test PRIVATE luthr_static)
 target_link_options(allocation_pool_test PRIVATE -Wl,--wrap=luaW_heapenter
-  -Wl,--wrap=luaMP_initpage)
-foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime remote_returns)
+  -Wl,--wrap=luaMP_initpage -Wl,--wrap=madvise)
+foreach(case IN ITEMS serial parallel batch cap init_gc control_lifetime remote_returns
+    spare_decommit spare_pressure spare_advice_failure)
   add_test(NAME allocation_pool_${case} COMMAND allocation_pool_test ${case})
   set_tests_properties(allocation_pool_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

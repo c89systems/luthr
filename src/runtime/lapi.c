@@ -1757,6 +1757,7 @@ LUA_API lua_Alloc lua_getallocf (lua_State *L, void **ud) {
 LUA_API void lua_setallocf (lua_State *L, lua_Alloc f, void *ud) {
   lua_lock(L);
   luaW_stop(L);
+  if (f != luaAL_builtin) luaM_drainsparepages(L);
   G(L)->allocator.context = ud;
   G(L)->allocator.function = f;
   luaW_start(L);

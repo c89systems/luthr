@@ -3003,6 +3003,7 @@ void luaC_fullgc (lua_State *L, int isemergency) {
   lua_assert(!g->gcemergency);
   interrupted = g->trace_interrupt;
   g->gcemergency = cast_byte(isemergency);  /* set flag */
+  if (isemergency) luaM_drainsparepages(L);
   if (isemergency && luaC_sweeping(L)) g->trace_interrupt++;
   if (isemergency && luaC_tracing(L)) {
     g->trace_interrupt++;

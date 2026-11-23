@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+#include <errno.h>
 #include <lapi.h>
 #include <lauxlib.h>
 #include <lgc.h>
@@ -8,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 #define require(condition)                                                     \
   do {                                                                         \
@@ -28,6 +31,9 @@ struct actor {
 };
 static __thread unsigned measured, admissions;
 static __thread unsigned initializations;
+enum { ADVICE_NORMAL, ADVICE_DISCARD, ADVICE_REJECT };
+static int advice_mode;
+static size_t discard_bytes;
 static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -61,6 +67,19 @@ void __wrap_luaMP_initpage(lua_State *L, LuaAllocPage *page) {
     require(pthread_mutex_unlock(&pause_init.mutex) == 0);
   }
   __real_luaMP_initpage(L, page);
+}
+
+int __real_madvise(void *, size_t, int);
+int __wrap_madvise(void *address, size_t bytes, int advice) {
+  if (advice == MADV_FREE && advice_mode != ADVICE_NORMAL) {
+    discard_bytes += bytes;
+    if (advice_mode == ADVICE_REJECT) {
+      errno = EINVAL;
+      return -1;
+    }
+    advice = MADV_DONTNEED;
+  }
+  return __real_madvise(address, bytes, advice);
 }
 
 static void *allocate(void *context, void *pointer, size_t old, size_t size) {
@@ -351,10 +370,85 @@ static void remote_returns(void) {
   require(pthread_mutex_destroy(&wave.mutex) == 0);
 }
 
+static void fill_tables(lua_State *L) {
+  lua_pushvalue(L, 1);
+  require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+  require(lua_toboolean(L, -1));
+  lua_pop(L, 1);
+}
+
+static lua_State *spare_fixture(void) {
+  lua_State *L = luaL_newstate();
+  require(L != NULL);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_loadstring(
+              L,
+              "local rows = {} "
+              "for i = 1, 120000 do rows[i] = {k=i, v=i*2} end "
+              "for i = 1, #rows do "
+              "  if rows[i].k ~= i or rows[i].v ~= i*2 then return false end "
+              "end "
+              "return #rows == 120000") == LUA_OK);
+  return L;
+}
+
+static void spare_reuse(int mode) {
+  lua_State *L = spare_fixture();
+  size_t saved;
+  advice_mode = mode;
+  fill_tables(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  saved = G(L)->allocation_spare_bytes;
+  require(discard_bytes != 0 && saved != 0);
+  require((saved > 16u * 1024 * 1024) == (mode == ADVICE_DISCARD));
+  fill_tables(L);
+  require(G(L)->allocation_spare_bytes < saved / 2);
+  lua_close(L);
+}
+
+static void *replacement_allocator(void *context, void *block, size_t old,
+                                   size_t size) {
+  unsigned *calls = context;
+  ++*calls;
+  return luaL_alloc(NULL, block, old, size);
+}
+
+static void spare_pressure(void) {
+  lua_State *L = spare_fixture();
+  unsigned calls = 0;
+  advice_mode = ADVICE_DISCARD;
+  fill_tables(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(G(L)->allocation_spare_bytes != 0);
+  lua_lock(L);
+  luaC_fullgc(L, 1);
+  lua_unlock(L);
+  require(G(L)->allocation_spare_bytes == 0);
+  fill_tables(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(G(L)->allocation_spare_bytes != 0);
+  lua_setallocf(L, replacement_allocator, &calls);
+  require(G(L)->allocation_spare_bytes == 0 && calls == 0);
+  fill_tables(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(G(L)->allocation_spare_bytes == 0 && calls != 0);
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   struct allocator allocator = {0};
   lua_State *L;
   require(argc == 2);
+  if (strcmp(argv[1], "spare_decommit") == 0 ||
+      strcmp(argv[1], "spare_advice_failure") == 0) {
+    spare_reuse(strcmp(argv[1], "spare_decommit") == 0 ? ADVICE_DISCARD
+                                                       : ADVICE_REJECT);
+    return 0;
+  }
+  if (strcmp(argv[1], "spare_pressure") == 0) {
+    spare_pressure();
+    return 0;
+  }
   if (strcmp(argv[1], "remote_returns") == 0) {
     remote_returns();
     return 0;
