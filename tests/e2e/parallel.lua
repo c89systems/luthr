@@ -16,6 +16,13 @@ local workloads={
     for i=1,n do sum=sum+rows[i].key+rows[i].value end
     return sum
   end,
+  array_records=function()
+    local rows={}
+    for i=1,n do rows[i]={i,{i*2}} end
+    local sum=0
+    for i=1,n do sum=sum+rows[i][1]+rows[i][2][1] end
+    return sum
+  end,
   shared_table=function(id)
     local base=(id-1)*n
     for i=1,n do shared[base+i]=i end
@@ -159,7 +166,7 @@ elseif native_add or native_identity or native_scalar then
   end
 end
 local work=assert(workloads[kind],'unknown workload')
-if kind=='independent_tables' then total=total*3 end
+if kind=='independent_tables' or kind=='array_records' then total=total*3 end
 if kind=='shared_reads' then total=n end
 if kind=='allocation_gc' or kind=='allocation_only' then total=total+n end
 local function prepare()

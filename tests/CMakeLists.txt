@@ -400,13 +400,13 @@ target_link_options(gc_table_scan_test PRIVATE -Wl,--wrap=luaA_tryscan
   -Wl,--wrap=luaC_finishstrong -Wl,--wrap=luaM_free_ -Wl,--wrap=luaHS_scanend
   -Wl,--undefined=luaC_scanstrong)
 foreach(collector IN ITEMS incremental generational)
-  foreach(case IN ITEMS array metatable relocate pause first_write first_write_small scalar_cards)
+  foreach(case IN ITEMS array list metatable relocate pause first_write first_write_small scalar_cards)
     add_test(NAME gc_table_scan_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector})
     set_tests_properties(gc_table_scan_${case}_${collector} PROPERTIES
       LABELS "unit;runtime;parallel;memcheck" TIMEOUT 30)
   endforeach()
-  foreach(case IN ITEMS array metatable fields retirement)
+  foreach(case IN ITEMS array list metatable fields retirement)
     add_test(NAME gc_table_scan_private_${case}_${collector}
       COMMAND gc_table_scan_test ${case}_${collector} private)
     set_tests_properties(gc_table_scan_private_${case}_${collector} PROPERTIES

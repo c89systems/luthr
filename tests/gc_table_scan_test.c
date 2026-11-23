@@ -27,7 +27,7 @@ static struct {
   Table *table;
   GCObject *child, *removed;
   int index, armed, entered, release, written, relocate, pause, pause_release,
-      remember, first_write, fields, cards, scalar_cards, promotion;
+      remember, first_write, fields, list, cards, scalar_cards, promotion;
   int retirement, drained;
   uint64_t initial_layout;
   unsigned chunks;
@@ -227,6 +227,16 @@ static void *write_values(void *unused) {
     lua_pushinteger(L, 84);
     lua_rawseti(L, -2, 1);
     lua_setfield(L, probe.index, "replaced");
+  } else if (probe.list) {
+    lua_pushvalue(L, probe.index);
+    lua_newtable(L);
+    lua_pushinteger(L, 84);
+    lua_rawseti(L, -2, 1);
+    lua_pushnil(L);
+    lua_lock(L);
+    luaH_setlist(L, probe.table, L->top.p - 3, 2, 2);
+    lua_unlock(L);
+    lua_pop(L, 3);
   } else {
     /* Change GC tags to full-width scalar bits and force a replacement image
      * while the marker retains the old one. The old image must remain usable.
@@ -295,6 +305,7 @@ int main(int argc, char **argv) {
   probe.promotion = strcmp(argv[1], "promotion_generational") == 0;
   probe.first_write = strncmp(argv[1], "first_write", 11) == 0;
   probe.fields = strncmp(argv[1], "fields", 6) == 0;
+  probe.list = strncmp(argv[1], "list_", 5) == 0;
   probe.retirement = strncmp(argv[1], "retirement", 10) == 0;
   small = strncmp(argv[1], "first_write_small", 17) == 0;
   array_size = probe.cards                  ? LUA_ARRAY_CARD_MIN
@@ -367,6 +378,8 @@ int main(int argc, char **argv) {
   } else {
     for (i = 1; i <= array_size; i++) {
       lua_newtable(L);
+      if (probe.list && i == 2)
+        probe.removed = (GCObject *)lua_topointer(L, -1);
       lua_pushinteger(L, 42);
       lua_rawseti(L, -2, 1);
       lua_rawseti(L, 3, i);
@@ -422,10 +435,10 @@ int main(int argc, char **argv) {
   while (!probe.entered)
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
-  if (probe.fields) {
+  if (probe.fields)
     require(iswhite(G(L), probe.child));
+  if (probe.fields || probe.list)
     require(iswhite(G(L), probe.removed));
-  }
   require(pthread_mutex_unlock(&probe.mutex) == 0);
   require(pthread_create(&writer, NULL, write_values, NULL) == 0);
   if (probe.pause) {
@@ -444,7 +457,7 @@ int main(int argc, char **argv) {
     require(getage(obj2gco(probe.table)) == G_SURVIVAL_DIRTY);
   if (probe.relocate || probe.fields)
     require(!iswhite(G(L), probe.child));
-  if (probe.fields)
+  if (probe.fields || probe.list)
     require(!iswhite(G(L), probe.removed));
   if (probe.retirement) {
     LuaWorld *world = &G(L)->world;
@@ -507,6 +520,12 @@ int main(int argc, char **argv) {
     require(lua_getfield(probe.writer, probe.index, "deleted") == LUA_TNIL);
     lua_pop(probe.writer, 1);
     require(lua_getfield(probe.writer, probe.index, "replaced") == LUA_TTABLE);
+    require(lua_rawgeti(probe.writer, -1, 1) == LUA_TNUMBER);
+    require(lua_tointeger(probe.writer, -1) == 84);
+  } else if (probe.list) {
+    require(lua_rawgeti(probe.writer, probe.index, 2) == LUA_TNIL);
+    lua_pop(probe.writer, 1);
+    require(lua_rawgeti(probe.writer, probe.index, 1) == LUA_TTABLE);
     require(lua_rawgeti(probe.writer, -1, 1) == LUA_TNUMBER);
     require(lua_tointeger(probe.writer, -1) == 84);
   } else if (!probe.relocate) {

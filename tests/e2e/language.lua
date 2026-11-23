@@ -18,6 +18,41 @@ local a,b,c = table.unpack(packed,1,3)
 assert(a==nil and b==42 and c==nil)
 
 do
+  local function fixed(first, last)
+    return {first, nil, last, name='list'}
+  end
+  local left, right = {}, {}
+  local list = fixed(left, right)
+  assert(list[1]==left and list[2]==nil and list[3]==right and list.name=='list')
+
+  local thread = coroutine.create(function()
+    local function tail()
+      coroutine.yield('constructing')
+      return {41}, nil, {42}
+    end
+    return {'first', tail()}
+  end)
+  local ok, phase = coroutine.resume(thread)
+  assert(ok and phase=='constructing')
+  local partial
+  for i=1,8 do
+    local _, value = debug.getlocal(thread,2,i)
+    if type(value)=='table' then
+      partial=value
+      break
+    end
+  end
+  assert(partial)
+  partial[2] = {'displaced'}
+  collectgarbage('collect')
+  local completed, result = coroutine.resume(thread)
+  assert(completed and rawequal(result,partial))
+  collectgarbage('collect')
+  assert(result[1]=='first' and result[2][1]==41 and
+         result[3]==nil and result[4][1]==42)
+end
+
+do
   local token = {}
   local function tailassert(...)
     return assert(...)

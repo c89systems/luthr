@@ -687,36 +687,20 @@
       }}
       vmcase(OP_SETLIST) {
         StkId ra = RA(i);
-        LuaObjectScope scope;
         unsigned n = cast_uint(GETARG_vB(i));
         unsigned last = cast_uint(GETARG_vC(i));
-        Table *h;
         if (n == 0)
           n = cast_uint(L->top.p - ra) - 1;  /* get up to the top */
         else
           L->top.p = ci->top.p;  /* correct top in case of emergency GC */
         readrange(ra, cast_int(n + 1));
-        h = hvalue(s2v(ra));
-        ci->u.l.rootpc = ip;
         last += n;
         if (TESTARG_k(i)) {
           last += cast_uint(GETARG_Ax(*pc)) * (MAXARG_vC + 1);
           pc++;
         }
-        luaA_begin(L, obj2gco(h), &scope);
-        /* when 'n' is known, table should have proper size */
-        if (last > h->asize) {  /* needs more space? */
-          /* fixed-size sets should have space preallocated */
-          lua_assert(GETARG_vB(i) == 0);
-          luaH_resizearray(L, h, last);  /* preallocate it at once */
-        }
-        for (; n > 0; n--) {
-          TValue *val = s2v(ra + n);
-          obj2arr(h, last - 1, val);
-          last--;
-          luaC_barrierback(L, obj2gco(h), val);
-        }
-        luaA_end(L, &scope);
+        ProtectNT(luaH_setlist(L, hvalue(s2v(ra)), ra, n, last));
+        updatebase(ci);
         vmbreak;
       }
       vmcase(OP_CLOSURE) {
