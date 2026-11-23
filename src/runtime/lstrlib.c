@@ -83,7 +83,7 @@ static void pushownedstring (lua_State *L, unsigned *work,
     luaR_pushroot(L, &result);
     setsvalue(L, &result.value, ts);
     lua_unlock(L);
-    luaS_copylongstr(L, ts, src, work);
+    luaS_buildlongstr(L, ts, src, work);
     lua_lock(L);
     setobj2s(L, L->top.p, &result.value);
     api_incr_top(L);
@@ -189,18 +189,52 @@ int luaB_strsub (lua_State *L) {
 }
 
 
+typedef struct StringResult {
+  LuaNativeRoot root;
+  char small[LUAI_MAXSHORTLEN];
+} StringResult;
+
+/* Known-size transforms write long results in their final allocation.
+** Only the collector can see the unfinished result through this root. */
+static char *startresult (lua_State *L, StringResult *result, size_t len) {
+  TString *string;
+  if (len <= LUAI_MAXSHORTLEN) return result->small;
+  lua_lock(L);
+  string = luaS_createlngstrobj(L, len);
+  luaR_pushroot(L, &result->root);
+  setsvalue(L, &result->root.value, string);
+  lua_unlock(L);
+  return getlngstr(string);
+}
+
+static void pushresult (lua_State *L, StringResult *result, size_t len,
+                         unsigned *work) {
+  TString *string = NULL;
+  if (len > LUAI_MAXSHORTLEN) {
+    string = tsvalue(&result->root.value);
+    luaS_buildlongstr(L, string, NULL, work);
+  }
+  lua_lock(L);
+  if (string == NULL) string = luaS_newlstr(L, result->small, len);
+  setsvalue2s(L, L->top.p, string);
+  api_incr_top(L);
+  luaC_checkGC(L);
+  if (len > LUAI_MAXSHORTLEN) luaR_poproot(L, &result->root);
+  lua_unlock(L);
+}
+
 static int str_reverse (lua_State *L) {
   LuaNativeRoot root;
+  StringResult result;
   unsigned work = 0;
   size_t l, i;
-  luaL_Buffer b;
   const char *s = luaL_rootstring(L, 1, &root, &l);
-  char *p = luaL_buffinitsize(L, &b, l);
+  char *p = startresult(L, &result, l);
   for (i = 0; i < l; i++) {
     p[i] = s[l - i - 1];
     luaQ_work(L, &work);
   }
-  luaL_pushresultsize(&b, l);
+  pushresult(L, &result, l, &work);
   return luaL_rootresult(L, &root, 1, 1);
 }
 
@@ -215,19 +249,19 @@ static void __attribute__((noinline)) changecase (char *dest, const char *src,
 
 static int str_case (lua_State *L, int upper) {
   LuaNativeRoot root;
+  StringResult result;
   unsigned work = 0;
   size_t l;
   size_t i;
-  luaL_Buffer b;
   const char *s = luaL_rootstring(L, 1, &root, &l);
-  char *p = luaL_buffinitsize(L, &b, l);
+  char *p = startresult(L, &result, l);
   for (i = 0; i < l;) {
     size_t chunk = l - i < 1024u ? l - i : 1024u;
     changecase(p + i, s + i, chunk, upper);
     luaQ_workn(L, &work, chunk);
     i += chunk;
   }
-  luaL_pushresultsize(&b, l);
+  pushresult(L, &result, l, &work);
   return luaL_rootresult(L, &root, 1, 1);
 }
 
@@ -242,16 +276,17 @@ static int str_upper (lua_State *L) { return str_case(L, 1); }
 */
 static int str_rep (lua_State *L) {
   LuaNativeRoot roots[2];
+  unsigned nroots = 1;
   unsigned work = 0;
   size_t len, lsep;
   const char *s = luaL_rootstring(L, 1, &roots[0], &len);
   lua_Integer n = luaL_checkinteger(L, 2);
   const char *sep;
-  if (lua_isnoneornil(L, 3)) {
-    luaL_rootarg(L, 3, &roots[1]);
-    sep = ""; lsep = 0;
+  if (lua_isnoneornil(L, 3)) { sep = ""; lsep = 0; }
+  else {
+    sep = luaL_rootstring(L, 3, &roots[1], &lsep);
+    nroots = 2;
   }
-  else sep = luaL_rootstring(L, 3, &roots[1], &lsep);
   if (n <= 0 || (len | lsep) == 0)
     lua_pushliteral(L, "");  /* no repetitions or both strings empty */
   else if (l_unlikely(len > MAX_SIZE - lsep ||
@@ -259,18 +294,25 @@ static int str_rep (lua_State *L) {
     return luaL_error(L, "resulting string too large");
   else {
     size_t totallen = (cast_sizet(n) * (len + lsep)) - lsep;
-    luaL_Buffer b;
-    char *p = luaL_buffinitsize(L, &b, totallen);
-    while (n-- > 1) {  /* first n-1 copies (followed by separator) */
-      copybytes(L, &work, p, s, len); p += len;
-      if (lsep > 0) {  /* empty 'memcpy' is not that cheap */
-        copybytes(L, &work, p, sep, lsep); p += lsep;
-      }
+    size_t written = len;
+    StringResult result;
+    char *p = startresult(L, &result, totallen);
+    copybytes(L, &work, p, s, len);
+    if (n > 1 && lsep != 0) {
+      copybytes(L, &work, p + len, sep, lsep);
+      written += lsep;
     }
-    copybytes(L, &work, p, s, len);  /* last copy without separator */
-    luaL_pushresultsize(&b, totallen);
+    /* Duplicate the initialized prefix. The final copy omits the trailing
+    ** separator by stopping at the exact result length. */
+    while (written < totallen) {
+      size_t remaining = totallen - written;
+      size_t chunk = written < remaining ? written : remaining;
+      copybytes(L, &work, p + written, p, chunk);
+      written += chunk;
+    }
+    pushresult(L, &result, totallen, &work);
   }
-  return luaL_rootresult(L, roots, 2, 1);
+  return luaL_rootresult(L, roots, nroots, 1);
 }
 
 

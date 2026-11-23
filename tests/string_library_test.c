@@ -296,33 +296,47 @@ static void interrupt_slice(lua_State *state, void *context) {
 }
 
 static void slice(struct fixture *test) {
+  static const struct {
+    const char *source;
+    size_t size;
+    unsigned char first, last;
+  } cases[] = {{"return string.sub(text,2,-2)", 131070, 0, 'b'},
+               {"return string.reverse(text)", 131072, 255, 'a'},
+               {"return string.lower(text)", 131072, 'a', 255},
+               {"return string.upper(text)", 131072, 'A', 255},
+               {"return string.rep(text,2,'\\0x')", 262146, 'a', 255}};
   lua_State *state = test->state;
-  size_t size;
-  const char *result;
+  unsigned i;
   execute(state, "text=string.rep('a\\0b\\255',32768)");
-  require(luaL_loadstring(state, "return string.sub(text,2,-2)") == LUA_OK);
-  test->large_size = 65536;
-  require(lua_pcall(state, 0, 1, 0) == LUA_OK);
-  test->large_size = 0;
-  require(test->large_requests == 1);
-  result = lua_tolstring(state, 1, &size);
-  require(result != NULL && size == 131070 && result[0] == '\0' &&
-          result[size - 1] == 'b');
-  lua_settop(state, 0);
-  require(luaL_loadstring(state, "return string.sub(text,2,-2)") == LUA_OK);
-  test->large_requests = 0;
-  test->large_size = 65536;
-  state->state_poll = interrupt_slice;
-  state->state_poll_context = test;
-  require(lua_pcall(state, 0, 1, 0) == LUA_ERRRUN);
-  state->state_poll = NULL;
-  state->state_poll_context = NULL;
-  test->large_size = 0;
-  result = lua_tostring(state, -1);
-  require(result != NULL && strstr(result, "slice interrupted") != NULL);
-  require(state->native_roots == NULL);
-  lua_settop(state, 0);
-  (void)lua_gc(state, LUA_GCCOLLECT);
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    size_t size;
+    const char *result;
+    require(luaL_loadstring(state, cases[i].source) == LUA_OK);
+    test->large_requests = 0;
+    test->large_size = 65536;
+    require(lua_pcall(state, 0, 1, 0) == LUA_OK);
+    test->large_size = 0;
+    require(test->large_requests == 1);
+    result = lua_tolstring(state, 1, &size);
+    require(result != NULL && size == cases[i].size &&
+            (unsigned char)result[0] == cases[i].first &&
+            (unsigned char)result[size - 1] == cases[i].last);
+    lua_settop(state, 0);
+    require(luaL_loadstring(state, cases[i].source) == LUA_OK);
+    test->large_requests = 0;
+    test->large_size = 65536;
+    state->state_poll = interrupt_slice;
+    state->state_poll_context = test;
+    require(lua_pcall(state, 0, 1, 0) == LUA_ERRRUN);
+    state->state_poll = NULL;
+    state->state_poll_context = NULL;
+    test->large_size = 0;
+    result = lua_tostring(state, -1);
+    require(result != NULL && strstr(result, "slice interrupted") != NULL);
+    require(state->native_roots == NULL);
+    lua_settop(state, 0);
+    (void)lua_gc(state, LUA_GCCOLLECT);
+  }
 }
 
 static void *run(void *context) {
@@ -374,6 +388,9 @@ static void *run(void *context) {
         "assert(s.lower('AZ-'..z..'09')=='az-'..z..'09' and "
         "s.upper('az')=='AZ'); "
         "assert(s.rep('x',3,'-')=='x-x-x' and s.rep('',3,'ab')=='abab'); "
+        "assert(s.rep('',1,'-')==''); local parts={}; "
+        "for i=1,1001 do parts[i]='a'..z..'b' end; "
+        "assert(s.rep(parts[1],#parts,z..'-')==table.concat(parts,z..'-')); "
         "assert(s.rep('x',0)==''); local a,b,c=s.byte('a'..z..'b',1,-1); "
         "assert(a==97 and b==0 and c==98 and select('#',s.byte('',1))==0); "
         "assert(s.char(0,255,97)==z..'\\255a' and s.char()==''); "

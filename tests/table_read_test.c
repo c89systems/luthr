@@ -1238,6 +1238,96 @@ static void captured_lookup(lua_State *state, int generational) {
   lua_setallocf(state, allocator.original, allocator.context);
 }
 
+enum { LONG_STRING_KEYS = 48 };
+
+struct string_hash_reader {
+  lua_State *state;
+  pthread_barrier_t *ready;
+};
+
+static void *hash_string_keys(void *context) {
+  struct string_hash_reader *reader = context;
+  lua_State *state = reader->state;
+  int i;
+  for (i = 0; i < LONG_STRING_KEYS; i++) {
+    lua_pushvalue(state, i + 2);
+    rendezvous(reader->ready);
+    require(lua_rawget(state, 1) == LUA_TNUMBER);
+    require(lua_tointeger(state, -1) == i + 1);
+    lua_pop(state, 1);
+  }
+  return NULL;
+}
+
+static void long_string_hash(lua_State *parent, int partition) {
+  struct string_hash_reader readers[2];
+  pthread_barrier_t ready;
+  pthread_t threads[2];
+  char key[LUA_NATIVE_WORK_SLICE + 1];
+  void *context;
+  lua_Alloc allocator = lua_getallocf(parent, &context);
+  lua_State *state = lua_newstate(allocator, context, LUA_NATIVE_WORK_SLICE);
+  TString *zero;
+  int i, j;
+  require(state != NULL);
+  require(pthread_barrier_init(&ready, NULL, 2) == 0);
+  lua_createtable(state, 0, LONG_STRING_KEYS);
+  for (j = 0; j < 2; j++) {
+    readers[j].state = lua_newthread(state);
+    readers[j].ready = &ready;
+    require(lua_checkstack(readers[j].state, LONG_STRING_KEYS + 2));
+    lua_pushvalue(state, 1);
+    lua_xmove(state, readers[j].state, 1);
+  }
+  if (partition) {
+    for (i = 0; i < 300; i++) {
+      lua_pushfstring(state, "entry %d", i);
+      lua_pushboolean(state, 1);
+      lua_rawset(state, 1);
+    }
+  }
+  luaX_lockstate(state);
+  require(luaH_hashparts(hvalue(s2v(state->ci->func.p + 1))) ==
+          (partition ? LUA_HASH_PARTS : 1));
+  luaX_unlockstate(state);
+  memset(key, 0, sizeof(key));
+  for (i = 0; i < LONG_STRING_KEYS; i++) {
+    size_t len = LUA_NATIVE_WORK_SLICE + i % 2;
+    TString *string;
+    /* A zero byte string whose length equals the seed has hash zero. */
+    if (i == 1) {
+      memset(key, 'k', sizeof(key));
+      key[1] = '\0';
+    }
+    key[0] = (char)i;
+    lua_pushlstring(state, key, len);
+    lua_pushinteger(state, i + 1);
+    lua_rawset(state, 1);
+    lua_pushlstring(state, key, len);
+    luaX_lockstate(state);
+    string = tsvalue(s2v(state->top.p - 1));
+    require((string->hash != 0 || string->extra) ==
+            (len > LUA_NATIVE_WORK_SLICE));
+    luaX_unlockstate(state);
+    for (j = 0; j < 2; j++) {
+      lua_pushvalue(state, -1);
+      lua_xmove(state, readers[j].state, 1);
+    }
+    lua_pop(state, 1);
+  }
+  for (j = 0; j < 2; j++)
+    require(pthread_create(&threads[j], NULL, hash_string_keys, &readers[j]) ==
+            0);
+  for (j = 0; j < 2; j++)
+    require(pthread_join(threads[j], NULL) == 0);
+  require(pthread_barrier_destroy(&ready) == 0);
+  luaX_lockstate(readers[0].state);
+  zero = tsvalue(s2v(readers[0].state->ci->func.p + 2));
+  require(zero->hash == 0 && zero->extra);
+  luaX_unlockstate(readers[0].state);
+  lua_close(state);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -1264,6 +1354,10 @@ int main(int argc, char **argv) {
     primitive_index(state);
   else if (strcmp(argv[1], "string_publication") == 0)
     string_publication(state);
+  else if (strcmp(argv[1], "long_string_hash") == 0)
+    long_string_hash(state, 0);
+  else if (strcmp(argv[1], "long_string_partition") == 0)
+    long_string_hash(state, 1);
   else if (strcmp(argv[1], "index_hit") == 0)
     index_hit(state);
   else if (strcmp(argv[1], "index_miss") == 0)

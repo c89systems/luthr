@@ -28,6 +28,8 @@
 ** Maximum size for string table.
 */
 #define MAXSTRTB	cast_int(luaM_limitN(INT_MAX, TString*))
+#define REGULAR_STRING_HEADER \
+  (offsetof(TString, storage) + sizeof(unsigned int))
 
 /* Low hash bits select a partition; the remaining bits select its bucket. */
 #define stringtableof(g,h) (&(g)->strt[(h) % LUA_STRING_SHARDS])
@@ -57,38 +59,56 @@ static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
   return hashbytes(str, l, seed ^ cast_uint(l));
 }
 
-
-unsigned luaS_hashlongstr (TString *ts) {
-  lua_assert(ts->tt == LUA_VLNGSTR && ts->extra == 1);
-  return ts->hash;
+unsigned luaS_computelonghash (TString *ts) {
+  unsigned hash;
+  if (__atomic_load_n(&ts->extra, __ATOMIC_RELAXED)) return 0;
+  lua_assert(ts->shrlen == LSTRREG && ts->u.lnglen <= LUA_NATIVE_WORK_SLICE);
+  /* Both the seed and contents are immutable. Concurrent first users may
+  ** compute the same hash without waiting or reading one another's input. */
+  hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->storage.seed);
+  if (hash == 0) __atomic_store_n(&ts->extra, 1, __ATOMIC_RELAXED);
+  else __atomic_store_n(&ts->hash, hash, __ATOMIC_RELAXED);
+  return hash;
 }
 
-/* Finish immutable string contents before publishing them to other tasks.
-** This removes the shared lazy hash mutation from table lookup. */
+/* Lookup must be bounded even under table ownership. Hash larger strings
+** before publication, while the constructor still owns the result. */
 void luaS_finishlongstr (TString *ts) {
-  lua_assert(ts->tt == LUA_VLNGSTR && ts->extra == 0);
-  ts->hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->hash);
-  ts->extra = 1;
+  unsigned seed = ts->hash;
+  lua_assert(ts->tt == LUA_VLNGSTR);
+  if (ts->shrlen == LSTRREG) {
+    if (ts->u.lnglen <= LUA_NATIVE_WORK_SLICE) return;
+    seed = ts->storage.seed;
+  }
+  ts->hash = luaS_hash(getlngstr(ts), ts->u.lnglen, seed);
+  ts->extra = ts->hash == 0;
 }
 
 
-/* The caller keeps source and destination rooted across polls. Hash in the
-** same order as a normal long string and publish only after copying. */
-void luaS_copylongstr (lua_State *L, TString *ts, const char *src,
-                       unsigned *work) {
+/* The result must remain rooted across polls. A source requests a copy;
+** otherwise the caller has already filled the result in place. */
+void luaS_buildlongstr (lua_State *L, TString *ts, const char *src,
+                        unsigned *work) {
   size_t remaining = ts->u.lnglen;
   char *dest = getlngstr(ts);
-  unsigned hash = ts->hash ^ cast_uint(remaining);
-  lua_assert(ts->tt == LUA_VLNGSTR && ts->shrlen == LSTRREG && ts->extra == 0);
+  unsigned hash = ts->storage.seed ^ cast_uint(remaining);
+  lua_assert(ts->tt == LUA_VLNGSTR && ts->shrlen == LSTRREG && ts->hash == 0);
+  if (remaining <= LUA_NATIVE_WORK_SLICE) {
+    if (src != NULL) {
+      memcpy(dest, src, remaining);
+      luaQ_workn(L, work, remaining);
+    }
+    return;
+  }
   while (remaining != 0) {
     size_t chunk = remaining < 1024u ? remaining : 1024u;
     remaining -= chunk;
-    memcpy(dest + remaining, src + remaining, chunk);
+    if (src != NULL) memcpy(dest + remaining, src + remaining, chunk);
     hash = hashbytes(dest + remaining, chunk, hash);
     luaQ_workn(L, work, chunk);
   }
   ts->hash = hash;
-  ts->extra = 1;
+  ts->extra = hash == 0;
 }
 
 
@@ -156,10 +176,10 @@ size_t luaS_sizelngstr (size_t len, int kind) {
   switch (kind) {
     case LSTRREG:  /* regular long string */
       /* don't need 'falloc'/'ud', but need space for content */
-      return offsetof(TString, falloc) + (len + 1) * sizeof(char);
+      return REGULAR_STRING_HEADER + (len + 1) * sizeof(char);
     case LSTRFIX:  /* fixed external long string */
       /* don't need 'falloc'/'ud' */
-      return offsetof(TString, falloc);
+      return offsetof(TString, storage);
     default:  /* external long string with deallocation */
       lua_assert(kind == LSTRMEM);
       return sizeof(TString);
@@ -233,10 +253,11 @@ TString *luaS_createlngstrobj (lua_State *L, size_t l) {
   TString *ts;
   if (l_unlikely(l >= MAX_SIZE - sizeof(TString)))
     luaM_toobig(L);
-  ts = createstrobj(L, luaS_sizelngstr(l, LSTRREG), LUA_VLNGSTR, G(L)->seed);
+  ts = createstrobj(L, luaS_sizelngstr(l, LSTRREG), LUA_VLNGSTR, 0);
   ts->u.lnglen = l;
   ts->shrlen = LSTRREG;  /* signals that it is a regular long string */
-  ts->contents = cast_charp(ts) + offsetof(TString, falloc);
+  ts->storage.seed = G(L)->seed;
+  ts->contents = cast_charp(ts) + REGULAR_STRING_HEADER;
   ts->contents[l] = '\0';  /* ending 0 */
   return ts;
 }
@@ -418,7 +439,7 @@ TString *luaS_newextlstr (lua_State *L,
       luaAL_freeexternal(L, falloc, ud, cast_voidp(s), len + 1);
       luaM_error(L);  /* re-raise memory error */
     }
-    ne.ts->falloc = falloc;
+    ne.ts->storage.falloc = falloc;
     ne.ts->ud = ud;
   }
   ne.ts->shrlen = ne.kind;

@@ -230,7 +230,8 @@ static unsigned hashpart (const TValue *key) {
         return integerpart(integer);
       bits = l_hashfloat(fltvalue(key));
       break;
-    case LUA_VSHRSTR: case LUA_VLNGSTR: bits = tsvalue(key)->hash; break;
+    case LUA_VSHRSTR: bits = tsvalue(key)->hash; break;
+    case LUA_VLNGSTR: bits = luaS_hashlongstr(tsvalue(key)); break;
     case LUA_VFALSE: bits = 0; break;
     case LUA_VTRUE: bits = 1; break;
     case LUA_VLIGHTUSERDATA: bits = point2uint(pvalue(key)); break;

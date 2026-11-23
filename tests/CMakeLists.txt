@@ -191,6 +191,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
 foreach(case IN ITEMS fast primitive batching stack_grace private_resize overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
+    long_string_hash long_string_partition
     index_hit index_miss index_metatable_change
     mixed_incremental mixed_generational writes_incremental writes_generational
     write_error_incremental write_error_generational retained_incremental retained_generational

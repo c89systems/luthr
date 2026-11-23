@@ -54,10 +54,17 @@
 #define eqshrstr(a,b)	check_exp((a)->tt == LUA_VSHRSTR, (a) == (b))
 
 
-LUAI_FUNC unsigned luaS_hashlongstr (TString *ts);
+LUAI_FUNC unsigned luaS_computelonghash (TString *ts);
+
+l_sinline unsigned luaS_hashlongstr (TString *ts) {
+  unsigned hash = __atomic_load_n(&ts->hash, __ATOMIC_RELAXED);
+  lua_assert(ts->tt == LUA_VLNGSTR);
+  return l_unlikely(hash == 0) ? luaS_computelonghash(ts) : hash;
+}
+
 LUAI_FUNC void luaS_finishlongstr (TString *ts);
-LUAI_FUNC void luaS_copylongstr (lua_State *L, TString *ts, const char *src,
-                                 unsigned *work);
+LUAI_FUNC void luaS_buildlongstr (lua_State *L, TString *ts, const char *src,
+                                  unsigned *work);
 LUAI_FUNC int luaS_eqstr (TString *a, TString *b);
 LUAI_FUNC void luaS_resize (lua_State *L, stringtable *table, int newsize);
 LUAI_FUNC void luaS_clearcache (global_State *g);

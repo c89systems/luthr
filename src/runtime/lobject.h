@@ -415,7 +415,7 @@ typedef struct GCObject {
 */
 typedef struct TString {
   CommonHeader;
-  lu_byte extra;  /* reserved words for short strings; "has hash" for longs */
+  lu_byte extra;  /* reserved short string or cached zero long-string hash */
   ls_byte shrlen;  /* length for short strings, negative for long strings */
   unsigned int hash;
   union {
@@ -423,7 +423,10 @@ typedef struct TString {
     struct TString *hnext;  /* linked list for hash table */
   } u;
   char *contents;  /* pointer to content in long strings */
-  lua_Alloc falloc;  /* deallocation function for external strings */
+  union {
+    lua_Alloc falloc;  /* deallocation function for external strings */
+    unsigned int seed;  /* immutable seed for inline long strings */
+  } storage;
   void *ud;  /* user data for external strings */
 } TString;
 
