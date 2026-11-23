@@ -27,6 +27,10 @@ typedef struct LuaTaskRoot {
   int shutdown_notified;  /* world mutex; claims at most one shutdown notice */
 } LuaTaskRoot;
 
+l_sinline int luaTK_hasstops (lua_State *L) {
+  return __atomic_load_n(&G(L)->task_stops, __ATOMIC_ACQUIRE) != 0;
+}
+
 /* Probe without delivering. The caller owns the current admission. */
 l_sinline LuaTaskRoot *luaTK_pendingon (lua_State *L, LuaExecution *execution) {
   LuaTaskRoot *task;
@@ -39,7 +43,7 @@ l_sinline LuaTaskRoot *luaTK_pendingon (lua_State *L, LuaExecution *execution) {
 }
 
 l_sinline LuaTaskRoot *luaTK_pendingstop (lua_State *L) {
-  return luaTK_pendingon(L, luaX_execution(L));
+  return luaTK_hasstops(L) ? luaTK_pendingon(L, luaX_execution(L)) : NULL;
 }
 
 /* The record and execution are initially zeroed and outlive all entered calls,

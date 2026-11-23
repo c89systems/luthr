@@ -536,6 +536,7 @@ typedef struct global_State {
   struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
   struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
+  unsigned task_stops;  /* atomic count of admitted/running tasks with a stop */
   TString *operation_error;
   l_mem GCbytes;  /* atomic charged storage, including pending destruction */
   l_mem GCused;  /* atomic logical storage paced by shared collection */

@@ -724,6 +724,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->coroutine_scopes = NULL;
   g->tasks = NULL;
   g->task_admission_closed = 0;
+  g->task_stops = 0;
   g->operation_error = NULL;
   g->gcstate = GCSpause;
   g->gckind = KGC_INC;

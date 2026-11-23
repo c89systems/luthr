@@ -1586,7 +1586,8 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
   if (gethookmask(L) ||
       (policy != NULL &&
        (__atomic_load_n(&policy->hookmask, __ATOMIC_ACQUIRE) != 0 ||
-        luaCP_exhausted(L))) || luaTK_pendingon(L, context->execution) != NULL)
+        luaCP_exhausted(L))) ||
+      (luaTK_hasstops(L) && luaTK_pendingon(L, context->execution) != NULL))
     return 0;
   if (wanted == LUA_MULTRET) wanted = count;
   if (wanted > 0 && count != 0) { setobj2s(L, func, value); }

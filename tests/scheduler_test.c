@@ -878,6 +878,50 @@ static void native_progress(struct fixture *f, int shutdown) {
   finish(f);
 }
 
+static int native_stop_gate(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_Integer index = luaL_checkinteger(L, 1);
+  require(index == 0 || index == 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered++;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!(f->native_release & (1u << index)))
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 1;
+}
+
+static void native_overlapping_stops(struct fixture *f) {
+  initlimits(f, 2, 2);
+  lua_pushcfunction(f->main, native_stop_gate);
+  lua_setglobal(f->main, "native_stop_gate");
+  for (unsigned i = 0; i < 2; i++)
+    submit(f, i, "local value=native_stop_gate(...); return value", (int)i);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered != 2)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  for (unsigned i = 0; i < 2; i++) {
+    require(luaTK_requeststop(&f->tasks[i].root) == LUA_OK);
+    require(luaTK_requeststop(&f->tasks[i].root) == LUA_OK);
+  }
+  for (unsigned i = 0; i < 2; i++) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    f->native_release |= 1u << i;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+    luaSC_wait(&f->tasks[i]);
+    require(luaTK_hasstops(f->main) == (i == 0));
+    (void)collect(f, i, LUA_ERRRUN);
+    if (i == 0) {
+      submit(f, 2, "local function answer() return 42 end; return answer()", 0);
+      require(collect(f, 2, LUA_OK) == 42);
+    }
+  }
+  require(!luaTK_hasstops(f->main));
+  finish(f);
+}
+
 static void parallel_native_compensation(struct fixture *f) {
   initlimits(f, 2, 2);
   lua_gc(f->main, LUA_GCSTOP);
@@ -2206,6 +2250,8 @@ int main(int argc, char **argv) {
     native_progress(f, 1);
   else if (strcmp(argv[1], "parallel_native_compensation") == 0)
     parallel_native_compensation(f);
+  else if (strcmp(argv[1], "native_overlapping_stops") == 0)
+    native_overlapping_stops(f);
   else if (strcmp(argv[1], "native_return_compensation") == 0)
     native_return_compensation(f, 0);
   else if (strcmp(argv[1], "native_return_handoff") == 0)
