@@ -330,7 +330,7 @@ int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
       context->api_region != NULL || ci == NULL ||
       L->stack_last.p - L->top.p <= LUA_MINSTACK ||
       L->native_depth != 0 || L->world_depth != 0 ||
-      L->task_tables != NULL || L->object_scopes != NULL)
+      L->object_scopes != NULL)
     return 0;
   task = execution->context;
   if (task->root.thread != L || task->external || task->native_pending ||

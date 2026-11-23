@@ -1857,6 +1857,69 @@ static int nursery_inspect(lua_State *L) {
   return 2;
 }
 
+static int nursery_roundtrip(lua_State *L) {
+  struct fixture *f = fixture;
+  size_t length;
+  const char *bytes;
+  lua_pushvalue(L, 1);
+  lua_pushvalue(L, 2);
+  require(lua_pcall(L, 1, 2, 0) == LUA_OK);
+  require(lua_toboolean(L, -2) && lua_tointeger(L, -1) == 42);
+  require(lua_getfield(L, 2, "payload") == LUA_TSTRING);
+  bytes = lua_tolstring(L, -1, &length);
+  require(bytes != NULL && length == 168);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->native_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(memcmp(bytes + length - 14, "private record", 14) == 0);
+  lua_pushvalue(L, 2);
+  lua_xmove(L, f->main, 1);
+  lua_pushinteger(L, 42);
+  return 1;
+}
+
+static void nursery_native_call(struct fixture *f, int generational) {
+  init(f, 1);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(f->main, "nursery_inspect", nursery_inspect);
+  lua_pushcfunction(f->main, nursery_roundtrip);
+  lua_setglobal(f->main, "nursery_roundtrip");
+  submit(f, 0,
+         "local row={child={answer=42,note=('child only'):rep(16)},"
+         "           payload=('private record'):rep(12)}; "
+         "assert(nursery_inspect(row)); "
+         "return nursery_roundtrip(function(value) "
+         "  return nursery_inspect(value),value.child.answer "
+         "end,row)",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  for (unsigned i = 0; i < 4; i++)
+    require(lua_gc(f->main, LUA_GCSTEP, (size_t)0) >= 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_getfield(f->main, -1, "payload") == LUA_TSTRING);
+  require(lua_rawlen(f->main, -1) == 168);
+  lua_pop(f->main, 1);
+  require(lua_getfield(f->main, -1, "child") == LUA_TTABLE);
+  require(lua_getfield(f->main, -1, "note") == LUA_TSTRING);
+  require(lua_rawlen(f->main, -1) == 160);
+  lua_pop(f->main, 1);
+  require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 3);
+  finish(f);
+}
+
 static void nursery_edges(struct fixture *f, int generational) {
   int status, results;
   init(f, 2);
@@ -2177,6 +2240,10 @@ int main(int argc, char **argv) {
     nursery_edges(f, 0);
   else if (strcmp(argv[1], "nursery_edges_generational") == 0)
     nursery_edges(f, 1);
+  else if (strcmp(argv[1], "nursery_native_incremental") == 0)
+    nursery_native_call(f, 0);
+  else if (strcmp(argv[1], "nursery_native_generational") == 0)
+    nursery_native_call(f, 1);
   else if (strcmp(argv[1], "native_accounting_count") == 0)
     native_accounting(f, 0);
   else if (strcmp(argv[1], "native_accounting_arm") == 0)
