@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <lapi.h>
 #include <lauxlib.h>
+#include <lgc.h>
 #include <lscheduler.h>
 #include <lualib.h>
 #include <sched.h>
@@ -1791,6 +1792,67 @@ static int nursery_native(lua_State *L) {
   return lua_getfield(L, 1, "answer") == LUA_TNUMBER;
 }
 
+static int nursery_inspect(lua_State *L) {
+  const TValue *value = s2v(L->ci->func.p + 1);
+  require(ttistable(value));
+  lua_pushboolean(L, luaC_tasktable(hvalue(value)));
+  lua_pushinteger(L, L->task_root_count);
+  return 2;
+}
+
+static void nursery_edges(struct fixture *f, int generational) {
+  int status, results;
+  init(f, 2);
+  luaL_openlibs(f->main);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(f->main, "nursery_inspect", nursery_inspect);
+  require(luaL_dostring(f->main, "nursery_external={child={42}}; "
+                                 "nursery_weak=setmetatable({nursery_external},"
+                                 "{__mode='v'})") == LUA_OK);
+  submit(f, 0,
+         "local external=nursery_external; local root={external}; "
+         "root[external]=42; nursery_external=nil; external=nil; "
+         "local private,edges=nursery_inspect(root); "
+         "nursery_ready=true; while not nursery_release do end; "
+         "assert(private and edges==1); "
+         "assert(root[1].child[1]==42 and root[root[1]]==42); "
+         "private,edges=nursery_inspect(root); assert(private and edges==1); "
+         "root[root[1]]=nil; root[1]=nil; "
+         "for i=1,5000 do local row={i,i+1}; assert(row[1]==i) end; "
+         "private,edges=nursery_inspect(root); assert(private and edges==0); "
+         "for i=1,100 do "
+         "  local row={('record '..i):rep(12)}; "
+         "  assert(nursery_inspect(row) and #row[1]>=96) "
+         "end; "
+         "return 42",
+         0);
+  nursery_wait(f->main, "nursery_ready");
+  for (unsigned i = 0; i < 4; i++)
+    lua_gc(f->main, LUA_GCSTEP, (size_t)128 * 1024);
+  require(luaL_dostring(f->main, "assert(nursery_weak[1].child[1]==42)") ==
+          LUA_OK);
+  lua_pushboolean(f->main, 1);
+  lua_setglobal(f->main, "nursery_release");
+  require(collect(f, 0, LUA_OK) == 42 && f->nursery_finished == 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(luaL_dostring(f->main, "assert(nursery_weak[1]==nil)") == LUA_OK);
+
+  submit(f, 1,
+         "local retained={}; assert(nursery_inspect(retained)); "
+         "for i=1,40 do retained[i]=('record '..i):rep(12) end; "
+         "assert(not nursery_inspect(retained)); return retained",
+         0);
+  luaSC_wait(&f->tasks[1]);
+  require(luaSC_collect(f->main, &f->tasks[1], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_geti(f->main, -1, 40) == LUA_TSTRING);
+  require(lua_rawlen(f->main, -1) == 108);
+  require(strncmp(lua_tostring(f->main, -1), "record 40", 9) == 0);
+  lua_pop(f->main, 2);
+  finish(f);
+}
+
 static void nursery(struct fixture *f, int generational) {
   int status, results;
   init(f, 2);
@@ -2054,6 +2116,10 @@ int main(int argc, char **argv) {
     nursery(f, 1);
   else if (strcmp(argv[1], "nursery_pacing") == 0)
     nursery_pacing(f);
+  else if (strcmp(argv[1], "nursery_edges_incremental") == 0)
+    nursery_edges(f, 0);
+  else if (strcmp(argv[1], "nursery_edges_generational") == 0)
+    nursery_edges(f, 1);
   else
     abort();
   require(live_stacks == 0);

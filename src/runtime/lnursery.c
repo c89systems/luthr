@@ -50,8 +50,7 @@ int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
 
 /* Escape transfers the entire bounded cohort without moving any object.
 ** The existing root/write barriers cover an edge added by the triggering
-** operation. The only previous outgoing edges outside this cohort are
-** the interned strings recorded below. */
+** operation. Publish the outgoing roots before making the cohort black. */
 static void sealtask (lua_State *L, lua_State *thread) {
   global_State *g = G(L);
   uintptr_t flags = LUA_BLOCK_TABLE;
@@ -70,8 +69,8 @@ static void sealtask (lua_State *L, lua_State *thread) {
   mark = luaC_newmark(g);
   epoch = g->sweep_plan.epoch;
   if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
-  for (i = 0; i < thread->task_string_count; i++)
-    luaC_traceobject(L, obj2gco(thread->task_string_roots[i]));
+  for (i = 0; i < thread->task_root_count; i++)
+    luaC_traceobject(L, thread->task_roots[i]);
   for (o = thread->task_tables; o != NULL; o = luaC_allocnext(o)) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
     LuaAllocPage *page = luaMP_page(block);
@@ -82,7 +81,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
     luaMP_young(page, epoch + 1);
   }
   thread->task_tables = NULL;
-  thread->task_string_count = 0;
+  thread->task_root_count = 0;
   thread->task_table_bytes = 0;
   thread->task_nursery_closed = 1;
 }
@@ -106,21 +105,29 @@ static int tasktable (GCObject *object) {
   return object->tt == LUA_VTABLE && luaC_tasktable(gco2t(object));
 }
 
+l_sinline unsigned rootindex (const lua_State *L, const GCObject *value) {
+  unsigned i;
+  for (i = 0; i < L->task_root_count; i++)
+    if (L->task_roots[i] == value) break;
+  return i;
+}
+
 int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
+  const unsigned limit = sizeof(L->task_roots) / sizeof(L->task_roots[0]);
   unsigned i;
   lua_assert(L->task_tables != NULL);
   if (tasktable(owner)) {
     if (tasktable(value)) return 1;
-    if (value->tt == LUA_VSHRSTR) {
-      TString *name = gco2ts(value);
-      for (i = 0; i < L->task_string_count; i++)
-        if (L->task_string_roots[i] == name) return 1;
-      if (i < sizeof(L->task_string_roots) / sizeof(L->task_string_roots[0])) {
-        L->task_string_roots[i] = name;
-        L->task_string_count++;
-        luaC_traceobject(L, value);
-        return 1;
-      }
+    i = rootindex(L, value);
+    if (i < L->task_root_count) return 1;
+    if (i < limit) {
+      L->task_roots[i] = value;
+      L->task_root_count = i + 1;
+      /* Let the next table allocation refine a full set of roots before
+      ** the next distinct edge has to promote the cohort. */
+      if (i + 1 == limit) L->task_table_limit = 0;
+      luaC_traceobject(L, value);
+      return 1;
     }
     luaC_sealtask(L);
   }
@@ -177,6 +184,7 @@ l_sinline void freesettables (lua_State *L, GCObject *o, int allocation_links) {
 void luaC_endtask (lua_State *L) {
   StkId slot;
   GCObject *o;
+  unsigned i;
   lua_assert(L->task_owner != NULL && L->task_tables != NULL);
   if (!gcrunning(G(L)) || L->openupval != NULL || L->native_roots != NULL) {
     luaC_sealtask(L);
@@ -189,9 +197,11 @@ void luaC_endtask (lua_State *L) {
     }
   }
   for (; slot < L->stack_last.p + EXTRA_STACK; slot++) setnilvalue2s(slot);
+  for (i = 0; i < L->task_root_count; i++)
+    luaC_traceobject(L, L->task_roots[i]);
   o = L->task_tables;
   L->task_tables = NULL;
-  L->task_string_count = 0;
+  L->task_root_count = 0;
   L->task_table_bytes = 0;
   L->task_nursery_closed = 1;
   pacenursery(L, 0);
@@ -213,25 +223,57 @@ l_sinline void marknursery (lua_State *L, GCObject *object, GCObject **gray,
   }
 }
 
+l_sinline int nurseryedge (lu_byte tag, int task) {
+  return task ? tag & BIT_ISCOLLECTABLE : tag == ctb(LUA_VTABLE);
+}
+
+l_sinline void visitnursery (lua_State *L, GCObject *object, GCObject **gray,
+                              int task, uint32_t *roots) {
+  if (!task || tasktable(object))
+    marknursery(L, object, gray, task);
+  else {
+    unsigned index = rootindex(L, object);
+    lua_assert(index < L->task_root_count);
+    if (index < L->task_root_count) *roots |= UINT32_C(1) << index;
+  }
+}
+
+/* Compact the roots from live private tables. Outgoing roots that disappear
+** still belong to any shared snapshot already in progress. */
+static void prunetaskroots (lua_State *L, uint32_t roots) {
+  unsigned i, count = 0;
+  for (i = 0; i < L->task_root_count; i++) {
+    GCObject *root = L->task_roots[i];
+    if (roots & (UINT32_C(1) << i)) L->task_roots[count++] = root;
+    else luaC_traceobject(L, root);
+  }
+  L->task_root_count = count;
+}
+
 static void tracenursery (lua_State *L, GCObject *gray, int task) {
   StkId slot;
+  uint32_t roots = 0;
   for (slot = L->stack.p; slot < L->top.p; slot++)
     if (ttistable(s2v(slot))) marknursery(L, gcvalue(s2v(slot)), &gray, task);
   while (gray != NULL) {
     Table *t = gco2t(gray);
     unsigned i;
     gray = t->gclist;
-    if (t->metatable != NULL) marknursery(L, obj2gco(t->metatable), &gray, task);
+    if (t->metatable != NULL)
+      visitnursery(L, obj2gco(t->metatable), &gray, task, &roots);
     for (i = 0; i < t->asize; i++)
-      if (*getArrTag(t, i) == ctb(LUA_VTABLE))
-        marknursery(L, getArrVal(t, i)->gc, &gray, task);
+      if (nurseryedge(*getArrTag(t, i), task))
+        visitnursery(L, getArrVal(t, i)->gc, &gray, task, &roots);
     for (i = 0; i < allocsizenode(t); i++) {
       Node *node = gnode(t, i);
       if (isempty(gval(node))) continue;
-      if (keytt(node) == ctb(LUA_VTABLE)) marknursery(L, gckey(node), &gray, task);
-      if (ttistable(gval(node))) marknursery(L, gcvalue(gval(node)), &gray, task);
+      if (nurseryedge(keytt(node), task))
+        visitnursery(L, gckey(node), &gray, task, &roots);
+      if (nurseryedge(rawtt(gval(node)), task))
+        visitnursery(L, gcvalue(gval(node)), &gray, task, &roots);
     }
   }
+  if (task) prunetaskroots(L, roots);
 }
 
 static size_t sweepnursery (lua_State *L, GCObject **link, int task) {

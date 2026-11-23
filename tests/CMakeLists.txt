@@ -77,7 +77,8 @@ foreach(case IN ITEMS fairness parallel no_requests early_incremental early_gene
     late_native_waiter cancel_granted_native startup_failures callback_progress
     timed_callback_progress synchronous_callback simultaneous_reentry parallel_native_compensation native_return_compensation native_return_handoff native_leaf_return native_recall_during_stack_borrow
     parked cancel_parked idle_notifications standby_carriers idle_affinity metadata_progress
-    timed_metadata_progress timed_slice timed_continuation_slice nursery_incremental nursery_generational nursery_pacing)
+    timed_metadata_progress timed_slice timed_continuation_slice nursery_incremental nursery_generational nursery_pacing
+    nursery_edges_incremental nursery_edges_generational)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
   set_tests_properties(scheduler_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

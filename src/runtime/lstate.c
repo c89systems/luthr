@@ -398,7 +398,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->task_tables = NULL;
   L->task_table_bytes = L->task_table_limit = 0;
   L->task_live_bytes = L->task_paced_bytes = 0;
-  L->task_string_count = 0;
+  L->task_root_count = 0;
   L->task_nursery_closed = 0;
   L->allocation_debt.pending = 0;
   L->reclaim_credit = 0;

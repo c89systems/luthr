@@ -405,12 +405,12 @@ struct lua_State {
   LuaStringCache *strcache;  /* weak API string cache, allocated on first use */
   LuaAllocationCache allocation;
   GCObject *task_tables;  /* task stack gate owns the cohort and its roots */
-  TString *task_string_roots[32];
+  GCObject *task_roots[32];  /* outgoing edges into the shared collector */
   size_t task_table_bytes;
   size_t task_live_bytes;
   size_t task_paced_bytes;  /* bytes already charged to the shared budget */
   size_t task_table_limit;
-  unsigned task_string_count;
+  unsigned task_root_count;
   int task_nursery_closed;
 };
 
