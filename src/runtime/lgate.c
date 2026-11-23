@@ -319,54 +319,69 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
 }
 
 #if !defined(HARDSTACKTESTS)
-/* A cached permit pins this execution before the frame is built. Keep its
-** ordinary stack publication and slow reentry, with no detached scope to
-** spill when there is no inherited heap or API ownership. */
-int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
-                        lua_CFunction f, int *results) {
+/* A reusable frame with no inherited heap or API scope can be published
+** before dispatch. A scheduled call must already have a pinned permit. */
+NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
+                                         unsigned status) {
   NativeStackContext *context = luaX_boundcontext(L);
   LuaExecution *execution = context->execution;
-  LuaScheduledTask *task;
+  LuaScheduledTask *task = NULL;
   CallInfo *ci = L->ci->next;
-  uintptr_t offer;
-  int n;
-  if (execution == NULL || execution->scheduler == NULL ||
-      execution->managed_depth != 1 || execution->native_depth != 0 ||
-      execution->trusted != NULL || execution->allocation_cache == NULL ||
-      context->api_region != NULL || ci == NULL ||
+  uintptr_t offer = 0;
+  if (context->api_region != NULL || ci == NULL ||
       L->stack_last.p - L->top.p <= LUA_MINSTACK ||
       L->native_depth != 0 || L->world_depth != 0 ||
       L->object_scopes != NULL)
-    return 0;
-  task = execution->context;
-  if (task->root.thread != L || task->external || task->native_pending ||
-      !__atomic_load_n(&task->native, __ATOMIC_RELAXED) ||
-      (offer = task->slot->stack_offer) == 0)
-    return 0;
+    return NULL;
+  if (execution != NULL) {
+    if (execution->scheduler == NULL || execution->managed_depth != 1 ||
+        execution->native_depth != 0 || execution->trusted != NULL ||
+        execution->allocation_cache == NULL)
+      return NULL;
+    task = execution->context;
+    if (task->root.thread != L || task->external || task->native_pending ||
+        !__atomic_load_n(&task->native, __ATOMIC_RELAXED) ||
+        (offer = task->slot->stack_offer) == 0)
+      return NULL;
+  }
   if (L->storage_retired != NULL || luaC_retired(L) != NULL ||
       L->reclaim_pages ||
       L->reclaim_credit != 0 || L->stack_peer != NULL ||
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0 ||
       __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context ||
       (gethookmask(L) & LUA_MASKCALL))
-    return 0;
+    return NULL;
   lua_assert(context == luaQ_ownertoken());
-  if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
-  execution->native_depth = 1;
   L->native_depth = 1;
-  publishoffer(L, context, execution, task, offer);
-  n = (*f)(L);
+  if (task != NULL) {
+    if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
+    execution->native_depth = 1;
+    publishoffer(L, context, execution, task, offer);
+  }
+  else {
+    if (L->allocation_debt.pending != 0 ||
+        __atomic_load_n(&L->withdrawn_debt, __ATOMIC_RELAXED) != 0)
+      luaM_publishdebt(L);
+    release(L, context, LUA_GATE_MANAGED);
+  }
+  return context;
+}
+
+void luaW_finishnativeframe (lua_State *L, NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  lua_assert(context == luaQ_ownertoken());
   attachstack(L, context);
   if (__atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context)
     luaW_restore(L, (LuaWorldScope){0}, L->native_depth);
-  lua_assert(context->api_region == NULL && execution->native_depth == 1 &&
-             L->native_depth == 1 && L->ci == ci);
+  lua_assert(context->api_region == NULL && L->native_depth == 1);
   L->native_depth = 0;
-  execution->native_depth = 0;
-  task->native_used = 1;
-  *results = n;
-  return 1;
+  if (execution != NULL) {
+    LuaScheduledTask *task = execution->context;
+    lua_assert(execution->native_depth == 1);
+    execution->native_depth = 0;
+    task->native_used = 1;
+  }
 }
 #endif
 

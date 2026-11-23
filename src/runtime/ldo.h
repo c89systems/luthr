@@ -124,8 +124,9 @@ LUAI_FUNC void luaD_hook (lua_State *L, int event, int line,
                                         int fTransfer, int nTransfer);
 LUAI_FUNC void luaD_hookcall (lua_State *L, CallInfo *ci);
 #if !defined(HARDSTACKTESTS)
-LUAI_FUNC int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
-                                  lua_CFunction f, int *results);
+LUAI_FUNC NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
+                                                   unsigned status);
+LUAI_FUNC void luaW_finishnativeframe (lua_State *L, NativeStackContext *context);
 #endif
 LUAI_FUNC int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
                                               int narg1, int delta);

@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <lauxlib.h>
+#include <limits.h>
 #include <lua.h>
 #include <time.h>
 
@@ -27,6 +28,18 @@ static int call(lua_State *state) {
   lua_remove(state, 1);
   lua_call(state, lua_gettop(state) - 1, (int)wanted);
   return lua_gettop(state);
+}
+
+static int frame(lua_State *state) {
+  lua_Integer growth = luaL_checkinteger(state, 3);
+  luaL_checktype(state, 2, LUA_TFUNCTION);
+  luaL_argcheck(state, growth >= 0 && growth <= INT_MAX, 3,
+                "invalid stack growth");
+  lua_toclose(state, 1);
+  luaL_checkstack(state, (int)growth, "native frame");
+  lua_pushvalue(state, 2);
+  lua_call(state, 0, LUA_MULTRET);
+  return lua_gettop(state) - 3;
 }
 
 static int reference(lua_State *state) {
@@ -75,9 +88,13 @@ static int pump(lua_State *state) {
 
 int luaopen_compat_fixture(lua_State *state);
 int luaopen_compat_fixture(lua_State *state) {
-  static const luaL_Reg functions[] = {{"callback", callback},   {"call", call},
-                                       {"reference", reference}, {"pump", pump},
-                                       {"monotonic", monotonic}, {NULL, NULL}};
+  static const luaL_Reg functions[] = {{"callback", callback},
+                                       {"call", call},
+                                       {"reference", reference},
+                                       {"pump", pump},
+                                       {"monotonic", monotonic},
+                                       {"frame", frame},
+                                       {NULL, NULL}};
   luaL_newlib(state, functions);
   return 1;
 }

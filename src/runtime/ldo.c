@@ -743,19 +743,12 @@ l_sinline int managedCfunction (const TValue *function) {
          (ttisCclosure(function) && clCvalue(function)->managed);
 }
 
-/* Share the native frame setup between regular and tail calls. */
-static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
+static int __attribute__((noinline)) callCwithscope (lua_State *L, StkId func,
                          unsigned status, lua_CFunction f, int managed) {
   int n;  /* number of returns */
   LuaCallScope call;
   CallInfo *ci;
   ptrdiff_t function;
-#if !defined(HARDSTACKTESTS)
-  if (!managed && luaW_trycallnative(L, func, status, f, &n)) {
-    ci = L->ci;
-    goto returned;
-  }
-#endif
   function = savestack(L, func);
   luaQ_begincall(L, managed, &call);
   func = restorestack(L, function);
@@ -770,11 +763,27 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   luaQ_entercall(L, &call);
   n = (*f)(L);  /* do the actual call */
   luaQ_leavecall(L, &call);
+  lua_assert(L->ci == ci);
+  UNUSED(ci);
+  return n;
+}
+
+/* Both regular and tail calls use the same result completion. Keep the
+** exceptional ownership record out of the common native activation. */
+static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
+                         unsigned status, lua_CFunction f, int managed) {
+  int n;
 #if !defined(HARDSTACKTESTS)
- returned:
+  NativeStackContext *context = managed ? NULL : luaW_trynativeframe(L, func, status);
+  if (context != NULL) {
+    n = (*f)(L);
+    luaW_finishnativeframe(L, context);
+  }
+  else
 #endif
+    n = callCwithscope(L, func, status, f, managed);
   api_checknelems(L, n);
-  luaD_poscall(L, ci, n);
+  luaD_poscall(L, L->ci, n);
   return n;
 }
 

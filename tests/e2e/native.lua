@@ -42,6 +42,31 @@ end
 assert(native.callback(function() return 42 end)==42)
 
 do
+  local closed=0
+  local scope=setmetatable({}, {__close=function(_,err)
+    assert(err==nil or err==marker)
+    closed=closed+1
+  end})
+  local function tail(fn,growth) return native.frame(scope,fn,growth) end
+  local function payload()
+    collectgarbage('collect')
+    return 42,nil,scope
+  end
+  local function check(...)
+    local values=table.pack(...)
+    assert(values.n==3 and values[1]==42 and values[2]==nil and values[3]==scope)
+  end
+  check(tail(payload,32))
+  check(tail(payload,8192))
+  local value=native.frame(scope,payload,0)
+  assert(value==42 and closed==3)
+  local success,err=pcall(tail,function() error(marker) end,0)
+  assert(not success and err==marker and closed==4)
+  check(tail(payload,0))
+  assert(closed==5)
+end
+
+do
   local call = native.call
   local function identity(x) return x end
   local function add(x,y) return x+y end
