@@ -6,6 +6,7 @@
 #include <lstate.h>
 #include <ltable.h>
 #include <ltask.h>
+#include <lualib.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -647,6 +648,57 @@ static void boundary_handoff(lua_State *L, const char *kind) {
   require(length == 10000);
 }
 
+static void *full_request(void *argument) {
+  struct request *r = argument;
+  role = r->role;
+  require(lua_gc(r->state, LUA_GCCOLLECT) == 0);
+  require(lua_getglobal(r->state, "weak") == LUA_TTABLE);
+  require(lua_rawgeti(r->state, -1, 1) == LUA_TNIL);
+  lua_pop(r->state, 2);
+  return NULL;
+}
+
+static void full_request_wave(lua_State *L, int generational) {
+  global_State *g = G(L);
+  struct request requests[2] = {{0}};
+  pthread_t threads[2];
+  uint64_t major;
+  unsigned i;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_dostring(L, "local live={}; for i=1,4096 do live[i]={i} end; "
+                           "weak=setmetatable({{}},{__mode='v'}); "
+                           "return live") == LUA_OK);
+  for (i = 0; i < 2; i++) {
+    requests[i].state = lua_newthread(L);
+    requests[i].role = i + 1;
+  }
+  /* Both callers enter full GC before either can start the new cycle. */
+  major = g->major_completed;
+  lua_lock(L);
+  luaW_heapenter(L);
+  for (i = 0; i < 2; i++)
+    require(pthread_create(&threads[i], NULL, full_request, &requests[i]) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.arrived[0] || !fixture.arrived[1])
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  luaW_heapleave(L);
+  lua_unlock(L);
+  for (i = 0; i < 2; i++)
+    require(pthread_join(threads[i], NULL) == 0);
+  require(g->major_completed == major + 1);
+  require(!luaC_tracing(L) && !luaC_sweeping(L));
+  require(lua_rawgeti(L, 1, 4096) == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 4096);
+  lua_pop(L, 2);
+  /* A request arriving after that cycle needs a fresh one. */
+  require(lua_gc(L, LUA_GCCOLLECT) == 0);
+  require(g->major_completed == major + 2);
+}
+
 static unsigned string_buckets(lua_State *L) {
   unsigned i, count = 0;
   for (i = 0; i < LUA_STRING_SHARDS; i++)
@@ -857,6 +909,10 @@ int main(int argc, char **argv) {
   }
   if (strncmp(argv[1], "handoff_", 8) == 0) {
     boundary_handoff(L, argv[1]);
+    goto done;
+  }
+  if (strncmp(argv[1], "full_", 5) == 0) {
+    full_request_wave(L, strcmp(argv[1], "full_generational") == 0);
     goto done;
   }
   if (strncmp(argv[1], "phase_", 6) == 0) {

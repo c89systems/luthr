@@ -2992,26 +2992,19 @@ static void fullinc (lua_State *L, global_State *g) {
 ** driving the next phase so a caller never takes over a later collection. */
 static void completecycle (lua_State *L, uint64_t epoch) {
   global_State *g = G(L);
+  if (luaC_traceepoch(g) != epoch) return;
   if (luaC_tracing(L)) tracework(L, epoch, cast(lu_mem, MAX_LMEM), 1);
   if (luaC_traceepoch(g) == epoch && luaC_sweeping(L))
     sweepwork(L, cast(lu_mem, MAX_LMEM), 1);
   completefinalizers(L, epoch);
 }
 
-/* Start a fresh major after any previous cycle. A complete request uses
-** the ordinary trace and sweep plans, releasing quiescence after startup. */
-static void fullconcurrent (lua_State *L) {
+/* Publish the full request before reopening admission. An automatic major
+** does not seal private task tables and cannot satisfy an explicit request. */
+static uint64_t startfullcycle (lua_State *L) {
   global_State *g = G(L);
   unsigned finish = TRACE_MAJOR;
-  uint64_t epoch, interrupted;
-  for (;;) {
-    luaW_collectenter(L);
-    if (!luaC_tracing(L) && !luaC_sweeping(L) && luaC_state(g) != GCScallfin)
-      break;
-    epoch = luaC_traceepoch(g);
-    luaW_heapleave(L);
-    completecycle(L, epoch);
-  }
+  uint64_t epoch;
   luaW_stop(L);
   luaW_heapleave(L);
   luaC_sealtasks(L);
@@ -3019,20 +3012,49 @@ static void fullconcurrent (lua_State *L) {
     minor2inc(g, KGC_INC);
     finish = TRACE_GENERATIONAL;
   }
-  interrupted = g->trace_interrupt;
   starttrace(L, finish);
   luaC_advancetrace(L);
-  epoch = luaC_traceepoch(g);
+  epoch = g->full_trace_epoch = luaC_traceepoch(g);
   luaW_start(L);
+  return epoch;
+}
+
+/* Wait for a cycle that starts after this caller entered. Drivers own no
+** private continuation, so a follower can finish the published cycle even
+** if its starter parks or unwinds. */
+static void fullconcurrent (lua_State *L) {
+  global_State *g = G(L);
+  uint64_t before = g->full_trace_epoch;
+  uint64_t epoch, interrupted = g->trace_interrupt;
+  int started = 0;
+  for (;;) {
+    luaW_collectenter(L);
+    epoch = g->full_trace_epoch;
+    if (epoch != before) {
+      luaW_heapleave(L);
+      break;
+    }
+    if (!luaC_tracing(L) && !luaC_sweeping(L) && luaC_state(g) != GCScallfin) {
+      interrupted = g->trace_interrupt;
+      epoch = startfullcycle(L);
+      started = 1;
+      break;
+    }
+    epoch = luaC_traceepoch(g);
+    luaW_heapleave(L);
+    completecycle(L, epoch);
+  }
   completecycle(L, epoch);
   if (g->trace_interrupt != interrupted && g->tobefnz != NULL) {
     luaW_stop(L);
     callallpendingfinalizers(L);
     luaW_start(L);
   }
-  trimstacks(L);
-  L->reclaim_pages = 1;
-  luaC_reclaim(L);
+  if (started) {
+    trimstacks(L);
+    L->reclaim_pages = 1;
+  }
+  if (luaC_retired(L) != NULL || L->reclaim_pages) luaC_reclaim(L);
 }
 
 /*
