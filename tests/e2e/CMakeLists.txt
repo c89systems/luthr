@@ -121,11 +121,13 @@ foreach(runtime IN ITEMS upstream luthr embedded)
 endforeach()
 
 foreach(collector IN ITEMS incremental generational)
-  add_test(NAME lua_scheduled_retained_chain_${collector}
-    COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
-      retained_chain "${collector}" 1 1 1 65000 1 0 0)
-  set_tests_properties(lua_scheduled_retained_chain_${collector}
-    PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 30)
+  foreach(slots IN ITEMS 1 4)
+    add_test(NAME lua_scheduled_retained_chain_${collector}_${slots}
+      COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+        retained_chain "${collector}" "${slots}" 1 4 65000 2 1 0)
+    set_tests_properties(lua_scheduled_retained_chain_${collector}_${slots}
+      PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 90)
+  endforeach()
   add_test(NAME lua_scheduled_nursery_cap_${collector}
     COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
       independent_tables "${collector}" 8 0 32 18000 2 1 0)

@@ -158,8 +158,17 @@ static void sealtask (lua_State *L, lua_State *thread) {
   mark = luaC_newmark(g);
   epoch = g->sweep_plan.epoch;
   if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
-  for (i = 0; i < thread->task_root_count; i++)
-    luaC_traceobject(L, cast(GCObject *, thread->task_roots[i]));
+  for (i = 0; i < thread->task_root_count; i++) {
+    GCObject *root = cast(GCObject *, thread->task_roots[i]);
+    /* The outgoing directory is about to disappear. The published cohort
+    ** can still refer into this thread's current construction nursery. */
+    if (root->tt == LUA_VTABLE && !luaC_tracingglobal(g)) {
+      Table *table = gco2t(root);
+      if (luaC_nurserytable(thread, table))
+        luaC_settablestate(table, luaC_tablestate(table) | NURSERY_ROOT);
+    }
+    luaC_traceobject(L, root);
+  }
   for (o = thread->task_objects; o != NULL; o = next) {
     next = luaC_allocnext(o);
     o->next = NULL;
