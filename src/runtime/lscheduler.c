@@ -147,9 +147,6 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
       else task->turn = slot->continuation != NULL ? TURN_PEER : TURN_NORMAL;
       task->next = NULL;
       slot->count--;
-      __atomic_store_n(&slot->dispatch_epoch,
-        __atomic_load_n(&slot->dispatch_epoch, __ATOMIC_RELAXED) + 1,
-        __ATOMIC_RELAXED);
       return task;
     }
     previous = task;
@@ -167,12 +164,9 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   if (task->reason == SC_CONTINUE && slot->continuation == NULL &&
       slot->head != NULL && slot->head->reason != SC_RESOURCE &&
       __atomic_load_n(&slot->head->affinity, __ATOMIC_ACQUIRE) == NULL) {
-    LuaScheduledTask **link = &slot->head;
-    /* A peer can claim the released slot before this context is saved.
-    ** Count that dispatch as its turn, even if it has already finished. */
-    if (__atomic_load_n(&slot->dispatch_epoch, __ATOMIC_RELAXED) ==
-        task->continuation_epoch)
-      link = &slot->head->next;
+    LuaScheduledTask **link = &slot->head->next;
+    /* The outgoing continuation still owns the slot. Publish it after the
+    ** first FIFO peer, whose dispatch will select the shorter peer slice. */
     lua_assert(task->next == NULL);
     task->next = *link;
     *link = task;
@@ -182,7 +176,7 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   else append(&slot->head, &slot->tail, task);
   slot->count++;
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
-  wakequeued(s, task);
+  if (task->reason != SC_CONTINUE) wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
 }
 
@@ -325,6 +319,12 @@ static void slotreturned (LuaScheduler *s) {
   }
 }
 
+static void releaseownedslot (LuaExecutionSlot *slot, LuaScheduledTask *task) {
+  lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == taskowner(task));
+  UNUSED(task);
+  __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
+}
+
 void luaSC_releaseslot (LuaScheduledTask *task) {
   LuaExecutionSlot *slot = task->slot;
   int managed = task->fiber.execution.allocation_cache != NULL;
@@ -333,10 +333,7 @@ void luaSC_releaseslot (LuaScheduledTask *task) {
   bindslot(task, NULL);
   task->stack_offer = 0;
   if (offer != 0 && !takeoffer(task, offer)) return;
-  if (managed || offer != 0) {
-    lua_assert(__atomic_load_n(&slot->owner, __ATOMIC_RELAXED) == taskowner(task));
-    __atomic_store_n(&slot->owner, NULL, __ATOMIC_SEQ_CST);
-  }
+  if (managed || offer != 0) releaseownedslot(slot, task);
   else if (!changeslot(slot, nativeowner(task), NULL)) return;
   slotreturned(task->scheduler);
 }
@@ -389,7 +386,7 @@ static void pause (LuaScheduledTask *task, int reason) {
   lua_assert(execution->native_depth == 0 || affinity != NULL);
   UNUSED(affinity);
   dropcachednative(task, 1);
-  luaSC_releaseslot(task);
+  if (reason != SC_CONTINUE) luaSC_releaseslot(task);
   task->reason = reason;
   luaCT_pause(&task->fiber);
   if (execution->native_depth == 0) luaD_rebindexecution(execution);
@@ -851,31 +848,27 @@ static void poll (LuaExecution *execution, lua_State *L) {
         ? L->task_old_bytes : 0;
     }
     if (now < task->slice_deadline) return;
-    /* The first serial turn always gives newly submitted peers a quick
-    ** start, including when the first task allocates immediately. */
-    live = serial && task->dispatches != 1 && L->task_owner == &task->root
+    /* The first turn and each FIFO peer get a short slice. A continuation
+    ** keeps its longer slice while consuming the graph it just built. */
+    live = serial && !task->external && task->dispatches != 1 &&
+        task->turn != TURN_PEER && L->task_owner == &task->root &&
+        execution->allocation_cache != NULL && execution->native_depth == 0
       ? L->task_old_bytes : 0;
-    /* A growing or shrinking graph is evidence that another turn can
-    ** advance its lifetime. Waiting with a stable graph uses FIFO. */
-    if (live >= RETAINED_HEAP_BYTES && live != task->slice_live &&
-        reentry == 0 && publishing == 0 &&
+    if (live >= RETAINED_HEAP_BYTES && reentry == 0 && publishing == 0 &&
         __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) {
-      /* Give a productive ordinary turn time to finish a live graph.
-      ** Subsequent continuation and peer turns use their own short limits. */
-      if (task->turn == TURN_NORMAL &&
+      int changing = live != task->slice_live;
+      if ((changing || task->turn == TURN_CONTINUATION) &&
           now - task->slice_deadline <
             RETAINED_SERIAL_SLICE_NS - SERIAL_SLICE_NS)
         return;
-      if (task->slot != NULL) {
-        task->continuation_epoch =
-          __atomic_load_n(&task->slot->dispatch_epoch, __ATOMIC_RELAXED);
-        reason = SC_CONTINUE;
-      }
+      if (changing) reason = SC_CONTINUE;
     }
   }
   task->slice_deadline = 0;
   depth = luaW_detach(L);
-  luaSC_releaseslot(task);  /* retire trusted helper capacity too */
+  if (execution->allocation_cache == NULL) reason = SC_READY;
+  if (reason != SC_CONTINUE)
+    luaSC_releaseslot(task);  /* retire trusted helper capacity too */
   task->handoffs++;
   if (task->external) {
     unsigned epoch;
@@ -1177,6 +1170,13 @@ static void *carrierentry (void *argument) {
         __atomic_fetch_sub(&s->pending_ready, 1, __ATOMIC_RELEASE);
       }
       else task->published = 1;
+    }
+    else if (task->reason == SC_CONTINUE) {
+      LuaExecutionSlot *slot = task->slot;
+      bindslot(task, NULL);
+      enqueue(s, task);
+      releaseownedslot(slot, task);
+      wakecapacity(s);
     }
     else enqueue(s, task);
     notify(s);

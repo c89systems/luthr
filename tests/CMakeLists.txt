@@ -68,7 +68,7 @@ target_compile_options(scheduler_test PRIVATE -Wall -Wextra -Werror -mtls-dialec
 target_link_libraries(scheduler_test PRIVATE luthr_static)
 target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaQ_wait -Wl,--wrap=luaQ_wakewaiter
-  -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=luaCT_resume -Wl,--wrap=pthread_mutex_init -Wl,--wrap=luaW_attach
+  -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=pthread_mutex_init -Wl,--wrap=luaW_attach
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime -Wl,--wrap=luaC_endtask
   -Wl,--wrap=luaC_preparefull)

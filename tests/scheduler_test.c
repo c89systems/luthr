@@ -46,8 +46,6 @@ struct fixture {
   int hold_full;
   size_t live;
   uint64_t poll_time_ns;
-  unsigned record_turns, dispatched_turns;
-  LuaFiber *turn_order[2];
   unsigned native_lease_test, native_lease_polls;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
@@ -299,43 +297,10 @@ void __wrap_luaX_poll(lua_State *L) {
       require(pthread_mutex_unlock(&fixture->mutex) == 0);
   }
 }
-void __real_luaCT_resume(LuaFiber *, LuaContext *);
-void __wrap_luaCT_resume(LuaFiber *fiber, LuaContext *caller) {
-  struct fixture *f = fixture;
-  if (f != NULL && __atomic_load_n(&f->record_turns, __ATOMIC_ACQUIRE)) {
-    unsigned index =
-        __atomic_fetch_add(&f->dispatched_turns, 1, __ATOMIC_RELAXED);
-    if (index == 0) {
-      LuaScheduler *s = &f->scheduler;
-      unsigned epoch;
-      require(pthread_mutex_lock(&s->mutex) == 0);
-      epoch = s->handoff_epoch;
-      /* This peer owns the slot before the outgoing continuation publishes.
-       * Keep the slot occupied until publication to isolate that handoff. */
-      require(pthread_mutex_lock(&f->mutex) == 0);
-      __atomic_store_n(&f->turn_order[0], fiber, __ATOMIC_RELEASE);
-      require(pthread_cond_broadcast(&f->changed) == 0);
-      require(pthread_mutex_unlock(&f->mutex) == 0);
-      while (epoch == s->handoff_epoch)
-        require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
-      require(pthread_mutex_unlock(&s->mutex) == 0);
-    } else if (index == 1)
-      __atomic_store_n(&f->turn_order[1], fiber, __ATOMIC_RELEASE);
-  }
-  __real_luaCT_resume(fiber, caller);
-}
-
 void __real_luaCT_pause(LuaFiber *);
 void __wrap_luaCT_pause(LuaFiber *fiber) {
   struct fixture *f = fixture;
   LuaScheduledTask *task = fiber->execution.context;
-  if (f != NULL && fiber == &f->tasks[0].fiber &&
-      __atomic_load_n(&f->record_turns, __ATOMIC_ACQUIRE)) {
-    require(pthread_mutex_lock(&f->mutex) == 0);
-    while (__atomic_load_n(&f->turn_order[0], __ATOMIC_ACQUIRE) == NULL)
-      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
-    require(pthread_mutex_unlock(&f->mutex) == 0);
-  }
   if (task->waiter != NULL &&
       ((f->pause_hold &&
         (!f->admission_fifo ||
@@ -565,16 +530,17 @@ static int poll_retained(lua_State *L) {
     __atomic_fetch_add(&f->poll_time_ns, 10000000, __ATOMIC_RELAXED);
     luaQ_poll(L);
     require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
-    __atomic_store_n(&f->record_turns, 1, __ATOMIC_RELEASE);
     __atomic_fetch_add(&f->poll_time_ns, 30000000, __ATOMIC_RELAXED);
     luaQ_poll(L);
-    __atomic_store_n(&f->record_turns, 0, __ATOMIC_RELEASE);
-    require(__atomic_load_n(&f->turn_order[0], __ATOMIC_ACQUIRE) ==
-            &f->tasks[1].fiber);
-    require(__atomic_load_n(&f->turn_order[1], __ATOMIC_ACQUIRE) ==
-            &f->tasks[0].fiber);
+    require(__atomic_load_n(&f->seen[1], __ATOMIC_ACQUIRE) == 1);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 1);
+    /* A resumed continuation can finish a read-only traversal. Upon expiry
+     * without heap growth it returns to FIFO, even with the graph held. */
     luaQ_poll(L);
     __atomic_fetch_add(&f->poll_time_ns, 10000000, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 1);
+    __atomic_fetch_add(&f->poll_time_ns, 30000000, __ATOMIC_RELAXED);
     luaQ_poll(L);
     require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == SLICE_PEERS);
   }

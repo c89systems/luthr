@@ -30,7 +30,6 @@ struct LuaExecutionSlot {
   lua_State *collector;  /* pinned until carriers have joined */
   LuaExecution collector_execution;  /* bounded, non-parking payload work */
   LuaScheduledTask *continuation;  /* at most one preferential resumption */
-  unsigned dispatch_epoch;  /* queue mutex publishes each selected peer */
 };
 
 struct LuaScheduledTask {
@@ -57,7 +56,6 @@ struct LuaScheduledTask {
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
   uint64_t minor_deadline;  /* owner's initial slice for an explicit minor */
   size_t slice_live;  /* private survivors at the start of this slice */
-  unsigned continuation_epoch;  /* peer dispatches before releasing the slot */
 };
 
 struct LuaCarrier {
