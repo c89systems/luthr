@@ -319,6 +319,23 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
 }
 
 #if !defined(HARDSTACKTESTS)
+/* Ordinary embedders can reclaim a free gate directly. The claim is visible
+** before checking for collector requests, just like any managed entry. */
+l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
+  uintptr_t expected = 0;
+  if (__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
+        cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
+        __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
+    uint64_t control = luaW_control(&G(L)->world);
+    if (l_unlikely((control & LUA_WORLD_REQUESTS) || luaC_tracing(L) ||
+        __atomic_load_n(&L->admission->storage_epoch, __ATOMIC_RELAXED) !=
+          luaW_epoch(control)))
+      luaW_enter(L);
+    preparecall(L, context);
+  }
+  else attachstack(L, context);
+}
+
 /* A reusable frame with no inherited heap or API scope can be published
 ** before dispatch. A scheduled call must already have a pinned permit. */
 NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
@@ -371,7 +388,8 @@ NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
 void luaW_finishnativeframe (lua_State *L, NativeStackContext *context) {
   LuaExecution *execution = context->execution;
   lua_assert(context == luaQ_ownertoken());
-  attachstack(L, context);
+  if (execution == NULL) resumehostcall(L, context);
+  else attachstack(L, context);
   if (__atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context)
     luaW_restore(L, (LuaWorldScope){0}, L->native_depth);
   lua_assert(context->api_region == NULL && L->native_depth == 1);

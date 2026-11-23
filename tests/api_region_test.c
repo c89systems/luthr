@@ -302,6 +302,55 @@ static void *invoke(void *context) {
   return NULL;
 }
 
+static unsigned wait_for_foreign_result;
+
+static int foreign_result(lua_State *state) {
+  (void)state;
+  if (!wait_for_foreign_result)
+    return 0;
+  __atomic_store_n(&entered, 1, __ATOMIC_RELEASE);
+  while (!__atomic_load_n(&observed, __ATOMIC_ACQUIRE))
+    sched_yield();
+  return 1;
+}
+
+static void *return_from_native(void *context) {
+  struct invocation *call = context;
+  lua_pushvalue(call->state, 1);
+  call->status = lua_pcall(call->state, 0, 1, 0);
+  return NULL;
+}
+
+static void native_return(lua_State *state) {
+  pthread_t worker;
+  struct invocation call = {lua_newthread(state), -1};
+  lua_State *target = call.state;
+  lua_pushcfunction(state, foreign_result);
+  lua_setglobal(state, "foreign_result");
+  require(lua_checkstack(target, 128));
+  require(luaL_loadstring(target, "local result = foreign_result(); "
+                                  "return result") == LUA_OK);
+  (void)return_from_native(&call); /* Warm the reusable activation. */
+  require(call.status == LUA_OK && lua_isnil(target, -1));
+  lua_pop(target, 1);
+  wait_for_foreign_result = 1;
+  require(pthread_create(&worker, NULL, return_from_native, &call) == 0);
+  while (!__atomic_load_n(&entered, __ATOMIC_ACQUIRE))
+    sched_yield();
+  /* Another thread can use the inactive C frame and collection must retain
+   * its new value while the opaque callback is still waiting. */
+  require(lua_gettop(target) == 0);
+  lua_newtable(target);
+  lua_pushinteger(target, 42);
+  lua_rawseti(target, 1, 1);
+  lua_gc(state, LUA_GCCOLLECT);
+  __atomic_store_n(&observed, 1, __ATOMIC_RELEASE);
+  require(pthread_join(worker, NULL) == 0 && call.status == LUA_OK);
+  require(lua_type(target, -1) == LUA_TTABLE);
+  require(lua_rawgeti(target, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(target, -1) == 42 && target->native_depth == 0);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   const char *source;
@@ -313,6 +362,11 @@ int main(int argc, char **argv) {
   luaL_openlibs(state);
   if (strstr(argv[1], "generational") != NULL)
     lua_gc(state, LUA_GCGEN);
+  if (strncmp(argv[1], "native_return_", 14) == 0) {
+    native_return(state);
+    lua_close(state);
+    return 0;
+  }
   if (strncmp(argv[1], "metadata_", 9) == 0) {
     metadata(state, 0);
     metadata(state, 1);
