@@ -58,6 +58,11 @@ typedef struct LuaCacheBorrow {
 LUAI_FUNC void luaMP_notify (struct global_State *g, LuaAllocPage *page);
 LUAI_FUNC void luaMP_publish (struct global_State *g, LuaAllocPage *page);
 LUAI_FUNC void luaMP_return (struct global_State *g, LuaAllocBlock *block);
+LUAI_FUNC void luaMP_returnbatch (struct global_State *g, LuaAllocPage *page,
+                                LuaAllocBlock *first, LuaAllocBlock *last);
+LUAI_FUNC void luaM_freetablebatch (lua_State *L, LuaAllocPage *page,
+                                  LuaAllocBlock *first, LuaAllocBlock *last,
+                                  unsigned count, l_mem bytes);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
 /* The caller holds the page's pool mutex throughout the short lease. */
 LUAI_FUNC int luaMC_borrow (lua_State *L, struct LuaAllocationCache *cache,

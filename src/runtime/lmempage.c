@@ -67,26 +67,41 @@ void luaMP_notify (global_State *g, LuaAllocPage *page) {
   luaMP_publish(g, page);
 }
 
-void luaMP_return (global_State *g, LuaAllocBlock *block) {
-  LuaAllocPage *page = luaMP_page(block);
+l_sinline void returnblocks (global_State *g, LuaAllocPage *page,
+                              LuaAllocBlock *first, LuaAllocBlock *last) {
+  LuaAllocBlock *rest = first == last ? NULL : first->block.link.next;
   uintptr_t old = __atomic_load_n(&page->remote, __ATOMIC_RELAXED);
   for (;;) {
     if (!(old & LUA_PAGE_NOTIFIED)) {
+      uintptr_t next = old;
+      if (rest != NULL) {
+        last->block.link.next = cast(LuaAllocBlock *, old);
+        next = cast(uintptr_t, rest);
+      }
       if (__atomic_compare_exchange_n(&page->remote, &old,
-            old | LUA_PAGE_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-        page->notified = block;
+            next | LUA_PAGE_NOTIFIED, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        page->notified = first;
         luaMP_publish(g, page);
         return; /* never touch page after publishing the lifetime pin */
       }
     }
     else {
-      block->block.link.next = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
+      last->block.link.next = cast(LuaAllocBlock *, old & ~LUA_PAGE_NOTIFIED);
       if (__atomic_compare_exchange_n(&page->remote, &old,
-            cast(uintptr_t, block) | LUA_PAGE_NOTIFIED, 0,
+            cast(uintptr_t, first) | LUA_PAGE_NOTIFIED, 0,
             __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         return; /* ordinary remote publication is also the last page access */
     }
   }
+}
+
+void luaMP_return (global_State *g, LuaAllocBlock *block) {
+  returnblocks(g, luaMP_page(block), block, block);
+}
+
+void luaMP_returnbatch (global_State *g, LuaAllocPage *page,
+                        LuaAllocBlock *first, LuaAllocBlock *last) {
+  returnblocks(g, page, first, last);
 }
 
 void luaMP_resetnotice (LuaAllocPage *page) {

@@ -628,6 +628,32 @@ l_noret luaM_toobig (lua_State *L) {
   luaG_runerror(L, "memory allocation error: block too big");
 }
 
+l_sinline void returnpooled (lua_State *L, LuaAllocPage *page,
+                             LuaAllocBlock *first, LuaAllocBlock *last,
+                             unsigned count) {
+  LuaAllocationCache *cache = allocationcache(L);
+  /* The allocation consumer's lease protects its local list. Empty pages
+  ** still notify reclamation so idle caches release their backing storage. */
+  if ((page->pool < LUA_ALLOC_POOLS || cache->slot_pages != NULL) &&
+      *cachepage(cache, page->pool) == page) {
+    lua_assert(page->owner == cache && page->used >= count);
+    page->used -= count;
+    last->block.link.next = page->local;
+    page->local = first;
+    if (page->used == 0) luaMP_notify(G(L), page);
+  }
+  else if (count == 1) luaMP_return(G(L), first);
+  else luaMP_returnbatch(G(L), page, first, last);
+}
+
+void luaM_freetablebatch (lua_State *L, LuaAllocPage *page,
+                          LuaAllocBlock *first, LuaAllocBlock *last,
+                          unsigned count, l_mem bytes) {
+  lua_assert(count != 0 && bytes > 0);
+  returnpooled(L, page, first, last, count);
+  account(L, bytes);
+}
+
 
 /*
 ** Free memory
@@ -645,23 +671,10 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
   retired = (header & LUA_BLOCK_RETIRED) != 0;
   page = luaMP_pageof(header);
   if (page != NULL) {
-    LuaAllocationCache *cache = allocationcache(L);
     if (header & LUA_BLOCK_TABLE)
       __atomic_store_n(&allocation->block.page, cast(uintptr_t, page),
                        __ATOMIC_RELAXED);
-    /* The allocation consumer's lease protects its local list. Its returned
-    ** block needs no remote notice or page-reclamation pass. Empty pages still
-    ** notify reclamation so idle caches release their backing storage. */
-    if ((page->pool < LUA_ALLOC_POOLS || cache->slot_pages != NULL) &&
-        *cachepage(cache, page->pool) == page) {
-      lua_assert(page->owner == cache && page->used != 0);
-      page->used--;
-      allocation->block.link.next = page->local;
-      page->local = allocation;
-      if (page->used == 0) luaMP_notify(G(L), page);
-    }
-    else
-      luaMP_return(G(L), allocation);
+    returnpooled(L, page, allocation, allocation, 1);
   }
   else {
     callfrealloc(L, allocation, osize + sizeof(LuaAllocBlock), 0);

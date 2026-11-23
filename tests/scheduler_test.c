@@ -1799,13 +1799,17 @@ static void nursery(struct fixture *f, int generational) {
   submit(f, 0,
          "local n=...; local name='nursery field '..n; "
          "local root={[name]=42}; root.self=root; name=nil; "
+         "local function read(k) return root.self[k] end; "
          "rawset(root,'values',{42}); "
          "for _,v in ipairs(rawget(root,'values')) do assert(v==42) end; "
          "for i=1,50000 do local row={i,i+1,kind='row'}; "
-         "if i%4096==0 then collectgarbage('step',0) end; "
+         "if i%4096==0 then "
+         "  local wide={}; for j=1,512 do wide[j]=j end; "
+         "  assert(wide[512]==512); collectgarbage('step',0) "
+         "end; "
          "assert(row[2]==i+1) end; "
          "nursery_ready=true; while not nursery_release do end; "
-         "return root.self['nursery field '..n]",
+         "local result=read('nursery field '..n); root=nil; return result",
          17);
   nursery_wait(f->main, "nursery_ready");
   for (unsigned i = 0; i < 4; i++)
@@ -1868,6 +1872,35 @@ static void nursery(struct fixture *f, int generational) {
   require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
   require(lua_tointeger(f->main, -1) == 42);
   lua_pop(f->main, 2);
+
+  submit(f, 5,
+         "local root={child={answer=42}}; "
+         "nursery_reader=function() return root.child.answer end; "
+         "nursery_capture_ready=true; "
+         "while not nursery_capture_release do end; "
+         "return root.child.answer",
+         0);
+  nursery_wait(f->main, "nursery_capture_ready");
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_getglobal(f->main, "nursery_reader") == LUA_TFUNCTION);
+  require(lua_pcall(f->main, 0, 1, 0) == LUA_OK);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 1);
+  lua_pushboolean(f->main, 1);
+  lua_setglobal(f->main, "nursery_capture_release");
+  require(collect(f, 5, LUA_OK) == 42);
+
+  submit(f, 6,
+         "local root={child={answer=42}}; "
+         "return function() return root.child.answer end",
+         0);
+  luaSC_wait(&f->tasks[6]);
+  require(luaSC_collect(f->main, &f->tasks[6], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_pcall(f->main, 0, 1, 0) == LUA_OK);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 1);
   finish(f);
 }
 

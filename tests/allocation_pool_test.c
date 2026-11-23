@@ -282,6 +282,26 @@ struct return_wave {
   unsigned ready, returned;
 };
 
+static void return_batch(struct return_wave *wave) {
+  unsigned start = 0;
+  while (start < BORROWED) {
+    LuaAllocBlock *first = (LuaAllocBlock *)wave->blocks[start] - 1;
+    LuaAllocBlock *last = first;
+    LuaAllocPage *page = luaMP_page(first);
+    unsigned end = start + 1;
+    for (; end < BORROWED; end++) {
+      LuaAllocBlock *next = (LuaAllocBlock *)wave->blocks[end] - 1;
+      if (luaMP_page(next) != page)
+        break;
+      last->block.link.next = next;
+      last = next;
+    }
+    luaM_freetablebatch(wave->state, page, first, last, end - start,
+                        (end - start) * BYTES);
+    start = end;
+  }
+}
+
 static void *return_remote(void *context) {
   struct return_wave *wave = context;
   unsigned round, i, j;
@@ -291,10 +311,14 @@ static void *return_remote(void *context) {
       require(pthread_cond_wait(&wave->changed, &wave->mutex) == 0);
     require(pthread_mutex_unlock(&wave->mutex) == 0);
     lua_lock(wave->state);
-    for (i = 0; i < BORROWED; i++) {
+    for (i = 0; i < BORROWED; i++)
       for (j = 0; j < BYTES; j++)
         require(wave->blocks[i][j] == (unsigned char)round);
-      luaM_free_(wave->state, wave->blocks[i], BYTES);
+    if (round % 2 == 0) {
+      for (i = 0; i < BORROWED; i++)
+        luaM_free_(wave->state, wave->blocks[i], BYTES);
+    } else {
+      return_batch(wave);
     }
     lua_unlock(wave->state);
     require(pthread_mutex_lock(&wave->mutex) == 0);

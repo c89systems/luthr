@@ -3,6 +3,7 @@
 #include "lprefix.h"
 
 #include "ldebug.h"
+#include "lfunc.h"
 #include "lgc.h"
 #include "lmem.h"
 #include "lmempage.h"
@@ -32,7 +33,7 @@ void luaC_taskresize (lua_State *L, l_mem change) {
 }
 
 int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
-  if (L->task_nursery_closed || !isLua(L->ci) || L->openupval != NULL ||
+  if (L->task_nursery_closed || !isLua(L->ci) ||
       gethookmask(L) || L->native_depth != 0 || !gcrunning(G(L))) return 0;
   if (bytes > TASK_NURSERY_BYTES - L->task_table_bytes) {
     luaC_sealtask(L);
@@ -148,6 +149,31 @@ static void pacenursery (lua_State *L, size_t live) {
     luaP_spend(g, cast(l_mem, dead / 16 + 1));
 }
 
+/* Task-private headers never enter the sweep directory. Return contiguous
+** runs from the same page together after disposing of their backing parts. */
+l_sinline void freesettables (lua_State *L, GCObject *o, int allocation_links) {
+  while (o != NULL) {
+    LuaAllocBlock *last = cast(LuaAllocBlock *, o) - 1, *first = NULL;
+    LuaAllocPage *page = luaMP_page(last);
+    unsigned count = 0;
+    l_mem bytes = 0;
+    for (;;) {
+      Table *table = gco2t(o);
+      LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
+      lua_assert(luaMP_header(block) == cast(uintptr_t, page));
+      lua_assert(luaC_tasktable(table) && luaA_lockowner(&table->access) == NULL);
+      o = allocation_links ? luaC_allocnext(o) : o->next;
+      bytes += sizeof(*table) + table->inline_bytes;
+      luaH_freeparts(L, table);
+      count++;
+      block->block.link.next = first;
+      first = block;
+      if (o == NULL || luaMP_page(cast(LuaAllocBlock *, o) - 1) != page) break;
+    }
+    luaM_freetablebatch(L, page, first, last, count, bytes);
+  }
+}
+
 void luaC_endtask (lua_State *L) {
   StkId slot;
   GCObject *o;
@@ -169,11 +195,7 @@ void luaC_endtask (lua_State *L) {
   L->task_table_bytes = 0;
   L->task_nursery_closed = 1;
   pacenursery(L, 0);
-  while (o != NULL) {
-    GCObject *next = luaC_allocnext(o);
-    luaH_free(L, gco2t(o));
-    o = next;
-  }
+  freesettables(L, o, 1);
   luaM_flushdebt(L);
 }
 
@@ -243,11 +265,14 @@ static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
   ** any of their referents, including frees that release admission. */
   for (slot = L->top.p; slot < L->stack_last.p + EXTRA_STACK; slot++)
     setnilvalue2s(slot);
-  do {
-    o = dead;
-    dead = o->next;
-    luaH_free(L, gco2t(o));
-  } while (dead != NULL);
+  if (task) freesettables(L, dead, 0);
+  else {
+    do {
+      o = dead;
+      dead = o->next;
+      luaH_free(L, gco2t(o));
+    } while (dead != NULL);
+  }
   luaM_flushdebt(L);
   return bytes;
 }
@@ -255,12 +280,21 @@ static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
 void luaC_taskstep (lua_State *L) {
   global_State *g = G(L);
   size_t live;
-  if (!gcrunning(g) || L->openupval != NULL || L->native_roots != NULL ||
+  if (!gcrunning(g) || L->native_roots != NULL ||
       L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
       !g->gcparams[LUA_GCPSTEPSIZE] || !g->gcparams[LUA_GCPSTEPMUL]) {
     L->task_table_limit = TASK_NURSERY_BYTES + 1;
     return;
   }
+#if defined(LUAI_ASSERT)
+  {
+    UpVal *uv;
+    /* Open private bindings still live in the scanned part of the stack.
+    ** Materializing a binding uses the ordinary heap write barrier. */
+    for (uv = L->openupval; uv != NULL; uv = uv->open.next)
+      lua_assert(!luaF_localupval(L, uv) || uplevel(uv) < L->top.p);
+  }
+#endif
   tracenursery(L, NULL, 1);
   live = sweepnursery(L, &L->task_tables, 1);
   if (L->task_tables != NULL) {
