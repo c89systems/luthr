@@ -16,4 +16,8 @@ static const void *const disptab[LUA_DISPATCH_COUNT] = {
   [LUA_PAIR_##first##_##second] = &&L_fast_LUA_PAIR_##first##_##second,
 #include "loppairs.h"
 #undef VM_PAIR
+  [LUA_SETRECORD_0] = &&L_fast_LUA_SETRECORD_0,
+  [LUA_SETRECORD_1] = &&L_fast_LUA_SETRECORD_1,
+  [LUA_SETRECORD_2] = &&L_fast_LUA_SETRECORD_2,
+  [LUA_SETRECORD_3] = &&L_fast_LUA_SETRECORD_3,
 };

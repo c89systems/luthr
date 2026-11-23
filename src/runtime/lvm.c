@@ -1691,6 +1691,18 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #define l_tforcall fast_tforcall
 #define l_tforloop fast_tforloop
 #include "lvmexecute.h"
+  vmcase(LUA_SETRECORD_0)
+  vmcase(LUA_SETRECORD_1)
+  vmcase(LUA_SETRECORD_2)
+  vmcase(LUA_SETRECORD_3) {
+    TValue *receiver = s2v(RA(i));
+    if (l_unlikely(!ttistable(receiver) ||
+        !luaH_trysetrecord(L, hvalue(receiver), tsvalue(KB(i)),
+                           dispatch - LUA_SETRECORD_0, RKC(i)))) {
+      directdispatch(OP_SETFIELD);
+    }
+    vmbreak;
+  }
 /* The first operation cannot suspend. A hook or poll due at the second
 ** instruction uses the ordinary fetch so the VM observes the same boundary.
 ** Enter the second handler with its original PCs before it can raise or park. */

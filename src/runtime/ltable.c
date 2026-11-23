@@ -1948,31 +1948,35 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
 /* Under the private table's mutation boundary, shade the displaced edge
 ** here. The common assignment barrier shades the incoming value before
 ** reopening the layout to the concurrent marker. */
+l_sinline int privaterecordslot (lua_State *L, Table *table, unsigned index,
+                                 TValue *value, int raw, int tracing) {
+  lu_byte tag = luaH_recordtag(table->arraydata, index);
+  if (tagisempty(tag) && !raw && table->metatable != NULL) return 0;
+  if (tracing && (tag & BIT_ISCOLLECTABLE))
+    luaC_traceobject(L, luaH_recordvalues(table)[index].gc);
+  if (ttisnil(value)) {
+    if (tag != LUA_VABSTKEY) luaH_setrecordtag(table, index, LUA_VEMPTY);
+  }
+  else {
+    __atomic_store(luaH_recordvalues(table) + index, &val_(value), __ATOMIC_RELEASE);
+    luaH_setrecordtag(table, index, rawtt(value));
+  }
+  return 1;
+}
+
 l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
                                TValue *value, int raw, int tracing) {
   Table *keys = luaH_recordkeys(table->node);
   unsigned index = keyinarray(table, key);
   int result;
   if (keys != NULL) {
-    lu_byte tag;
     if (ttisshrstring(key)) index = luaH_recordindex(keys, tsvalue(key));
     else if (ttislngstring(key)) index = recordlongindex(keys, tsvalue(key));
     else index = keys->asize;
     if (index == keys->asize)
       return ttisnil(value) && (raw || table->metatable == NULL) &&
              !ttisnil(key) && !(ttisfloat(key) && luai_numisnan(fltvalue(key)));
-    tag = luaH_recordtag(table->arraydata, index);
-    if (tagisempty(tag) && !raw && table->metatable != NULL) return 0;
-    if (tracing && (tag & BIT_ISCOLLECTABLE))
-      luaC_traceobject(L, luaH_recordvalues(table)[index].gc);
-    if (ttisnil(value)) {
-      if (tag != LUA_VABSTKEY) luaH_setrecordtag(table, index, LUA_VEMPTY);
-    }
-    else {
-      __atomic_store(luaH_recordvalues(table) + index, &val_(value), __ATOMIC_RELEASE);
-      luaH_setrecordtag(table, index, rawtt(value));
-    }
-    return 1;
+    return privaterecordslot(L, table, index, value, raw, tracing);
   }
   if (index != 0) {
     lu_byte *tag = getArrTag(table, index - 1);
@@ -2020,14 +2024,11 @@ l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
 /* The current gate is the private graph's only mutator. With no allocation,
 ** wait or callback, its live operands need no additional native root records.
 ** The collector only reads strong storage and validates our sequence. */
-int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
-                 int raw) {
+l_sinline __attribute__((always_inline)) int tryprivatewrite (
+    lua_State *L, Table *t, const TValue *key, TValue *value, int raw,
+    unsigned index) {
   uint64_t sequence;
-  uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
   int tracing, done;
-  if (sharing & LUA_OBJECT_SHARED)
-    return sharedset(L, t, key, value, raw, NULL) > 0;
-  if (sharing != cast(uintptr_t, L)) return 0;
   sequence = __atomic_load_n(&t->sequence, __ATOMIC_RELAXED);
   if (sequence & 1) return 0;  /* an enclosing borrowed operation owns it */
   /* Only the owner and a concurrent marker can read these slots. Sweep
@@ -2038,7 +2039,8 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
     if (!luaH_strongaccess(L, t)) return 0;
     __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
   }
-  done = privatestoreslot(L, t, key, value, raw, tracing);
+  done = key == NULL ? privaterecordslot(L, t, index, value, raw, tracing)
+                     : privatestoreslot(L, t, key, value, raw, tracing);
   if (done) {
     settableflags(t, gettableflags(t) & cast_byte(~maskflags));
     luaC_barrierback(L, obj2gco(t), value);
@@ -2049,6 +2051,27 @@ int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
     __atomic_store_n(&t->sequence, sequence + (done ? LUA_TABLE_VERSION_STEP : 0),
                      __ATOMIC_RELEASE);
   return done;
+}
+
+int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,
+                 int raw) {
+  uintptr_t sharing = __atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE);
+  if (sharing & LUA_OBJECT_SHARED)
+    return sharedset(L, t, key, value, raw, NULL) > 0;
+  return sharing == cast(uintptr_t, L) && tryprivatewrite(L, t, key, value, raw, 0);
+}
+
+int luaH_trysetrecord (lua_State *L, Table *t, TString *key, unsigned index,
+                       TValue *value) {
+  Table *keys;
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) != cast(uintptr_t, L))
+    return 0;
+  keys = luaH_recordkeys(t->node);
+  /* A hook can replace the constructor's receiver. Its live layout must
+  ** confirm the field name at the selected slot before the direct store. */
+  if (keys == NULL || index >= keys->asize ||
+      getArrVal(keys, index)->gc != obj2gco(key)) return 0;
+  return tryprivatewrite(L, t, NULL, value, 0, index);
 }
 
 /* The receiver and arguments are rooted and already published. Each retry

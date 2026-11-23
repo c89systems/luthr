@@ -647,7 +647,7 @@ typedef struct Proto {
   int32_t scalar_bias;
   TValue *k;  /* constants used by the function */
   Instruction *code;  /* opcodes */
-  lu_byte *dispatch;  /* immutable overrides for captured operands and pairs */
+  lu_byte *dispatch;  /* immutable instruction dispatch overrides */
   LuaRecordSite *records;  /* sorted by constructor instruction */
   int sizerecords;
   struct Proto **p;  /* functions defined inside the function */

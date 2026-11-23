@@ -357,6 +357,10 @@ enum {
 #define VM_PAIR(first,second) LUA_PAIR_##first##_##second,
 #include "loppairs.h"
 #undef VM_PAIR
+  LUA_SETRECORD_0,
+  LUA_SETRECORD_1,
+  LUA_SETRECORD_2,
+  LUA_SETRECORD_3,
   LUA_DISPATCH_COUNT
 };
 

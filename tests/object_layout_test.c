@@ -104,6 +104,39 @@ static void run_chunk(lua_State *L, const char *source, int results) {
   require(status == LUA_OK);
 }
 
+static void record_constructor_hooks(lua_State *L) {
+  run_chunk(L,
+            "local function make(n) return {key=n, value=n+1} end\n"
+            "local reversed = {value=-1, key=-2}\n"
+            "local writes = {}\n"
+            "local function during_constructor(action)\n"
+            "  local visits = 0\n"
+            "  debug.sethook(function()\n"
+            "    if debug.getinfo(2, 'f').func == make then\n"
+            "      local _, object = debug.getlocal(2, 2)\n"
+            "      if type(object) == 'table' and not next(object) then\n"
+            "        visits = visits + 1\n"
+            "        debug.sethook()\n"
+            "        if action == 'replace' then\n"
+            "          assert(debug.setlocal(2, 2, reversed))\n"
+            "        else\n"
+            "          setmetatable(object, {__newindex = writes})\n"
+            "        end\n"
+            "      end\n"
+            "    end\n"
+            "  end, '', 1)\n"
+            "  local object = make(41)\n"
+            "  debug.sethook()\n"
+            "  assert(visits == 1)\n"
+            "  return object\n"
+            "end\n"
+            "assert(during_constructor('replace') == reversed)\n"
+            "assert(reversed.key == 41 and reversed.value == 42)\n"
+            "assert(next(during_constructor('metatable')) == nil)\n"
+            "assert(writes.key == 41 and writes.value == 42)\n",
+            0);
+}
+
 static void record_table(lua_State *L, lua_State *other) {
   const Table *record, *second, *keys, *metatable;
   luaL_openlibs(L);
@@ -241,6 +274,7 @@ static void record_table(lua_State *L, lua_State *other) {
     lua_pop(other, 1);
   }
   lua_pop(other, 3);
+  record_constructor_hooks(L);
 }
 
 int main(int argc, char **argv) {

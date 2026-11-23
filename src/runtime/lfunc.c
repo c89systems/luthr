@@ -654,7 +654,8 @@ static unsigned dispatchpair (unsigned first, unsigned second) {
 
 /* The hints name possible fields. An extra assignment or a different key
 ** uses the ordinary dictionary image. Loading and dumping keep Lua code. */
-static unsigned recordfields (const Proto *p, int pc, lu_byte *fields) {
+static unsigned recordfields (const Proto *p, int pc, lu_byte *fields,
+                              lu_byte *stores) {
   Instruction insn = p->code[pc];
   unsigned hash, count = 0, reg;
   int at;
@@ -671,7 +672,10 @@ static unsigned recordfields (const Proto *p, int pc, lu_byte *fields) {
       if (key >= cast_uint(p->sizek) || !ttisshrstring(&p->k[key])) return 0;
       for (i = 0; i < count; i++)
         if (tsvalue(&p->k[fields[i]]) == tsvalue(&p->k[key])) break;
-      if (i == count) fields[count++] = cast_byte(key);
+      if (i == count) {
+        stores[count] = cast_byte(at - pc);
+        fields[count++] = cast_byte(key);
+      }
       if (count == hash) return count;
     }
     else if (op == OP_NEWTABLE || op == OP_RETURN || op == OP_RETURN0 ||
@@ -682,17 +686,24 @@ static unsigned recordfields (const Proto *p, int pc, lu_byte *fields) {
 }
 
 static void lowerrecords (lua_State *L, Proto *p) {
-  lu_byte fields[LUA_RECORD_MAX_FIELDS];
+  lu_byte fields[LUA_RECORD_MAX_FIELDS], stores[LUA_RECORD_MAX_FIELDS];
   int pc, sites = 0;
+  _Static_assert(LUA_SETRECORD_3 - LUA_SETRECORD_0 + 1 == LUA_RECORD_MAX_FIELDS,
+                 "record store dispatch range");
   for (pc = 0; pc < p->sizecode; pc++)
-    if (recordfields(p, pc, fields) != 0) sites++;
+    if (recordfields(p, pc, fields, stores) != 0) sites++;
   if (sites == 0) return;
+  if (p->dispatch == NULL) {
+    p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
+    for (pc = 0; pc < p->sizecode; pc++)
+      p->dispatch[pc] = cast_byte(GET_OPCODE(p->code[pc]));
+  }
   p->records = luaM_newvectorchecked(L, sites, LuaRecordSite);
   p->sizerecords = sites;
   for (pc = 0; pc < sites; pc++) p->records[pc].keys = NULL;
   sites = 0;
   for (pc = 0; pc < p->sizecode; pc++) {
-    unsigned i, count = recordfields(p, pc, fields);
+    unsigned i, count = recordfields(p, pc, fields, stores);
     Table *keys;
     if (count == 0) continue;
     keys = luaH_new(L, count, 0);
@@ -701,8 +712,11 @@ static void lowerrecords (lua_State *L, Proto *p) {
     luaC_objbarrier(L, p, keys);
     for (i = 0; i < count; i++) {
       const TValue *key = &p->k[fields[i]];
+      int store = pc + stores[i];
       obj2arr(keys, i, key);
       luaC_barrierback(L, obj2gco(keys), key);
+      if (p->dispatch[store] == OP_SETFIELD)
+        p->dispatch[store] = cast_byte(LUA_SETRECORD_0 + i);
     }
     luaA_share(L, obj2gco(keys));
   }
