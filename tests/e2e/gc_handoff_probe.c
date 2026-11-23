@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "gc_probe.h"
 #include <lauxlib.h>
+#include <lgc.h>
 #include <lstate.h>
 #include <pthread.h>
 #include <sched.h>
@@ -116,6 +117,31 @@ static void minor_notification(lua_State *state, struct fixture *fixture,
           record->minor_restore_ns == 0);
 }
 
+static void snapshot_while_arming(lua_State *state, GcProbe *record) {
+  global_State *g = G(state);
+  uint64_t control, epoch, calls = record->root_snapshot_calls;
+  uint64_t elapsed = record->root_snapshot_ns;
+  uint64_t requests = record->root_snapshot_requests;
+  luaX_lockstate(state);
+  control = luaW_control(&g->world);
+  epoch = luaC_traceepoch(g);
+  require(!(control & LUA_MARK_ACTIVE));
+  /* The new epoch can be visible before the collector can scan any stack. */
+  __atomic_store_n(&g->trace_epoch, epoch + 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&g->world.control,
+                   control | LUA_MARK_ACTIVE | LUA_MARK_ARMING,
+                   __ATOMIC_SEQ_CST);
+  record->enabled = 1;
+  require(luaC_checksnapshot(state) == 0);
+  record->enabled = 0;
+  __atomic_store_n(&g->world.control, control, __ATOMIC_SEQ_CST);
+  __atomic_store_n(&g->trace_epoch, epoch, __ATOMIC_RELEASE);
+  luaX_unlockstate(state);
+  require(record->root_snapshot_requests == requests + 1 &&
+          record->root_snapshot_calls == calls &&
+          record->root_snapshot_ns == elapsed);
+}
+
 int main(void) {
   lua_State *state = luaL_newstate();
   struct fixture fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
@@ -150,6 +176,7 @@ int main(void) {
           record.metadata_handoff_ns == handoff_ns &&
           record.metadata_wait_ns == wait_ns);
   minor_notification(state, &fixture, &record);
+  snapshot_while_arming(state, &record);
   gc_probe_bind(NULL, NULL);
   lua_close(state);
   require(pthread_cond_destroy(&fixture.changed) == 0);

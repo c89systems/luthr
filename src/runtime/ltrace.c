@@ -135,7 +135,7 @@ void luaC_snapshotproto (lua_State *L, Proto *proto) {
 ** The epoch publication makes both the snapshot and its barrier queues visible
 ** before a scanner can finish this root. Stacks stay black with the hybrid
 ** heap barrier; they do not need a second, globally paused traversal. */
-void luaC_snapshot (lua_State *L, lua_State *thread) {
+unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
   uint64_t epoch = luaC_traceepoch(G(L));
   StkId slot;
   LuaNativeRoot *root;
@@ -143,7 +143,7 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
   UpVal *upvalue;
   Proto *proto;
   if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
-    return;
+    return 0;
   luaC_traceobject(L, obj2gco(thread));
   if (thread->task_objects != NULL) {
     unsigned i;
@@ -195,15 +195,17 @@ void luaC_snapshot (lua_State *L, lua_State *thread) {
   __atomic_store_n(&thread->trace_snapshot, epoch, __ATOMIC_SEQ_CST);
   if (luaC_waitingstacks(G(L)))
     luaC_readystack(G(L), cast(uintptr_t, thread));
+  return 1;
 }
 
-void luaC_checksnapshot (lua_State *L) {
+unsigned luaC_checksnapshot (lua_State *L) {
   if (luaC_scanready(G(L))) {
     /* Paired operations own two gates but share the first participation word.
     ** An allocation wait on either stack must publish both root sets. */
-    if (L->stack_peer != NULL) luaC_snapshot(L, L->stack_peer);
-    luaC_snapshot(L, L);
+    unsigned peer = L->stack_peer != NULL ? luaC_snapshot(L, L->stack_peer) : 0;
+    return peer + luaC_snapshot(L, L);
   }
+  return 0;
 }
 
 int luaC_snapshotparked (lua_State *L, lua_State *thread) {

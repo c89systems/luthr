@@ -223,8 +223,8 @@ lu_mem __real_luaC_tracebatch(lua_State *, unsigned);
 void __real_luaC_scantrace(lua_State *, LuaTraceWork *, unsigned);
 void __real_luaC_assisttrace(lua_State *);
 void __real_luaC_polltrace(lua_State *);
-void __real_luaC_snapshot(lua_State *, lua_State *);
-void __real_luaC_checksnapshot(lua_State *);
+unsigned __real_luaC_snapshot(lua_State *, lua_State *);
+unsigned __real_luaC_checksnapshot(lua_State *);
 void __real_luaW_waitcollector(lua_State *, int);
 void __real_luaM_reclaimpages(lua_State *);
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
@@ -712,16 +712,10 @@ void __wrap_luaC_assistsweep(lua_State *L) {
   collect(L, COLLECT_SWEEP_ASSIST, 0);
 }
 
-static unsigned snapshot_needed(lua_State *L, lua_State *thread) {
-  return luaC_tracing(L) &&
-         __atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) !=
-             luaC_traceepoch(G(L));
-}
-
-static void snapshot(lua_State *L, lua_State *thread) {
+static unsigned snapshot(lua_State *L, lua_State *thread) {
   GcProbe *record = probe(L);
   uint64_t started = 0;
-  unsigned count = 0;
+  unsigned count;
   int outer = 0;
   if (record != NULL) {
     outer = record->root_depth++ == 0;
@@ -730,17 +724,12 @@ static void snapshot(lua_State *L, lua_State *thread) {
       record->stopped_start = 0;
     }
     if (outer) {
-      count = snapshot_needed(L, thread != NULL ? thread : L);
-      if (thread == NULL && L->stack_peer != NULL)
-        count += snapshot_needed(L, L->stack_peer);
-      if (count)
-        started = now();
+      record->root_snapshot_requests++;
+      started = now();
     }
   }
-  if (thread != NULL)
-    __real_luaC_snapshot(L, thread);
-  else
-    __real_luaC_checksnapshot(L);
+  count = thread != NULL ? __real_luaC_snapshot(L, thread)
+                         : __real_luaC_checksnapshot(L);
   if (record != NULL) {
     if (outer && count) {
       record->root_snapshot_calls += count;
@@ -748,12 +737,13 @@ static void snapshot(lua_State *L, lua_State *thread) {
     }
     record->root_depth--;
   }
+  return count;
 }
 
-void __wrap_luaC_snapshot(lua_State *L, lua_State *thread) {
-  snapshot(L, thread);
+unsigned __wrap_luaC_snapshot(lua_State *L, lua_State *thread) {
+  return snapshot(L, thread);
 }
-void __wrap_luaC_checksnapshot(lua_State *L) { snapshot(L, NULL); }
+unsigned __wrap_luaC_checksnapshot(lua_State *L) { return snapshot(L, NULL); }
 
 void __wrap_luaW_waitcollector(lua_State *L, int reason) {
   GcProbe *record = probe(L);

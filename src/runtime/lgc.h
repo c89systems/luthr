@@ -597,11 +597,12 @@ LUAI_FUNC GCObject *luaC_barriernext (GCObject *object);
 #define luaC_prewriteptr(L,old,newp) \
   { luaC_tracepointer((L),(old)); luaC_tracepointer((L),(newp)); }
 LUAI_FUNC void luaC_traceobject (lua_State *L, GCObject *object);
-LUAI_FUNC void luaC_snapshot (lua_State *L, lua_State *thread);
+/* Return the number of stacks whose roots were published by this call. */
+LUAI_FUNC unsigned luaC_snapshot (lua_State *L, lua_State *thread);
 LUAI_FUNC int luaC_snapshotparked (lua_State *L, lua_State *thread);
 LUAI_FUNC void luaC_snapshotproto (lua_State *L, Proto *proto);
 LUAI_FUNC void luaC_traceview (lua_State *L, const Table *view);
-LUAI_FUNC void luaC_checksnapshot (lua_State *L);
+LUAI_FUNC unsigned luaC_checksnapshot (lua_State *L);
 LUAI_FUNC void luaC_trimstack (lua_State *L);
 LUAI_FUNC lu_mem luaC_tracebatch (lua_State *L, unsigned limit);
 LUAI_FUNC void luaC_readytrace (global_State *g);

@@ -63,7 +63,8 @@ foreach(path IN LISTS gc_profile_paths)
     foreach(field IN ITEMS stop_requests stop_gc stop_barrier stop_other publish_calls
         collector_body_ns collector_calls collector_running_calls barrier_records
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
-        trace_ns trace_scan_ns trace_peak_workers trace_work_bytes root_snapshot_ns stopped_ns
+        trace_ns trace_scan_ns trace_peak_workers trace_work_bytes
+        root_snapshot_requests root_snapshot_calls root_snapshot_ns stopped_ns
         sweep_ns sweep_scan_ns sweep_records sweep_paused_records
         startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
         minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
@@ -75,6 +76,7 @@ foreach(path IN LISTS gc_profile_paths)
     math(EXPR classified "${stop_gc} + ${stop_barrier} + ${stop_other}")
     math(EXPR minor_measured "${minor_before_wake_ns} + ${minor_during_wake_ns} + ${minor_after_wake_ns}")
     math(EXPR minor_fiber "${minor_dispatch_ns} + ${minor_restore_ns}")
+    math(EXPR root_capacity "2 * ${root_snapshot_requests}")
     foreach(clock IN ITEMS cpu wall)
       string(JSON total GET "${row}" "${clock}_ns")
       string(JSON execution GET "${row}" "execution_${clock}_ns")
@@ -100,6 +102,8 @@ foreach(path IN LISTS gc_profile_paths)
         back_records GREATER barrier_records OR
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
         sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
+        root_snapshot_calls GREATER root_capacity OR
+        (root_snapshot_calls EQUAL 0 AND NOT root_snapshot_ns EQUAL 0) OR
         metadata_handoffs GREATER metadata_waits OR metadata_handoff_ns GREATER metadata_wait_ns OR
         metadata_handoff_max_ns GREATER metadata_handoff_ns OR
         minor_woken GREATER minor_waits OR minor_measured GREATER minor_wait_ns OR

@@ -28,7 +28,7 @@
   X(trace_retry_protos) X(trace_retry_upvalues) X(trace_retry_closures) X(trace_retry_userdata) \
   X(sweep_calls) X(sweep_ns) X(sweep_scan_ns) X(sweep_records) \
   X(sweep_paused_records) X(sweep_poll_calls) X(sweep_assist_calls) \
-  X(root_snapshot_calls) X(root_snapshot_ns) \
+  X(root_snapshot_requests) X(root_snapshot_calls) X(root_snapshot_ns) \
   X(heap_entries) X(heap_gc_entries) X(heap_contended_entries) X(heap_gc_wait_ns) X(heap_deferred_entries) \
   X(allocator_calls) X(allocator_waits) X(allocator_wait_ns) \
   X(quiesce_waits) X(quiesce_wait_ns) X(metadata_waits) X(metadata_wait_ns) \
