@@ -410,7 +410,8 @@ typedef struct GCObject {
 #define LSTRMEM		-3  /* external long string with deallocation */
 
 /* Flags in 'extra' for long strings. Short strings use it for tokens. */
-enum { LSTR_ZEROHASH = 1, LSTR_TASK = 2, LSTR_TASKLIVE = 4 };
+enum { LSTR_ZEROHASH = 1, LSTR_TASK = 2, LSTR_TASKLIVE = 4,
+       LSTR_TASKOLD = 8 };
 
 /*
 ** Header for a string value.

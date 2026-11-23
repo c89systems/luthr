@@ -423,6 +423,10 @@ struct lua_State {
   lu_byte task_nursery_pending;
   lu_byte task_seal_requested;  /* atomic request, retired under world.mutex */
   uint16_t task_root_inline_index[2 * LUA_TASK_INLINE_ROOTS];
+  GCObject *task_old_objects;  /* first survivor in task_objects */
+  GCObject *task_remembered;  /* young targets, terminated by this thread */
+  size_t task_old_bytes;
+  unsigned task_young_scans;
 };
 
 

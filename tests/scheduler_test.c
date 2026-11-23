@@ -2078,6 +2078,43 @@ static void nursery_edges(struct fixture *f, int generational) {
   finish(f);
 }
 
+static void nursery_survivors(struct fixture *f, int generational) {
+  int status, results;
+  init(f, 2);
+  luaL_openlibs(f->main);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(f->main, "nursery_inspect", nursery_inspect);
+  require(luaL_dostring(f->main, "nursery_external={42}") == LUA_OK);
+  submit(f, 0,
+         "local root={nursery_external}; nursery_external=nil; "
+         "for i=2,3072 do root[i]={i} end; "
+         "local private,edges=nursery_inspect(root); "
+         "assert(private and edges==1); "
+         "local function attach(t) "
+         "  local child={42}; "
+         "  t[1]=nil; t[2]=child; t[3]=('keep'):rep(33); t[child]=17 "
+         "end; "
+         "attach(root); "
+         "for i=3073,5000 do root[i]=i end; "
+         "for i=1,40000 do local scratch={i,i+1} end; "
+         "private,edges=nursery_inspect(root); assert(private and edges==0); "
+         "assert(root[2][1]==42 and #root[3]==132 and root[5000]==5000); "
+         "local latest={43}; root[4]=latest; root[5]=latest; root[latest]=23; "
+         "return root",
+         0);
+  luaSC_wait(&f->tasks[0]);
+  require(luaSC_collect(f->main, &f->tasks[0], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_setglobal(f->main, "nursery_result");
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(luaL_dostring(f->main, "local t=nursery_result; "
+                                 "assert(t[1]==nil and t[2][1]==42 and "
+                                 "t[3]==('keep'):rep(33) and t[5000]==5000); "
+                                 "assert(t[t[2]]==17 and t[4]==t[5] and "
+                                 "t[4][1]==43 and t[t[4]]==23)") == LUA_OK);
+  finish(f);
+}
+
 static void nursery_full(struct fixture *f, int generational) {
   lua_State *L;
   init(f, 3);
@@ -2447,6 +2484,10 @@ int main(int argc, char **argv) {
     nursery_edges(f, 0);
   else if (strcmp(argv[1], "nursery_edges_generational") == 0)
     nursery_edges(f, 1);
+  else if (strcmp(argv[1], "nursery_survivors_incremental") == 0)
+    nursery_survivors(f, 0);
+  else if (strcmp(argv[1], "nursery_survivors_generational") == 0)
+    nursery_survivors(f, 1);
   else if (strcmp(argv[1], "nursery_native_incremental") == 0)
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)

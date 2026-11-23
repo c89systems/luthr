@@ -396,6 +396,10 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->nursery_epoch = NURSERY_TAG;
   L->nursery_tables = 0;
   L->task_objects = NULL;
+  L->task_old_objects = NULL;
+  L->task_remembered = obj2gco(L);
+  L->task_old_bytes = 0;
+  L->task_young_scans = 0;
   L->task_nursery_bytes = L->task_nursery_limit = 0;
   L->task_live_bytes = L->task_paced_bytes = 0;
   L->task_root_count = 0;

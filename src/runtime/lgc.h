@@ -247,11 +247,14 @@ static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
 }
 
 enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_TASK = 8,
-       NURSERY_STEP = 16 };
+       NURSERY_STEP = 16, NURSERY_TASKOLD = 16 };  /* age only on task tables */
+
+l_sinline int luaC_tasktablestate (uint64_t state) {
+  return (state & (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);
+}
 
 l_sinline int luaC_tasktable (const Table *table) {
-  return (__atomic_load_n(&table->gcstate, __ATOMIC_ACQUIRE) &
-          (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);
+  return luaC_tasktablestate(__atomic_load_n(&table->gcstate, __ATOMIC_ACQUIRE));
 }
 
 l_sinline int luaC_taskstring (const GCObject *object) {
@@ -432,7 +435,7 @@ LUAI_FUNC void luaC_pollseal (lua_State *L);
 LUAI_FUNC void luaC_retireseal (lua_State *L);
 LUAI_FUNC void luaC_endtask (lua_State *L);
 LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
-LUAI_FUNC void luaC_taskresize (lua_State *L, l_mem change);
+LUAI_FUNC void luaC_taskresize (lua_State *L, Table *table, l_mem change);
 LUAI_FUNC void luaC_taskstep (lua_State *L);
 LUAI_FUNC void luaC_freetaskroots (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);

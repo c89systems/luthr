@@ -838,7 +838,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     if (oldasize != newasize) change += cast(l_mem, concretesize(newasize));
     if (retired_array != NULL) change -= cast(l_mem, concretesize(oldasize));
     if (retired_nodes != NULL) change -= cast(l_mem, sizehash(newt.node));
-    luaC_taskresize(L, change);
+    luaC_taskresize(L, t, change);
   }
   luaR_poproot(L, &image);
   if (retirement != NULL) {

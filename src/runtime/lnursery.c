@@ -21,6 +21,10 @@
 #define TASK_NURSERY_ROOT_MAX 2048u
 #define TASK_ROOT_LIVE cast(uintptr_t, 1u)
 
+typedef enum NurseryScan {
+  NURSERY_CONSTRUCTION, NURSERY_TASK_FULL, NURSERY_TASK_YOUNG
+} NurseryScan;
+
 /* The hash stores dense indices, so root snapshots visit only actual roots.
 ** During a local trace the low pointer bit records which roots remain live. */
 l_sinline uint16_t *rootslot (lua_State *L, uintptr_t root) {
@@ -43,6 +47,7 @@ static void indexroots (lua_State *L) {
 
 static void clearroots (lua_State *L) {
   L->task_nursery_pending = 0;
+  L->task_young_scans = 0;
   if (L->task_root_count != 0) {
     L->task_root_count = 0;
     indexroots(L);
@@ -84,7 +89,7 @@ void luaC_freetaskroots (lua_State *L) {
   }
 }
 
-void luaC_taskresize (lua_State *L, l_mem change) {
+static void taskresize (lua_State *L, l_mem change) {
   size_t before = L->task_live_bytes - L->task_paced_bytes;
   size_t after;
   lua_assert(change >= 0 || cast(size_t, -change) <= L->task_live_bytes);
@@ -99,6 +104,15 @@ void luaC_taskresize (lua_State *L, l_mem change) {
     after = TASK_NURSERY_START;
   }
   luaM_privatebytes(L, cast(l_mem, after) - cast(l_mem, before));
+}
+
+void luaC_taskresize (lua_State *L, Table *t, l_mem change) {
+  lua_assert(luaC_tasktable(t));
+  if (luaC_tablestate(t) & NURSERY_TASKOLD) {
+    lua_assert(change >= 0 || cast(size_t, -change) <= L->task_old_bytes);
+    L->task_old_bytes += change;
+  }
+  taskresize(L, change);
 }
 
 int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
@@ -119,7 +133,7 @@ int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
     L->task_nursery_pending = 1;
     L->poll_remaining = 1;
   }
-  luaC_taskresize(L, cast(l_mem, bytes));
+  taskresize(L, cast(l_mem, bytes));
   return 1;
 }
 
@@ -148,6 +162,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
     luaC_traceobject(L, cast(GCObject *, thread->task_roots[i]));
   for (o = thread->task_objects; o != NULL; o = next) {
     next = luaC_allocnext(o);
+    o->next = NULL;
     setmarked(o, mark);
     if (o->tt == LUA_VTABLE) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
@@ -159,7 +174,8 @@ static void sealtask (lua_State *L, lua_State *thread) {
     }
     else {
       TString *s = gco2ts(o);
-      __atomic_fetch_and(&s->extra, cast_byte(~LSTR_TASK), __ATOMIC_RELEASE);
+      __atomic_fetch_and(&s->extra, cast_byte(~(LSTR_TASK | LSTR_TASKOLD)),
+                         __ATOMIC_RELEASE);
       luaC_allocnext(o) = strings;
       strings = o;
       if (tail == NULL) tail = o;
@@ -167,6 +183,9 @@ static void sealtask (lua_State *L, lua_State *thread) {
   }
   if (strings != NULL) luaC_publishobjects(L, strings, tail);
   thread->task_objects = NULL;
+  thread->task_old_objects = NULL;
+  thread->task_remembered = obj2gco(thread);
+  thread->task_old_bytes = 0;
   clearroots(thread);
   thread->task_nursery_bytes = 0;
   thread->task_nursery_closed = 1;
@@ -273,12 +292,31 @@ void __attribute__((cold)) luaC_preparefull (lua_State *L) {
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
 }
 
+/* Remember the target until its first local collection. Overwriting a slot
+** can leave a floating survivor until the next full pass. Private objects
+** can use the header link until publication. The thread sentinel lets a
+** non-null link identify even the last entry and deduplicate repeated writes. */
+static void remembertarget (lua_State *L, GCObject *value) {
+  if (value->next != NULL) return;
+  if (value->tt == LUA_VTABLE
+        ? (luaC_tablestate(gco2t(value)) & NURSERY_TASKOLD) != 0
+        : (__atomic_load_n(&gco2ts(value)->extra, __ATOMIC_RELAXED) &
+           LSTR_TASKOLD) != 0)
+    return;
+  value->next = L->task_remembered;
+  L->task_remembered = value;
+}
+
 int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
+  uint64_t state = owner->tt == LUA_VTABLE ? luaC_tablestate(gco2t(owner)) : 0;
   lua_assert(L->task_objects != NULL);
-  if (owner->tt == LUA_VTABLE && luaC_tasktable(gco2t(owner))) {
+  if (luaC_tasktablestate(state)) {
     uintptr_t root;
     uint16_t *slot;
-    if (luaC_taskobject(value)) return 1;
+    if (luaC_taskobject(value)) {
+      if (state & NURSERY_TASKOLD) remembertarget(L, value);
+      return 1;
+    }
     root = cast(uintptr_t, value);
     lua_assert(!(root & TASK_ROOT_LIVE));
     slot = rootslot(L, root);
@@ -374,6 +412,9 @@ void luaC_endtask (lua_State *L) {
     luaC_traceobject(L, cast(GCObject *, L->task_roots[i]));
   o = L->task_objects;
   L->task_objects = NULL;
+  L->task_old_objects = NULL;
+  L->task_remembered = obj2gco(L);
+  L->task_old_bytes = 0;
   clearroots(L);
   L->task_nursery_bytes = 0;
   L->task_nursery_closed = 1;
@@ -382,17 +423,15 @@ void luaC_endtask (lua_State *L) {
   luaM_flushdebt(L);
 }
 
-l_sinline int nurserytable (lua_State *L, Table *table, int task) {
-  return task ? luaC_tasktable(table) : luaC_nurserytable(L, table);
-}
-
 l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
-                            int task) {
+                            NurseryScan scan) {
   if (object->tt == LUA_VTABLE) {
     Table *t = gco2t(object);
-    uint64_t state;
-    if (!nurserytable(L, t, task)) return 0;
-    state = luaC_tablestate(t);
+    uint64_t state = luaC_tablestate(t);
+    if (scan == NURSERY_CONSTRUCTION ? !luaC_nurserytable(L, t)
+                                     : !luaC_tasktablestate(state))
+      return 0;
+    if (scan == NURSERY_TASK_YOUNG && (state & NURSERY_TASKOLD)) return 1;
     if (!(state & NURSERY_LIVE)) {
       luaC_settablestate(t, state | NURSERY_LIVE);
       t->gclist = *gray;
@@ -402,23 +441,25 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
   else {
     TString *s;
     lu_byte flags;
-    if (!task || object->tt != LUA_VLNGSTR) return 0;
+    if (scan == NURSERY_CONSTRUCTION || object->tt != LUA_VLNGSTR) return 0;
     s = gco2ts(object);
     flags = __atomic_load_n(&s->extra, __ATOMIC_RELAXED);
     if (!(flags & LSTR_TASK)) return 0;
+    if (scan == NURSERY_TASK_YOUNG && (flags & LSTR_TASKOLD)) return 1;
     if (!(flags & LSTR_TASKLIVE))
       __atomic_store_n(&s->extra, flags | LSTR_TASKLIVE, __ATOMIC_RELAXED);
   }
   return 1;
 }
 
-l_sinline int nurseryedge (lu_byte tag, int task) {
-  return task ? tag & BIT_ISCOLLECTABLE : tag == ctb(LUA_VTABLE);
+l_sinline int nurseryedge (lu_byte tag, NurseryScan scan) {
+  return scan == NURSERY_CONSTRUCTION ? tag == ctb(LUA_VTABLE)
+                                      : tag & BIT_ISCOLLECTABLE;
 }
 
 l_sinline void visitnursery (lua_State *L, GCObject *object, GCObject **gray,
-                              int task) {
-  if (!marknursery(L, object, gray, task) && task) {
+                              NurseryScan scan) {
+  if (!marknursery(L, object, gray, scan) && scan == NURSERY_TASK_FULL) {
     uint16_t index = *rootslot(L, cast(uintptr_t, object));
     lua_assert(index != 0 && index <= L->task_root_count);
     if (index != 0) L->task_roots[index - 1] |= TASK_ROOT_LIVE;
@@ -440,44 +481,61 @@ static void prunetaskroots (lua_State *L) {
   }
 }
 
-static void tracenursery (lua_State *L, GCObject *gray, int task) {
+static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
   StkId slot;
+  if (scan != NURSERY_CONSTRUCTION) {
+    GCObject *o = L->task_remembered;
+    while (o != obj2gco(L)) {
+      GCObject *next = o->next;
+      o->next = NULL;
+      if (scan == NURSERY_TASK_YOUNG) marknursery(L, o, &gray, scan);
+      o = next;
+    }
+    L->task_remembered = obj2gco(L);
+  }
   for (slot = L->stack.p; slot < L->top.p; slot++)
-    if (nurseryedge(rawtt(s2v(slot)), task))
-      marknursery(L, gcvalue(s2v(slot)), &gray, task);
+    if (nurseryedge(rawtt(s2v(slot)), scan))
+      marknursery(L, gcvalue(s2v(slot)), &gray, scan);
   while (gray != NULL) {
     Table *t = gco2t(gray);
     unsigned i;
     gray = t->gclist;
     if (t->metatable != NULL)
-      visitnursery(L, obj2gco(t->metatable), &gray, task);
+      visitnursery(L, obj2gco(t->metatable), &gray, scan);
     for (i = 0; i < t->asize; i++)
-      if (nurseryedge(*getArrTag(t, i), task))
-        visitnursery(L, getArrVal(t, i)->gc, &gray, task);
+      if (nurseryedge(*getArrTag(t, i), scan))
+        visitnursery(L, getArrVal(t, i)->gc, &gray, scan);
     for (i = 0; i < allocsizenode(t); i++) {
       Node *node = gnode(t, i);
       if (isempty(gval(node))) continue;
-      if (nurseryedge(keytt(node), task))
-        visitnursery(L, gckey(node), &gray, task);
-      if (nurseryedge(rawtt(gval(node)), task))
-        visitnursery(L, gcvalue(gval(node)), &gray, task);
+      if (nurseryedge(keytt(node), scan))
+        visitnursery(L, gckey(node), &gray, scan);
+      if (nurseryedge(rawtt(gval(node)), scan))
+        visitnursery(L, gcvalue(gval(node)), &gray, scan);
     }
   }
-  if (task) prunetaskroots(L);
+  if (scan == NURSERY_TASK_FULL) prunetaskroots(L);
 }
 
-static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
+static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
+  int task = scan != NURSERY_CONSTRUCTION;
+  GCObject *end = scan == NURSERY_TASK_YOUNG ? L->task_old_objects : NULL;
   GCObject *dead = NULL, *o;
-  size_t bytes = 0;
+  size_t bytes = end != NULL ? L->task_old_bytes : 0;
   StkId slot;
-  while ((o = *link) != NULL) {
+  while ((o = *link) != end) {
     if (o->tt == LUA_VTABLE) {
       Table *t = gco2t(o);
-      if (nurserytable(L, t, task)) {
+      if (task || luaC_nurserytable(L, t)) {
         uint64_t state = luaC_tablestate(t);
+        lua_assert(!task || luaC_tasktablestate(state));
         if (!(state & NURSERY_LIVE)) goto detach;
-        luaC_settablestate(t, state & ~cast(uint64_t, NURSERY_LIVE));
-        if (task) bytes += luaH_size(t, t);
+        state &= ~cast(uint64_t, NURSERY_LIVE);
+        if (task) {
+          state |= NURSERY_TASKOLD;
+          bytes += luaH_size(t, t);
+        }
+        luaC_settablestate(t, state);
       }
     }
     else if (task) {
@@ -485,7 +543,8 @@ static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
       lu_byte flags = __atomic_load_n(&s->extra, __ATOMIC_RELAXED);
       lua_assert(flags & LSTR_TASK);
       if (!(flags & LSTR_TASKLIVE)) goto detach;
-      __atomic_store_n(&s->extra, flags & ~LSTR_TASKLIVE, __ATOMIC_RELAXED);
+      __atomic_store_n(&s->extra, (flags & ~LSTR_TASKLIVE) |
+                                  LSTR_TASKOLD, __ATOMIC_RELAXED);
       bytes += sizestrreg(s->u.lnglen);
     }
     link = luaC_alloclink(o);
@@ -502,7 +561,11 @@ static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
     o->next = dead;
     dead = o;
   }
-  if (task) pacenursery(L, bytes);
+  if (task) {
+    L->task_old_objects = L->task_objects;
+    L->task_old_bytes = bytes;
+    pacenursery(L, bytes);
+  }
   if (dead == NULL) return bytes;
   /* A later safepoint can widen top. Discard stale registers before freeing
   ** any of their referents, including frees that release admission. */
@@ -522,7 +585,8 @@ static size_t sweepnursery (lua_State *L, GCObject **link, int task) {
 
 void luaC_taskstep (lua_State *L) {
   global_State *g = G(L);
-  size_t live;
+  size_t live, young_bytes;
+  NurseryScan scan = NURSERY_TASK_FULL;
   L->task_nursery_pending = 0;
   if (!gcrunning(g) || L->native_roots != NULL ||
       L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
@@ -530,7 +594,8 @@ void luaC_taskstep (lua_State *L) {
     L->task_nursery_limit = TASK_NURSERY_BYTES + 1;
     return;
   }
-  if (luaC_taskrootpressure(L) && L->task_nursery_bytes < L->task_nursery_limit &&
+  if (L->task_old_bytes < TASK_NURSERY_START / 2 && luaC_taskrootpressure(L) &&
+      L->task_nursery_bytes < L->task_nursery_limit &&
       growroots(L)) return;
   if (L->task_objects == NULL) return;
 #if defined(LUAI_ASSERT)
@@ -542,12 +607,26 @@ void luaC_taskstep (lua_State *L) {
       lua_assert(!luaF_localupval(L, uv) || uplevel(uv) < L->top.p);
   }
 #endif
-  tracenursery(L, NULL, 1);
-  live = sweepnursery(L, &L->task_objects, 1);
+  /* A young pass represents roughly one slab of allocation. Amortize full
+  ** tracing over at least four times the survivor size, with a two MiB
+  ** minimum interval. Capacity and root pressure can force earlier passes. */
+  young_bytes = cast_sizet(L->task_young_scans) * TASK_NURSERY_START;
+  if (L->task_old_bytes >= TASK_NURSERY_START / 2 &&
+      L->task_nursery_bytes < TASK_NURSERY_BYTES - TASK_NURSERY_START &&
+      (young_bytes < TASK_NURSERY_BYTES || young_bytes / 4 < L->task_old_bytes) &&
+      !luaC_taskrootpressure(L))
+    scan = NURSERY_TASK_YOUNG;
+  L->task_young_scans = scan == NURSERY_TASK_YOUNG ? L->task_young_scans + 1 : 0;
+  tracenursery(L, NULL, scan);
+  live = sweepnursery(L, &L->task_objects, scan);
   if (L->task_objects != NULL) {
     lua_assert(L->task_live_bytes == live);
     L->task_nursery_bytes = live;
-    L->task_nursery_limit = live * 2 + TASK_NURSERY_START;
+    L->task_nursery_limit = TASK_NURSERY_START +
+      (live < TASK_NURSERY_START / 2 ? live * 2 : live);
+    if (live < TASK_NURSERY_BYTES - TASK_NURSERY_START &&
+        L->task_nursery_limit > TASK_NURSERY_BYTES - TASK_NURSERY_START)
+      L->task_nursery_limit = TASK_NURSERY_BYTES - TASK_NURSERY_START;
     if (luaC_taskrootpressure(L)) growroots(L);
   }
 }
@@ -592,7 +671,7 @@ void luaC_collectnursery (lua_State *L) {
   for (o = L->new_tables; o != NULL; o = luaC_allocnext(o))
     if (o->tt == LUA_VTABLE && luaC_nurserytable(L, gco2t(o)) &&
         (luaC_tablestate(gco2t(o)) & NURSERY_ROOT))
-      marknursery(L, o, &gray, 0);
-  tracenursery(L, gray, 0);
-  sweepnursery(L, &L->new_tables, 0);
+      marknursery(L, o, &gray, NURSERY_CONSTRUCTION);
+  tracenursery(L, gray, NURSERY_CONSTRUCTION);
+  sweepnursery(L, &L->new_tables, NURSERY_CONSTRUCTION);
 }
