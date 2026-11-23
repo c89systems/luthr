@@ -35,6 +35,11 @@ static int answer(lua_State *L) {
 static void small_table(lua_State *L, lua_State *other, int from_lua) {
   const Table *table;
   unsigned i;
+  lua_createtable(L, 2, 0);
+  table = lua_topointer(L, -1);
+  require(table != NULL && table->asize == 2);
+  budget(table, 112);
+  lua_pop(L, 1);
   lua_createtable(L, 0, 2);
   table = lua_topointer(L, -1);
   require(table != NULL && table->inline_bytes >= 2 * sizeof(Node));

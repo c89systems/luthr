@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <lauxlib.h>
 #include <lcallback.h>
+#include <ldo.h>
 #include <lstate.h>
 #include <lualib.h>
 #include <pthread.h>
@@ -17,6 +18,7 @@ struct fixture {
 };
 static struct fixture *active;
 static int sync_failure;
+static int message_failure;
 
 #define require(condition)                                                     \
   do {                                                                         \
@@ -27,6 +29,18 @@ static int sync_failure;
   } while (0)
 int __real_pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
 int __real_pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
+TString *__real_luaS_newlstr(lua_State *, const char *, size_t);
+TString *__wrap_luaS_newlstr(lua_State *state, const char *text,
+                             size_t length) {
+  static const char close_error[] =
+      "cannot close an active registered callback";
+  if (message_failure && length == sizeof(close_error) - 1 &&
+      memcmp(text, close_error, length) == 0) {
+    message_failure = 0;
+    luaD_throw(state, LUA_ERRMEM);
+  }
+  return __real_luaS_newlstr(state, text, length);
+}
 int __wrap_pthread_mutex_init(pthread_mutex_t *mutex,
                               const pthread_mutexattr_t *attributes) {
   if (sync_failure == 1) {
@@ -209,25 +223,19 @@ static void *run(void *context) {
     sync_failure = strcmp(fixture->mode, "mutex") == 0 ? 1 : 2;
     require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_ERRMEM);
     require(sync_failure == 0 && G(state)->callbacks == NULL);
+  } else if (strcmp(fixture->mode, "create_oom_message") == 0) {
+    message_failure = 1;
+    require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_ERRMEM);
+    require(message_failure == 0 && G(state)->callbacks == NULL);
+    require(fixture->callbacks[0].thread == NULL &&
+            fixture->callbacks[0].close_error == NULL);
   } else if (strncmp(fixture->mode, "create_oom", 10) == 0) {
-    int status;
-    fixture->fail_at = fixture->allocations +
-                       (strcmp(fixture->mode, "create_oom_message") == 0 ? 3U
-                        : strcmp(fixture->mode, "create_oom_stack") == 0 ? 2U
-                                                                         : 1U);
+    fixture->fail_at =
+        fixture->allocations +
+        (strcmp(fixture->mode, "create_oom_stack") == 0 ? 2U : 1U);
     fixture->remaining = 2;
-    status = luaCB_init(state, &fixture->callbacks[0], 0);
-    if (status == LUA_OK) {
-      /* The fixed rejection string can reuse a locally allocated page. */
-      require(strcmp(fixture->mode, "create_oom_message") == 0);
-      require(fixture->failures == 0 && fixture->remaining == 2);
-      luaCB_revoke(&fixture->callbacks[0]);
-      require(luaCB_destroy(state, &fixture->callbacks[0]) == LUA_OK);
-      fixture->remaining = 0;
-    } else {
-      require(status == LUA_ERRMEM);
-      require(fixture->failures == 2 && fixture->remaining == 0);
-    }
+    require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_ERRMEM);
+    require(fixture->failures == 2 && fixture->remaining == 0);
     require(G(state)->callbacks == NULL);
   }
   require(luaCB_init(state, &fixture->callbacks[0], 0) == LUA_OK);

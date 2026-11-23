@@ -962,7 +962,8 @@ set_target_properties(callback_entry_test PROPERTIES C_STANDARD 99)
 target_compile_options(callback_entry_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(callback_entry_test PRIVATE luthr_static)
 target_link_options(callback_entry_test PRIVATE
-  -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init)
+  -Wl,--wrap=pthread_mutex_init -Wl,--wrap=pthread_cond_init
+  -Wl,--wrap=luaS_newlstr)
 foreach(case IN ITEMS mutex condition create_oom create_oom_stack create_oom_message invoke_oom
     roots_incremental roots_generational errors reserve)
   add_test(NAME callback_entry_${case} COMMAND callback_entry_test ${case})

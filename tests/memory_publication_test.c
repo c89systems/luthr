@@ -346,7 +346,7 @@ static void ordinary_operations(lua_State *state) {
   lua_newtable(state); /* selected metatable, rooted for the whole check */
   luaX_lockstate(state);
   for (bin = 0; bin < LUA_ALLOC_BINS; bin++) {
-    size_t size = (size_t)16 << bin;
+    size_t size = luaMP_binbytes(bin);
     for (i = 0; i < 4; i++)
       blocks[i] = luaM_malloc_(state, size, 0);
     for (i = 0; i < 4; i++)

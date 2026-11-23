@@ -79,17 +79,17 @@ LUAI_FUNC void luaMC_notify (LuaCacheBorrow *borrow);
 
 l_sinline size_t luaMP_binbytes (unsigned bin) {
   static const unsigned short sizes[LUA_ALLOC_BINS] =
-    {16, 32, 64, 128, 160, 192, 256, LUA_ALLOC_MAX};
+    {16, 32, 64, 112, 128, 160, 192, 256, LUA_ALLOC_MAX};
   lua_assert(bin < LUA_ALLOC_BINS);
   return sizes[bin];
 }
 
-/* Class lookup in 16-byte units. 160 and 192 keep a small table and its
-** initial storage together without rounding the combined object to 256. */
+/* Class lookup in 16-byte units. 112 fits small tables with inline arrays.
+** 160 and 192 keep larger inline layouts below the 256-byte class. */
 l_sinline unsigned luaMP_sizeclass (size_t bytes) {
   static const unsigned char bins[LUA_ALLOC_MAX / 16 + 1] = {
-    0, 0, 1, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 6, 6,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+    0, 0, 1, 2, 2, 3, 3, 3, 4, 5, 5, 6, 6, 7, 7, 7, 7,
+    8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8
   };
   lua_assert(bytes <= LUA_ALLOC_MAX);
   return bins[(bytes + 15) / 16];
