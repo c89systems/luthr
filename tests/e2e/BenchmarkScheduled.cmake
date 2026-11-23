@@ -211,11 +211,12 @@ set(closures_iterations 50000)
 set(allocation_gc_iterations 5000)
 set(callback_workloads lua_callback native_callbacks native_callbacks_local native_direct
   native_direct_local native_leaf native_stack native_identity
-  native_scalar native_scalar_direct native_protected native_streaming)
+  native_scalar native_scalar_direct native_protected native_records native_streaming)
 foreach(workload IN LISTS callback_workloads)
   set(${workload}_iterations 18000)
 endforeach()
 set(native_streaming_iterations 6000)
+set(native_records_iterations 6000)
 foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
     shared_growth shared_reads closures allocation_gc ${callback_workloads})
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")

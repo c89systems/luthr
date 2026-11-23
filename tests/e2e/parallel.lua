@@ -73,6 +73,29 @@ local local_native_add=kind=='native_callbacks_local' or kind=='native_direct_lo
 local native_add=kind=='native_callbacks' or kind=='native_direct' or local_native_add
 local native_identity=kind=='native_identity'
 local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
+if kind=='native_records' then
+  local callback=require('compat_fixture').callback
+  local schema={prefix='record=',weight=3}
+  local tail=n%16
+  total=schema.weight*total+(#schema.prefix+64)*n+120*(n//16)+tail*(tail+1)//2
+  local function consume(row)
+    return row.sequence*schema.weight+#row.payload
+  end
+  workloads[kind]=function()
+    local recent={}
+    local sum=0
+    for i=1,n do
+      local row={sequence=i,payload=schema.prefix..string.rep('x',64+i%16)}
+      recent[(i-1)%64+1]=row
+      sum=sum+callback(consume,row)
+    end
+    for i=math.max(1,n-63),n do
+      local row=recent[(i-1)%64+1]
+      assert(row.sequence==i and #row.payload==#schema.prefix+64+i%16)
+    end
+    return sum
+  end
+end
 if kind=='native_streaming' then
   local native=require('compat_fixture')
   local chunk=string.rep('x',128)
