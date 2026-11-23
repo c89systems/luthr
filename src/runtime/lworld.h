@@ -19,17 +19,22 @@ typedef struct LuaParticipation {
   uint64_t trace_armed;  /* written with the stack gate and world.mutex */
 } LuaParticipation;
 
-/* Control publishes admission requests and the reclamation epoch together.
-** Epochs use the masked word so modular comparisons still span 64 bits. */
+/* A single snapshot covers collector colours, admission requests, and the
+** storage epoch. Epoch arithmetic uses the masked word and wraps at 64 bits.
+** The low byte also supplies the initial colour of a new object. */
 enum {
-  LUA_WORLD_STOPPED = 1,
-  LUA_WORLD_STORAGE_WAIT = 2,
-  LUA_WORLD_ARM_TRACE = 4,
-  LUA_WORLD_STACK_ROOTS = 8,
-  LUA_WORLD_SEAL_NURSERIES = 16,
+  LUA_MARK_YOUNG = 1u << 8,
+  LUA_MARK_ACTIVE = 1u << 9,
+  LUA_MARK_ARMING = 1u << 10,
+  LUA_WORLD_MARK_MASK = (1u << 11) - 1,
+  LUA_WORLD_STOPPED = 1u << 11,
+  LUA_WORLD_STORAGE_WAIT = 1u << 12,
+  LUA_WORLD_ARM_TRACE = 1u << 13,
+  LUA_WORLD_STACK_ROOTS = 1u << 14,
+  LUA_WORLD_SEAL_NURSERIES = 1u << 15,
   LUA_WORLD_REQUESTS = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT |
                        LUA_WORLD_ARM_TRACE | LUA_WORLD_SEAL_NURSERIES,
-  LUA_WORLD_EPOCH_STEP = 32
+  LUA_WORLD_EPOCH_STEP = 1u << 16
 };
 
 typedef struct LuaWorld {
@@ -74,7 +79,7 @@ l_sinline int luaW_heapheld (const LuaWorld *world) {
 }
 
 l_sinline uint64_t luaW_epoch (uint64_t control) {
-  return control & ~cast(uint64_t, LUA_WORLD_REQUESTS | LUA_WORLD_STACK_ROOTS);
+  return control & ~cast(uint64_t, LUA_WORLD_EPOCH_STEP - 1);
 }
 
 LUAI_FUNC int luaW_init (struct global_State *g);

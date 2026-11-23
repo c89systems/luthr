@@ -327,7 +327,7 @@ l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
         cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     uint64_t control = luaW_control(&G(L)->world);
-    if (l_unlikely((control & LUA_WORLD_REQUESTS) || luaC_tracing(L) ||
+    if (l_unlikely((control & (LUA_WORLD_REQUESTS | LUA_MARK_ACTIVE)) ||
         __atomic_load_n(&L->admission->storage_epoch, __ATOMIC_RELAXED) !=
           luaW_epoch(control)))
       luaW_enter(L);

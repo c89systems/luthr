@@ -551,7 +551,6 @@ typedef struct global_State {
   LuaGCPacer pacer;
   l_mem GCcyclelive;  /* initial tracing cohort, less its logical garbage */
   unsigned gcstep_pending;  /* atomic; automatic startup requested or in progress */
-  unsigned mark_state;  /* atomic stamps, allocation age and trace flags */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   unsigned young_work;  /* atomic births and remaining generational work */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */

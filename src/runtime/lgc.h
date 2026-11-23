@@ -73,17 +73,14 @@ l_sinline int luaC_traceblocked (global_State *g) {
          (luaC_waitingstacks(g) && !luaC_tracerunnable(g));
 }
 
-/* Publish the allocation and mark stamps together with trace activation.
-** Inactive states retain the last trace's interpretation for sweeping. */
-enum {
-  LUA_MARK_YOUNG = 1u << 8, LUA_MARK_ACTIVE = 1u << 9, LUA_MARK_ARMING = 1u << 10
-};
-#define luaC_markstate(g) __atomic_load_n(&(g)->mark_state, __ATOMIC_RELAXED)
+#define luaC_markstate(g) \
+  cast_uint(__atomic_load_n(&(g)->world.control, __ATOMIC_RELAXED) & \
+            LUA_WORLD_MARK_MASK)
 #define luaC_tracingglobal(g) \
-  ((__atomic_load_n(&(g)->mark_state, __ATOMIC_ACQUIRE) & LUA_MARK_ACTIVE) != 0)
+  ((__atomic_load_n(&(g)->world.control, __ATOMIC_ACQUIRE) & LUA_MARK_ACTIVE) != 0)
 l_sinline int luaC_scanready (global_State *g) {
   const unsigned bits = LUA_MARK_ACTIVE | LUA_MARK_ARMING;
-  return (__atomic_load_n(&g->mark_state, __ATOMIC_ACQUIRE) & bits) ==
+  return (__atomic_load_n(&g->world.control, __ATOMIC_ACQUIRE) & bits) ==
     LUA_MARK_ACTIVE;
 }
 
@@ -265,7 +262,7 @@ static inline int luaC_unmarked (unsigned state, lu_byte marked) {
 #define isblack(g,o) (!iswhite((g),(o)) && !isgray(o))
 
 static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
-  unsigned state = __atomic_load_n(&g->mark_state, __ATOMIC_ACQUIRE);
+  unsigned state = cast_uint(__atomic_load_n(&g->world.control, __ATOMIC_ACQUIRE));
   return !(state & LUA_MARK_ACTIVE) &&
          luaC_unmarked(state, __atomic_load_n(marked, __ATOMIC_RELAXED));
 }

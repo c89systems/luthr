@@ -56,7 +56,8 @@ l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
           expected | LUA_GATE_STACK, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
       return luaX_valueenterslow(L, 0);
     /* A stop sees this reservation or precedes the control-word check. */
-    if (l_likely(!luaW_stopped(&G(L)->world) && !luaC_tracing(L)))
+    if (l_likely(!(luaW_control(&G(L)->world) &
+                   (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE))))
       return LUA_VALUE_STACK;
     return luaX_valueenterslow(L, 1);
   }

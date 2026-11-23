@@ -493,10 +493,21 @@ static void index_miss(lua_State *state) {
 static void resume_epoch(lua_State *state) {
   LuaWorld *world = &G(state)->world;
   const unsigned requests = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT;
+  unsigned marks;
   luaX_lockstate(state);
+  marks = luaC_markstate(G(state));
   require(pthread_mutex_lock(&world->mutex) == 0);
   luaW_deactivate(state);
+  /* A storage epoch wrapping through zero must leave the mark colours intact.
+   */
+  __atomic_fetch_add(&world->control,
+                     (uint64_t)0 - LUA_WORLD_EPOCH_STEP -
+                         luaW_epoch(luaW_control(world)),
+                     __ATOMIC_SEQ_CST);
+  require(luaC_markstate(G(state)) == marks);
   __atomic_fetch_add(&world->control, LUA_WORLD_EPOCH_STEP, __ATOMIC_SEQ_CST);
+  require(luaW_epoch(luaW_control(world)) == 0 &&
+          luaC_markstate(G(state)) == marks);
   __atomic_fetch_or(&world->control, LUA_WORLD_STORAGE_WAIT, __ATOMIC_SEQ_CST);
   /* Resumption runs under world.mutex even when a new epoch needs reporting.
    * It must not recursively acquire that mutex to notify storage waiters. */
@@ -512,6 +523,7 @@ static void resume_epoch(lua_State *state) {
   require((luaW_control(world) & LUA_WORLD_REQUESTS) == requests);
   luaW_start(state);
   require((luaW_control(world) & LUA_WORLD_REQUESTS) == LUA_WORLD_STORAGE_WAIT);
+  require(luaC_markstate(G(state)) == marks);
   luaX_unlockstate(state);
   luaX_lockstate(state);
   require(state->admission->storage_epoch == luaW_epoch(luaW_control(world)));

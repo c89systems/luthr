@@ -681,11 +681,9 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   }
   L = &g->mainth.l;
   L->tt = LUA_VTHREAD;
-  g->mark_state = bitmask(MAJOR0BIT);
   g->strcache_epoch = 1;
   g->shrink_strings = 0;
   g->young_work = LUA_YOUNG_SURVIVOR;
-  L->marked = luaC_newmark(g);
   preinit_thread(L, g, 0);
   if (luaW_init(g) != 0) {
     luaX_destroygate(&L->stack_gate);
@@ -693,6 +691,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     (*f)(ud, g, sizeof(global_State), 0);
     return NULL;
   }
+  L->marked = luaC_newmark(g);
   if (luaM_initpools(L) != 0) {
     luaW_destroy(g);
     luaX_destroygate(&L->stack_gate);

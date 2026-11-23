@@ -551,6 +551,16 @@ static void resetweakstamps (global_State *g) {
   __atomic_store_n(&g->weak_stamp, LUA_WEAK_STAMP_STEP, __ATOMIC_RELAXED);
 }
 
+static void publishmarkstate (LuaWorld *world, unsigned mark) {
+  uint64_t control = __atomic_load_n(&world->control, __ATOMIC_RELAXED);
+  uint64_t next;
+  lua_assert(!(mark & ~LUA_WORLD_MARK_MASK));
+  do {
+    next = (control & ~cast(uint64_t, LUA_WORLD_MARK_MASK)) | mark;
+  } while (!__atomic_compare_exchange_n(&world->control, &control, next, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
 static void starttrace (lua_State *L, unsigned finish) {
   global_State *g = G(L);
   unsigned stamps = luaC_markstate(g) & MARKSTAMPS;
@@ -563,8 +573,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   /* Stop publishing weak closure-cache entries before their epoch changes.
   ** Allocation and shading switch together once the plan is initialized. */
   if (arming)
-    __atomic_store_n(&g->mark_state, luaC_markstate(g) | LUA_MARK_ARMING,
-                     __ATOMIC_RELEASE);
+    __atomic_fetch_or(&g->world.control, LUA_MARK_ARMING, __ATOMIC_RELEASE);
   if (finish == TRACE_YOUNG) {
     stamps ^= bitmask(MINORBIT);
     stamps |= LUA_MARK_YOUNG;
@@ -606,8 +615,8 @@ static void starttrace (lua_State *L, unsigned finish) {
   __atomic_store_n(&g->trace_plan.phase, TRACE_INIT, __ATOMIC_RELAXED);
   g->trace_plan.finish = finish;
   g->trace_plan.roots_pending = arming;
-  __atomic_store_n(&g->mark_state,
-    stamps | LUA_MARK_ACTIVE | (arming ? LUA_MARK_ARMING : 0), __ATOMIC_RELEASE);
+  publishmarkstate(&g->world,
+    stamps | LUA_MARK_ACTIVE | (arming ? LUA_MARK_ARMING : 0));
   if (arming) {
     /* Prepare the root queue before workers can complete the handshake. */
     luaC_initialtrace(L);
@@ -623,7 +632,7 @@ void luaC_publishtraceplan (global_State *g) {
   luaP_begin(g);
   g->GCcyclelive = g->pacer.start;
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
-  __atomic_fetch_and(&g->mark_state, ~cast(unsigned, LUA_MARK_ARMING),
+  __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_MARK_ARMING),
                      __ATOMIC_RELEASE);
 }
 
@@ -631,7 +640,7 @@ static void endtrace (lua_State *L) {
   global_State *g = G(L);
   lua_assert(L->world_depth != 0 && g->trace_stacks == NULL &&
              !__atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE));
-  __atomic_store_n(&g->mark_state, luaC_markstate(g) & ~LUA_MARK_ACTIVE,
+  __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_MARK_ACTIVE),
                    __ATOMIC_RELEASE);
   g->trace_weakcutoff = 0;
   luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
