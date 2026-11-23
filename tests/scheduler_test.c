@@ -1949,6 +1949,7 @@ static void nursery_native_call(struct fixture *f, int generational) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   for (unsigned i = 0; i < 4; i++)
     require(lua_gc(f->main, LUA_GCSTEP, (size_t)0) >= 0);
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   f->native_release = 1;
   require(pthread_cond_broadcast(&f->changed) == 0);
@@ -2048,6 +2049,40 @@ static void nursery_edges(struct fixture *f, int generational) {
   require(lua_rawequal(f->main, -2, -1));
   lua_pop(f->main, 2);
   lua_pop(f->main, 1);
+  finish(f);
+}
+
+static void nursery_full(struct fixture *f, int generational) {
+  lua_State *L;
+  init(f, 3);
+  L = f->main;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_inspect", nursery_inspect);
+  require(luaL_dostring(L, "ready, done = {}, {}") == LUA_OK);
+  submit(f, 0,
+         "local graph={}; graph.self=graph; "
+         "for i=1,4096 do graph[i]={key=i} end; "
+         "graph.label=('local root'):rep(16); "
+         "assert(nursery_inspect(graph)); ready[0]=true; "
+         "while not (done[1] and done[2]) do end; "
+         "assert(not nursery_inspect(graph)); "
+         "assert(graph.self==graph and graph.label==('local root'):rep(16)); "
+         "return graph[4096].key",
+         0);
+  for (unsigned id = 1; id <= 2; id++)
+    submit(f, id,
+           "local id=...; local graph={answer=42}; "
+           "assert(nursery_inspect(graph)); ready[id]=true; "
+           "while not start_full do end; collectgarbage('collect'); "
+           "assert(not nursery_inspect(graph)); done[id]=true; "
+           "return graph.answer",
+           (int)id);
+  require(luaL_dostring(L, "while not (ready[0] and ready[1] and ready[2]) "
+                           "do end; start_full=true") == LUA_OK);
+  require(collect(f, 0, LUA_OK) == 4096);
+  require(collect(f, 1, LUA_OK) == 42);
+  require(collect(f, 2, LUA_OK) == 42);
   finish(f);
 }
 
@@ -2324,6 +2359,10 @@ int main(int argc, char **argv) {
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)
     nursery_native_call(f, 1);
+  else if (strcmp(argv[1], "nursery_full_incremental") == 0)
+    nursery_full(f, 0);
+  else if (strcmp(argv[1], "nursery_full_generational") == 0)
+    nursery_full(f, 1);
   else if (strcmp(argv[1], "native_accounting_count") == 0)
     native_accounting(f, 0);
   else if (strcmp(argv[1], "native_accounting_arm") == 0)

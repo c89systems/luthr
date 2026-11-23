@@ -187,6 +187,93 @@ void luaC_sealtasks (lua_State *L) {
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
 }
 
+void luaC_retireseal (lua_State *L) {
+  global_State *g = G(L);
+  if (__atomic_load_n(&L->task_seal_requested, __ATOMIC_RELAXED) == 0) return;
+  __atomic_store_n(&L->task_seal_requested, 0, __ATOMIC_RELAXED);
+  lua_assert(g->seals_pending != 0);
+  if (--g->seals_pending == 0)
+    luaQ_wake(&g->world.changed, &g->world.waiters);
+}
+
+static void __attribute__((cold)) sealowned (lua_State *L, lua_State *thread) {
+  LuaWorld *world = &G(L)->world;
+  if (__atomic_load_n(&thread->task_seal_requested, __ATOMIC_ACQUIRE) == 0)
+    return;
+  sealtask(L, thread);
+  thread->task_nursery_closed = 1;
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  luaC_retireseal(thread);
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
+void __attribute__((cold)) luaC_pollseal (lua_State *L) {
+  sealowned(L, L);
+  if (L->stack_peer != NULL) sealowned(L, L->stack_peer);
+}
+
+/* The full collector keeps metadata ownership so colors cannot roll over.
+** Active tasks transfer their own cohorts. An idle stack may be borrowed
+** under its gate, and a parked owner's cohort is stable under world.mutex.
+** Once acknowledged, a task cannot start another cohort until mark begins. */
+void __attribute__((cold)) luaC_preparefull (lua_State *L) {
+  global_State *g = G(L);
+  LuaWorld *world = &g->world;
+  LuaTaskRoot *task;
+  lua_assert(luaW_ownsheap(L) && L->world_depth == 0);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  lua_assert(g->seals_pending == 0);
+  __atomic_fetch_or(&world->control, LUA_WORLD_SEAL_NURSERIES, __ATOMIC_SEQ_CST);
+  for (task = g->tasks; task != NULL; task = task->next) {
+    lua_State *thread = task->thread;
+    if (thread->task_owner == task) {
+      __atomic_store_n(&thread->task_seal_requested, 1, __ATOMIC_RELEASE);
+      g->seals_pending++;
+    }
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+  luaC_pollseal(L);
+  luaX_checksync(pthread_mutex_lock(&world->mutex));
+  while (g->seals_pending != 0) {
+    lua_State *idle[8];
+    unsigned count = 0, i;
+    for (task = g->tasks; task != NULL; task = task->next) {
+      lua_State *thread = task->thread;
+      int reservation;
+      if (__atomic_load_n(&thread->task_seal_requested, __ATOMIC_RELAXED) == 0)
+        continue;
+      reservation = __atomic_load_n(&thread->root_waiting, __ATOMIC_RELAXED)
+        ? 2 : luaX_tryreserve(thread);
+      if (reservation == 2) {
+        sealtask(L, thread);
+        thread->task_nursery_closed = 1;
+        luaC_retireseal(thread);
+        break;  /* bound the work under the world mutex */
+      }
+      if (reservation == 1) {
+        idle[count++] = thread;
+        if (count == sizeof(idle) / sizeof(idle[0])) break;
+      }
+    }
+    if (count != 0 || task != NULL) {
+      luaX_checksync(pthread_mutex_unlock(&world->mutex));
+      for (i = 0; i < count; i++) {
+        sealowned(L, idle[i]);
+        luaX_endreserve(idle[i], 1);
+      }
+      luaX_checksync(pthread_mutex_lock(&world->mutex));
+    }
+    else if (g->seals_pending != 0) {
+      L->native_depth++;
+      luaW_deactivate(L);
+      luaQ_wait(L, &world->mutex, &world->changed, &world->waiters);
+      luaW_resume(L);
+      L->native_depth--;
+    }
+  }
+  luaX_checksync(pthread_mutex_unlock(&world->mutex));
+}
+
 int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
   lua_assert(L->task_objects != NULL);
   if (owner->tt == LUA_VTABLE && luaC_tasktable(gco2t(owner))) {

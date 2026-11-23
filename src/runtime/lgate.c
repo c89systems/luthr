@@ -408,6 +408,8 @@ static void managestack (lua_State *L, NativeStackContext *context) {
 l_sinline uintptr_t apienter (lua_State *L, NativeStackContext *context) {
   if (attachedapi(L, context)) {
     luaX_pollrequests(L);
+    if (l_unlikely(luaW_control(&G(L)->world) & LUA_WORLD_SEAL_NURSERIES))
+      luaC_pollseal(L);
     return 0;
   }
   lockstate(L, context);
@@ -601,6 +603,8 @@ void luaX_pollrequests (lua_State *L) {
 }
 
 void luaX_poll (lua_State *L) {
+  if (l_unlikely(luaW_control(&G(L)->world) & LUA_WORLD_SEAL_NURSERIES))
+    luaC_pollseal(L);
   luaHS_quiescent(L);
   luaHS_reclaim(L, LUAHS_ASSIST);
   luaQ_poll(L);
@@ -623,7 +627,8 @@ void luaX_poll (lua_State *L) {
   ** amortizes repeated escapes without disabling private allocation for
   ** the rest of a long-running task. */
   if (l_unlikely(L->task_nursery_closed) &&
-      L->task_owner != NULL && L->native_depth == 0 && isLua(L->ci)) {
+      L->task_owner != NULL && L->native_depth == 0 && isLua(L->ci) &&
+      !(luaW_control(&G(L)->world) & LUA_WORLD_SEAL_NURSERIES)) {
     lua_assert(L->task_objects == NULL);
     L->task_nursery_closed = 0;
   }

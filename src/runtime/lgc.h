@@ -426,6 +426,10 @@ LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);
 LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
 LUAI_FUNC void luaC_sealtask (lua_State *L);
 LUAI_FUNC void luaC_sealtasks (lua_State *L);
+LUAI_FUNC void luaC_preparefull (lua_State *L);
+LUAI_FUNC void luaC_pollseal (lua_State *L);
+/* world.mutex, after the task's nursery has been drained */
+LUAI_FUNC void luaC_retireseal (lua_State *L);
 LUAI_FUNC void luaC_endtask (lua_State *L);
 LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
 LUAI_FUNC void luaC_taskresize (lua_State *L, l_mem change);

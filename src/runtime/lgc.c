@@ -3025,9 +3025,9 @@ static uint64_t startfullcycle (lua_State *L) {
   global_State *g = G(L);
   unsigned finish = TRACE_MAJOR;
   uint64_t epoch;
+  luaC_preparefull(L);
   luaW_stop(L);
   luaW_heapleave(L);
-  luaC_sealtasks(L);
   if (luaC_kind(g) == KGC_GENMINOR) {
     minor2inc(g, KGC_INC);
     finish = TRACE_GENERATIONAL;
@@ -3035,6 +3035,8 @@ static uint64_t startfullcycle (lua_State *L) {
   starttrace(L, finish);
   luaC_advancetrace(L);
   epoch = g->full_trace_epoch = luaC_traceepoch(g);
+  __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_WORLD_SEAL_NURSERIES),
+                     __ATOMIC_SEQ_CST);
   luaW_start(L);
   return epoch;
 }

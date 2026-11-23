@@ -25,7 +25,7 @@ l_sinline void luaX_releaseto (lua_State *L, uintptr_t reservation,
     luaX_badrelease();
   lua_assert(offer == 0 || !(previous & LUA_GATE_OFFER_MASK));
   control = luaW_control(&g->world);
-  requests = LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS;
+  requests = LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS | LUA_WORLD_SEAL_NURSERIES;
   if (!(reservation & LUA_GATE_STACK)) requests |= LUA_WORLD_STORAGE_WAIT;
   /* Only a managed reservation with old allocation debt can hold up an arm. */
   if (l_unlikely((previous & LUA_GATE_WAITING) ||

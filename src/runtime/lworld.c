@@ -60,6 +60,7 @@ int luaW_init (global_State *g) {
   int status, i;
   world->control = 0;
   world->entry_waiting = 0;
+  g->seals_pending = 0;
   world->rendezvous_cursor = NULL;
   world->heap_depth = 0;
   world->heap_owner.token = world->collector.token = NULL;
@@ -138,7 +139,8 @@ void luaW_destroy (global_State *g) {
              world->participants == NULL && world->rendezvous_cursor == NULL &&
              !luaW_heapheld(world) && world->waiters == NULL &&
              world->resume_waiters == NULL && world->rendezvous_waiters == NULL &&
-             !(luaW_control(world) & LUA_WORLD_ARM_TRACE) &&
+             g->seals_pending == 0 &&
+             !(luaW_control(world) & (LUA_WORLD_ARM_TRACE | LUA_WORLD_SEAL_NURSERIES)) &&
              g->phase_waiters == NULL && g->minor_waiters == NULL &&
              g->trace_waiters == NULL &&
              world->heap_head == NULL && world->reclaimers == NULL &&
@@ -353,6 +355,7 @@ void luaW_armtrace (lua_State *L) {
 }
 
 void luaW_deactivate (lua_State *L) {
+  LuaWorld *world = &G(L)->world;
   luaM_publishdebt(L);
   withdraw(L);
   if (luaC_waitingstacks(G(L))) {
@@ -361,6 +364,8 @@ void luaW_deactivate (lua_State *L) {
       luaC_readystack(G(L), cast(uintptr_t, L->stack_peer));
   }
   notifyrendezvous(G(L), L);
+  if (l_unlikely(luaW_control(world) & LUA_WORLD_SEAL_NURSERIES))
+    luaQ_wake(&world->changed, &world->waiters);
 }
 
 void luaW_resume (lua_State *L) {
@@ -408,6 +413,7 @@ void luaW_enter (lua_State *L) {
   if (l_unlikely(control & LUA_WORLD_STOPPED)) awaitentry(L, world);
   else {
     if (l_unlikely(control & LUA_WORLD_ARM_TRACE)) luaW_acktrace(L);
+    if (l_unlikely(control & LUA_WORLD_SEAL_NURSERIES)) luaC_pollseal(L);
     if (luaC_tracing(L)) luaC_checksnapshot(L);
   }
 }
@@ -439,6 +445,7 @@ void luaW_leave (global_State *g, uintptr_t stack, unsigned flags,
     ready = luaC_readystack(g, stack);
   notifyrendezvous(g, NULL);
   if ((flags & LUA_GATE_WAITING) ||
+      (control & LUA_WORLD_SEAL_NURSERIES) ||
       (!(flags & LUA_GATE_STACK) &&
        (luaW_control(world) & LUA_WORLD_STORAGE_WAIT)))
     luaQ_wake(&world->changed, &world->waiters);

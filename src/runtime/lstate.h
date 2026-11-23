@@ -421,6 +421,7 @@ struct lua_State {
   uint16_t *task_root_index;  /* hash slots contain dense indices plus one */
   unsigned task_root_capacity;
   lu_byte task_nursery_pending;
+  lu_byte task_seal_requested;  /* atomic request, retired under world.mutex */
   uint16_t task_root_inline_index[2 * LUA_TASK_INLINE_ROOTS];
 };
 
@@ -570,6 +571,7 @@ typedef struct global_State {
   l_mem GCmajorminor;  /* auxiliary counter to control major-minor shifts */
   stringtable strt[LUA_STRING_SHARDS];  /* independently owned intern partitions */
   unsigned shrink_strings;  /* atomic request from a retiring intern shard */
+  unsigned seals_pending;  /* world.mutex, acknowledgements before full GC */
   TValue l_registry;
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
