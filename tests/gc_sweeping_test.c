@@ -85,7 +85,7 @@ void __wrap_luaC_scansweep(lua_State *state, LuaSweepWork *work) {
   int candidate = work->page != NULL && test != NULL && test->revive == NULL;
   if (work->page != NULL) {
     size_t stride = sizeof(LuaAllocBlock) + work->page->blockbytes;
-    size_t cells = (work->page->bytes - LUA_ALLOC_PAGE_HEADER) / stride;
+    size_t cells = (luaMP_slotend(work->page) - LUA_ALLOC_PAGE_HEADER) / stride;
     require(work->page->bytes <= LUA_ALLOC_PAGE_MAX);
     if (cells > sweep_limit)
       sweep_limit = cells;

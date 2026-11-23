@@ -561,9 +561,9 @@ static void resetweakstamps (global_State *g) {
     LuaAllocPage *page;
     size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
     for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
-      size_t offset;
+      size_t offset, limit = luaMP_slotend(page);
       if (page->state != LUA_PAGE_OPEN || page->table_epoch == 0) continue;
-      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         Table *table = cast(Table *, block + 1);
@@ -2020,8 +2020,8 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
   LuaAllocPage *page = work->page;
   l_mem bytes = 0, headers = 0;
   unsigned count = 0;
-  size_t offset;
-  for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+  size_t offset, limit = luaMP_slotend(page);
+  for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
        offset += stride) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
     uintptr_t header = luaMP_header(block);
@@ -2038,7 +2038,7 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
   }
   lua_assert(count != 0 && count == page->used);
   if (headers != bytes) {
-    for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+    for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
          offset += stride) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
       luaH_freeparts(L, cast(Table *, block + 1));
@@ -2058,9 +2058,9 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
     size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
     uintptr_t birth = luaMP_birth(g->sweep_plan.epoch);
     unsigned count = 0;
-    size_t offset;
+    size_t offset, limit = luaMP_slotend(page);
     if (!work->full_page || !release_dead_page(L, work, stride, birth)) {
-      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         uintptr_t header = luaMP_header(block);
@@ -2320,9 +2320,9 @@ static void retire_table_pages (lua_State *L) {
     LuaAllocPage *page;
     size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
     for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
-      size_t offset;
+      size_t offset, limit = luaMP_slotend(page);
       if (__atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED) == 0) continue;
-      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= page->bytes;
+      for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         if (luaMP_header(block) & LUA_BLOCK_TABLE)

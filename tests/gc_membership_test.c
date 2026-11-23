@@ -67,7 +67,7 @@ static unsigned capture_tables(lua_State *state, GCObject **out,
     for (LuaAllocPage *page = G(state)->allocation_pages[pool]; page != NULL;
          page = page->next) {
       for (size_t offset = LUA_ALLOC_PAGE_HEADER;
-           offset + stride <= page->bytes; offset += stride) {
+           offset + stride <= luaMP_slotend(page); offset += stride) {
         LuaAllocBlock *cell = (LuaAllocBlock *)((char *)page + offset);
         if (luaMP_header(cell) & LUA_BLOCK_TABLE) {
           require(count < CAPACITY);

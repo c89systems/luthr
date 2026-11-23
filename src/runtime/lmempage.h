@@ -51,9 +51,26 @@ struct LuaAllocPage {
   unsigned task_backing;
   unsigned task_dirty;
   unsigned task_top;  /* first virgin slot, before any free-list reuse */
-  unsigned task_capacity;
+  unsigned task_capacity;  /* nonzero through the lifetime of a task page */
   lu_byte task_mark;  /* inherited by task tables when the page is published */
 };
+
+/* Task pages reserve this storage after their slots. Keep the same slot
+** boundaries after publication, until the backing page is reused. */
+typedef struct LuaTaskPageBits {
+  uint64_t live[LUA_PAGE_TRACE_WORDS];
+  uint64_t young[LUA_PAGE_TRACE_WORDS];
+} LuaTaskPageBits;
+
+l_sinline size_t luaMP_slotend (const LuaAllocPage *page) {
+  return page->task_capacity ? page->bytes - sizeof(LuaTaskPageBits) : page->bytes;
+}
+
+l_sinline LuaTaskPageBits *luaMP_taskbits (LuaAllocPage *page) {
+  lua_assert(page->task_capacity != 0);
+  return cast(LuaTaskPageBits *, cast_charp(page) + page->bytes -
+                                sizeof(LuaTaskPageBits));
+}
 
 #define LUA_PAGE_NOTIFIED cast(uintptr_t, 1)
 #define luaMP_remote(page) cast(LuaAllocBlock *, \

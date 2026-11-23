@@ -28,7 +28,7 @@ struct slot_mark {
 static void check_page_marks(lua_State *state, LuaAllocPage *page,
                              struct slot_mark *marks, int save) {
   size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
-  size_t count = (page->bytes - LUA_ALLOC_PAGE_HEADER) / stride;
+  size_t count = (luaMP_slotend(page) - LUA_ALLOC_PAGE_HEADER) / stride;
   for (size_t i = 0; i < count; i++) {
     LuaAllocBlock *cell =
         (LuaAllocBlock *)((char *)page + LUA_ALLOC_PAGE_HEADER + i * stride);

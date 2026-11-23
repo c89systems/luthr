@@ -2167,6 +2167,9 @@ static void nursery_survivors(struct fixture *f, int generational) {
          "private,edges=nursery_inspect(root); assert(private and edges==0); "
          "assert(root[2][1]==42 and #root[3]==132 and root[5000]==5000); "
          "local latest={43}; root[4]=latest; root[5]=latest; root[latest]=23; "
+         "latest=nil; "
+         "for i=1,16384 do local scratch={i}; scratch[1]=scratch end; "
+         "assert(root[4]==root[5] and root[4][1]==43 and root[root[4]]==23); "
          "return root",
          0);
   luaSC_wait(&f->tasks[0]);

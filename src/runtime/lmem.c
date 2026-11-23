@@ -961,6 +961,7 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
   LuaAllocPage *page = L->task_alloc_pages[pool];
   LuaAllocBlock *block;
   unsigned slot;
+  uint64_t bit;
   if (!taskpageavailable(page)) {
     size_t bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8
                                  : page->bytes * 2;
@@ -978,8 +979,9 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
     }
     preparepage(page, cast_uint(luaMP_binbytes(pool)), pool, bytes);
     page->task_private = 1;
-    page->task_capacity = cast_uint((bytes - LUA_ALLOC_PAGE_HEADER) /
-      (sizeof(LuaAllocBlock) + page->blockbytes));
+    page->task_capacity = cast_uint((bytes - LUA_ALLOC_PAGE_HEADER -
+      sizeof(LuaTaskPageBits)) / (sizeof(LuaAllocBlock) + page->blockbytes));
+    memset(luaMP_taskbits(page), 0, sizeof(LuaTaskPageBits));
     page->next = L->task_pages;
     page->previous = NULL;
     L->task_pages = L->task_alloc_pages[pool] = page;
@@ -997,8 +999,10 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
   page->used++;
   __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_TABLE,
                     __ATOMIC_RELAXED);
-  lua_assert(!(page->trace_slots[slot / 64] & (UINT64_C(1) << (slot % 64))));
-  page->trace_slots[slot / 64] |= UINT64_C(1) << (slot % 64);
+  bit = UINT64_C(1) << (slot % 64);
+  lua_assert(!(page->trace_slots[slot / 64] & bit));
+  page->trace_slots[slot / 64] |= bit;
+  luaMP_taskbits(page)->young[slot / 64] |= bit;
   if (!page->task_dirty) {
     page->task_dirty = 1;
     page->dirty_next = L->task_young_pages;

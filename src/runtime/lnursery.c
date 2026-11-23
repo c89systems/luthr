@@ -543,17 +543,33 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
   if (object->tt == LUA_VTABLE) {
     Table *t = gco2t(object);
     uint64_t state = luaC_tablestate(t);
-    if (scan == NURSERY_CONSTRUCTION ? !luaC_nurserytable(L, t)
-                                     : !luaC_tasktablestate(t, state))
-      return 0;
-    if (scan == NURSERY_TASK_YOUNG && (state & NURSERY_TASKOLD)) return 1;
-    if (!(state & NURSERY_LIVE)) {
+    if (scan != NURSERY_CONSTRUCTION &&
+        (state & LUA_TASK_PAGE_STATE) == LUA_TASK_PAGE_STATE) {
+      const LuaAllocBlock *block = cast(const LuaAllocBlock *, t) - 1;
+      LuaAllocPage *page = luaMP_page(block);
+      unsigned slot;
+      uint64_t *live, bit;
+      if (!__atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE)) return 0;
+      if (scan == NURSERY_TASK_YOUNG && (state & NURSERY_TASKOLD)) return 1;
+      slot = luaMP_slotindex(page, block);
+      bit = UINT64_C(1) << (slot % 64);
+      live = &luaMP_taskbits(page)->live[slot / 64];
+      if (*live & bit) return 1;
+      *live |= bit;
+    }
+    else {
+      if (scan == NURSERY_CONSTRUCTION ? !luaC_nurserytable(L, t)
+                                       : !luaC_tasktablestate(t, state))
+        return 0;
+      if ((state & NURSERY_LIVE) ||
+          (scan == NURSERY_TASK_YOUNG && (state & NURSERY_TASKOLD)))
+        return 1;
       luaC_settablestate(t, state | NURSERY_LIVE);
-      if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS ||
-          (state & NURSERY_TASK_EDGES)) {
-        t->gclist = *gray;
-        *gray = object;
-      }
+    }
+    if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS ||
+        (state & NURSERY_TASK_EDGES)) {
+      t->gclist = *gray;
+      *gray = object;
     }
   }
   else {
@@ -650,9 +666,9 @@ static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
   }
 }
 
-/* Only pages with young allocations need visiting during a minor pass.
-** Remove dead slots from the directory before a backing-buffer free can
-** release admission. The outstanding slots pin their allocation page. */
+/* Sweep whole words and leave mature survivors' headers untouched. Remove
+** dead slots from the directory before a backing-buffer free can release
+** admission. The outstanding slots pin their allocation page. */
 static size_t sweeptaskpages (lua_State *L, NurseryScan scan, GCObject **dead) {
   int young = scan == NURSERY_TASK_YOUNG;
   LuaAllocPage *page = young ? L->task_young_pages : L->task_pages;
@@ -660,31 +676,34 @@ static size_t sweeptaskpages (lua_State *L, NurseryScan scan, GCObject **dead) {
   L->task_young_pages = NULL;
   while (page != NULL) {
     LuaAllocPage *next = young ? page->dirty_next : page->next;
+    LuaTaskPageBits *bits = luaMP_taskbits(page);
     unsigned word;
     page->task_dirty = 0;
     for (word = 0; word < LUA_PAGE_TRACE_WORDS; word++) {
-      uint64_t slots = page->trace_slots[word];
+      uint64_t live = bits->live[word];
+      uint64_t youngslots = bits->young[word];
+      uint64_t slots = (young ? youngslots : page->trace_slots[word]) & ~live;
+      uint64_t survivors = youngslots & live;
+      bits->young[word] = bits->live[word] = 0;
+      page->trace_slots[word] &= ~slots;
+      while (survivors != 0) {
+        unsigned index = word * 64 + cast_uint(__builtin_ctzll(survivors));
+        Table *table = cast(Table *, luaMP_slotblock(page, index) + 1);
+        survivors &= survivors - 1;
+        luaC_settablestate(table, luaC_tablestate(table) | NURSERY_TASKOLD);
+      }
       while (slots != 0) {
         unsigned bit = cast_uint(__builtin_ctzll(slots));
         LuaAllocBlock *block = luaMP_slotblock(page, word * 64 + bit);
         Table *table = cast(Table *, block + 1);
-        uint64_t state = luaC_tablestate(table);
         slots &= slots - 1;
-        if (young && (state & NURSERY_TASKOLD)) continue;
-        if (state & NURSERY_LIVE) {
-          luaC_settablestate(table,
-            (state | NURSERY_TASKOLD) & ~cast(uint64_t, NURSERY_LIVE));
-        }
-        else {
-          page->trace_slots[word] &= ~(UINT64_C(1) << bit);
-          /* A backing-buffer free can permit publication of this page. */
-          __atomic_store_n(&block->block.page, cast(uintptr_t, page),
-                            __ATOMIC_RELAXED);
-          reclaimed += page->task_backing ? luaH_size(table, table)
-                         : sizeof(*table) + table->inline_bytes;
-          table->next = *dead;
-          *dead = obj2gco(table);
-        }
+        /* A backing-buffer free can permit publication of this page. */
+        __atomic_store_n(&block->block.page, cast(uintptr_t, page),
+                          __ATOMIC_RELAXED);
+        reclaimed += page->task_backing ? luaH_size(table, table)
+                       : sizeof(*table) + table->inline_bytes;
+        table->next = *dead;
+        *dead = obj2gco(table);
       }
     }
     page = next;

@@ -8,14 +8,14 @@
 
 void luaMP_initpage (lua_State *L, LuaAllocPage *page) {
   size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
-  size_t offset;
+  size_t offset, limit = luaMP_slotend(page);
   lua_assert(!completestate(G(L)) || luaW_iscollector(L) ||
     luaW_active(L->admission) != 0);
   UNUSED(L);
   _Static_assert(_Alignof(LuaAllocBlock) > LUA_BLOCK_FLAGS, "allocation flags");
   lua_assert((cast(uintptr_t, page) & LUA_BLOCK_FLAGS) == 0);
   for (offset = LUA_ALLOC_PAGE_HEADER;
-       offset + stride <= page->bytes; offset += stride) {
+       offset + stride <= limit; offset += stride) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
     block->block.page = cast(uintptr_t, page);
     block->block.link.next = page->local;
