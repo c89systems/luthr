@@ -3019,12 +3019,15 @@ static void completecycle (lua_State *L, uint64_t epoch) {
   completefinalizers(L, epoch);
 }
 
-/* Publish the full request before reopening admission. An automatic major
-** does not seal private task tables and cannot satisfy an explicit request. */
+/* Publish the upcoming epoch before sealing its first nursery. A follower
+** entering during preparation can already have objects in a new cohort
+** and must wait for a fresh full cycle. Metadata ownership prevents other
+** cycles from starting before this epoch has been installed. */
 static uint64_t startfullcycle (lua_State *L) {
   global_State *g = G(L);
   unsigned finish = TRACE_MAJOR;
-  uint64_t epoch;
+  uint64_t epoch = luaC_traceepoch(g) + 1;
+  __atomic_store_n(&g->full_trace_epoch, epoch, __ATOMIC_RELEASE);
   luaC_preparefull(L);
   luaW_stop(L);
   luaW_heapleave(L);
@@ -3034,7 +3037,7 @@ static uint64_t startfullcycle (lua_State *L) {
   }
   starttrace(L, finish);
   luaC_advancetrace(L);
-  epoch = g->full_trace_epoch = luaC_traceepoch(g);
+  lua_assert(epoch == luaC_traceepoch(g));
   __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_WORLD_SEAL_NURSERIES),
                      __ATOMIC_SEQ_CST);
   luaW_start(L);
@@ -3046,12 +3049,12 @@ static uint64_t startfullcycle (lua_State *L) {
 ** if its starter parks or unwinds. */
 static void fullconcurrent (lua_State *L) {
   global_State *g = G(L);
-  uint64_t before = g->full_trace_epoch;
+  uint64_t before = __atomic_load_n(&g->full_trace_epoch, __ATOMIC_ACQUIRE);
   uint64_t epoch, interrupted = g->trace_interrupt;
   int started = 0;
   for (;;) {
     luaW_collectenter(L);
-    epoch = g->full_trace_epoch;
+    epoch = __atomic_load_n(&g->full_trace_epoch, __ATOMIC_RELAXED);
     if (epoch != before) {
       luaW_heapleave(L);
       break;

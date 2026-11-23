@@ -212,8 +212,7 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
     luaC_traceobject(L, obj2gco(L));
     registertask(L, task, execution, LUA_TASK_ADMITTED);
     L->task_owner = task;
-    L->task_nursery_closed =
-      (luaW_control(world) & LUA_WORLD_SEAL_NURSERIES) != 0;
+    L->task_nursery_closed = 0;
     status = LUA_OK;
   }
   luaX_checksync(pthread_mutex_unlock(&world->mutex));

@@ -201,7 +201,6 @@ static void __attribute__((cold)) sealowned (lua_State *L, lua_State *thread) {
   if (__atomic_load_n(&thread->task_seal_requested, __ATOMIC_ACQUIRE) == 0)
     return;
   sealtask(L, thread);
-  thread->task_nursery_closed = 1;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   luaC_retireseal(thread);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
@@ -215,7 +214,8 @@ void __attribute__((cold)) luaC_pollseal (lua_State *L) {
 /* The full collector keeps metadata ownership so colors cannot roll over.
 ** Active tasks transfer their own cohorts. An idle stack may be borrowed
 ** under its gate, and a parked owner's cohort is stable under world.mutex.
-** Once acknowledged, a task cannot start another cohort until mark begins. */
+** A task can open a new cohort after acknowledging. The shared trace
+** sees its outgoing roots, as it does for cohorts born during marking. */
 void __attribute__((cold)) luaC_preparefull (lua_State *L) {
   global_State *g = G(L);
   LuaWorld *world = &g->world;
@@ -246,7 +246,6 @@ void __attribute__((cold)) luaC_preparefull (lua_State *L) {
         ? 2 : luaX_tryreserve(thread);
       if (reservation == 2) {
         sealtask(L, thread);
-        thread->task_nursery_closed = 1;
         luaC_retireseal(thread);
         break;  /* bound the work under the world mutex */
       }

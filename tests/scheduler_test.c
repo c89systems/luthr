@@ -42,6 +42,8 @@ struct fixture {
   unsigned idle_entries, host_channel_entries;
   lua_State *metadata_peer;
   unsigned metadata_held, metadata_queued, metadata_released;
+  unsigned full_stage;
+  int hold_full;
   size_t live;
   uint64_t poll_time_ns;
   unsigned native_lease_test, native_lease_polls;
@@ -57,6 +59,30 @@ static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
 static pthread_t idle_host;
+
+enum {
+  FULL_OLD_READY = 1,
+  FULL_PREPARED,
+  FULL_NEW_READY,
+  FULL_RESUME,
+  FULL_COMPLETE
+};
+
+void __real_luaC_preparefull(lua_State *);
+void __wrap_luaC_preparefull(lua_State *L) {
+  struct fixture *f = fixture;
+  __real_luaC_preparefull(L);
+  if (f == NULL || !f->hold_full || L != f->main)
+    return;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  if (f->full_stage == FULL_OLD_READY) {
+    f->full_stage = FULL_PREPARED;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+    while (f->full_stage < FULL_RESUME)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  }
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+}
 
 void __real_luaC_endtask(lua_State *);
 void __wrap_luaC_endtask(lua_State *L) {
@@ -2086,6 +2112,72 @@ static void nursery_full(struct fixture *f, int generational) {
   finish(f);
 }
 
+static int full_stage(lua_State *L) {
+  struct fixture *f = fixture;
+  unsigned next = (unsigned)lua_tointeger(L, 1);
+  unsigned stage;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  if (next != 0) {
+    require(next == f->full_stage + 1);
+    f->full_stage = next;
+    require(pthread_cond_broadcast(&f->changed) == 0);
+  }
+  stage = f->full_stage;
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  lua_pushinteger(L, stage);
+  return 1;
+}
+
+static void *collect_full(void *arg) {
+  require(lua_gc(arg, LUA_GCCOLLECT) == 0);
+  return NULL;
+}
+
+static void nursery_full_cutoff(struct fixture *f, int generational) {
+  pthread_t first, second;
+  lua_State *L;
+  init(f, 1);
+  L = f->main;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  f->metadata_peer = lua_newthread(L);
+  managed(L, "nursery_inspect", nursery_inspect);
+  managed(L, "full_stage", full_stage);
+  f->hold_full = 1;
+  submit(
+      f, 0,
+      "local old={answer=40}; assert(nursery_inspect(old)); full_stage(1); "
+      "while full_stage()<2 do end; assert(not nursery_inspect(old)); "
+      "for i=1,4096 do end; "
+      "local young={answer=2}; assert(nursery_inspect(young)); full_stage(3); "
+      "while full_stage()<5 do end; assert(not nursery_inspect(young)); "
+      "return old.answer+young.answer",
+      0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->full_stage < FULL_OLD_READY)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(pthread_create(&first, NULL, collect_full, L) == 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->full_stage < FULL_NEW_READY)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(pthread_create(&second, NULL, collect_full, f->metadata_peer) == 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->metadata_queued)
+    luaQ_wait(L, &f->mutex, &f->changed, &f->waiters);
+  f->full_stage = FULL_RESUME;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(pthread_join(first, NULL) == 0);
+  require(pthread_join(second, NULL) == 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->full_stage = FULL_COMPLETE;
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  lua_pop(L, 1);
+  finish(f);
+}
+
 static void nursery(struct fixture *f, int generational) {
   int status, results;
   init(f, 2);
@@ -2363,6 +2455,10 @@ int main(int argc, char **argv) {
     nursery_full(f, 0);
   else if (strcmp(argv[1], "nursery_full_generational") == 0)
     nursery_full(f, 1);
+  else if (strcmp(argv[1], "nursery_full_cutoff_incremental") == 0)
+    nursery_full_cutoff(f, 0);
+  else if (strcmp(argv[1], "nursery_full_cutoff_generational") == 0)
+    nursery_full_cutoff(f, 1);
   else if (strcmp(argv[1], "native_accounting_count") == 0)
     native_accounting(f, 0);
   else if (strcmp(argv[1], "native_accounting_arm") == 0)

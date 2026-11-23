@@ -552,7 +552,7 @@ typedef struct global_State {
   unsigned young_work;  /* atomic births and remaining generational work */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
-  uint64_t full_trace_epoch;  /* most recent ordinary full request, set at startup */
+  uint64_t full_trace_epoch;  /* atomic, announced before full preparation */
   uint64_t major_completed;  /* atomic count at the end of major collection */
   uint64_t weak_stamp;  /* high bits of the tables' per-trace weak state */
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
