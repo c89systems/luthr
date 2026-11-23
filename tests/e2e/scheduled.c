@@ -224,6 +224,7 @@ int main(int argc, char **argv) {
   luaL_openlibs(L);
   lua_CFunction override = NULL;
   if (strcmp(argv[2], "native_direct") == 0 ||
+      strcmp(argv[2], "native_direct_local") == 0 ||
       strcmp(argv[2], "native_scalar_direct") == 0)
     override = direct_callback;
   else if (strcmp(argv[2], "native_protected") == 0)

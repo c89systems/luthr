@@ -69,7 +69,8 @@ local workloads={
     return sum
   end,
 }
-local native_add=kind=='native_callbacks' or kind=='native_direct'
+local local_native_add=kind=='native_callbacks_local' or kind=='native_direct_local'
+local native_add=kind=='native_callbacks' or kind=='native_direct' or local_native_add
 local native_identity=kind=='native_identity'
 local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
 if kind=='native_streaming' then
@@ -99,7 +100,15 @@ if kind=='native_leaf' or kind=='native_stack' then
     return sum
   end
 end
-if native_add or native_identity or native_scalar then
+if kind=='lua_callback' then
+  total=total+n
+  workloads[kind]=function()
+    local function payload(value) return value+1 end
+    local sum=0
+    for i=1,n do sum=sum+payload(i) end
+    return sum
+  end
+elseif native_add or native_identity or native_scalar then
   local native=require('compat_fixture')
   local payload
   if native_identity then
@@ -111,10 +120,19 @@ if native_add or native_identity or native_scalar then
     payload=function(value) return value+1 end
     total=total+n
   end
-  workloads[kind]=function()
-    local sum=0
-    for i=1,n do sum=sum+native.callback(payload,i) end
-    return sum
+  if local_native_add then
+    local callback=native.callback
+    workloads[kind]=function()
+      local sum=0
+      for i=1,n do sum=sum+callback(payload,i) end
+      return sum
+    end
+  else
+    workloads[kind]=function()
+      local sum=0
+      for i=1,n do sum=sum+native.callback(payload,i) end
+      return sum
+    end
   end
 end
 local work=assert(workloads[kind],'unknown workload')
