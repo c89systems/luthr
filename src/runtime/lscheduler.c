@@ -11,7 +11,8 @@
 #include <string.h>
 #include <time.h>
 
-enum { SC_READY, SC_RESOURCE, SC_DONE };
+enum { SC_READY, SC_CONTINUE, SC_RESOURCE, SC_DONE };
+enum { TURN_NORMAL, TURN_PEER, TURN_CONTINUATION };
 enum {
   DEFAULT_SLICE_NS = 2 * 1000 * 1000,
   FIRST_SERIAL_SLICE_NS = 250 * 1000,
@@ -139,8 +140,16 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
     if (runnableon(task, carrier, stopped)) {
       *link = task->next;
       if (slot->tail == task) slot->tail = previous;
+      if (slot->continuation == task) {
+        slot->continuation = NULL;
+        task->turn = TURN_CONTINUATION;
+      }
+      else task->turn = slot->continuation != NULL ? TURN_PEER : TURN_NORMAL;
       task->next = NULL;
       slot->count--;
+      __atomic_store_n(&slot->dispatch_epoch,
+        __atomic_load_n(&slot->dispatch_epoch, __ATOMIC_RELAXED) + 1,
+        __ATOMIC_RELAXED);
       return task;
     }
     previous = task;
@@ -155,7 +164,22 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   LuaExecutionSlot *slot = &s->slots[task->home];
   lua_assert(task->slot == NULL && task->fiber.execution.allocation_cache == NULL);
   luaX_checksync(pthread_mutex_lock(&slot->mutex));
-  append(&slot->head, &slot->tail, task);
+  if (task->reason == SC_CONTINUE && slot->continuation == NULL &&
+      slot->head != NULL && slot->head->reason != SC_RESOURCE &&
+      __atomic_load_n(&slot->head->affinity, __ATOMIC_ACQUIRE) == NULL) {
+    LuaScheduledTask **link = &slot->head;
+    /* A peer can claim the released slot before this context is saved.
+    ** Count that dispatch as its turn, even if it has already finished. */
+    if (__atomic_load_n(&slot->dispatch_epoch, __ATOMIC_RELAXED) ==
+        task->continuation_epoch)
+      link = &slot->head->next;
+    lua_assert(task->next == NULL);
+    task->next = *link;
+    *link = task;
+    if (task->next == NULL) slot->tail = task;
+    slot->continuation = task;
+  }
+  else append(&slot->head, &slot->tail, task);
   slot->count++;
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   wakequeued(s, task);
@@ -784,13 +808,11 @@ static void poll (LuaExecution *execution, lua_State *L) {
   LuaWorldScope depth;
   int timed = task->polls == 0;  /* requests set polls to 1 in either mode */
   int serial = s->config.slots == 1;
+  int reason = SC_READY;
   unsigned publishing, reentry;
   pollnative(task, L);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
-  if (timed && serial && !task->retained_heap && L->task_owner == &task->root &&
-      L->task_old_bytes >= RETAINED_HEAP_BYTES)
-    task->retained_heap = 1;
   if (l_unlikely(task->minor_deadline != 0)) {
     LuaExecution *driver = __atomic_load_n(&s->minor_driver, __ATOMIC_ACQUIRE);
     if (driver != execution) task->minor_deadline = 0;
@@ -817,24 +839,39 @@ static void poll (LuaExecution *execution, lua_State *L) {
   /* A native return needs prompt access to the sole managed slot. */
   if (timed && (!serial || reentry == 0)) {
     uint64_t now = monotonicns();
+    size_t live;
     if (task->slice_deadline == 0) {
       unsigned slice = DEFAULT_SLICE_NS;
-      /* On one worker, give each queued task a quick start. Then give
-      ** longer tasks enough time to finish and retire their live graphs. */
-      if (serial)
-        slice = task->dispatches == 1 ? FIRST_SERIAL_SLICE_NS : SERIAL_SLICE_NS;
+      /* A peer ahead of a continuation makes progress with the same
+      ** bounded turn used by a worker with competing local work. */
+      if (serial && task->dispatches == 1) slice = FIRST_SERIAL_SLICE_NS;
+      else if (serial && task->turn != TURN_PEER) slice = SERIAL_SLICE_NS;
       task->slice_deadline = now + slice;
+      task->slice_live = serial && L->task_owner == &task->root
+        ? L->task_old_bytes : 0;
     }
     if (now < task->slice_deadline) return;
-    /* Let a proven large working set finish before opening more live graphs.
-    ** The first serial slice still starts peers promptly. Resource handoffs
-    ** can interrupt the extension and the deadline never moves forward. */
-    if (serial && task->dispatches != 1 && task->retained_heap &&
-        L->task_owner == &task->root &&
+    /* The first serial turn always gives newly submitted peers a quick
+    ** start, including when the first task allocates immediately. */
+    live = serial && task->dispatches != 1 && L->task_owner == &task->root
+      ? L->task_old_bytes : 0;
+    /* A growing or shrinking graph is evidence that another turn can
+    ** advance its lifetime. Waiting with a stable graph uses FIFO. */
+    if (live >= RETAINED_HEAP_BYTES && live != task->slice_live &&
         reentry == 0 && publishing == 0 &&
-        __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0 &&
-        now - task->slice_deadline < RETAINED_SERIAL_SLICE_NS - SERIAL_SLICE_NS)
-      return;
+        __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) {
+      /* Give a productive ordinary turn time to finish a live graph.
+      ** Subsequent continuation and peer turns use their own short limits. */
+      if (task->turn == TURN_NORMAL &&
+          now - task->slice_deadline <
+            RETAINED_SERIAL_SLICE_NS - SERIAL_SLICE_NS)
+        return;
+      if (task->slot != NULL) {
+        task->continuation_epoch =
+          __atomic_load_n(&task->slot->dispatch_epoch, __ATOMIC_RELAXED);
+        reason = SC_CONTINUE;
+      }
+    }
   }
   task->slice_deadline = 0;
   depth = luaW_detach(L);
@@ -853,7 +890,7 @@ static void poll (LuaExecution *execution, lua_State *L) {
     __atomic_fetch_sub(&s->external_yields, 1, __ATOMIC_RELEASE);
     unlock(s);
   }
-  else pause(task, SC_READY);
+  else pause(task, reason);
   luaW_attach(L, depth);
 }
 

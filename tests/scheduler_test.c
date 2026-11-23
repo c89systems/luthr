@@ -46,6 +46,8 @@ struct fixture {
   int hold_full;
   size_t live;
   uint64_t poll_time_ns;
+  unsigned record_turns, dispatched_turns;
+  LuaFiber *turn_order[2];
   unsigned native_lease_test, native_lease_polls;
   int inspect_polls, shutting_down, parallel_check, deny;
 };
@@ -297,10 +299,43 @@ void __wrap_luaX_poll(lua_State *L) {
       require(pthread_mutex_unlock(&fixture->mutex) == 0);
   }
 }
+void __real_luaCT_resume(LuaFiber *, LuaContext *);
+void __wrap_luaCT_resume(LuaFiber *fiber, LuaContext *caller) {
+  struct fixture *f = fixture;
+  if (f != NULL && __atomic_load_n(&f->record_turns, __ATOMIC_ACQUIRE)) {
+    unsigned index =
+        __atomic_fetch_add(&f->dispatched_turns, 1, __ATOMIC_RELAXED);
+    if (index == 0) {
+      LuaScheduler *s = &f->scheduler;
+      unsigned epoch;
+      require(pthread_mutex_lock(&s->mutex) == 0);
+      epoch = s->handoff_epoch;
+      /* This peer owns the slot before the outgoing continuation publishes.
+       * Keep the slot occupied until publication to isolate that handoff. */
+      require(pthread_mutex_lock(&f->mutex) == 0);
+      __atomic_store_n(&f->turn_order[0], fiber, __ATOMIC_RELEASE);
+      require(pthread_cond_broadcast(&f->changed) == 0);
+      require(pthread_mutex_unlock(&f->mutex) == 0);
+      while (epoch == s->handoff_epoch)
+        require(pthread_cond_wait(&s->changed, &s->mutex) == 0);
+      require(pthread_mutex_unlock(&s->mutex) == 0);
+    } else if (index == 1)
+      __atomic_store_n(&f->turn_order[1], fiber, __ATOMIC_RELEASE);
+  }
+  __real_luaCT_resume(fiber, caller);
+}
+
 void __real_luaCT_pause(LuaFiber *);
 void __wrap_luaCT_pause(LuaFiber *fiber) {
   struct fixture *f = fixture;
   LuaScheduledTask *task = fiber->execution.context;
+  if (f != NULL && fiber == &f->tasks[0].fiber &&
+      __atomic_load_n(&f->record_turns, __ATOMIC_ACQUIRE)) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (__atomic_load_n(&f->turn_order[0], __ATOMIC_ACQUIRE) == NULL)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
   if (task->waiter != NULL &&
       ((f->pause_hold &&
         (!f->admission_fifo ||
@@ -488,29 +523,23 @@ static int mark_running(lua_State *L) {
 
 enum { SLICE_PEERS = 3 };
 
+static void wait_slice_peers(lua_State *L) {
+  while (__atomic_load_n(&fixture->scheduler.runnable, __ATOMIC_ACQUIRE) <
+         SLICE_PEERS)
+    luaX_pollrequests(L);
+}
+
 static int poll_slice(lua_State *L) {
   struct fixture *f = fixture;
   uint64_t slice_ns = (uint64_t)luaL_checkinteger(L, 1);
-  uint64_t retained_ns = (uint64_t)luaL_optinteger(L, 2, 0);
   lua_lock(L);
-  while (__atomic_load_n(&f->scheduler.runnable, __ATOMIC_ACQUIRE) <
-         SLICE_PEERS)
-    luaX_pollrequests(L);
+  wait_slice_peers(L);
   /* Repeated polls keep the current task until its slice expires. */
   for (unsigned i = 0; i < 16; i++)
     luaQ_poll(L);
   __atomic_fetch_add(&f->poll_time_ns, slice_ns - 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
   require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
-  if (retained_ns != 0) {
-    __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
-    luaQ_poll(L);
-    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
-    __atomic_fetch_add(&f->poll_time_ns, retained_ns - slice_ns - 1,
-                       __ATOMIC_RELAXED);
-    luaQ_poll(L);
-    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
-  }
   __atomic_fetch_add(&f->poll_time_ns, 1, __ATOMIC_RELAXED);
   luaQ_poll(L);
   /* Already queued peers run before the preempted task resumes. */
@@ -520,21 +549,60 @@ static int poll_slice(lua_State *L) {
   return 0;
 }
 
+static int poll_retained(lua_State *L) {
+  struct fixture *f = fixture;
+  int grew = lua_toboolean(L, 1);
+  int first = lua_toboolean(L, 2);
+  lua_lock(L);
+  if (!grew) {
+    wait_slice_peers(L);
+    luaQ_poll(L);
+  } else if (first) {
+    __atomic_fetch_add(&f->poll_time_ns, 250000, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == SLICE_PEERS);
+  } else {
+    __atomic_fetch_add(&f->poll_time_ns, 10000000, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == 0);
+    __atomic_store_n(&f->record_turns, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&f->poll_time_ns, 30000000, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    __atomic_store_n(&f->record_turns, 0, __ATOMIC_RELEASE);
+    require(__atomic_load_n(&f->turn_order[0], __ATOMIC_ACQUIRE) ==
+            &f->tasks[1].fiber);
+    require(__atomic_load_n(&f->turn_order[1], __ATOMIC_ACQUIRE) ==
+            &f->tasks[0].fiber);
+    luaQ_poll(L);
+    __atomic_fetch_add(&f->poll_time_ns, 10000000, __ATOMIC_RELAXED);
+    luaQ_poll(L);
+    require(__atomic_load_n(&f->started, __ATOMIC_ACQUIRE) == SLICE_PEERS);
+  }
+  lua_unlock(L);
+  return 0;
+}
+
 static void timed_slice(struct fixture *f, int continuation, int retained) {
-  const char *chunk = continuation
-                          ? "coroutine.yield(); mark_running(); "
-                            "poll_slice(...); return 10"
-                          : "mark_running(); poll_slice(...); return 10";
+  const char *chunk = "mark_running(); poll_slice(...); return 10";
   f->poll_time_ns = 1;
   init(f, 1);
   f->scheduler.config.quantum_polls = 0;
-  if (retained)
-    chunk = "local rows={}; for i=1,8192 do rows[i]={i,i+1} end; "
-            "coroutine.yield(); mark_running(); poll_slice(...,40000000); "
-            "return rows[8192][2]-8183";
-  else
+  if (retained) {
+    if (continuation)
+      chunk = "coroutine.yield(); mark_running(); poll_retained(false); "
+              "local rows={}; for i=1,8192 do rows[i]={i,i+1} end; "
+              "poll_retained(true); return rows[8192][2]-8183";
+    else
+      chunk = "mark_running(); poll_retained(false); "
+              "local rows={}; for i=1,8192 do rows[i]={i,i+1} end; "
+              "poll_retained(true,true); return rows[8192][2]-8183";
+    managed(f->main, "poll_retained", poll_retained);
+  } else {
+    if (continuation)
+      chunk = "coroutine.yield(); mark_running(); poll_slice(...); return 10";
     lua_gc(f->main, LUA_GCSTOP);
-  managed(f->main, "poll_slice", poll_slice);
+    managed(f->main, "poll_slice", poll_slice);
+  }
   managed(f->main, "started", started);
   managed(f->main, "mark_running", mark_running);
   submit(f, 0, chunk, continuation ? 10000000 : 250000);
@@ -2438,6 +2506,8 @@ int main(int argc, char **argv) {
     timed_slice(f, 1, 0);
   else if (strcmp(argv[1], "timed_retained_slice") == 0)
     timed_slice(f, 1, 1);
+  else if (strcmp(argv[1], "timed_retained_start") == 0)
+    timed_slice(f, 0, 1);
   else if (strcmp(argv[1], "early_incremental") == 0)
     wake_before_publication(f, 0);
   else if (strcmp(argv[1], "early_generational") == 0)
