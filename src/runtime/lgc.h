@@ -271,7 +271,7 @@ static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
 }
 
 enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_TASK = 8,
-       NURSERY_STEP = 16, NURSERY_TASKOLD = 16 };  /* age only on task tables */
+       NURSERY_STEP = 16, NURSERY_TASKOLD = 16, NURSERY_TASK_EDGES = 32 };
 
 l_sinline int luaC_tasktablestate (uint64_t state) {
   return (state & (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);

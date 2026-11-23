@@ -22,7 +22,7 @@
 #define TASK_ROOT_LIVE cast(uintptr_t, 1u)
 
 typedef enum NurseryScan {
-  NURSERY_CONSTRUCTION, NURSERY_TASK_FULL, NURSERY_TASK_YOUNG
+  NURSERY_CONSTRUCTION, NURSERY_TASK_YOUNG, NURSERY_TASK_FULL, NURSERY_TASK_ROOTS
 } NurseryScan;
 
 /* The hash stores dense indices, so root snapshots visit only actual roots.
@@ -322,6 +322,10 @@ int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
   if (luaC_tasktablestate(state)) {
     uintptr_t root;
     uint16_t *slot;
+    /* Interned strings are shared and the root directory already retains
+    ** them. Everything else may need tracing even in a regular full pass. */
+    if (value->tt != LUA_VSHRSTR && !(state & NURSERY_TASK_EDGES))
+      luaC_settablestate(gco2t(owner), state | NURSERY_TASK_EDGES);
     if (luaC_taskobject(value)) {
       if (state & NURSERY_TASKOLD) remembertarget(L, value);
       return 1;
@@ -443,8 +447,11 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
     if (scan == NURSERY_TASK_YOUNG && (state & NURSERY_TASKOLD)) return 1;
     if (!(state & NURSERY_LIVE)) {
       luaC_settablestate(t, state | NURSERY_LIVE);
-      t->gclist = *gray;
-      *gray = object;
+      if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS ||
+          (state & NURSERY_TASK_EDGES)) {
+        t->gclist = *gray;
+        *gray = object;
+      }
     }
   }
   else {
@@ -462,26 +469,32 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
 }
 
 l_sinline int nurseryedge (lu_byte tag, NurseryScan scan) {
-  return scan == NURSERY_CONSTRUCTION ? tag == ctb(LUA_VTABLE)
-                                      : tag & BIT_ISCOLLECTABLE;
+  if (scan == NURSERY_CONSTRUCTION) return tag == ctb(LUA_VTABLE);
+  if (scan == NURSERY_TASK_YOUNG)
+    return tag == ctb(LUA_VTABLE) || tag == ctb(LUA_VLNGSTR);
+  return (tag & BIT_ISCOLLECTABLE) &&
+    (scan == NURSERY_TASK_ROOTS || tag != ctb(LUA_VSHRSTR));
 }
 
 l_sinline void visitnursery (lua_State *L, GCObject *object, GCObject **gray,
                               NurseryScan scan) {
-  if (!marknursery(L, object, gray, scan) && scan == NURSERY_TASK_FULL) {
+  if (!marknursery(L, object, gray, scan) && scan >= NURSERY_TASK_FULL) {
     uint16_t index = *rootslot(L, cast(uintptr_t, object));
     lua_assert(index != 0 && index <= L->task_root_count);
     if (index != 0) L->task_roots[index - 1] |= TASK_ROOT_LIVE;
   }
 }
 
-/* Compact the roots from live private tables. Outgoing roots that disappear
-** still belong to any shared snapshot already in progress. */
-static void prunetaskroots (lua_State *L) {
+/* Compact the roots from live private tables. Keep interned strings until
+** the bounded directory needs room or the cohort dies. Removed roots still
+** belong to any shared snapshot already in progress. */
+static void prunetaskroots (lua_State *L, int prune_strings) {
   unsigned i, count = 0;
   for (i = 0; i < L->task_root_count; i++) {
     uintptr_t root = L->task_roots[i];
-    if (root & TASK_ROOT_LIVE) L->task_roots[count++] = root & ~TASK_ROOT_LIVE;
+    if ((root & TASK_ROOT_LIVE) ||
+        (!prune_strings && cast(GCObject *, root)->tt == LUA_VSHRSTR))
+      L->task_roots[count++] = root & ~TASK_ROOT_LIVE;
     else luaC_traceobject(L, cast(GCObject *, root));
   }
   if (count != L->task_root_count) {
@@ -523,7 +536,6 @@ static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
         visitnursery(L, gcvalue(gval(node)), &gray, scan);
     }
   }
-  if (scan == NURSERY_TASK_FULL) prunetaskroots(L);
 }
 
 static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
@@ -571,6 +583,8 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
     dead = o;
   }
   if (task) {
+    if (scan >= NURSERY_TASK_FULL)
+      prunetaskroots(L, scan == NURSERY_TASK_ROOTS || L->task_objects == NULL);
     L->task_old_objects = L->task_objects;
     L->task_old_bytes = bytes;
     pacenursery(L, bytes);
@@ -625,6 +639,7 @@ void luaC_taskstep (lua_State *L) {
       (young_bytes < TASK_NURSERY_BYTES || young_bytes / 4 < L->task_old_bytes) &&
       !luaC_taskrootpressure(L))
     scan = NURSERY_TASK_YOUNG;
+  else if (luaC_taskrootpressure(L)) scan = NURSERY_TASK_ROOTS;
   L->task_young_scans = scan == NURSERY_TASK_YOUNG ? L->task_young_scans + 1 : 0;
   tracenursery(L, NULL, scan);
   live = sweepnursery(L, &L->task_objects, scan);

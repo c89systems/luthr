@@ -2115,6 +2115,44 @@ static void nursery_survivors(struct fixture *f, int generational) {
   finish(f);
 }
 
+static void nursery_root_pressure(struct fixture *f, int generational) {
+  lua_State *L;
+  int status, results;
+  init(f, 2);
+  L = f->main;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_inspect", nursery_inspect);
+  submit(
+      f, 0,
+      "local id=...; local records={}; "
+      "for i=1,1536 do records[i]={marker=i} end; "
+      "local function make_record(n) "
+      "  local child={n}; "
+      "  return {{[child]={['key-'..n]=n}}, ('data-'..n):rep(24), child} "
+      "end; "
+      "records[1]=make_record(id); "
+      "for i=1,38000 do local garbage={i,i+1} end; "
+      "local private,edges=nursery_inspect(records); "
+      "assert(private and edges>=2); "
+      "for i=1,4096 do local garbage={['short-'..i]=i} end; "
+      "private,edges=nursery_inspect(records); assert(private and edges<64); "
+      "assert(records[1536].marker==1536); "
+      "local row=records[1]; "
+      "assert(row[1][row[3]]['key-'..id]==id and row[3][1]==id); "
+      "assert(row[2]==('data-'..id):rep(24)); return row",
+      42);
+  luaSC_wait(&f->tasks[0]);
+  require(luaSC_collect(L, &f->tasks[0], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_setglobal(L, "nursery_result");
+  lua_gc(L, LUA_GCCOLLECT);
+  require(luaL_dostring(L, "local r=nursery_result; "
+                           "assert(r[1][r[3]]['key-42']==42 and r[3][1]==42); "
+                           "assert(r[2]==('data-42'):rep(24))") == LUA_OK);
+  finish(f);
+}
+
 static void nursery_full(struct fixture *f, int generational) {
   lua_State *L;
   init(f, 3);
@@ -2488,6 +2526,10 @@ int main(int argc, char **argv) {
     nursery_survivors(f, 0);
   else if (strcmp(argv[1], "nursery_survivors_generational") == 0)
     nursery_survivors(f, 1);
+  else if (strcmp(argv[1], "nursery_root_pressure_incremental") == 0)
+    nursery_root_pressure(f, 0);
+  else if (strcmp(argv[1], "nursery_root_pressure_generational") == 0)
+    nursery_root_pressure(f, 1);
   else if (strcmp(argv[1], "nursery_native_incremental") == 0)
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)
