@@ -212,6 +212,7 @@ static void unlinkpublisher (lua_State *L) {
 void luaW_unregister (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
+  luaM_publishwithdrawn(L);
   unlinkpublisher(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   lua_assert(luaW_active(participant) == 0 && participant->storage_scan == 0);
@@ -274,6 +275,9 @@ l_sinline int rendezvousready (LuaWorld *world, int arming) {
   while ((part = world->rendezvous_cursor) != NULL) {
     if ((__atomic_load_n(&part->thread->stack_gate.word, __ATOMIC_SEQ_CST) &
          active) && (!arming || part->trace_armed != epoch)) return 0;
+    /* A pre-arm owner settled its active debt when acknowledging, or
+    ** sealed it in the withdrawn batch before releasing its admission. */
+    if (arming) luaM_publishwithdrawn(part->thread);
     world->rendezvous_cursor = part->next;
   }
   return 1;

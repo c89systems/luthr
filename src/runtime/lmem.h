@@ -27,8 +27,12 @@ LUAI_FUNC void luaM_flushdebt (lua_State *L);
 /* Reclassify already allocated logical bytes after a private layout commits,
 ** or before a private table escapes or is freed. */
 LUAI_FUNC void luaM_privatebytes (lua_State *L, l_mem change);
-/* Withdrawals publish both owned stacks before losing their participation. */
+/* Settle accounting for both owned stacks at a collector boundary. */
 LUAI_FUNC void luaM_publishdebt (lua_State *L);
+/* Opaque calls can carry bounded accounting into the next API activation. */
+LUAI_FUNC void luaM_withdrawdebt (lua_State *L);
+/* A phase can collect a withdrawn batch without taking its stack gate. */
+LUAI_FUNC void luaM_publishwithdrawn (lua_State *L);
 LUAI_FUNC int luaM_initpools (lua_State *L);
 LUAI_FUNC void luaM_destroypools (lua_State *L);
 /* Admitted cache owner, quiescent retirement or a finished task's retirement

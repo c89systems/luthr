@@ -591,8 +591,8 @@ static void starttrace (lua_State *L, unsigned finish) {
 }
 
 void luaC_publishtraceplan (global_State *g) {
-  /* At this point every older allocation batch has charged its debt, via
-  ** withdrawal or acknowledgement. The sweep can subtract that cohort. */
+  /* The arm rendezvous or world stop has settled older allocation batches.
+  ** The sweep can subtract that cohort. */
   luaP_begin(g);
   g->GCcyclelive = g->pacer.start;
   __atomic_fetch_add(&g->world.work_epoch, 1, __ATOMIC_RELEASE);
@@ -1734,7 +1734,8 @@ void luaC_publish (lua_State *L) {
       lua_State *owner = participant->thread;
       lua_assert(owner->new_objects == NULL && owner->new_tables == NULL &&
                  owner->storage_retired == NULL &&
-                 owner->allocation_debt.pending == 0 && owner->reclaim_credit == 0);
+                 owner->allocation_debt.pending == 0 && owner->reclaim_credit == 0 &&
+                 owner->withdrawn_debt == 0);
     }
   }
 #endif

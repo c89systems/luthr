@@ -73,6 +73,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime -Wl,--wrap=luaC_endtask)
 foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational wake_waiters stopped_dispatch
     native native_reentry shutdown yield saturation cancel_admission early_native_return native_grant_stopped_world native_fifo native_competitive
+    native_accounting_count native_accounting_arm
     native_burst_parking native_burst_poll native_burst_single native_lease_expiry native_lease_inactive native_lease_full
     late_native_waiter cancel_granted_native startup_failures callback_progress
     timed_callback_progress synchronous_callback simultaneous_reentry parallel_native_compensation native_return_compensation native_return_handoff native_leaf_return native_recall_during_stack_borrow

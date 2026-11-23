@@ -401,6 +401,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->task_root_count = 0;
   L->task_nursery_closed = 0;
   L->allocation_debt.pending = 0;
+  L->withdrawn_debt = 0;
   L->reclaim_credit = 0;
   L->publish_next = NULL;
   L->publish_previous = NULL;

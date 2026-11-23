@@ -99,13 +99,30 @@ static void accountassist (lua_State *L, l_mem change) {
   }
 }
 
+static LuaAllocationDebt takewithdrawn (lua_State *L) {
+  LuaAllocationDebt withdrawn;
+  withdrawn.pending = __atomic_load_n(&L->withdrawn_debt, __ATOMIC_ACQUIRE);
+  if (withdrawn.pending != 0)
+    withdrawn.pending = __atomic_exchange_n(&L->withdrawn_debt, 0, __ATOMIC_ACQ_REL);
+  return withdrawn;
+}
+
+void luaM_publishwithdrawn (lua_State *L) {
+  LuaAllocationDebt withdrawn = takewithdrawn(L);
+  if (withdrawn.batch.total != 0)
+    __atomic_fetch_sub(&G(L)->GCbytes, withdrawn.batch.total, __ATOMIC_RELAXED);
+  if (withdrawn.batch.shared != 0)
+    __atomic_fetch_sub(&G(L)->GCused, withdrawn.batch.shared, __ATOMIC_RELAXED);
+}
+
 void luaM_flushdebt (lua_State *L) {
-  l_mem debt = L->allocation_debt.batch.total;
-  l_mem shared = luaM_shareddebt(L);
+  LuaAllocationDebt withdrawn = takewithdrawn(L);
+  l_mem debt = cast(l_mem, L->allocation_debt.batch.total) + withdrawn.batch.total;
+  l_mem shared = cast(l_mem, L->allocation_debt.batch.shared) + withdrawn.batch.shared;
   l_mem reclaimed = L->reclaim_credit;
+  accountassist(L, L->allocation_debt.batch.shared);
   L->allocation_debt.pending = 0;
   L->reclaim_credit = 0;
-  accountassist(L, shared);
   if (debt != 0) __atomic_fetch_sub(&G(L)->GCbytes, debt, __ATOMIC_RELAXED);
   if (shared != 0) __atomic_fetch_sub(&G(L)->GCused, shared, __ATOMIC_RELAXED);
   if (reclaimed != 0) {
@@ -126,10 +143,36 @@ void luaM_privatebytes (lua_State *L, l_mem change) {
 
 void luaM_publishdebt (lua_State *L) {
   lua_State *peer = L->stack_peer;
-  if (L->allocation_debt.pending != 0 || L->reclaim_credit != 0)
+  if (L->allocation_debt.pending != 0 || L->reclaim_credit != 0 ||
+      __atomic_load_n(&L->withdrawn_debt, __ATOMIC_RELAXED) != 0)
     luaM_flushdebt(L);
-  if (peer != NULL && (peer->allocation_debt.pending != 0 || peer->reclaim_credit != 0))
+  if (peer != NULL && (peer->allocation_debt.pending != 0 ||
+      peer->reclaim_credit != 0 ||
+      __atomic_load_n(&peer->withdrawn_debt, __ATOMIC_RELAXED) != 0))
     luaM_flushdebt(peer);
+}
+
+void luaM_withdrawdebt (lua_State *L) {
+  LuaAllocationDebt previous, next, local = L->allocation_debt;
+  if (L->reclaim_credit != 0 || L->stack_peer != NULL || L->task_owner == NULL) {
+    luaM_publishdebt(L);
+    return;
+  }
+  if (local.pending == 0) return;
+  previous.pending = __atomic_load_n(&L->withdrawn_debt, __ATOMIC_RELAXED);
+  do {
+    next.batch.total = previous.batch.total + local.batch.total;
+    next.batch.shared = previous.batch.shared + local.batch.shared;
+    if (next.batch.total >= DEBT_BATCH || next.batch.total <= -DEBT_BATCH ||
+        next.batch.shared >= DEBT_BATCH || next.batch.shared <= -DEBT_BATCH) {
+      luaM_flushdebt(L);
+      return;
+    }
+  } while (!__atomic_compare_exchange_n(&L->withdrawn_debt, &previous.pending,
+             next.pending, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  luaW_trackpublisher(L);
+  L->allocation_debt.pending = 0;
+  accountassist(L, local.batch.shared);
 }
 
 static void accountowned (lua_State *L, l_mem change, int exclusive) {

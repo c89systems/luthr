@@ -780,6 +780,63 @@ static int block_binding(lua_State *L) {
   return 1;
 }
 
+static int hold_userdata(lua_State *L) {
+  struct fixture *f = fixture;
+  unsigned char *bytes = lua_newuserdatauv(L, 4096, 0);
+  bytes[0] = 41;
+  bytes[4095] = 1;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  while (!f->native_release)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  lua_newuserdatauv(L, 4096, 0); /* leave a fresh batch for the task's exit */
+  lua_pushinteger(L, bytes[0] + bytes[4095]);
+  return 1;
+}
+
+static void native_accounting(struct fixture *f, int arm) {
+  LuaAllocationDebt withdrawn;
+  global_State *g;
+  lua_State *owner;
+  l_mem total, shared;
+  init(f, 1);
+  lua_gc(f->main, LUA_GCGEN);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_pushcfunction(f->main, hold_userdata);
+  lua_setglobal(f->main, "hold_userdata");
+  submit(f, 0, "return hold_userdata()", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  owner = f->tasks[0].root.thread;
+  g = G(f->main);
+  withdrawn.pending = __atomic_load_n(&owner->withdrawn_debt, __ATOMIC_ACQUIRE);
+  require(withdrawn.batch.total <= -4096 && withdrawn.batch.shared <= -4096);
+  total = gettotalbytes(g) - withdrawn.batch.total;
+  shared = getgcbytes(g) - withdrawn.batch.shared;
+  if (arm) {
+    uint64_t epoch = luaC_traceepoch(g);
+    require(lua_gc(f->main, LUA_GCSTEP, (size_t)0) >= 0);
+    require(luaC_traceepoch(g) != epoch && g->pacer.start == shared);
+  } else {
+    l_mem kib = lua_gc(f->main, LUA_GCCOUNT);
+    require(kib * 1024 + lua_gc(f->main, LUA_GCCOUNTB) == total);
+    require(getgcbytes(g) == shared);
+  }
+  require(__atomic_load_n(&owner->withdrawn_debt, __ATOMIC_ACQUIRE) == 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  luaSC_wait(&f->tasks[0]);
+  require(__atomic_load_n(&owner->withdrawn_debt, __ATOMIC_ACQUIRE) == 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  finish(f);
+}
+
 static void native_progress(struct fixture *f, int shutdown) {
   unsigned i;
   init(f, 1);
@@ -2120,6 +2177,10 @@ int main(int argc, char **argv) {
     nursery_edges(f, 0);
   else if (strcmp(argv[1], "nursery_edges_generational") == 0)
     nursery_edges(f, 1);
+  else if (strcmp(argv[1], "native_accounting_count") == 0)
+    native_accounting(f, 0);
+  else if (strcmp(argv[1], "native_accounting_arm") == 0)
+    native_accounting(f, 1);
   else
     abort();
   require(live_stacks == 0);

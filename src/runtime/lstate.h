@@ -323,6 +323,11 @@ typedef struct LuaSharingRoots {
 /*
 ** 'per thread' state
 */
+typedef union LuaAllocationDebt {
+  struct { int32_t shared, total; } batch;
+  uint64_t pending;
+} LuaAllocationDebt;
+
 struct lua_State {
   CommonHeader;
   lu_byte allowhook;
@@ -395,10 +400,7 @@ struct lua_State {
   GCObject *new_tables;  /* scratch links in table allocation prefixes */
   uintptr_t nursery_epoch;
   size_t nursery_tables;
-  union {
-    struct { int32_t shared, total; } batch;
-    uint64_t pending;  /* both bounded batches are zero when no debt is pending */
-  } allocation_debt;
+  LuaAllocationDebt allocation_debt;
   l_mem reclaim_credit;  /* freed bytes do not replenish allocation pacing */
   struct lua_State *publish_next;
   struct lua_State **publish_previous;  /* atomic membership, shard owns links */
@@ -412,6 +414,7 @@ struct lua_State {
   size_t task_table_limit;
   unsigned task_root_count;
   int task_nursery_closed;
+  uint64_t withdrawn_debt;  /* bounded accounting retained across opaque C */
 };
 
 
@@ -683,7 +686,9 @@ union GCUnion {
 #define getgcbytes(g) __atomic_load_n(&(g)->GCused, __ATOMIC_RELAXED)
 
 l_sinline l_mem luaM_shareddebt (const lua_State *L) {
-  return L->allocation_debt.batch.shared;
+  LuaAllocationDebt withdrawn;
+  withdrawn.pending = __atomic_load_n(&L->withdrawn_debt, __ATOMIC_RELAXED);
+  return cast(l_mem, L->allocation_debt.batch.shared) + withdrawn.batch.shared;
 }
 
 l_sinline l_mem luaE_getdebt (const global_State *g) {

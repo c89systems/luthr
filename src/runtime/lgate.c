@@ -212,6 +212,8 @@ static int offerstack (lua_State *L, NativeStackContext *context,
 static void unlockstate (lua_State *L, NativeStackContext *context, int values,
                          int detach) {
   LuaExecution *execution = context->execution;
+  int native = execution != NULL && execution->scheduler != NULL &&
+               execution->native_depth != 0;
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
   ** and the next allocating/calling API, instead of extending every read. */
@@ -221,8 +223,11 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values,
       luaC_reclaim(L);
   }
   if (L->allocation_debt.pending != 0 || L->reclaim_credit != 0 ||
-      (!values && L->stack_peer != NULL))
-    luaM_publishdebt(L);
+      (!values && L->stack_peer != NULL) ||
+      (!native && __atomic_load_n(&L->withdrawn_debt, __ATOMIC_RELAXED) != 0)) {
+    if (native) luaM_withdrawdebt(L);
+    else luaM_publishdebt(L);
+  }
   if (L->object_scopes == NULL &&
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
@@ -333,13 +338,14 @@ int luaW_trycallnative (lua_State *L, StkId func, unsigned status,
       (offer = task->slot->stack_offer) == 0)
     return 0;
   if (L->storage_retired != NULL || luaC_retired(L) != NULL ||
-      L->reclaim_pages || L->allocation_debt.pending != 0 ||
+      L->reclaim_pages ||
       L->reclaim_credit != 0 || L->stack_peer != NULL ||
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0 ||
       __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context ||
       (gethookmask(L) & LUA_MASKCALL))
     return 0;
   lua_assert(context == luaQ_ownertoken());
+  if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
   execution->native_depth = 1;
   L->native_depth = 1;
