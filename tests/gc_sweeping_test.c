@@ -239,7 +239,11 @@ static int boundary(lua_State *state) {
   lua_unlock(state);
   test.boundaries = 2;
   fixture = &test;
-  lua_gc(state, LUA_GCCOLLECT);
+  lua_lock(state);
+  luaW_stop(state);
+  luaC_fullgc(state, 0);
+  luaW_start(state);
+  lua_unlock(state);
   require(test.boundaries == 0);
   fixture = NULL;
   require(lua_gettop(test.worker) == 2);

@@ -1588,6 +1588,12 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
     lua_unlock(L);
     return res;
   }
+  if (what == LUA_GCCOLLECT) {
+    if (g->gcstp & (GCSTPGC | GCSTPCLS)) res = -1;
+    else luaC_fullgc(L, 0);
+    lua_unlock(L);
+    return res;
+  }
   luaC_entergc(L, &gcframe);
   do {
     luaC_waittrace(L);
@@ -1613,10 +1619,6 @@ LUA_API int lua_gc (lua_State *L, int what, ...) {
       g->gcstp = 0;  /* (other bits must be zero here) */
       __atomic_store_n(&g->sweep_workers, luaC_sweeping(L) &&
         luaC_sweepready(g), __ATOMIC_RELEASE);
-      break;
-    }
-    case LUA_GCCOLLECT: {
-      luaC_fullgc(L, 0);
       break;
     }
     case LUA_GCCOUNT: {

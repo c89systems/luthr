@@ -371,7 +371,8 @@ target_compile_options(gc_tracing_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_tracing_test PRIVATE luthr_static)
 target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaA_tryscan -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_stop
-  -Wl,--wrap=luaM_malloc_ -Wl,--wrap=luaM_allocstack -Wl,--wrap=luaC_scanstrong)
+  -Wl,--wrap=luaM_malloc_ -Wl,--wrap=luaM_allocstack -Wl,--wrap=luaC_scanstrong
+  -Wl,--wrap=luaW_waitcollector)
 foreach(case IN ITEMS array hash userdata metatable cclosure capture stack stack_wait_snapshot stack_wait_release stack_wait_reopen stack_wait_collect stack_wait_park busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak weak_retry weak_stamp_wrap intern cache
     concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues
     capture_read weaken_array_after_read weaken_hash_after_read)

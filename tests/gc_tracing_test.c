@@ -28,7 +28,7 @@ struct collection {
   pthread_cond_t changed;
   lua_State *main, *collector, *worker;
   size_t live;
-  unsigned allocating, failures, fail, assisted, stops;
+  unsigned allocating, failures, fail, assisted, stops, sweep_stops;
   int entered, release, done, emergency, minor, help;
 };
 static struct collection *collecting;
@@ -42,9 +42,18 @@ static struct parallel_scan {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *workers[2], *finisher;
-  int entered, progressed, release, finished;
+  int entered, progressed, release, finished, waiting;
 } *parallel_scanning;
 static __thread unsigned parallel_worker;
+
+void __real_luaW_waitcollector(lua_State *, int);
+void __wrap_luaW_waitcollector(lua_State *L, int reason) {
+  struct parallel_scan *scan = parallel_scanning;
+  if (scan != NULL && L == scan->finisher && reason == LUA_WAIT_TRACE)
+    __atomic_store_n(&scan->waiting, 1, __ATOMIC_RELEASE);
+  __real_luaW_waitcollector(L, reason);
+}
+
 static struct closure_builder {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -90,9 +99,14 @@ void *__wrap_luaM_allocstack(lua_State *L, size_t size, int emergency) {
 
 void __real_luaW_stop(lua_State *);
 void __wrap_luaW_stop(lua_State *L) {
-  if (collecting != NULL && L == collecting->collector && L->world_depth == 0 &&
-      luaC_tracing(L))
-    collecting->stops++;
+  if (collecting != NULL && L == collecting->collector && L->world_depth == 0) {
+    require(pthread_mutex_lock(&G(L)->world.mutex) == 0);
+    if (luaC_tracing(L))
+      collecting->stops++;
+    if (luaC_sweeping(L) && luaC_sweepready(G(L)))
+      collecting->sweep_stops++;
+    require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
+  }
   if (L == weak_marker && luaC_tracephase(G(L)) == TRACE_MARK &&
       G(L)->trace_plan.again == NULL && G(L)->ephemeron != NULL)
     weak_round_stops++;
@@ -1016,6 +1030,8 @@ static void concurrent_collection(const char *kind) {
   /* Ten thousand retained objects require over 150 mark batches. Global
    * synchronization must follow phases, rather than stopping at every batch. */
   require(collection.stops < 64);
+  if (!collection.emergency && !collection.minor && !collection.help)
+    require(collection.sweep_stops == 0);
   if (to_generation)
     require(G(collection.main)->gckind == KGC_GENMINOR);
   if (to_incremental)
@@ -1223,12 +1239,12 @@ static void parallel_marking(const char *kind) {
     require(G(L)->GCmarked > marked);
   require(pthread_mutex_unlock(&G(L)->world.mutex) == 0);
   require(pthread_create(&finisher, NULL, parallel_finisher, &scan) == 0);
-  while (!luaW_stopped(&G(L)->world))
+  while (!__atomic_load_n(&scan.waiting, __ATOMIC_ACQUIRE))
     sched_yield();
   /* An empty shared queue cannot finish a phase while the first scanner's
    * claimed payloads and newly discovered edges are still private. */
   require(pthread_mutex_lock(&scan.mutex) == 0);
-  require(!scan.finished && luaC_tracing(L));
+  require(!scan.finished && luaC_tracing(L) && !luaW_stopped(&G(L)->world));
   scan.release = 1;
   require(pthread_cond_broadcast(&scan.changed) == 0);
   require(pthread_mutex_unlock(&scan.mutex) == 0);
