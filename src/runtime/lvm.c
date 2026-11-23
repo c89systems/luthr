@@ -1479,11 +1479,72 @@ l_sinline StkId directregister (StkId base, int reg) {
 	  luaC_condGC(L, (void)0, (void)0); \
 	  luaX_pollrequests(L); updatebase(ci); updatetrap(ci); }
 
+static const TValue *projectedvalue (const LuaRecordSite *site,
+                                     const Proto *p, StkId base, StkId result,
+                                     const Instruction *first) {
+  switch (site->source) {
+    case LUA_PROJECT_REGISTER: return s2v(base + site->operand);
+    case LUA_PROJECT_CONSTANT: return p->k + site->operand;
+    case LUA_PROJECT_FIELD: {
+      const TValue *key = s2v(base + site->operand);
+      int i;
+      if (!ttisstring(key)) return NULL;
+      for (i = site->projection - 2; i >= 0; i--) {
+        Instruction store = first[i];
+        if (luaV_rawequalobj(key, p->k + GETARG_B(store)))
+          return TESTARG_k(store) ? p->k + GETARG_C(store)
+                                  : s2v(base + GETARG_C(store));
+      }
+      return NULL;
+    }
+    case LUA_PROJECT_INDEX: {
+      lua_Integer index;
+      if (luaV_tointegerns(s2v(base + site->operand), &index, F2Ieq) &&
+          index > 0 && index <= site->moves)
+        return s2v(result + index);
+      return NULL;
+    }
+    default: return NULL;
+  }
+}
+
+l_sinline const LuaRecordSite *constructorsite (const Proto *p,
+                                               const Instruction *at) {
+  int index = cast_int(at - p->code);
+  int low = 0, high = p->sizerecords;
+  while (low < high) {
+    int middle = low + (high - low) / 2;
+    if (p->records[middle].pc < index) low = middle + 1;
+    else high = middle;
+  }
+  if (low < p->sizerecords && p->records[low].pc == index) return &p->records[low];
+  return NULL;
+}
+
+static void __attribute__((noinline)) projecttable (
+    lua_State *L, const Proto *proto, CallInfo *ci, StkId result,
+    const Instruction *first, const LuaRecordSite *site) {
+  StkId base = ci->func.p + 1;
+  const TValue *value;
+  unsigned move;
+  /* Preserve temporary writes. There is no parking or user code before
+  ** the final read overwrites the only register holding the table. */
+  for (move = 0; move < site->moves; move++) {
+    Instruction ins = first[move];
+    setobjs2s(L, base + GETARG_A(ins), base + GETARG_B(ins));
+  }
+  value = projectedvalue(site, proto, base, result, first);
+  if (value != NULL) { setobj2s(L, result, value); }
+  else { setnilvalue2s(result); }
+  L->top.p = site->moves != 0 ? ci->top.p : result + 1;
+  L->poll_remaining -= site->projection;
+}
+
 /* Allocation can park and relocate registers. Keep this operation out of
 ** both dispatch loops, with the destination recoverable from the saved top. */
-static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
-                                     const Instruction *at, Instruction i,
-                                     Instruction extra) {
+static void __attribute__((noinline)) createtable (
+    lua_State *L, CallInfo *ci, const Instruction *at, Instruction i,
+    Instruction extra) {
   unsigned hash = cast_uint(GETARG_vB(i));
   unsigned array = cast_uint(GETARG_vC(i));
   const Proto *proto = ci_func(ci)->p;
@@ -1495,15 +1556,8 @@ static void __attribute__((noinline)) createtable (lua_State *L, CallInfo *ci,
     array += cast_uint(GETARG_Ax(extra)) * (MAXARG_vC + 1);
   }
   if (hash != 0 && array == 0 && proto->sizerecords != 0) {
-    int index = cast_int(at - proto->code);
-    int low = 0, high = proto->sizerecords;
-    while (low < high) {
-      int middle = low + (high - low) / 2;
-      if (proto->records[middle].pc < index) low = middle + 1;
-      else high = middle;
-    }
-    if (low < proto->sizerecords && proto->records[low].pc == index)
-      keys = proto->records[low].keys;
+    const LuaRecordSite *site = constructorsite(proto, at);
+    if (site != NULL) keys = site->keys;
   }
   L->top.p = ci->func.p + 2 + GETARG_A(i);
   table = keys != NULL ? luaH_newrecord(L, keys) : luaH_new(L, array, hash);
@@ -1691,6 +1745,18 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #define l_tforcall fast_tforcall
 #define l_tforloop fast_tforloop
 #include "lvmexecute.h"
+  vmcase(LUA_PROJECT_TABLE) {
+    const LuaRecordSite *site = constructorsite(p, ip);
+    lua_assert(site != NULL && site->projection != 0);
+    if (l_unlikely(trap || ci->u.l.captures != 0 ||
+                   L->poll_remaining <= site->projection || gethookmask(L))) {
+      directdispatch(OP_NEWTABLE);
+    }
+    projecttable(L, p, ci, RA(i), pc + 1, site);
+    pc += 1 + site->projection;  /* extra argument and projected operations */
+    updatetrap(ci);
+    vmbreak;
+  }
   vmcase(LUA_SETRECORD_0)
   vmcase(LUA_SETRECORD_1)
   vmcase(LUA_SETRECORD_2)

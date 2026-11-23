@@ -275,6 +275,55 @@ static void record_table(lua_State *L, lua_State *other) {
   }
   lua_pop(other, 3);
   record_constructor_hooks(L);
+
+  run_chunk(
+      L,
+      "local function field(a,b) return ({first=a, second=b}).first end; "
+      "local function item(a,b) return ({a,b})[2] end; "
+      "local function absent(a) return ({first=a}).missing end; "
+      "local function constant(a) return ({first=a, second=23}).second end; "
+      "local function repeated(a) return ({first=1, first=a}).first end; "
+      "local function choose(key,a,b) return ({first=a, second=b})[key] end; "
+      "local function selectat(key,a,b) return ({a,b})[key] end; "
+      "local value={}; "
+      "assert(field(value,false)==value and item(false,value)==value); "
+      "assert(field(nil,false)==nil and item(false,nil)==nil); "
+      "assert(absent(value)==nil and constant(value)==23); "
+      "assert(repeated(value)==value); "
+      "assert(choose('first',value,17)==value and choose('second',0,17)==17); "
+      "assert(choose(nil,value,17)==nil and choose({},value,17)==nil); "
+      "assert(selectat(2.0,17,value)==value and selectat(1,17,value)==17); "
+      "assert(selectat(2.5,17,value)==nil and selectat('2',17,value)==nil); "
+      "local function keeps(a,b) "
+      "  local t={first=a,second=b}; return t.first,t "
+      "end; "
+      "local picked, surviving=keeps(value,23); "
+      "assert(picked==value and surviving.second==23); "
+      "local calls=0; local function effect() calls=calls+1; return value end; "
+      "assert(({first=effect(),second=0}).first==value and calls==1); "
+      "assert(assert(load(string.dump(field,true),nil,'b'))(value,0)==value); "
+      "assert(assert(load(string.dump(item,true),nil,'b'))(0,value)==value); "
+      "collectgarbage('collect'); collectgarbage('stop'); "
+      "local before=collectgarbage('count'); "
+      "for i=1,6000 do "
+      "  assert(field(i,0)==i and item(0,i)==i and "
+      "         choose('second',0,i)==i and selectat(2,0,i)==i); "
+      "end; "
+      "assert(collectgarbage('count')-before<32); collectgarbage('restart'); "
+      "local observed=false; "
+      "debug.sethook(function() "
+      "  if debug.getinfo(2,'f').func ~= field then return end; "
+      "  for i=1,8 do "
+      "    local name, slot=debug.getlocal(2,i); "
+      "    if not name then break end; "
+      "    if type(slot)=='table' and rawget(slot,'first')==101 then "
+      "      rawset(slot,'first',137); observed=true; "
+      "    end; "
+      "  end; "
+      "end,'',1); "
+      "local hooked=field(101,105); debug.sethook(); "
+      "assert(observed and hooked==137)",
+      0);
 }
 
 int main(int argc, char **argv) {

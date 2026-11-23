@@ -685,13 +685,114 @@ static unsigned recordfields (const Proto *p, int pc, lu_byte *fields,
   return count > hash / 2 ? count : 0;
 }
 
+/* The last read kills the anonymous table's only reference. The accepted
+** stores and register moves cannot expose it or execute a metamethod. */
+static LuaRecordSite projectconstructor (const Proto *p, int pc) {
+  LuaRecordSite plan = {0};
+  Instruction allocation = p->code[pc];
+  unsigned array, hash, reg;
+  int first, at;
+  if (GET_OPCODE(allocation) != OP_NEWTABLE || TESTARG_k(allocation) ||
+      p->sizecode - pc <= 2 || GET_OPCODE(p->code[pc + 1]) != OP_EXTRAARG)
+    return plan;
+  reg = GETARG_A(allocation);
+  array = GETARG_vC(allocation);
+  hash = GETARG_vB(allocation);
+  if (reg >= p->maxstacksize || array > 4 || hash > 3 ||
+      (array != 0 && hash != 0))
+    return plan;
+  first = at = pc + 2;
+  if (array != 0) {
+    Instruction pack, read;
+    OpCode op;
+    unsigned i, index;
+    if (reg + array >= p->maxstacksize ||
+        cast_uint(p->sizecode - at) < array + 2)
+      return plan;
+    for (i = 1; i <= array; i++) {
+      Instruction move = p->code[at++];
+      if (GET_OPCODE(move) != OP_MOVE || GETARG_A(move) != reg + i ||
+          GETARG_B(move) >= reg)
+        return plan;
+    }
+    pack = p->code[at++];
+    read = p->code[at++];
+    op = GET_OPCODE(read);
+    if (GET_OPCODE(pack) != OP_SETLIST || GETARG_A(pack) != reg ||
+        TESTARG_k(pack) || GETARG_vB(pack) != array || GETARG_vC(pack) != 0 ||
+        (op != OP_GETI && op != OP_GETTABLE) ||
+        GETARG_A(read) != reg || GETARG_B(read) != reg)
+      return plan;
+    index = GETARG_C(read);
+    if (op == OP_GETI) {
+      if (index > 0 && index <= array) {
+        plan.source = LUA_PROJECT_REGISTER;
+        plan.operand = cast_byte(reg + index);
+      }
+    }
+    else if (index < reg) {
+      plan.source = LUA_PROJECT_INDEX;
+      plan.operand = cast_byte(index);
+    }
+    else return plan;
+    plan.moves = cast_byte(array);
+  }
+  else {
+    Instruction read;
+    OpCode op;
+    unsigned field;
+    for (; at < p->sizecode && at - first < 4; at++) {
+      Instruction store = p->code[at];
+      unsigned key, operand;
+      if (GET_OPCODE(store) != OP_SETFIELD || GETARG_A(store) != reg)
+        break;
+      key = GETARG_B(store);
+      operand = GETARG_C(store);
+      if (key >= cast_uint(p->sizek) || !ttisshrstring(&p->k[key]) ||
+          operand >= (TESTARG_k(store) ? cast_uint(p->sizek) : reg))
+        return plan;
+    }
+    if (at == p->sizecode) return plan;
+    read = p->code[at++];
+    op = GET_OPCODE(read);
+    if ((op != OP_GETFIELD && op != OP_GETTABLE) ||
+        GETARG_A(read) != reg || GETARG_B(read) != reg)
+      return plan;
+    field = GETARG_C(read);
+    if (op == OP_GETTABLE) {
+      if (field >= reg) return plan;
+      plan.source = LUA_PROJECT_FIELD;
+      plan.operand = cast_byte(field);
+      plan.projection = cast_byte(at - first);
+      return plan;
+    }
+    if (field >= cast_uint(p->sizek) || !ttisshrstring(&p->k[field]))
+      return plan;
+    for (int i = at - 2; i >= first; i--) {
+      Instruction store = p->code[i];
+      if (tsvalue(&p->k[GETARG_B(store)]) == tsvalue(&p->k[field])) {
+        plan.source = TESTARG_k(store) ? LUA_PROJECT_CONSTANT
+                                      : LUA_PROJECT_REGISTER;
+        plan.operand = cast_byte(GETARG_C(store));
+        break;
+      }
+    }
+  }
+  plan.projection = cast_byte(at - first);
+  return plan;
+}
+
 static void lowerrecords (lua_State *L, Proto *p) {
   lu_byte fields[LUA_RECORD_MAX_FIELDS], stores[LUA_RECORD_MAX_FIELDS];
   int pc, sites = 0;
   _Static_assert(LUA_SETRECORD_3 - LUA_SETRECORD_0 + 1 == LUA_RECORD_MAX_FIELDS,
                  "record store dispatch range");
-  for (pc = 0; pc < p->sizecode; pc++)
-    if (recordfields(p, pc, fields, stores) != 0) sites++;
+  for (pc = 0; pc < p->sizecode; pc++) {
+    if (GET_OPCODE(p->code[pc]) == OP_NEWTABLE &&
+        (recordfields(p, pc, fields, stores) != 0 ||
+         projectconstructor(p, pc).projection != 0))
+      sites++;
+  }
   if (sites == 0) return;
   if (p->dispatch == NULL) {
     p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
@@ -703,12 +804,20 @@ static void lowerrecords (lua_State *L, Proto *p) {
   for (pc = 0; pc < sites; pc++) p->records[pc].keys = NULL;
   sites = 0;
   for (pc = 0; pc < p->sizecode; pc++) {
-    unsigned i, count = recordfields(p, pc, fields, stores);
+    unsigned i, count;
+    LuaRecordSite plan;
     Table *keys;
+    if (GET_OPCODE(p->code[pc]) != OP_NEWTABLE) continue;
+    count = recordfields(p, pc, fields, stores);
+    plan = projectconstructor(p, pc);
+    if (count == 0 && plan.projection == 0) continue;
+    plan.pc = pc;
+    p->records[sites++] = plan;
+    if (plan.projection != 0 && p->dispatch[pc] == OP_NEWTABLE)
+      p->dispatch[pc] = LUA_PROJECT_TABLE;
     if (count == 0) continue;
     keys = luaH_new(L, count, 0);
-    p->records[sites].keys = keys;
-    p->records[sites++].pc = pc;
+    p->records[sites - 1].keys = keys;
     luaC_objbarrier(L, p, keys);
     for (i = 0; i < count; i++) {
       const TValue *key = &p->k[fields[i]];
