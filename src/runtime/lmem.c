@@ -851,6 +851,7 @@ static void preparepage (LuaAllocPage *page,
   page->trace_pending = 0;
   page->task_private = page->task_backing = page->task_dirty = 0;
   page->task_top = page->task_capacity = 0;
+  page->task_mark = 0;
   page->task_bytes = 0;
   {
     unsigned stride = blockbytes + sizeof(LuaAllocBlock);
@@ -888,9 +889,10 @@ static void offerpage (global_State *g, LuaAllocPage *page) {
   *head = page;
 }
 
-/* The table headers are already shaded and carry ordinary sweep flags.
-** This publishes the page itself; no pool operation sees it earlier. */
-void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch) {
+/* Publish one mark for the live slots and install the page ahead of any
+** frozen sweep cursor. Its slots join the next sweep cohort. */
+void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch,
+                         lu_byte mark) {
   global_State *g = G(L);
   unsigned pool = page->pool;
   unsigned slot;
@@ -904,6 +906,7 @@ void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch) {
     page->local = block;
   }
   page->table_epoch = page->used != 0 ? epoch + 1 : 0;
+  page->task_mark = mark;
   __atomic_store_n(&page->task_private, 0, __ATOMIC_RELEASE);
   luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
   page->next = *poolpages(g, pool);
@@ -992,7 +995,8 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
     block = luaMP_slotblock(page, slot);
   }
   page->used++;
-  __atomic_store_n(&block->block.page, cast(uintptr_t, page), __ATOMIC_RELAXED);
+  __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_TABLE,
+                    __ATOMIC_RELAXED);
   lua_assert(!(page->trace_slots[slot / 64] & (UINT64_C(1) << (slot % 64))));
   page->trace_slots[slot / 64] |= UINT64_C(1) << (slot % 64);
   if (!page->task_dirty) {

@@ -308,14 +308,15 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
   global_State *g = G(L);
   char *p;
   GCObject *o;
-  int collector;
+  int collector, taskpage;
   p = NULL;
   if (tt == LUA_VTABLE && L->task_owner != NULL &&
       luaC_tasktableeligible(L, sz) && !luaW_iscollector(L))
     p = cast_charp(luaM_trytasktable(L, sz));
+  taskpage = p != NULL;
   if (p == NULL) p = cast_charp(luaM_newobject(L, novariant(tt), sz));
   o = cast(GCObject *, p + offset);
-  setmarked(o, luaC_newmark(g));
+  setmarked(o, taskpage ? LUA_TASK_PAGE_MARK : luaC_newmark(g));
   o->tt = tt;
   o->next = NULL;
   if (tt == LUA_VLNGSTR) gco2ts(o)->extra = 0;
@@ -382,15 +383,35 @@ GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz) {
 */
 static int claimmark (global_State *g, GCObject *o) {
   unsigned state = luaC_markstate(g);
-  lu_byte marked = getmarked(o);
-  lu_byte claimed;
+  lu_byte marked, claimed;
   if (luaC_taskobject(o)) return 0;
+  marked = getmarked(o);
   do {
     if (!luaC_unmarked(state, marked)) return 0;
     claimed = cast_byte(luaC_stamp(state, marked) | bitmask(QUEUEDBIT));
   } while (!__atomic_compare_exchange_n(&o->marked, &marked, claimed, 0,
                                         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
   return 1;
+}
+
+lu_byte luaC_materializemark (const GCObject *o) {
+  LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
+  LuaAllocPage *page = luaMP_page(block);
+  Table *table = gco2t(cast(GCObject *, o));
+  lu_byte mark = LUA_TASK_PAGE_MARK;
+  uint64_t state;
+  lua_assert(o->tt == LUA_VTABLE && page != NULL);
+  if (__atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE)) return 0;
+  /* Retire the nursery state without overwriting a weak mode installed by
+  ** another owner. All competing first readers use the same page mark. */
+  state = __atomic_load_n(&table->gcstate, __ATOMIC_RELAXED);
+  if ((state & LUA_TASK_PAGE_STATE) == LUA_TASK_PAGE_STATE)
+    __atomic_compare_exchange_n(&table->gcstate, &state, 0, 0,
+                                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+  if (__atomic_compare_exchange_n(&table->marked, &mark, page->task_mark, 0,
+                                   __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+    return page->task_mark;
+  return mark;
 }
 
 static void reallymarkobject (global_State *g, GCObject *o) {

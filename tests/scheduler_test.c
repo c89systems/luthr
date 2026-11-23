@@ -2173,12 +2173,23 @@ static void nursery_survivors(struct fixture *f, int generational) {
   require(luaSC_collect(f->main, &f->tasks[0], &status, &results) == LUA_OK);
   require(status == LUA_OK && results == 1);
   lua_setglobal(f->main, "nursery_result");
+  require(
+      luaL_dostring(f->main,
+                    "local t=nursery_result; local dead=t[3072]; "
+                    "t[3072]=nil; nursery_finalized=0; "
+                    "nursery_weak=setmetatable({dead,t[1536]},{__mode='v'}); "
+                    "setmetatable(dead,{__gc=function(o) "
+                    "assert(o[1]==3072); nursery_finalized=nursery_finalized+1 "
+                    "end})") == LUA_OK);
   lua_gc(f->main, LUA_GCCOLLECT);
-  require(luaL_dostring(f->main, "local t=nursery_result; "
-                                 "assert(t[1]==nil and t[2][1]==42 and "
-                                 "t[3]==('keep'):rep(33) and t[5000]==5000); "
-                                 "assert(t[t[2]]==17 and t[4]==t[5] and "
-                                 "t[4][1]==43 and t[t[4]]==23)") == LUA_OK);
+  require(luaL_dostring(f->main,
+                        "local t=nursery_result; "
+                        "assert(nursery_weak[1]==nil and "
+                        "nursery_weak[2]==t[1536] and nursery_finalized==1); "
+                        "assert(t[1]==nil and t[2][1]==42 and "
+                        "t[3]==('keep'):rep(33) and t[5000]==5000); "
+                        "assert(t[t[2]]==17 and t[4]==t[5] and "
+                        "t[4][1]==43 and t[t[4]]==23)") == LUA_OK);
   finish(f);
 }
 

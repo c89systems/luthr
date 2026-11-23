@@ -52,6 +52,7 @@ struct LuaAllocPage {
   unsigned task_dirty;
   unsigned task_top;  /* first virgin slot, before any free-list reuse */
   unsigned task_capacity;
+  lu_byte task_mark;  /* inherited by task tables when the page is published */
 };
 
 #define LUA_PAGE_NOTIFIED cast(uintptr_t, 1)
@@ -77,7 +78,7 @@ LUAI_FUNC void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
 LUAI_FUNC void *luaM_trytasktable (lua_State *L, size_t size);
 LUAI_FUNC void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page,
-                                 uint64_t epoch);
+                                 uint64_t epoch, lu_byte mark);
 LUAI_FUNC void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page);
 LUAI_FUNC void luaM_trimtaskpages (lua_State *L);
 /* The caller holds the page's pool mutex throughout the short lease. */

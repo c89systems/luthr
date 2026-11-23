@@ -213,7 +213,18 @@ LUAI_FUNC void luaC_leavegc (lua_State *L, LuaGCFrame *frame);
 #define MARKSTAMPS	(MAJORBITS | bitmask(MINORBIT))
 
 
-#define getmarked(x) __atomic_load_n(&(x)->marked, __ATOMIC_RELAXED)
+/* Task pages allocate their tables with a reserved mark byte. The page
+** supplies their first shared mark after publication. */
+#define LUA_TASK_PAGE_MARK cast_byte(bit2mask(FINALIZEDBIT, QUEUEDBIT))
+LUAI_FUNC lu_byte luaC_materializemark (const GCObject *o);
+
+l_sinline lu_byte luaC_getmarked (const GCObject *o) {
+  lu_byte mark = __atomic_load_n(&o->marked, __ATOMIC_RELAXED);
+  if (l_unlikely(mark == LUA_TASK_PAGE_MARK)) return luaC_materializemark(o);
+  return mark;
+}
+
+#define getmarked(x) luaC_getmarked(cast(const GCObject *, (x)))
 /* Diagnostic reads can run outside metadata ownership. An exchange also
 ** makes these atomic writes visible to Helgrind's instruction-level model. */
 #define setmarked(x,m) \
@@ -261,21 +272,26 @@ static inline int luaC_unmarked (unsigned state, lu_byte marked) {
 #define iswhite(g,o) luaC_unmarked(luaC_markstate(g), getmarked(o))
 #define isblack(g,o) (!iswhite((g),(o)) && !isgray(o))
 
-static inline int luaC_deadmark (global_State *g, const lu_byte *marked) {
-  unsigned state = cast_uint(__atomic_load_n(&g->world.control, __ATOMIC_ACQUIRE));
-  return !(state & LUA_MARK_ACTIVE) &&
-         luaC_unmarked(state, __atomic_load_n(marked, __ATOMIC_RELAXED));
-}
-
 enum { NURSERY_TAG = 1, NURSERY_ROOT = 2, NURSERY_LIVE = 4, NURSERY_TASK = 8,
-       NURSERY_STEP = 16, NURSERY_TASKOLD = 16, NURSERY_TASK_EDGES = 32 };
+       NURSERY_STEP = 16, NURSERY_TASKOLD = 16, NURSERY_TASK_EDGES = 32,
+       NURSERY_PAGED = 64 };
 
-l_sinline int luaC_tasktablestate (uint64_t state) {
-  return (state & (NURSERY_TAG | NURSERY_TASK)) == (NURSERY_TAG | NURSERY_TASK);
+#define LUA_TASK_PAGE_STATE (NURSERY_TAG | NURSERY_TASK | NURSERY_PAGED)
+
+#define luaC_tablestate(t) __atomic_load_n(&(t)->gcstate, __ATOMIC_ACQUIRE)
+
+l_sinline int luaC_tasktablestate (const Table *table, uint64_t state) {
+  if ((state & (NURSERY_TAG | NURSERY_TASK)) != (NURSERY_TAG | NURSERY_TASK))
+    return 0;
+  if (state & NURSERY_PAGED) {
+    LuaAllocPage *page = luaMP_page(cast(const LuaAllocBlock *, table) - 1);
+    return __atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE) != 0;
+  }
+  return 1;
 }
 
 l_sinline int luaC_tasktable (const Table *table) {
-  return luaC_tasktablestate(__atomic_load_n(&table->gcstate, __ATOMIC_ACQUIRE));
+  return luaC_tasktablestate(table, luaC_tablestate(table));
 }
 
 l_sinline int luaC_taskstring (const GCObject *object) {
@@ -289,7 +305,9 @@ l_sinline int luaC_taskobject (const GCObject *object) {
 }
 
 l_sinline int luaC_objectdead (global_State *g, const GCObject *object) {
-  return luaC_deadmark(g, &object->marked) &&
+  unsigned state = cast_uint(__atomic_load_n(&g->world.control, __ATOMIC_ACQUIRE));
+  return !(state & LUA_MARK_ACTIVE) &&
+         luaC_unmarked(state, getmarked(object)) &&
          !luaC_taskobject(object);
 }
 #define isdead(g,o) luaC_objectdead((g), cast(const GCObject *, (o)))
@@ -443,7 +461,6 @@ enum {
   LUA_WEAK_STAMP_STEP = 64
 };
 
-#define luaC_tablestate(t) __atomic_load_n(&(t)->gcstate, __ATOMIC_ACQUIRE)
 #define luaC_settablestate(t,v) __atomic_store_n(&(t)->gcstate, (v), __ATOMIC_RELEASE)
 
 LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);

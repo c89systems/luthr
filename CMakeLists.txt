@@ -67,11 +67,10 @@ add_custom_command(OUTPUT "${facade_header}" "${facade_source}" "${export_map}"
   VERBATIM)
 add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 
-# Keep dispatch ahead of the nursery, constructor helper and string construction.
-# Keep scheduler policy after the VM and native paths to isolate their layout.
+# Keep dispatch and native paths together ahead of collector and scheduler policy.
 set(lua_sources
-  laccess lallocator lapi lbarrier lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lgc lgcobject lgctable llex lmem lmemcache lmempage lobject lopcodes
-  lpacer lparser lpipe lpolicy lreclaim lschedulergc lsharing lstate lsweep ltable ltableaccess ltablestorage ltask ltm ltrace lcollector lundump lvm ltablelist lstring lworld lzio lauxlib lbaselib lcorolib
+  laccess lallocator lapi lbarrier lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lvm lgc lgcobject lgctable llex lmem lmemcache lmempage lobject lopcodes
+  lpacer lparser lpipe lpolicy lreclaim lschedulergc lsharing lstate lsweep ltable ltableaccess ltablestorage ltask ltm ltrace lcollector lundump ltablelist lstring lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit ltracepage lnursery lscheduler)
 list(TRANSFORM lua_sources PREPEND "src/runtime/")
 list(TRANSFORM lua_sources APPEND ".c")

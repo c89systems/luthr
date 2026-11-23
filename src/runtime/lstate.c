@@ -400,6 +400,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->task_remembered = obj2gco(L);
   L->task_old_bytes = 0;
   L->task_minor_budget = 0;
+  L->task_unpaged_bytes = 0;
   L->task_pages = L->task_young_pages = NULL;
   memset(L->task_alloc_pages, 0, sizeof(L->task_alloc_pages));
   L->task_page_bytes = 0;
