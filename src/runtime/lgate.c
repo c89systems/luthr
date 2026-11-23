@@ -613,4 +613,12 @@ void luaX_poll (lua_State *L) {
   }
   luaTK_checkstop(L);
   luaCP_checklimit(L);
+  /* A promotion closes only the current cohort. Retry after a Lua poll
+  ** amortizes repeated escapes without disabling private allocation for
+  ** the rest of a long-running task. */
+  if (l_unlikely(L->task_nursery_closed) &&
+      L->task_owner != NULL && L->native_depth == 0 && isLua(L->ci)) {
+    lua_assert(L->task_tables == NULL);
+    L->task_nursery_closed = 0;
+  }
 }
