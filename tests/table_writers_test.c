@@ -160,7 +160,7 @@ int main(int argc, char **argv) {
     unsigned bucket, mask = sizenode(probe.table) - 1;
     lua_pushliteral(L, "field-1");
     bucket = tsvalue(s2v(L->top.p - 1))->hash & mask;
-    a = luaH_Hgetshortstr(probe.table, tsvalue(s2v(L->top.p - 1)));
+    a = luaH_shortslot(probe.table->node + bucket, tsvalue(s2v(L->top.p - 1)));
     probe.first_slot = (unsigned)((const Node *)a - probe.table->node);
     lua_pop(L, 1);
     for (i = 2; i <= 10000; i++) {
@@ -175,7 +175,8 @@ int main(int argc, char **argv) {
       lua_pushinteger(L, 0);
       lua_rawset(L, 1);
       lua_pushfstring(L, "field-%d", (int)i);
-      b = luaH_Hgetshortstr(probe.table, tsvalue(s2v(L->top.p - 1)));
+      b = luaH_shortslot(probe.table->node + bucket,
+                         tsvalue(s2v(L->top.p - 1)));
       lua_pop(L, 1);
       if (luaH_writer(G(L), &a->value_) != luaH_writer(G(L), &b->value_))
         break;

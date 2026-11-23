@@ -80,13 +80,18 @@ l_sinline int luaH_trygetint (lua_State *L, Table *table, lua_Integer key,
 l_sinline int luaH_trygetshortstr (lua_State *L, Table *table, TString *key,
                                    TValue *result, lu_byte *tag) {
   Node *nodes;
+  Table *keys;
   lu_byte found;
   if (!luaA_localtable(L, table))
     return luaH_trygetsharedshortstr(L, table, key, result, tag);
   nodes = table->node;
   lua_assert(luaH_hashdir(nodes) == NULL);
-  if (luaH_recordkeys(nodes) != NULL)
-    found = luaH_hashvalue(luaH_Hgetshortstr(table, key), result);
+  keys = luaH_recordkeys(nodes);
+  if (keys != NULL) {
+    unsigned index = luaH_recordindex(keys, key);
+    found = index < keys->asize ? luaH_recordvalue(table, index, result)
+                               : LUA_VABSTKEY;
+  }
   else
     found = luaH_hashvalue(luaH_shortslot(luaH_shortposition(nodes, key), key),
                            result);

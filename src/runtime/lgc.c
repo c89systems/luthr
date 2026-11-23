@@ -771,12 +771,14 @@ static int traversearray (LuaTraceWork *work, Table *h) {
 }
 
 static int traverserecord (LuaTraceWork *work, Table *h, Table *keys) {
-  TValue *values = luaH_recordvalues(h);
+  Value *values = luaH_recordvalues(h);
+  uintptr_t tags = h->arraydata;
   unsigned i;
   int marked = 0;
   for (i = 0; i < keys->asize; i++) {
-    if (valiswhite(work->global, values + i)) {
-      markwork(work, gcvalue(values + i));
+    if ((luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) &&
+        iswhite(work->global, values[i].gc)) {
+      markwork(work, values[i].gc);
       marked = 1;
     }
   }
@@ -885,11 +887,13 @@ static int cachemode (global_State *g, Table *h, const TValue *mode) {
 }
 
 static int getmode (global_State *g, Table *h) {
+  TValue mode;
   if (luaC_markstate(g) & LUA_MARK_ACTIVE) {
     uint64_t state = luaC_tablestate(h);
     if (luaC_weakvalid(g, state)) return cast_int(luaC_weakmode(state));
   }
-  return cachemode(g, h, gfasttm(g, h->metatable, TM_MODE));
+  return cachemode(g, h, luaT_gettmunlocked(h->metatable, TM_MODE,
+                                           g->tmname[TM_MODE], &mode));
 }
 
 /* The table owner freezes its mode; its metatable only needs a validated read.

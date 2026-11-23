@@ -56,17 +56,18 @@ void luaT_init (lua_State *L) {
 
 
 /*
-** Borrowed lookup for the collector under world quiescence. Mutators use
+** Lookup for the collector under world quiescence. Mutators use
 ** rooted snapshots through luaT_gettmbyobj instead.
 */
-const TValue *luaT_gettmunlocked (Table *events, TMS event, TString *ename) {
-  const TValue *tm = luaH_Hgetshortstr(events, ename);
+const TValue *luaT_gettmunlocked (Table *events, TMS event, TString *ename,
+                                  TValue *result) {
   lua_assert(event <= TM_EQ);
-  if (notm(tm)) {  /* no tag method? */
+  if (checknoTM(events, event)) return NULL;
+  if (tagisempty(luaH_getshortowned(events, ename, result))) {
     __atomic_fetch_or(&events->flags, cast_byte(1u << event), __ATOMIC_RELAXED);
     return NULL;
   }
-  else return tm;
+  else return result;
 }
 
 

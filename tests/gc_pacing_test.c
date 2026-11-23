@@ -844,7 +844,7 @@ static void nursery_backing_wait(void) {
   lua_createtable(L, 256, 0);
   table = (Table *)lua_topointer(L, -1);
   nursery_slot = (LuaAllocBlock *)table - 1;
-  nursery_backing = table->array - table->asize;
+  nursery_backing = luaH_array(table) - table->asize;
   lua_pop(L, 1);
   for (unsigned i = 0; i < 64; i++) {
     lua_newtable(L);

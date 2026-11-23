@@ -32,10 +32,13 @@
 
 LUAI_DDEC(const Node luaH_dummynode;)
 
-/* A compact record owns its values inline. Its immutable key array is a
-** separate collectable table, shared by the constructor's instances. */
+/* A record keeps its payloads inline and uses the unused array pointer word
+** for tags. The low bit distinguishes tags from an aligned array pointer.
+** The node field points to the constructor's shared immutable key array. */
 #define LUA_RECORD_TAG cast(uintptr_t, 2)
+#define LUA_RECORD_TAGS cast(uintptr_t, 1)
 enum { LUA_RECORD_MAX_FIELDS = 4 };
+_Static_assert(sizeof(uintptr_t) > LUA_RECORD_MAX_FIELDS, "record tag word");
 
 l_sinline Table *luaH_recordkeys (const Node *image) {
   uintptr_t address = cast(uintptr_t, image);
@@ -43,8 +46,41 @@ l_sinline Table *luaH_recordkeys (const Node *image) {
     ? cast(Table *, address & ~LUA_RECORD_TAG) : NULL;
 }
 
-l_sinline TValue *luaH_recordvalues (Table *table) {
-  return cast(TValue *, table + 1);
+l_sinline Value *luaH_recordvalues (const Table *table) {
+  return cast(Value *, table + 1);
+}
+
+l_sinline lu_byte luaH_recordtag (uintptr_t tags, unsigned index) {
+  return cast_byte(tags >> ((index + 1) * 8));
+}
+
+l_sinline void luaH_setrecordtag (Table *table, unsigned index, lu_byte tag) {
+  unsigned shift = (index + 1) * 8;
+  uintptr_t tags = (table->arraydata & ~(cast(uintptr_t, 255) << shift)) |
+                   (cast(uintptr_t, tag) << shift);
+  __atomic_store_n(&table->arraydata, tags, __ATOMIC_RELEASE);
+}
+
+/* The logical array is empty throughout the compact layout's lifetime. */
+l_sinline Value *luaH_readarray (const Table *table) {
+  uintptr_t data = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+  return (data & LUA_RECORD_TAGS) ? NULL : cast(Value *, data);
+}
+
+l_sinline Value *luaH_array (const Table *table) {
+  lua_assert(!(table->arraydata & LUA_RECORD_TAGS));
+  return cast(Value *, table->arraydata);
+}
+
+/* Ownership or exclusive collector access protects the record image. */
+l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
+                                    TValue *result) {
+  lu_byte tag = luaH_recordtag(table->arraydata, index);
+  if (!tagisempty(tag)) {
+    val_(result) = luaH_recordvalues(table)[index];
+    settt_(result, tag);
+  }
+  return tag;
 }
 
 #define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))
@@ -127,9 +163,9 @@ LUAI_FUNC l_mem luaH_hashsize (const Table *);
   --------------------------------------------------------
   ...  |   Value 1     |   Value 0     | header |0|1|...
   --------------------------------------------------------
-                                       ^ t->array
+                                       ^ luaH_array(t)
 
-** All accesses to 't->array' should be through the macros 'getArrTag'
+** Slot access should use the macros 'getArrTag'
 ** and 'getArrVal'.
 */
 
@@ -142,10 +178,10 @@ typedef struct LuaArrayHeader {
 #define arraytag(a,k) (cast(lu_byte *, (a)) + sizeof(LuaArrayHeader) + (k))
 
 /* Computes the address of the tag for the abstract C-index 'k' */
-#define getArrTag(t,k)	arraytag((t)->array, (k))
+#define getArrTag(t,k)	arraytag(luaH_array(t), (k))
 
 /* Computes the address of the value for the abstract C-index 'k' */
-#define getArrVal(t,k)	((t)->array - 1 - (k))
+#define getArrVal(t,k)	(luaH_array(t) - 1 - (k))
 
 l_sinline unsigned luaH_recordindex (const Table *keys, const TString *key) {
   unsigned i;
@@ -171,7 +207,7 @@ l_sinline unsigned luaH_arraycardcount (unsigned size) {
 }
 
 l_sinline uint64_t *luaH_arraycards (const Table *t) {
-  return cast(uint64_t *, cast_charp(t->array) + luaH_cardoffset(t->asize));
+  return cast(uint64_t *, cast_charp(luaH_array(t)) + luaH_cardoffset(t->asize));
 }
 
 l_sinline void luaH_dirtyarray (Table *t, unsigned index, const TValue *value) {
@@ -186,7 +222,7 @@ l_sinline void luaH_dirtyarray (Table *t, unsigned index, const TValue *value) {
 ** see luaH_getn. It is stored there to avoid wasting space in
 ** the structure Table for tables with no array part.
 */
-#define lenhint(t)	(&arrayheader((t)->array)->hint)
+#define lenhint(t)	(&arrayheader(luaH_array(t))->hint)
 
 
 /*
@@ -235,8 +271,8 @@ LUAI_FUNC int luaH_setshared (lua_State *, Table *, const TValue *, TValue *, in
 LUAI_FUNC void luaH_setlist (lua_State *L, Table *t, StkId base,
                             unsigned count, unsigned last);
 
-/* Borrowed lookup: requires object ownership or collector quiescence. */
-LUAI_FUNC const TValue *luaH_Hgetshortstr (Table *t, TString *key);
+/* Requires object ownership or collector quiescence. */
+LUAI_FUNC lu_byte luaH_getshortowned (Table *t, TString *key, TValue *result);
 
 LUAI_FUNC void luaH_setint (lua_State *L, Table *t, lua_Integer key,
                                                     TValue *value);

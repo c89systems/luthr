@@ -440,7 +440,8 @@ int main(int argc, char **argv) {
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
   deadline.tv_sec += 10;
   if (probe.retirement)
-    __atomic_store_n(&watched_buffer, probe.table->array - probe.table->asize,
+    __atomic_store_n(&watched_buffer,
+                     luaH_array(probe.table) - probe.table->asize,
                      __ATOMIC_RELAXED);
   probe.armed = 1;
   require(pthread_create(&marker, NULL, mark, NULL) == 0);

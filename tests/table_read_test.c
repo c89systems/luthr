@@ -638,7 +638,7 @@ static void private_resize(lua_State *state) {
 
   luaX_lockstate(state);
   table = hvalue(s2v(state->stack.p + 1));
-  watched = table->array - table->asize;
+  watched = luaH_array(table) - table->asize;
   returned = 0;
   luaH_resizearray(state, table, 16384);
   require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);

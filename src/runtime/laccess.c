@@ -308,9 +308,9 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     if (cache) luaA_begin(L, obj2gco(mt), &layout);
     luaA_beginlock(L, &g->metatable_access[type], &access);
     if (cache) {
-      const TValue *field = luaH_Hgetshortstr(mt, g->tmname[TM_INDEX]);
-      if (ttistable(field)) {
-        index = hvalue(field);
+      TValue field;
+      if (luaH_getshortowned(mt, g->tmname[TM_INDEX], &field) == LUA_VTABLE) {
+        index = hvalue(&field);
         __atomic_fetch_or(&mt->flags, LUA_TABLE_STRING_INDEX, __ATOMIC_RELEASE);
       }
     }
@@ -373,17 +373,16 @@ static void endpair (lua_State *L, LuaObjectScope *first,
 /* The returned value is copied into the caller's live, GC-visible snapshot. */
 static void metafield (lua_State *L, Table *mt, TString *key,
                        LuaNativeRoot *result, int event) {
-  const TValue *slot;
+  TValue value;
   setnilvalue(&result->value);
   if (mt == NULL)
     return;
-  slot = luaH_Hgetshortstr(mt, key);
-  if (ttisnil(slot)) {
+  if (tagisempty(luaH_getshortowned(mt, key, &value))) {
     if (event >= 0 && event <= TM_EQ)
       __atomic_fetch_or(&mt->flags, cast_byte(1u << event), __ATOMIC_RELAXED);
   }
   else
-    luaR_setroot(L, result, slot);
+    luaR_setroot(L, result, &value);
 }
 
 void luaA_tabletm (lua_State *L, Table *mt, TMS event, LuaNativeRoot *result) {

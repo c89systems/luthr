@@ -16,8 +16,10 @@ static int snapshot (Table *table, Table *view, Table **metatable,
                      uint64_t *sequence) {
   *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   if (*sequence & 1) return 0;
-  view->array = __atomic_load_n(&table->array, __ATOMIC_ACQUIRE);
-  view->asize = view->array != NULL ? arrayheader(view->array)->size : 0;
+  view->arraydata = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+  view->asize = 0;
+  if (view->arraydata != 0 && !(view->arraydata & LUA_RECORD_TAGS))
+    view->asize = arrayheader(luaH_array(view))->size;
   view->node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   *metatable = __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE);
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == *sequence;
@@ -152,14 +154,14 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   keys = luaH_recordkeys(view.node);
   if (keys != NULL) {
     GCObject *edges[LUA_RECORD_MAX_FIELDS + 2];
-    TValue *values = luaH_recordvalues(table);
+    Value *values = luaH_recordvalues(table);
     unsigned count = 1;
     edges[0] = obj2gco(keys);
     if (metatable != NULL) edges[count++] = obj2gco(metatable);
     for (i = 0; i < keys->asize; i++) {
-      lu_byte tag = __atomic_load_n(&values[i].tt_, __ATOMIC_ACQUIRE);
+      lu_byte tag = luaH_recordtag(view.arraydata, i);
       if (tag & BIT_ISCOLLECTABLE)
-        __atomic_load(&values[i].value_.gc, &edges[count++], __ATOMIC_ACQUIRE);
+        __atomic_load(&values[i].gc, &edges[count++], __ATOMIC_ACQUIRE);
     }
     if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
       return 0;

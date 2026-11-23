@@ -526,11 +526,12 @@ static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
     if (t->metatable != NULL)
       visitnursery(L, obj2gco(t->metatable), &gray, scan);
     if (keys != NULL) {
-      TValue *values = luaH_recordvalues(t);
+      Value *values = luaH_recordvalues(t);
+      uintptr_t tags = t->arraydata;
       visitnursery(L, obj2gco(keys), &gray, scan);
       for (i = 0; i < keys->asize; i++)
-        if (nurseryedge(rawtt(values + i), scan))
-          visitnursery(L, gcvalue(values + i), &gray, scan);
+        if (nurseryedge(luaH_recordtag(tags, i), scan))
+          visitnursery(L, values[i].gc, &gray, scan);
       continue;
     }
     for (i = 0; i < t->asize; i++)

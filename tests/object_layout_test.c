@@ -64,7 +64,8 @@ static void small_table(lua_State *L, lua_State *other, int from_lua) {
   table = lua_topointer(L, -1);
   require(table != NULL && table->inline_bytes != 0);
   budget(table, 160);
-  require((uintptr_t)(table->array - table->asize) == (uintptr_t)(table + 1));
+  require((uintptr_t)(luaH_array(table) - table->asize) ==
+          (uintptr_t)(table + 1));
   require((uintptr_t)table->node - (uintptr_t)(table + 1) <
           table->inline_bytes);
   lua_xmove(L, other, 1);
@@ -116,7 +117,7 @@ static void record_table(lua_State *L, lua_State *other) {
   keys = luaH_recordkeys(record->node);
   require(keys != NULL && keys == luaH_recordkeys(second->node));
   require(record != second && lua_rawlen(L, 2) == 0);
-  budget(record, 112);
+  budget(record, 96);
   lua_pop(L, 1);
   lua_pushexternalstring(L, "key", 3, NULL, NULL);
   require(lua_rawget(L, 2) == LUA_TNUMBER && lua_tointeger(L, -1) == 10);
@@ -125,6 +126,8 @@ static void record_table(lua_State *L, lua_State *other) {
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_topointer(other, 1) == record);
   require(luaH_recordkeys(record->node) == keys);
+  require(lua_rawgeti(other, 1, 1) == LUA_TNIL);
+  lua_pop(other, 1);
   lua_pushexternalstring(other, "key", 3, NULL, NULL);
   require(lua_rawget(other, 1) == LUA_TNUMBER &&
           lua_tointeger(other, -1) == 10);
@@ -188,6 +191,29 @@ static void record_table(lua_State *L, lua_State *other) {
           lua_tointeger(L, -1) == 3);
   lua_pop(L, 1);
   lua_pop(L, 1);
+
+  run_chunk(L,
+            "local edge = {}; local n = math.mininteger; "
+            "return {integer=n, float=1.25, edge=edge, name='record'}",
+            1);
+  record = lua_topointer(L, 2);
+  keys = luaH_recordkeys(record->node);
+  require(keys != NULL && keys->asize == 4);
+  budget(record, 112);
+  lua_xmove(L, other, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getfield(other, 1, "integer") == LUA_TNUMBER &&
+          lua_isinteger(other, -1) &&
+          lua_tointeger(other, -1) == LUA_MININTEGER);
+  lua_pop(other, 1);
+  require(lua_getfield(other, 1, "float") == LUA_TNUMBER &&
+          lua_tonumber(other, -1) == 1.25);
+  lua_pop(other, 1);
+  require(lua_getfield(other, 1, "edge") == LUA_TTABLE);
+  lua_pop(other, 1);
+  require(lua_getfield(other, 1, "name") == LUA_TSTRING &&
+          strcmp(lua_tostring(other, -1), "record") == 0);
+  lua_pop(other, 2);
 
   run_chunk(L,
             "local function make(mode) "

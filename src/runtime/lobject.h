@@ -846,7 +846,7 @@ typedef struct Table {
   uintptr_t sharing;
   uint64_t sequence;
   LuaObjectLock access;
-  Value *array;  /* array part */
+  uintptr_t arraydata;  /* array pointer or tagged compact-record tags */
   Node *node;
   struct Table *metatable;
   GCObject *gclist;

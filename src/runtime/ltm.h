@@ -63,8 +63,6 @@ typedef enum {
 #define checknoTM(mt,e) ((mt) == NULL || \
   __atomic_load_n(&(mt)->flags, __ATOMIC_RELAXED) & (1u << (e)))
 
-#define gfasttm(g,mt,e)  \
-  (checknoTM(mt, e) ? NULL : luaT_gettmunlocked(mt, e, (g)->tmname[e]))
 
 #define ttypename(x)	luaT_typenames_[(x) + 1]
 
@@ -76,7 +74,8 @@ LUAI_FUNC const char *luaT_objtypename (lua_State *L, const TValue *o,
                                        struct LuaNativeRoot *name);
 
 /* Borrowed lookup is confined to collector quiescence. */
-LUAI_FUNC const TValue *luaT_gettmunlocked (Table *events, TMS event, TString *ename);
+LUAI_FUNC const TValue *luaT_gettmunlocked (Table *events, TMS event,
+                                           TString *ename, TValue *result);
 LUAI_FUNC void luaT_gettmbyobj (lua_State *L, const TValue *o, TMS event,
                                struct LuaNativeRoot *result);
 LUAI_FUNC void luaT_init (lua_State *L);
