@@ -1562,7 +1562,7 @@ static void __attribute__((noinline)) createtable (
   L->top.p = ci->func.p + 2 + GETARG_A(i);
   table = keys != NULL ? luaH_newrecord(L, keys) : luaH_new(L, array, hash);
   sethvalue2s(L, L->top.p - 1, table);
-  if (L->task_objects != NULL && L->task_nursery_bytes >= L->task_nursery_limit)
+  if (luaC_hastaskheap(L) && L->task_nursery_bytes >= L->task_nursery_limit)
     luaC_taskstep(L);
   luaC_condGC(L, (void)0, (void)0);
   luaX_pollrequests(L);

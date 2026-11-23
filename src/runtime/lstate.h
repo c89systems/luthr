@@ -426,7 +426,11 @@ struct lua_State {
   GCObject *task_old_objects;  /* first survivor in task_objects */
   GCObject *task_remembered;  /* young targets, terminated by this thread */
   size_t task_old_bytes;
-  unsigned task_young_scans;
+  unsigned task_minor_budget;
+  struct LuaAllocPage *task_pages;
+  struct LuaAllocPage *task_young_pages;
+  struct LuaAllocPage *task_alloc_pages[LUA_ALLOC_BINS];
+  size_t task_page_bytes;
 };
 
 

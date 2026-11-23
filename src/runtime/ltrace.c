@@ -145,7 +145,7 @@ unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
   if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
     return 0;
   luaC_traceobject(L, obj2gco(thread));
-  if (thread->task_objects != NULL) {
+  if (luaC_hastaskheap(thread)) {
     unsigned i;
     for (i = 0; i < thread->task_root_count; i++)
       luaC_traceobject(L, cast(GCObject *, thread->task_roots[i]));

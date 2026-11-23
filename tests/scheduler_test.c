@@ -88,7 +88,7 @@ void __real_luaC_endtask(lua_State *);
 void __wrap_luaC_endtask(lua_State *L) {
   struct fixture *f = fixture;
   if (f != NULL && f->tasks[0].root.thread == L) {
-    require(L->task_objects != NULL);
+    require(luaC_hastaskheap(L));
     f->nursery_finished++;
   }
   __real_luaC_endtask(L);
@@ -2162,13 +2162,14 @@ static void nursery_full(struct fixture *f, int generational) {
   require(luaL_dostring(L, "ready, done = {}, {}") == LUA_OK);
   submit(f, 0,
          "local graph={}; graph.self=graph; "
-         "for i=1,4096 do graph[i]={key=i} end; "
+         "for i=1,65536 do graph[i]={key=i} end; "
          "graph.label=('local root'):rep(16); "
          "assert(nursery_inspect(graph)); ready[0]=true; "
          "while not (done[1] and done[2]) do end; "
          "assert(not nursery_inspect(graph)); "
          "assert(graph.self==graph and graph.label==('local root'):rep(16)); "
-         "return graph[4096].key",
+         "assert(graph[1].key==1 and graph[32768].key==32768); "
+         "return graph[65536].key",
          0);
   for (unsigned id = 1; id <= 2; id++)
     submit(f, id,
@@ -2180,7 +2181,7 @@ static void nursery_full(struct fixture *f, int generational) {
            (int)id);
   require(luaL_dostring(L, "while not (ready[0] and ready[1] and ready[2]) "
                            "do end; start_full=true") == LUA_OK);
-  require(collect(f, 0, LUA_OK) == 4096);
+  require(collect(f, 0, LUA_OK) == 65536);
   require(collect(f, 1, LUA_OK) == 42);
   require(collect(f, 2, LUA_OK) == 42);
   finish(f);

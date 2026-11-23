@@ -9,17 +9,6 @@ _Static_assert(LUA_ALLOC_PAGE_MAX == (1u << 16), "page slot reciprocal");
 _Static_assert(LUA_ALLOC_PAGE_MAX / (sizeof(Table) + sizeof(LuaAllocBlock)) <=
                64 * LUA_PAGE_TRACE_WORDS, "page bitmap covers table slots");
 
-l_sinline unsigned tableslot (const LuaAllocPage *page, const LuaAllocBlock *block) {
-  unsigned offset = cast_uint(cast(const char *, block) -
-    cast(const char *, page)) - LUA_ALLOC_PAGE_HEADER;
-  /* Slot offsets are exact stride multiples below 2^16. Rounding the
-  ** reciprocal up therefore introduces less than one slot of error. */
-  unsigned slot = (offset * page->trace_scale) >> 16;
-  lua_assert(offset < LUA_ALLOC_PAGE_MAX &&
-    slot * (page->blockbytes + sizeof(*block)) == offset);
-  return slot;
-}
-
 /* Slot bits are installed before the ready word. A producer observing the
 ** queued bit leaves announcement to the owner of that page notice. */
 static void queue (global_State *g, LuaAllocPage *page, unsigned word,
@@ -42,7 +31,7 @@ static void queue (global_State *g, LuaAllocPage *page, unsigned word,
 void luaC_queuetracepage (global_State *g, GCObject *object) {
   LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
   LuaAllocPage *page = luaMP_page(block);
-  unsigned slot = tableslot(page, block);
+  unsigned slot = luaMP_slotindex(page, block);
   queue(g, page, slot / 64, UINT64_C(1) << (slot % 64));
 }
 
@@ -56,7 +45,7 @@ void luaC_flushtracepage (LuaTraceWork *work) {
 void luaC_stagetracepage (LuaTraceWork *work, GCObject *object) {
   LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
   LuaAllocPage *page = luaMP_page(block);
-  unsigned slot = tableslot(page, block);
+  unsigned slot = luaMP_slotindex(page, block);
   unsigned word = slot / 64;
   if (page != work->staged_page || word != work->staged_word) {
     luaC_flushtracepage(work);

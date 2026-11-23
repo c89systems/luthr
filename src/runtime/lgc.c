@@ -309,7 +309,11 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
   char *p;
   GCObject *o;
   int collector;
-  p = cast_charp(luaM_newobject(L, novariant(tt), sz));
+  p = NULL;
+  if (tt == LUA_VTABLE && L->task_owner != NULL &&
+      luaC_tasktableeligible(L, sz) && !luaW_iscollector(L))
+    p = cast_charp(luaM_trytasktable(L, sz));
+  if (p == NULL) p = cast_charp(luaM_newobject(L, novariant(tt), sz));
   o = cast(GCObject *, p + offset);
   setmarked(o, luaC_newmark(g));
   o->tt = tt;

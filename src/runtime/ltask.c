@@ -264,7 +264,7 @@ int luaTK_finish (LuaTaskRoot *task, int *status, int *results) {
   valid = valid && L->owned_operations == 0;
   if (valid) task->phase = LUA_TASK_FINISHING;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  if (valid && L->task_objects != NULL) {
+  if (valid && luaC_hastaskheap(L)) {
     if (*status == LUA_OK) luaC_endtask(L);
     else luaC_sealtask(L);
   }

@@ -448,6 +448,9 @@ enum {
 
 LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);
 LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
+LUAI_FUNC int luaC_tasktableeligible (lua_State *L, size_t bytes);
+LUAI_FUNC int luaC_taskpagefits (lua_State *L, size_t bytes);
+#define luaC_hastaskheap(L) ((L)->task_objects != NULL || (L)->task_pages != NULL)
 LUAI_FUNC void luaC_sealtask (lua_State *L);
 LUAI_FUNC void luaC_sealtasks (lua_State *L);
 LUAI_FUNC void luaC_preparefull (lua_State *L);
@@ -508,7 +511,7 @@ l_sinline void luaC_nurseryedge (lua_State *L, GCObject *owner, GCObject *value)
 static inline int luaC_barrierneeded (lua_State *L, GCObject *owner,
                                      GCObject *value) {
   lu_byte marked, referent;
-  if (L->task_objects != NULL && luaC_taskedge(L, owner, value)) return 0;
+  if (luaC_hastaskheap(L) && luaC_taskedge(L, owner, value)) return 0;
   /* The shared trace publishes all newborns before local work can resume. */
   if (luaC_tracingglobal(G(L))) return 1;
   luaC_nurseryedge(L, owner, value);

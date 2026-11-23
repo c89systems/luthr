@@ -627,7 +627,7 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
     size_t newasizeb = concretesize(newasize);
     unsigned tomove = oldasize < newasize ? oldasize : newasize;
     Value *np;
-    if (L->task_objects != NULL) luaC_taskbacking(L, t, newasizeb);
+    if (luaC_hastaskheap(L)) luaC_taskbacking(L, t, newasizeb);
     np = cast(Value *, luaM_realloc_(L, NULL, 0, newasizeb));
     if (np == NULL)  /* allocation error? */
       return NULL;
@@ -787,7 +787,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     luaG_runerror(L, "table overflow");
   if (lsize > MAXHBITS || (lsize >= 0 && (1u << lsize) > MAXHSIZE))
     luaG_runerror(L, "table overflow");
-  if (L->task_objects != NULL && lsize >= 0)
+  if (luaC_hastaskheap(L) && lsize >= 0)
     luaC_taskbacking(L, t, nodebytes(lsize));
   /* create new hash part with appropriate size into 'newt' */
   newt.flags = 0;
@@ -831,7 +831,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
     *lenhint(t) = newasize / 2u;  /* reset the retained image's hint */
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
-  if (L->task_objects != NULL && luaC_tasktable(t)) {
+  if (luaC_hastaskheap(L) && luaC_tasktable(t)) {
     /* Only the installed layout belongs to the nursery. Allocations that
     ** fail, retire an older layout, or seal the region use normal accounting
     ** until the replacement is installed. */

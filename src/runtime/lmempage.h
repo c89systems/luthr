@@ -46,6 +46,12 @@ struct LuaAllocPage {
   uint64_t trace_slots[LUA_PAGE_TRACE_WORDS];  /* atomic pending mark slots */
   unsigned trace_pending;  /* atomic word summary and notice ownership */
   unsigned trace_scale;  /* reciprocal of the slot stride in 16-bit units */
+  size_t task_bytes;  /* payload of allocated slots while task-owned */
+  unsigned task_private;
+  unsigned task_backing;
+  unsigned task_dirty;
+  unsigned task_top;  /* first virgin slot, before any free-list reuse */
+  unsigned task_capacity;
 };
 
 #define LUA_PAGE_NOTIFIED cast(uintptr_t, 1)
@@ -69,6 +75,11 @@ LUAI_FUNC void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                                   LuaAllocBlock *first, LuaAllocBlock *last,
                                   unsigned count, l_mem bytes);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
+LUAI_FUNC void *luaM_trytasktable (lua_State *L, size_t size);
+LUAI_FUNC void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page,
+                                 uint64_t epoch);
+LUAI_FUNC void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page);
+LUAI_FUNC void luaM_trimtaskpages (lua_State *L);
 /* The caller holds the page's pool mutex throughout the short lease. */
 LUAI_FUNC int luaMC_borrow (lua_State *L, struct LuaAllocationCache *cache,
                            LuaCacheBorrow *borrow, int exclusive);
@@ -81,6 +92,22 @@ LUAI_FUNC void luaMC_notify (LuaCacheBorrow *borrow);
     * sizeof(LuaAllocBlock))
 #define LUA_ALLOC_MAX 512
 #define LUA_ALLOC_PAGE_MAX 65536
+
+l_sinline unsigned luaMP_slotindex (const LuaAllocPage *page,
+                                    const LuaAllocBlock *block) {
+  unsigned offset = cast_uint(cast(const char *, block) -
+    cast(const char *, page)) - LUA_ALLOC_PAGE_HEADER;
+  unsigned slot = (offset * page->trace_scale) >> 16;
+  lua_assert(offset < LUA_ALLOC_PAGE_MAX &&
+    slot * (page->blockbytes + sizeof(*block)) == offset);
+  return slot;
+}
+
+l_sinline LuaAllocBlock *luaMP_slotblock (LuaAllocPage *page, unsigned slot) {
+  size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
+  return cast(LuaAllocBlock *, cast_charp(page) + LUA_ALLOC_PAGE_HEADER +
+                              slot * stride);
+}
 
 l_sinline size_t luaMP_binbytes (unsigned bin) {
   static const unsigned short sizes[LUA_ALLOC_BINS] =

@@ -693,7 +693,14 @@ void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                           LuaAllocBlock *first, LuaAllocBlock *last,
                           unsigned count, l_mem bytes) {
   lua_assert(count != 0 && bytes > 0);
-  returnpooled(L, page, first, last, count);
+  if (__atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE)) {
+    lua_assert(page->used >= count && page->task_bytes >= cast_sizet(bytes));
+    page->used -= count;
+    page->task_bytes -= cast_sizet(bytes);
+    last->block.link.next = page->local;
+    page->local = first;
+  }
+  else returnpooled(L, page, first, last, count);
   account(L, bytes);
 }
 
@@ -842,6 +849,9 @@ static void preparepage (LuaAllocPage *page,
   page->trace_next = NULL;
   memset(page->trace_slots, 0, sizeof(page->trace_slots));
   page->trace_pending = 0;
+  page->task_private = page->task_backing = page->task_dirty = 0;
+  page->task_top = page->task_capacity = 0;
+  page->task_bytes = 0;
   {
     unsigned stride = blockbytes + sizeof(LuaAllocBlock);
     page->trace_scale = (LUA_ALLOC_PAGE_MAX + stride - 1) / stride;
@@ -876,6 +886,123 @@ static void offerpage (global_State *g, LuaAllocPage *page) {
   page->available_previous = head;
   if (*head != NULL) (*head)->available_previous = &page->available_next;
   *head = page;
+}
+
+/* The table headers are already shaded and carry ordinary sweep flags.
+** This publishes the page itself; no pool operation sees it earlier. */
+void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch) {
+  global_State *g = G(L);
+  unsigned pool = page->pool;
+  unsigned slot;
+  lua_assert(page->task_private && page->owner == NULL);
+  /* Shared allocation uses a free list; virgin slots need it only if the
+  ** page escapes. Unpublished pages can allocate these slots in order. */
+  for (slot = page->task_top; slot < page->task_capacity; slot++) {
+    LuaAllocBlock *block = luaMP_slotblock(page, slot);
+    block->block.page = cast(uintptr_t, page);
+    block->block.link.next = page->local;
+    page->local = block;
+  }
+  page->table_epoch = page->used != 0 ? epoch + 1 : 0;
+  __atomic_store_n(&page->task_private, 0, __ATOMIC_RELEASE);
+  luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+  page->next = *poolpages(g, pool);
+  page->previous = poolpages(g, pool);
+  if (page->next != NULL) page->next->previous = &page->next;
+  *poolpages(g, pool) = page;
+  if (page->used == 0) luaMP_notify(g, page);
+  else if (page->local != NULL) offerpage(g, page);
+  luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
+}
+
+/* The page has no external readers and has been unlinked from the task. */
+void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page) {
+  size_t bytes = page->task_bytes;
+  lua_assert(page->task_private);
+  callfrealloc(L, page, page->bytes, 0);
+  if (bytes != 0) account(L, cast(l_mem, bytes));
+}
+
+l_sinline int taskpageavailable (const LuaAllocPage *page) {
+  return page != NULL &&
+    (page->local != NULL || page->task_top < page->task_capacity);
+}
+
+void luaM_trimtaskpages (lua_State *L) {
+  LuaAllocPage **link = &L->task_pages, *discard = NULL, *page;
+  while ((page = *link) != NULL) {
+    unsigned pool = page->pool;
+    lua_assert(!page->task_dirty);
+    if (page->used == 0 && page != L->task_alloc_pages[pool]) {
+      *link = page->next;
+      L->task_page_bytes -= page->bytes;
+      page->next = discard;
+      discard = page;
+    }
+    else {
+      LuaAllocPage *current = L->task_alloc_pages[pool];
+      if (taskpageavailable(page) && !taskpageavailable(current))
+        L->task_alloc_pages[pool] = page;
+      link = &page->next;
+    }
+  }
+  while (discard != NULL) {
+    page = discard;
+    discard = page->next;
+    luaM_discardtaskpage(L, page);
+  }
+}
+
+void *luaM_trytasktable (lua_State *L, size_t size) {
+  unsigned pool = luaMP_sizeclass(size);
+  LuaAllocPage *page = L->task_alloc_pages[pool];
+  LuaAllocBlock *block;
+  unsigned slot;
+  if (!taskpageavailable(page)) {
+    size_t bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8
+                                 : page->bytes * 2;
+    if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
+    if (!luaC_taskpagefits(L, bytes)) {
+      luaC_sealtask(L);
+      return NULL;
+    }
+    page = cast(LuaAllocPage *, firsttry(L, NULL, 0, bytes));
+    if (page == NULL) return NULL;
+    /* Backing admission may have transferred the previous cohort. */
+    if (!luaC_tasktableeligible(L, size) || !luaC_taskpagefits(L, bytes)) {
+      callfrealloc(L, page, bytes, 0);
+      return NULL;
+    }
+    preparepage(page, cast_uint(luaMP_binbytes(pool)), pool, bytes);
+    page->task_private = 1;
+    page->task_capacity = cast_uint((bytes - LUA_ALLOC_PAGE_HEADER) /
+      (sizeof(LuaAllocBlock) + page->blockbytes));
+    page->next = L->task_pages;
+    page->previous = NULL;
+    L->task_pages = L->task_alloc_pages[pool] = page;
+    L->task_page_bytes += bytes;
+  }
+  if (page->local != NULL) {
+    block = page->local;
+    page->local = block->block.link.next;
+    slot = luaMP_slotindex(page, block);
+  }
+  else {
+    slot = page->task_top++;
+    block = luaMP_slotblock(page, slot);
+  }
+  page->used++;
+  __atomic_store_n(&block->block.page, cast(uintptr_t, page), __ATOMIC_RELAXED);
+  lua_assert(!(page->trace_slots[slot / 64] & (UINT64_C(1) << (slot % 64))));
+  page->trace_slots[slot / 64] |= UINT64_C(1) << (slot % 64);
+  if (!page->task_dirty) {
+    page->task_dirty = 1;
+    page->dirty_next = L->task_young_pages;
+    L->task_young_pages = page;
+  }
+  page->task_bytes += size;
+  account(L, -cast(l_mem, size));
+  return block + 1;
 }
 
 static void abandonpage (lua_State *L, unsigned pool) {

@@ -690,7 +690,7 @@ void luaX_poll (lua_State *L) {
   ** the rest of a long-running task. */
   if (l_unlikely(L->task_nursery_closed) &&
       L->task_owner != NULL && L->native_depth == 0 && isLua(L->ci)) {
-    lua_assert(L->task_objects == NULL);
+    lua_assert(!luaC_hastaskheap(L));
     L->task_nursery_closed = 0;
   }
 }
