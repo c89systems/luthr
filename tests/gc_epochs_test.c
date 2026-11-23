@@ -251,8 +251,13 @@ static void weak_age(lua_State *state) {
 
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
+  int watch_page;
   require(state != NULL && argc == 2);
-  luaL_openlibs(state);
+  watch_page = strcmp(argv[1], "mature_page") == 0;
+  /* Keep the small-table page available for the next allocation. Library
+   * registration can fill that size class before this test starts. */
+  if (!watch_page)
+    luaL_openlibs(state);
   lua_gc(state, LUA_GCINC);
   lua_gc(state, LUA_GCCOLLECT);
   lua_gc(state, LUA_GCSTOP);
@@ -260,7 +265,7 @@ int main(int argc, char **argv) {
     live(state, strcmp(argv[1], "live_generational") == 0);
   else if (strcmp(argv[1], "modes") == 0)
     modes(state);
-  else if (strcmp(argv[1], "mature_page") == 0)
+  else if (watch_page)
     mature_page(state);
   else if (strcmp(argv[1], "rotations") == 0) {
     rotations(state);
