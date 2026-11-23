@@ -347,12 +347,14 @@ target_link_libraries(gc_requests_test PRIVATE luthr_static)
 target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
   -Wl,--wrap=luaW_heapleave
   -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_trycollectenter
-  -Wl,--wrap=luaW_stop -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaC_tracebatch)
+  -Wl,--wrap=luaW_stop -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaC_tracebatch
+  -Wl,--wrap=luaD_tryscalarcall)
 foreach(case IN ITEMS incremental generational explicit explicit_trace_slice stopped phase_incremental phase_generational
     overdue_incremental overdue_generational overdue_stopped shrink_strings reachable_finalizers late_finalizer
     handoff_trace_incremental handoff_trace_generational handoff_sweep_incremental handoff_sweep_generational
     full_incremental full_generational
-    empty_minor minor_sweep_birth minor_unwind minor_finalizer minor_arm minor_arm_registry arm_ack arm_withdraw arm_incremental major_after_minor late_task_root)
+    empty_minor minor_sweep_birth minor_unwind minor_finalizer minor_arm minor_arm_registry minor_arm_scalar
+    arm_ack arm_withdraw arm_incremental major_after_minor late_task_root)
   add_test(NAME gc_requests_${case} COMMAND gc_requests_test ${case})
   set_tests_properties(gc_requests_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)

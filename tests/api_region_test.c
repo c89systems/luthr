@@ -342,11 +342,15 @@ int main(int argc, char **argv) {
         "local arg=setmetatable({}, {__add=function() error('expected') end}); "
         "local err,status=callback(true,1,handler,compute,arg); "
         "assert(err=='handled' and status==2 and calls==1); "
+        "local ok,msg=pcall(callback,false,1,nil,compute,arg); "
+        "assert(not ok and msg:find('expected') and calls==1); "
         "local hits=0; local function hook() "
         "  if debug.getinfo(2,'f').func==compute then hits=hits+1 end end; "
         "debug.sethook(hook,'c'); "
-        "local v,ok=callback(true,1,handler,compute,41); "
-        "debug.sethook(); assert(v==129 and ok==0 and hits==1)";
+        "local v,status=callback(true,1,handler,compute,41); "
+        "assert(v==129 and status==0); "
+        "v,status=callback(false,1,nil,compute,41); "
+        "debug.sethook(); assert(v==129 and status==0 and hits==2)";
   } else if (strncmp(argv[1], "foreign_", 8) == 0) {
     function = foreign;
     is_foreign = 1;

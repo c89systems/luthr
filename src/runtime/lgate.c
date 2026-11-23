@@ -210,7 +210,7 @@ static int offerstack (lua_State *L, NativeStackContext *context,
 }
 
 static void unlockstate (lua_State *L, NativeStackContext *context, int values,
-                         int detach) {
+                         int offer) {
   LuaExecution *execution = context->execution;
   int native = execution != NULL && execution->scheduler != NULL &&
                execution->native_depth != 0;
@@ -232,7 +232,7 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values,
       __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   lua_assert(L->admission == &L->participation);
-  if (detach && offerstack(L, context, execution)) return;
+  if (offer && offerstack(L, context, execution)) return;
   /* Keep participation until all physical gate accesses have finished. A
   ** collector may reclaim this state after the final leave; do not touch it. */
   release(L, context, LUA_GATE_MANAGED);
@@ -262,10 +262,11 @@ LuaWorldScope luaW_detach (lua_State *L) {
   return scope;
 }
 
-static int reclaimstack (lua_State *L, NativeStackContext *context) {
+l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
+                             uintptr_t reservation) {
   LuaExecution *execution = context->execution;
   LuaScheduledTask *task;
-  uintptr_t offer;
+  uintptr_t offer, expected, managed;
   if (execution == NULL || execution->scheduler == NULL ||
       execution->managed_depth != 0 ||
       __atomic_load_n(&execution->scheduler->reentry_waiting,
@@ -276,8 +277,13 @@ static int reclaimstack (lua_State *L, NativeStackContext *context) {
   /* A published offer belongs to an already pinned native activation. */
   lua_assert(execution->pin_depth == 0 ||
              pthread_equal(execution->pinned_carrier, pthread_self()));
-  if (!__atomic_compare_exchange_n(&L->stack_gate.word, &offer,
-        cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
+  expected = offer | reservation;
+  if (reservation != 0)
+    expected |= __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+                LUA_GATE_WAITING;
+  managed = cast(uintptr_t, context) | LUA_GATE_MANAGED |
+            (expected & LUA_GATE_WAITING);
+  if (!__atomic_compare_exchange_n(&L->stack_gate.word, &expected, managed, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return 0;
   task->stack_offer = 0;
   execution->allocation_cache = &task->slot->allocation;
@@ -287,7 +293,7 @@ static int reclaimstack (lua_State *L, NativeStackContext *context) {
 }
 
 l_sinline void attachstack (lua_State *L, NativeStackContext *context) {
-  if (!reclaimstack(L, context)) lockstate(L, context);
+  if (!reclaimstack(L, context, 0)) lockstate(L, context);
   preparecall(L, context);
 }
 
@@ -421,56 +427,77 @@ carrierentry void luaX_apienter (lua_State *L) {
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));
 }
 
-/* Without an immediate grant, release stack ownership before blocking. */
-static int callpromote (lua_State *L, NativeStackContext *context) {
-  if (context->execution != NULL &&
-      !luaQ_tryentermanaged(context->execution)) return 0;
-  luaW_enter(L);
-  preparecall(L, context);
-  return 1;
-}
-
 static void releaseaftertrace (lua_State *L, uintptr_t reservation) {
   if (__atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
     luaSC_notifygc(G(L));
   luaX_releasegate(L, reservation);
 }
 
+/* Keep the existing stack reservation through a nonblocking slot grant.
+** A recall or a queued return can force the ordinary admission path. */
+static int promotecall (lua_State *L, NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  if (!reclaimstack(L, context, LUA_GATE_STACK)) {
+    if (execution != NULL && !luaQ_tryentermanaged(execution)) return 0;
+    managestack(L, context);
+  }
+  preparecall(L, context);
+  return 1;
+}
+
+/* A successful scalar probe only changes the result slots of this stack. */
+l_sinline const Proto *scalarcallee (lua_State *L, int nargs, int nresults,
+                                      StkId *func) {
+  const Proto *p;
+  api_checkpop(L, nargs + 1);
+  *func = L->top.p - (nargs + 1);
+  if (!ttisLclosure(s2v(*func))) return NULL;
+  p = clLvalue(s2v(*func))->p;
+  if (p->scalar_ticks == 0) return NULL;
+  api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
+  api_checkresults(L, nargs, nresults);
+  UNUSED(nresults);
+  return p;
+}
+
 carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
   NativeStackContext *context = luaE_resolvestack(&thread_context);
   LuaExecution *execution = context->execution;
   uintptr_t owner;
-  if (context->api_region == NULL &&
-      (execution == NULL || execution->native_depth != 0)) {
+  if (context->api_region != NULL) {
+    StkId func;
+    const Proto *p;
+    apienter(L, context);
+    p = scalarcallee(L, nargs, nresults, &func);
+    if (p != NULL && luaD_tryscalarcall(L, func, p, nargs, nresults, context)) {
+      adjustresults(L, nresults);
+      return 1;
+    }
+    return 0;
+  }
+  if (execution == NULL || execution->native_depth != 0) {
     uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
-    uintptr_t reservation = cast(uintptr_t, context) | LUA_GATE_MANAGED;
-    /* Publish an owner once. Stack access can proceed from this reservation.
-    ** Borrowing heap storage requires managed entry. */
-    if (trygate(&L->stack_gate, &expected, reservation, __ATOMIC_SEQ_CST)) {
+    /* Stack-only reservations do not delay trace arming. Promote before
+    ** executing anything that needs a managed slot or table storage. */
+    if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {
       int traced = 0;
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         StkId func;
-        api_checkpop(L, nargs + 1);
-        func = L->top.p - (nargs + 1);
-        if (ttisLclosure(s2v(func))) {
-          const Proto *proto = clLvalue(s2v(func))->p;
-          if (proto->scalar_ticks != 0) {
-            api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
-            api_checkresults(L, nargs, nresults);
-            traced = luaC_tracing(L);
-            if (l_unlikely(traced)) luaC_checksnapshot(L);
-            if (luaD_tryscalarcall(L, func, proto, nargs, nresults, context)) {
-              adjustresults(L, nresults);
-              if (l_unlikely(traced)) releaseaftertrace(L, reservation);
-              else luaX_releasegate(L, reservation);
-              return 1;
-            }
+        const Proto *p = scalarcallee(L, nargs, nresults, &func);
+        if (p != NULL) {
+          traced = luaC_tracing(L);
+          if (l_unlikely(traced)) luaC_checksnapshot(L);
+          if (luaD_tryscalarcall(L, func, p, nargs, nresults, context)) {
+            adjustresults(L, nresults);
+            if (l_unlikely(traced)) releaseaftertrace(L, LUA_GATE_STACK);
+            else luaX_releasegate(L, LUA_GATE_STACK);
+            return 1;
           }
         }
-        if (callpromote(L, context)) return 0;
+        if (promotecall(L, context)) return 0;
       }
-      if (l_unlikely(traced)) releaseaftertrace(L, reservation);
-      else release(L, context, LUA_GATE_MANAGED);
+      if (l_unlikely(traced)) releaseaftertrace(L, LUA_GATE_STACK);
+      else luaX_releasegate(L, LUA_GATE_STACK);
     }
   }
   owner = apienter(L, context);
@@ -481,7 +508,9 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
 void luaX_apileave (lua_State *L) {
   NativeStackContext *context = luaX_boundcontext(L);
   lua_assert(context != NULL && context == luaQ_ownertoken());
-  if (context->api_region == NULL) unlockstate(L, context, 0, 0);
+  /* A full API call returning to opaque C can offer the stack and slot
+  ** together, just like the outer native call. */
+  if (context->api_region == NULL) unlockstate(L, context, 0, 1);
 }
 
 carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
@@ -503,7 +532,7 @@ void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
     lua_assert(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
     releaseaftertrace(L, LUA_GATE_STACK);
   }
-  else unlockstate(L, cast(NativeStackContext *, owner), 1, 0);
+  else unlockstate(L, cast(NativeStackContext *, owner), 1, 1);
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {

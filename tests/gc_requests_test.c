@@ -29,7 +29,7 @@ static struct {
 } fixture = {.mutex = PTHREAD_MUTEX_INITIALIZER,
              .changed = PTHREAD_COND_INITIALIZER};
 static __thread unsigned role;
-static __thread unsigned stops;
+static __thread unsigned stops, scalar_calls;
 enum { MINOR_NO_GATE, MINOR_UNWIND, MINOR_FINALIZER, MINOR_ARM, ARM_RELEASE };
 static int minor_case;
 static void arrive(void);
@@ -394,6 +394,66 @@ static void minor_arm(lua_State *L, int busy_registry) {
     lua_remove(mutator, -2);
   }
   require(lua_isnil(mutator, -1));
+}
+
+int __real_luaD_tryscalarcall(lua_State *, StkId, const Proto *, int, int,
+                              NativeStackContext *);
+int __wrap_luaD_tryscalarcall(lua_State *L, StkId func, const Proto *p,
+                              int nargs, int wanted, NativeStackContext *ctx) {
+  if (scalar_calls == 2) {
+    require(pthread_mutex_lock(&fixture.mutex) == 0);
+    fixture.arrived[1] = 1;
+    require(pthread_cond_broadcast(&fixture.changed) == 0);
+    while (!fixture.release_driver)
+      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  }
+  return __real_luaD_tryscalarcall(L, func, p, nargs, wanted, ctx);
+}
+
+static int scalar_bridge(lua_State *L) {
+  scalar_calls++;
+  lua_call(L, 1, 1);
+  return 1;
+}
+
+static void *run_scalar_bridge(void *argument) {
+  require(lua_pcall(argument, 0, 1, 0) == LUA_OK);
+  return NULL;
+}
+
+static void minor_arm_scalar(lua_State *L) {
+  struct request driver = {.role = 1, .phase = 5};
+  pthread_t worker, collector;
+  lua_State *mutator;
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  mutator = lua_newthread(L);
+  lua_pushcfunction(L, scalar_bridge);
+  lua_setglobal(L, "bridge");
+  require(luaL_loadstring(
+              mutator, "local function identity(x) return x end; "
+                       "local h; for i=1,4096 do h={h} end; "
+                       "bridge(identity,h); "
+                       "return bridge(identity,{answer=42}).answer") == LUA_OK);
+  driver.state = lua_newthread(L);
+  minor_case = MINOR_ARM;
+  require(pthread_create(&worker, NULL, run_scalar_bridge, mutator) == 0);
+  require(pthread_mutex_lock(&fixture.mutex) == 0);
+  while (!fixture.arrived[1])
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(pthread_create(&collector, NULL, request, &driver) == 0);
+  /* Initial marking can start while a bounded callback borrows its stack. */
+  while (!fixture.driver_parked)
+    require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+  require(luaC_scanready(G(L)) && !luaW_stopped(&G(L)->world));
+  fixture.release_driver = 1;
+  require(pthread_cond_broadcast(&fixture.changed) == 0);
+  require(pthread_mutex_unlock(&fixture.mutex) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(pthread_join(collector, NULL) == 0);
+  require(lua_tointeger(mutator, -1) == 42);
 }
 
 static void explicit_minor_followers(lua_State *L, int unwind) {
@@ -924,6 +984,10 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "minor_arm") == 0 ||
       strcmp(argv[1], "minor_arm_registry") == 0) {
     minor_arm(L, strcmp(argv[1], "minor_arm_registry") == 0);
+    goto done;
+  }
+  if (strcmp(argv[1], "minor_arm_scalar") == 0) {
+    minor_arm_scalar(L);
     goto done;
   }
   if (strcmp(argv[1], "arm_ack") == 0 || strcmp(argv[1], "arm_withdraw") == 0 ||
