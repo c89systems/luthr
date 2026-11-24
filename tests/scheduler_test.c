@@ -1184,10 +1184,14 @@ static int warm_native_permit(lua_State *L) {
   return 0;
 }
 
-static void native_recall_during_stack_borrow(struct fixture *f) {
+static void native_recall_during_stack_borrow(struct fixture *f,
+                                              int root_offer) {
   lua_State *target;
   int reservation;
   init(f, 1);
+  /* Exercise the slot-owner offer when the stack has no slot encoding. */
+  if (!root_offer)
+    f->scheduler.slots[0].stack_offer = 0;
   lua_pushcfunction(f->main, warm_native_permit);
   lua_setglobal(f->main, "warm_native_permit");
   lua_pushcfunction(f->main, blocked_leaf);
@@ -2747,7 +2751,9 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
-    native_recall_during_stack_borrow(f);
+    native_recall_during_stack_borrow(f, 1);
+  else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
+    native_recall_during_stack_borrow(f, 0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
