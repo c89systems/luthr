@@ -1284,16 +1284,19 @@ static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
 }
 
 
-/*
-** Add the replacement value to the string buffer 'b'.
-** Return true if the original string was changed. (Function calls and
-** table indexing resulting in nil or false do not change the subject.)
-*/
-static int add_value (MatchState *ms, luaL_Buffer *b, const char *s,
-                      const char *e, int tr, LuaNativeRoot *replacement) {
+/* Copy unchanged spans only when a replacement needs an output buffer. */
+static void addprefix (MatchState *ms, luaL_Buffer *b, const char *pending,
+                       const char *s) {
+  if (pending == NULL) pending = ms->src_init;
+  addbytes(ms, b, pending, ct_diff2sz(s - pending));
+}
+
+
+static void add_value (MatchState *ms, luaL_Buffer *b, const char **pending,
+                       const char *s, const char *e, int tr,
+                       LuaNativeRoot *replacement) {
   lua_State *L = ms->L;
   LuaNativeRoot result;
-  int changed;
   switch (tr) {
     case LUA_TFUNCTION: {  /* call the function */
       int n;
@@ -1310,28 +1313,70 @@ static int add_value (MatchState *ms, luaL_Buffer *b, const char *s,
       break;
     }
     default: {  /* LUA_TNUMBER or LUA_TSTRING */
+      addprefix(ms, b, *pending, s);
       add_s(ms, b, s, e, replacement);
-      return 1;  /* something changed */
+      *pending = e;
+      return;
     }
   }
   luaL_rootarg(L, lua_gettop(L), &result);
   lua_pop(L, 1);  /* The buffer's box must again be the top stack value. */
-  if (l_isfalse(&result.value)) {  /* nil or false? */
-    addbytes(ms, b, s, ct_diff2sz(e - s));
-    changed = 0;
-  }
-  else if (l_unlikely(!ttisstring(&result.value) &&
-                     !cvt2str(&result.value)))
-    return luaL_error(L, "invalid replacement value (a %s)",
-                         lua_typename(L, ttype(&result.value)));
-  else {
+  if (!l_isfalse(&result.value)) {  /* nil and false leave the span pending */
     size_t len;
-    const char *value = luaL_roottostring(L, &result, &len);
+    const char *value;
+    if (l_unlikely(!ttisstring(&result.value) && !cvt2str(&result.value)))
+      luaL_error(L, "invalid replacement value (a %s)",
+                 lua_typename(L, ttype(&result.value)));
+    value = luaL_roottostring(L, &result, &len);
+    addprefix(ms, b, *pending, s);
     addbytes(ms, b, value, len);
-    changed = 1;
+    *pending = e;
   }
   luaL_rootresult(L, &result, 1, 0);
-  return changed;
+}
+
+
+/* Compile a short, locale-independent pattern that matches exactly one byte. */
+static int compileclass (MatchState *ms, const char *p,
+                         unsigned char bytes[UCHAR_MAX + 1]) {
+  const char *end;
+  int negated;
+  if (*p != '[' || ms->p_end - p > 64 || classend(ms, p) != ms->p_end)
+    return 0;
+  end = ms->p_end - 1;
+  negated = (*++p == '^');
+  p += negated;
+  memset(bytes, negated, UCHAR_MAX + 1);
+  while (p < end) {
+    unsigned first = cast_uchar(*p++);
+    if (first == L_ESC) {
+      if (p == end || *p++ != 'z') return 0;
+      first = 0;
+    }
+    else if (end - p >= 2 && *p == '-') {
+      unsigned last = cast_uchar(p[1]);
+      if (first <= last) memset(bytes + first, !negated, last - first + 1);
+      p += 2;
+      continue;
+    }
+    bytes[first] = !negated;
+  }
+  return 1;
+}
+
+
+static const char *nextclassmatch (MatchState *ms, const char *s,
+                                   const unsigned char *bytes) {
+  while (s < ms->src_end) {
+    const char *start = s;
+    ptrdiff_t left = ms->src_end - s;
+    const char *limit = s + (left < LUA_NATIVE_WORK_SLICE
+                             ? left : LUA_NATIVE_WORK_SLICE);
+    while (s < limit && !bytes[cast_uchar(*s)]) s++;
+    luaQ_workn(ms->L, &ms->work, ct_diff2sz(s - start) + (s < limit));
+    if (s < limit) break;
+  }
+  return s;
 }
 
 
@@ -1341,12 +1386,14 @@ static int str_gsub (lua_State *L) {
   const char *src = luaL_rootstring(L, 1, &roots[0], &srcl);
   const char *p = luaL_rootstring(L, 2, &roots[1], &lp);
   const char *lastmatch = NULL;  /* end of last match */
+  const char *pending = NULL;  /* end of last replacement, if any */
+  unsigned char bytes[UCHAR_MAX + 1];
   int tr;
   /* max replacements */
   lua_Integer max_s = luaL_optinteger(L, 4, cast_st2S(srcl) + 1);
   int anchor = (*p == '^');
   lua_Integer n = 0;  /* replacement count */
-  int changed = 0;  /* change flag */
+  int byteclass;
   MatchState ms;
   luaL_Buffer b;
   luaL_rootarg(L, 3, &roots[2]);
@@ -1359,23 +1406,30 @@ static int str_gsub (lua_State *L) {
     p++; lp--;  /* skip anchor character */
   }
   prepstate(&ms, L, src, srcl, p, lp);
+  byteclass = n < max_s && !anchor && compileclass(&ms, p, bytes);
   while (n < max_s) {
     const char *e;
     reprepstate(&ms);  /* (re)prepare state for new match */
-    if ((e = match(&ms, src, p)) != NULL && e != lastmatch) {  /* match? */
+    if (byteclass) {
+      src = nextclassmatch(&ms, src, bytes);
+      if (src == ms.src_end) break;
+      e = src + 1;
+    }
+    else e = match(&ms, src, p);
+    if (e != NULL && e != lastmatch) {  /* match? */
       n++;
-      changed = add_value(&ms, &b, src, e, tr, &roots[2]) || changed;
+      add_value(&ms, &b, &pending, src, e, tr, &roots[2]);
       src = lastmatch = e;
     }
     else if (src < ms.src_end)  /* otherwise, skip one character */
-      luaL_addchar(&b, *src++);
+      src++;
     else break;  /* end of subject */
     if (anchor) break;
   }
-  if (!changed)  /* no changes? */
+  if (pending == NULL)  /* no changes? */
     luaL_pushrooted(L, &roots[0]);  /* return the original subject snapshot */
   else {  /* something changed */
-    addbytes(&ms, &b, src, ct_diff2sz(ms.src_end - src));
+    addbytes(&ms, &b, pending, ct_diff2sz(ms.src_end - pending));
     luaL_pushresult(&b);  /* create and return new string */
   }
   lua_pushinteger(L, n);  /* number of substitutions */

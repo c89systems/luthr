@@ -222,6 +222,7 @@ static void snapshot(struct fixture *test) {
   lua_State *state = test->state;
   int find = strstr(test->mode, "find") != NULL;
   int gsub = strstr(test->mode, "gsub") != NULL;
+  int byteclass = strstr(test->mode, "class") != NULL;
   int values = strstr(test->mode, "values") != NULL;
   int iterator = strstr(test->mode, "iterator") != NULL || values;
   int args = gsub ? 3 : find ? 4 : iterator ? 0 : 2;
@@ -231,7 +232,10 @@ static void snapshot(struct fixture *test) {
                   : iterator ? "gmatch"
                              : "match");
   input(state, &test->inputs[0], 8194, 'a', "z");
-  input(state, &test->inputs[1], find ? 2049 : 2050, 'a', find ? "z" : "()");
+  if (byteclass)
+    input(state, &test->inputs[1], 3, 'a', "[z]");
+  else
+    input(state, &test->inputs[1], find ? 2049 : 2050, 'a', find ? "z" : "()");
   if (gsub)
     input(state, &test->inputs[2], 2050, 'R', "");
   else if (find) {
@@ -261,8 +265,13 @@ static void snapshot(struct fixture *test) {
   else if (gsub) {
     size_t len;
     const char *result = lua_tolstring(state, 1, &len);
-    require(result != NULL && len == 8202 && result[len - 2] == 'a' &&
-            result[len - 1] == 'z' && lua_tointeger(state, 2) == 4);
+    require(result != NULL);
+    if (byteclass)
+      require(len == 10243 && result[8192] == 'a' && result[8193] == 'R' &&
+              result[len - 1] == 'R' && lua_tointeger(state, 2) == 1);
+    else
+      require(len == 8202 && result[len - 2] == 'a' && result[len - 1] == 'z' &&
+              lua_tointeger(state, 2) == 4);
   } else if (!values)
     require(lua_gettop(state) == 1 && lua_tointeger(state, 1) == 2049);
   require(state->native_roots == NULL && state->object_scopes == NULL);
@@ -424,6 +433,16 @@ static void oom(struct fixture *test) {
   require(lua_pcall(state, 3, 2, 0) == LUA_OK);
   test->deny = 0;
   require(test->failures == 0 && lua_tointeger(state, -1) == 0);
+  lua_settop(state, 0);
+  function(state, "gsub");
+  lua_getglobal(state, "text");
+  lua_pushliteral(state, "[z]");
+  lua_pushliteral(state, "!");
+  test->deny = 1;
+  require(lua_pcall(state, 3, 2, 0) == LUA_OK);
+  test->deny = 0;
+  require(test->failures == 0 && lua_rawlen(state, 1) == 8194 &&
+          lua_tointeger(state, 2) == 0);
   lua_settop(state, 0);
   execute(state, "replacement=text..'%1'");
   for (kind = 0; kind < 2; ++kind) {
