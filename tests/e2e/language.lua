@@ -153,6 +153,46 @@ equal(string.gsub('alpha=12 beta=21','(%a+)=(%d+)',function(k,v)
 end),'alpha=24 beta=42')
 equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
 do
+  local function readbyte(subject, index)
+    local first = subject:byte(index)
+    local second = subject:byte(index, index)
+    return first, second
+  end
+  local subject = string.char(255)..'A'
+  local decoded = assert(load(string.dump(readbyte)))
+  local first, second = decoded(subject,1)
+  equal(first,255)
+  equal(second,255)
+  first, second = decoded(subject,-1)
+  equal(first,65)
+  equal(second,65)
+  first, second = decoded(subject,3)
+  equal(first,nil)
+  equal(second,nil)
+
+  local byte = string.byte
+  string.byte = function(source, index, last)
+    equal(source,subject)
+    return last and index + last or index
+  end
+  first, second = decoded(subject,2)
+  string.byte = byte
+  equal(first,2)
+  equal(second,4)
+
+  local calls = 0
+  debug.sethook(function(event)
+    if event == 'call' and debug.getinfo(2,'f').func == byte then
+      calls = calls + 1
+    end
+  end,'c')
+  first, second = decoded(subject,2)
+  debug.sethook()
+  equal(first,65)
+  equal(second,65)
+  equal(calls,2)
+end
+do
   local capture = string.rep('x',8192)
   local subject = '['..capture..']'
   local pattern = '%[(x+)()%]'

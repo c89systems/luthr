@@ -13,6 +13,8 @@
 #include <stddef.h>
 #include <errno.h>
 
+#include <string.h>
+
 #include "lua.h"
 
 #include "laccess.h"
@@ -652,6 +654,36 @@ static unsigned dispatchpair (unsigned first, unsigned second) {
   }
 }
 
+/* A fixed-result byte call can consume a positive index in its caller.
+** Keep the bytecode and each later instruction's dispatch entry intact. */
+static int bytecallsite (const Proto *p, int pc) {
+  const Instruction *code = p->code + pc;
+  const TValue *key;
+  int a, k;
+  int moves = 1;
+  if (p->sizecode - pc < 3 || GET_OPCODE(code[0]) != OP_SELF ||
+      GET_OPCODE(code[1]) != OP_MOVE)
+    return 0;
+  a = GETARG_A(code[0]);
+  if (GETARG_A(code[1]) != a + 2 || GETARG_B(code[1]) >= a) return 0;
+  if (GET_OPCODE(code[2]) == OP_MOVE) {
+    if (p->sizecode - pc < 4 || GETARG_A(code[2]) != a + 3 ||
+        GETARG_B(code[2]) != GETARG_B(code[1]))
+      return 0;
+    moves = 2;
+  }
+  if (GET_OPCODE(code[moves + 1]) != OP_CALL ||
+      GETARG_A(code[moves + 1]) != a ||
+      GETARG_B(code[moves + 1]) != moves + 2 ||
+      GETARG_C(code[moves + 1]) != 2)
+    return 0;
+  k = GETARG_C(code[0]);
+  if (k >= p->sizek) return 0;
+  key = &p->k[k];
+  return ttisshrstring(key) && tsvalue(key)->shrlen == 4 &&
+         memcmp(getshrstr(tsvalue(key)), "byte", 4) == 0;
+}
+
 /* The hints name possible fields. An extra assignment or a different key
 ** uses the ordinary dictionary image. Loading and dumping keep Lua code. */
 static unsigned recordfields (const Proto *p, int pc, lu_byte *fields,
@@ -870,6 +902,8 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       if (first < NUM_OPCODES && second < NUM_OPCODES) {
         unsigned pair = dispatchpair(first, second);
         if (pair != 0) p->dispatch[pc] = cast_byte(pair);
+        else if (count == 0 && first == OP_SELF && bytecallsite(p, pc))
+          p->dispatch[pc] = LUA_STRING_BYTE_CALL;
       }
     }
   }

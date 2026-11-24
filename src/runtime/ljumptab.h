@@ -21,4 +21,5 @@ static const void *const disptab[LUA_DISPATCH_COUNT] = {
   [LUA_SETRECORD_2] = &&L_fast_LUA_SETRECORD_2,
   [LUA_SETRECORD_3] = &&L_fast_LUA_SETRECORD_3,
   [LUA_PROJECT_TABLE] = &&L_fast_LUA_PROJECT_TABLE,
+  [LUA_STRING_BYTE_CALL] = &&L_fast_LUA_STRING_BYTE_CALL,
 };
