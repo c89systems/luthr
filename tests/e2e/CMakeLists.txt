@@ -236,7 +236,7 @@ add_custom_target(benchmark_scheduler
     -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduled.cmake"
   DEPENDS scheduled_upstream scheduled_luthr scheduled_embedded VERBATIM USES_TERMINAL)
 add_test(NAME lua_scheduled_smoke COMMAND "${CMAKE_COMMAND}" ${scheduled_arguments}
-  -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=2048 -Ddelay_us=1000 "-Dlevels=1;2;0"
+  -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=2048 -Ddelay_us=1000 -Dhash_seed=21 "-Dlevels=1;2;0"
   "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/scheduled-smoke"
   -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduledSmoke.cmake")
 add_test(NAME lua_scheduled_arguments COMMAND "${CMAKE_COMMAND}" ${scheduled_arguments}

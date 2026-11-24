@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <lauxlib.h>
+#include <limits.h>
 #include <lualib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,6 +182,8 @@ int main(int argc, char **argv) {
   lua_Integer expected;
   unsigned slots, native, tasks, iterations, samples, warmups;
   unsigned selected_slots = 1, selected_carriers = 0, selected_native = 0;
+  unsigned hash_seed = 0;
+  int seeded = 0;
   int failed = 0, stopped = 0, default_allocator = 0, valid_options = 1;
 #ifdef LUTHR_BENCH_GC_PROBE
   GcProbe host_probe = {0};
@@ -208,6 +211,10 @@ int main(int argc, char **argv) {
       default_allocator = 1;
     else if (!stopped && strcmp(argv[i], "stopped") == 0)
       stopped = 1;
+    else if (!seeded && strncmp(argv[i], "hash-seed=", 10) == 0 &&
+             argv[i][10] >= '0' && argv[i][10] <= '9' &&
+             number(argv[i] + 10, 0, UINT_MAX, &hash_seed))
+      seeded = 1;
     else
       valid_options = 0;
   }
@@ -222,7 +229,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
             "usage: %s script workload collector slots native_limit "
             "tasks iterations samples warmups delay_us "
-            "[default-allocator] [stopped]\n",
+            "[default-allocator] [stopped] [hash-seed=NUMBER]\n",
             argv[0]);
     return 2;
   }
@@ -232,7 +239,10 @@ int main(int argc, char **argv) {
     return 2;
   }
 #endif
-  L = default_allocator ? luaL_newstate() : lua_newstate(allocate, &memory, 0);
+  if (!seeded && default_allocator)
+    hash_seed = luaL_makeseed(NULL);
+  L = default_allocator ? lua_newstate(luaL_alloc, NULL, hash_seed)
+                        : lua_newstate(allocate, &memory, hash_seed);
   require(L != NULL);
   luaL_openlibs(L);
   lua_CFunction override = NULL;
@@ -477,6 +487,7 @@ int main(int argc, char **argv) {
     field("observed_native_peak", native_peak);
     field("completed", done);
     field("automatic_gc_stopped", stopped);
+    field("hash_seed", hash_seed);
 #ifdef LUTHR_BENCH_GC_PROBE
     gc_probe_emit(&total);
 #endif
