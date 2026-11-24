@@ -1899,7 +1899,7 @@ static int __attribute__((noinline)) sharedpartset (
 l_sinline uint64_t sharedlayout (lua_State *L, Table *table,
                                  const TValue *key, const TValue *value) {
   if (luaW_stopped(&G(L)->world) ||
-      (gettableflags(table) & LUA_TABLE_STRING_INDEX) ||
+      (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) ||
       !published(key) || !published(value) || !luaH_strongaccess(L, table))
     return 1;
   return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
@@ -2053,7 +2053,8 @@ l_sinline __attribute__((always_inline)) int tryprivatewrite (
   done = key == NULL ? privaterecordslot(L, t, index, value, raw, tracing)
                      : privatestoreslot(L, t, key, value, raw, tracing);
   if (done) {
-    settableflags(t, gettableflags(t) & cast_byte(~maskflags));
+    settableflags(t, gettableflags(t) &
+                     cast_byte(~(maskflags | LUA_TABLE_STRING_RANGES)));
     luaC_barrierback(L, obj2gco(t), value);
   }
   /* Failure has not changed any key, value or image. Restore that version;
@@ -2124,6 +2125,9 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
   LuaHashPart *part;
   if (gettableflags(t) & LUA_TABLE_STRING_INDEX)
     luaA_invalidatestringindex(L, t);
+  if (gettableflags(t) & LUA_TABLE_STRING_RANGES)
+    __atomic_fetch_and(&t->flags, cast_byte(~LUA_TABLE_STRING_RANGES),
+                       __ATOMIC_RELEASE);
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) {
     luaA_sharevalue(L, key);
     luaA_sharevalue(L, value);

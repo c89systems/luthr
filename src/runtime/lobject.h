@@ -846,6 +846,8 @@ enum {
 
 /* Retire the direct string index before changing this metatable. */
 #define LUA_TABLE_STRING_INDEX (1u << 7)
+/* The string library's byte and sub bindings can be used directly. */
+#define LUA_TABLE_STRING_RANGES (1u << 6)
 
 typedef struct Table {
   CommonHeader;

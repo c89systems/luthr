@@ -512,6 +512,21 @@ static void *run(void *context) {
             "value=abs(-9); assert(capture()==9); "
             "assert(tail(abs,math.mininteger)==math.mininteger and "
             "math.type(abs(-7.0))=='float' and abs('-3')==3)");
+    execute(state, "local methods=reopen(); "
+                   "local function pair(s,i) "
+                   "local b=s:byte(i); local c=s:sub(i,i); return b,c end; "
+                   "local b,c=pair('a\\0c',2); assert(b==0 and c=='\\0'); "
+                   "b,c=pair('abc',-1); assert(b==99 and c=='c'); "
+                   "b,c=pair('abc',4); assert(b==nil and c==''); "
+                   "methods.byte=function(s,i) return 40+i end; "
+                   "b,c=pair('abc',2); assert(b==42 and c=='b'); "
+                   "methods=reopen(); "
+                   "rawset(methods,'sub',function(s,i,j) return s..i..j end); "
+                   "b,c=pair('abc',2); assert(b==98 and c=='abc22'); "
+                   "getmetatable('').__index={byte=function() return 17 end, "
+                   "sub=function() return 'changed' end}; "
+                   "b,c=pair('abc',2); assert(b==17 and c=='changed'); "
+                   "reopen()");
     if (!facade)
       execute(state,
               "local sub,byte,abs=string.sub,string.byte,math.abs; "
@@ -522,8 +537,11 @@ static void *run(void *context) {
               "if e=='call' then calls=calls+1 else returns=returns+1 end end "
               "end,'cr'); "
               "local s,k,m=sub('aaa',1,1),byte('b'),abs(-3); "
+              "local function pair(s,i) "
+              "local b=s:byte(i); local c=s:sub(i,i); return b,c end; "
+              "local b,c=pair('ab',2); assert(b==98 and c=='b'); "
               "debug.sethook(); "
-              "assert(s=='a' and k==98 and m==3 and calls==3 and returns==3)");
+              "assert(s=='a' and k==98 and m==3 and calls==5 and returns==5)");
   } else if (strstr(test->mode, "snapshot") != NULL)
     snapshot(test);
   else if (strstr(test->mode, "slice") != NULL)

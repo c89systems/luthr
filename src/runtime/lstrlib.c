@@ -34,6 +34,7 @@
 #include "lfunc.h"
 #include "lgc.h"
 #include "lstring.h"
+#include "ltable.h"
 #include "lundump.h"
 #include "lvm.h"
 
@@ -2446,6 +2447,24 @@ static const luaL_Reg strlib[] = {
 };
 
 
+static void cachestringranges (lua_State *L) {
+  Table *methods;
+  TValue byte, sub;
+  lua_pushliteral(L, "byte");
+  lua_pushliteral(L, "sub");
+  lua_lock(L);
+  methods = hvalue(s2v(L->top.p - 3));
+  if (luaA_localtable(L, methods) &&
+      luaH_getshortowned(methods, tsvalue(s2v(L->top.p - 2)), &byte) == LUA_VMCF &&
+      luaH_getshortowned(methods, tsvalue(s2v(L->top.p - 1)), &sub) == LUA_VMCF &&
+      checktag(&byte, LUA_VBCF) && checktag(&sub, LUA_VBCF) &&
+      fvalue(&byte) == luaB_strbyte && fvalue(&sub) == luaB_strsub)
+    __atomic_fetch_or(&methods->flags, LUA_TABLE_STRING_RANGES, __ATOMIC_RELEASE);
+  L->top.p -= 2;
+  lua_unlock(L);
+}
+
+
 static void createmetatable (lua_State *L) {
   const luaL_Reg *entry;
   /* table to be metatable for strings */
@@ -2472,6 +2491,7 @@ LUAMOD_API int luaopen_string (lua_State *L) {
     luaQ_pushmanaged(L, entry->func, 0);
     lua_setfield(L, -2, entry->name);
   }
+  cachestringranges(L);
   createmetatable(L);
   return 1;
 }

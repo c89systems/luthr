@@ -654,11 +654,11 @@ static unsigned dispatchpair (unsigned first, unsigned second) {
   }
 }
 
-/* A fixed-result byte call can consume a positive index in its caller.
+/* A fixed-result range call can consume a positive index in its caller.
 ** Keep the bytecode and each later instruction's dispatch entry intact. */
-static int bytecallsite (const Proto *p, int pc) {
+static int stringrangecallsite (const Proto *p, int pc) {
   const Instruction *code = p->code + pc;
-  const TValue *key;
+  TString *key;
   int a, k;
   int moves = 1;
   if (p->sizecode - pc < 3 || GET_OPCODE(code[0]) != OP_SELF ||
@@ -678,10 +678,10 @@ static int bytecallsite (const Proto *p, int pc) {
       GETARG_C(code[moves + 1]) != 2)
     return 0;
   k = GETARG_C(code[0]);
-  if (k >= p->sizek) return 0;
-  key = &p->k[k];
-  return ttisshrstring(key) && tsvalue(key)->shrlen == 4 &&
-         memcmp(getshrstr(tsvalue(key)), "byte", 4) == 0;
+  if (k >= p->sizek || !ttisshrstring(&p->k[k])) return 0;
+  key = tsvalue(&p->k[k]);
+  return (key->shrlen == 4 && memcmp(getshrstr(key), "byte", 4) == 0) ||
+         (moves == 2 && key->shrlen == 3 && memcmp(getshrstr(key), "sub", 3) == 0);
 }
 
 /* The hints name possible fields. An extra assignment or a different key
@@ -879,9 +879,12 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
     }
   }
   if (count == 0)
-    for (pc = 0; pc + 1 < p->sizecode; pc++)
-      if (dispatchpair(GET_OPCODE(p->code[pc]), GET_OPCODE(p->code[pc + 1])))
+    for (pc = 0; pc + 1 < p->sizecode; pc++) {
+      unsigned op = GET_OPCODE(p->code[pc]);
+      if (dispatchpair(op, GET_OPCODE(p->code[pc + 1])) ||
+          (op == OP_SELF && stringrangecallsite(p, pc)))
         break;
+    }
   if (count != 0 || pc + 1 < p->sizecode)
     p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
   for (pc = 0; pc < p->sizecode; pc++) {
@@ -902,8 +905,8 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       if (first < NUM_OPCODES && second < NUM_OPCODES) {
         unsigned pair = dispatchpair(first, second);
         if (pair != 0) p->dispatch[pc] = cast_byte(pair);
-        else if (count == 0 && first == OP_SELF && bytecallsite(p, pc))
-          p->dispatch[pc] = LUA_STRING_BYTE_CALL;
+        else if (count == 0 && first == OP_SELF && stringrangecallsite(p, pc))
+          p->dispatch[pc] = LUA_STRING_RANGE_CALL;
       }
     }
   }

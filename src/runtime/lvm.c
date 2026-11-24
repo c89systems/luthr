@@ -1572,9 +1572,8 @@ static void __attribute__((noinline)) createtable (
   luaX_pollrequests(L);
 }
 
-/* Resolve the actual method through the concurrent table read. No register
-** changes until the lookup and argument support the bounded builtin call. */
-static int __attribute__((noinline)) trybytecall (
+/* No register changes until the binding and argument support a bounded call. */
+static int __attribute__((noinline)) trystringrangecall (
     lua_State *L, const TValue *receiver, TString *key, const TValue *index,
     StkId result, unsigned crossed) {
   Table *methods;
@@ -1582,21 +1581,28 @@ static int __attribute__((noinline)) trybytecall (
   const char *bytes;
   size_t length;
   lua_Unsigned position;
+  int sub = key->shrlen == 3;  /* lowering selects "byte" or "sub" */
   if (!ttisstring(receiver) || !ttisinteger(index)) return 0;
   position = l_castS2U(ivalue(index)) - 1;
   bytes = getlstr(tsvalue(receiver), length);
   if (position >= length) return 0;
   methods = luaA_stringindex(L);
   if (methods == NULL) return 0;
-  luaC_tracepointer(L, methods);
-  if (!luaH_readshortstr(G(L), L, methods, key, &method) ||
-      !checktag(&method, LUA_VBCF) || fvalue(&method) != luaB_strbyte ||
-      gethookmask(L))
-    return 0;
+  if (!(gettableflags(methods) & LUA_TABLE_STRING_RANGES)) {
+    luaC_tracepointer(L, methods);
+    if (!luaH_readshortstr(G(L), L, methods, key, &method) ||
+        !checktag(&method, LUA_VBCF) ||
+        fvalue(&method) != (sub ? luaB_strsub : luaB_strbyte))
+      return 0;
+  }
+  if (gethookmask(L)) return 0;
   setobj2s(L, result + 1, receiver);
   setobj2s(L, result + 2, index);
   if (crossed == 3) setobj2s(L, result + 3, index);
-  setivalue(s2v(result), cast_uchar(bytes[position]));
+  if (sub) {
+    setsvalue2s(L, result, &G(L)->byte_strings[cast_uchar(bytes[position])]);
+  }
+  else { setivalue(s2v(result), cast_uchar(bytes[position])); }
   L->top.p = result + 1;
   return 1;
 }
@@ -1778,10 +1784,10 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #define l_tforcall fast_tforcall
 #define l_tforloop fast_tforloop
 #include "lvmexecute.h"
-  vmcase(LUA_STRING_BYTE_CALL) {
+  vmcase(LUA_STRING_RANGE_CALL) {
     unsigned crossed = GET_OPCODE(pc[1]) == OP_MOVE ? 3u : 2u;
     if (l_unlikely(trap || L->poll_remaining <= crossed || gethookmask(L)) ||
-        !trybytecall(L, vRB(i), tsvalue(KC(i)), vRB(pc[0]), RA(i), crossed)) {
+        !trystringrangecall(L, vRB(i), tsvalue(KC(i)), vRB(pc[0]), RA(i), crossed)) {
       directdispatch(OP_SELF);
     }
     L->poll_remaining -= crossed;

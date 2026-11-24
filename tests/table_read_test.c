@@ -354,7 +354,9 @@ static void primitive_index(lua_State *state) {
 
 static void string_publication(lua_State *state) {
   lua_State *reader = lua_newthread(state);
-  require(luaL_loadstring(reader, "return ('abc'):sub(2)") == LUA_OK);
+  require(luaL_loadstring(reader, "local s,i='abc',2; local b=s:byte(i); "
+                                  "local c=s:sub(i,i); "
+                                  "return b==98 and c..'c'") == LUA_OK);
   string_reader = reader;
   require(luaopen_string(state) == 1);
   require(string_reader == NULL);
