@@ -127,16 +127,17 @@ const Node luaH_dummynode = {
 const TValue luaH_absentkey = {ABSTKEYCONSTANT};
 
 
-/*
-** Negative integers are distributed across hash partitions. A second
-** remainder can share factors with partition selection and put consecutive
-** keys on one chain. Use a power-of-two mask and mix the high bits into it.
-** The high-bit term is constant over a run of adjacent low bits.
-*/
-l_sinline unsigned hashint (unsigned size, lua_Integer i) {
+l_sinline lua_Unsigned distributedbits (lua_Unsigned bits) {
+  return bits ^ (bits >> 16);
+}
+
+/* Secondary images start with the quotient of the division that selects
+** their partition. Fold high bits into the slot index for sparse keys. */
+l_sinline unsigned hashint (const Node *nodes, unsigned size, lua_Integer i) {
   lua_Unsigned ui = l_castS2U(i);
   if (i < 0) {
-    uint64_t bits = cast(uint64_t, ui);
+    uint64_t bits = nodes->u.partitioned
+      ? distributedbits(ui) / (LUA_HASH_PARTS - 1) : ui;
     uint64_t high = (bits >> 16) * UINT64_C(0x9e3779b97f4a7c15);
     return lmod(cast_uint(bits ^ (high >> 32)), size);
   }
@@ -179,9 +180,9 @@ static unsigned l_hashfloat (lua_Number n) {
 ** returns the 'main' position of an element in a table (that is,
 ** the index of its hash value).
 */
-static unsigned mainindex (unsigned size, const TValue *key) {
+static unsigned mainindex (const Node *nodes, unsigned size, const TValue *key) {
   switch (ttypetag(key)) {
-    case LUA_VNUMINT: return hashint(size, ivalue(key));
+    case LUA_VNUMINT: return hashint(nodes, size, ivalue(key));
     case LUA_VNUMFLT: return hashmod(size, l_hashfloat(fltvalue(key)));
     case LUA_VSHRSTR: return lmod(tsvalue(key)->hash, size);
     case LUA_VLNGSTR: return lmod(luaS_hashlongstr(tsvalue(key)), size);
@@ -200,7 +201,7 @@ l_sinline unsigned nodesteps (const Node *nodes) {
 }
 
 l_sinline Node *mainpositionTV (Node *nodes, const TValue *key) {
-  return nodes + mainindex(nodesteps(nodes), key);
+  return nodes + mainindex(nodes, nodesteps(nodes), key);
 }
 
 l_sinline Node *mainpositionfromnode (Node *nodes, Node *nd) {
@@ -212,7 +213,7 @@ l_sinline Node *mainpositionfromnode (Node *nodes, Node *nd) {
 /* All positive integer keys use part zero, including keys currently outside
 ** the array. Other keys can grow independently of array density changes. */
 l_sinline unsigned distributedpart (lua_Unsigned bits) {
-  return 1 + cast_uint((bits ^ (bits >> 16)) % (LUA_HASH_PARTS - 1));
+  return 1 + cast_uint(distributedbits(bits) % (LUA_HASH_PARTS - 1));
 }
 
 l_sinline unsigned integerpart (lua_Integer integer) {
@@ -661,7 +662,7 @@ static Value *resizearray (lua_State *L, Table *t, unsigned oldasize,
 ** comparison ensures that the shift in the second one does not
 ** overflow.
 */
-static Node *initnodes (char *storage, int lsize) {
+static Node *initnodes (char *storage, int lsize, int partitioned) {
   Node *base;
   if (lsize < 0) {  /* no elements to hash part? */
     base = cast(Node *, &luaH_dummynode);
@@ -672,6 +673,7 @@ static Node *initnodes (char *storage, int lsize) {
     size_t offset = lsize >= LIMFORLAST ? sizeof(Limbox) : 0;
     base = cast(Node *, storage + offset);
     base->u.lsize = cast_byte(lsize);
+    base->u.partitioned = cast_byte(partitioned);
     if (offset != 0)
       cast(Limbox *, storage)->lastfree = base + size;
     for (i = 0; i < cast_int(size); i++) {
@@ -696,7 +698,7 @@ static int setnodevector (lua_State *L, Table *t, int lsize) {
     storage = luaM_realloc_(L, NULL, 0, nodebytes(lsize));
     if (storage == NULL) return 0;
   }
-  __atomic_store_n(&t->node, initnodes(storage, lsize), __ATOMIC_RELEASE);
+  __atomic_store_n(&t->node, initnodes(storage, lsize, 0), __ATOMIC_RELEASE);
   return 1;
 }
 
@@ -907,7 +909,7 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     int log = count != 0 ? luaO_ceillog2(count) : -1;
     char *storage = log >= 0 ? luaM_realloc_(L, NULL, 0, nodebytes(log)) : NULL;
     if (log >= 0 && storage == NULL) break;
-    part->nodes = initnodes(storage, log);
+    part->nodes = initnodes(storage, log, i != 0);
     part->version = 0;
     part->gate = 0;
     part->waiters = NULL;
@@ -1053,10 +1055,10 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
       *lenhint(t) = asize / 2u;
       memset(getArrTag(t, 0), LUA_VEMPTY, asize);
     }
-    t->node = initnodes(storage + arraybytes, lsize);
+    t->node = initnodes(storage + arraybytes, lsize, 0);
   }
   else {
-    t->node = initnodes(NULL, -1);
+    t->node = initnodes(NULL, -1, 0);
     if (asize != 0 || hsize != 0) {
       /* luaH_resize roots its receiver across larger backing allocations. */
       luaH_resize(L, t, asize, hsize);
@@ -1329,7 +1331,7 @@ static const TValue *getintfromhash (Table *t, lua_Integer key) {
   if (directory != NULL)
     nodes = directory->parts[integerpart(key)].nodes;
   lua_assert(!ikeyinarray(t, key));
-  return findinteger(nodes + hashint(nodesteps(nodes), key), key);
+  return findinteger(nodes + hashint(nodes, nodesteps(nodes), key), key);
 }
 
 static int hashkeyisempty (Table *t, lua_Unsigned key) {
@@ -1607,9 +1609,9 @@ l_sinline int __attribute__((always_inline)) probehash (
     LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision, int deadok) {
   unsigned size = nodesteps(base);
   unsigned index, steps;
-  if (scalar == LUA_VNUMINT) index = hashint(size, ivalue(key));
+  if (scalar == LUA_VNUMINT) index = hashint(base, size, ivalue(key));
   else if (scalar == ctb(LUA_VSHRSTR)) index = lmod(tsvalue(key)->hash, size);
-  else index = mainindex(size, key);
+  else index = mainindex(base, size, key);
   for (steps = 0; steps < size && (!deadok || steps < LUA_NEXT_PROBE_LIMIT);
        steps++) {
     Node *node = base + index;
@@ -1733,7 +1735,7 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth, int log) {
     luaM_free(L, growth->retirement);
     luaM_error(L);
   }
-  growth->nodes = initnodes(storage, log);
+  growth->nodes = initnodes(storage, log, 1);
   growth->retirement->array = growth->retirement->nodes = NULL;
   growth->retirement->array_bytes = growth->retirement->node_bytes = 0;
 }
@@ -1769,7 +1771,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
   uint64_t revision;
   if (ttisinteger(key)) {
     lua_Integer integer = ivalue(key);
-    position = nodes + hashint(nodesteps(nodes), integer);
+    position = nodes + hashint(nodes, nodesteps(nodes), integer);
     slot = findinteger(position, integer);
   }
   else if (ttisshrstring(key)) {

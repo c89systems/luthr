@@ -812,6 +812,7 @@ typedef union Node {
     TValuefields;  /* fields for value */
     lu_byte key_tt;  /* key type */
     lu_byte lsize;  /* immutable log2 of capacity, used in the first node only */
+    lu_byte partitioned;  /* first node of a secondary hash image */
     int next;  /* for chaining */
     Value key_val;  /* key value */
   } u;

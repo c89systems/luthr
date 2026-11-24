@@ -198,8 +198,8 @@ static void run(lua_State *L, const char *source) {
   require(status == LUA_OK);
 }
 
-static void check_integer_keys(lua_State *L, lua_Integer stride) {
-  const int count = 256 * (LUA_HASH_PARTS - 1);
+static void check_integer_keys(lua_State *L, int count, lua_Integer stride) {
+  int linked = 0;
   Table *table;
   int index;
   lua_newtable(L);
@@ -219,12 +219,15 @@ static void check_integer_keys(lua_State *L, lua_Integer stride) {
     unsigned size = luaH_nodesize(nodes);
     for (unsigned i = 0; i < size; ++i) {
       const Node *node = nodes + i;
+      linked += gnext(node) != 0;
       for (unsigned length = 1; gnext(node) != 0; ++length) {
         require(length < 8);
         node += gnext(node);
       }
     }
   }
+  /* Partitioning a dense range should leave almost all keys at home. */
+  require(stride != 1 || linked <= count / 16);
   for (int i = 1; i <= count; ++i) {
     require(lua_rawgeti(L, index, -(lua_Integer)i * stride) == LUA_TNUMBER);
     require(lua_tointeger(L, -1) == i);
@@ -387,8 +390,9 @@ int main(int argc, char **argv) {
   lua_pop(L, 1);
   lua_pushexternalstring(L, "external", 8, NULL, NULL);
   require(lua_rawget(L, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 1337);
-  check_integer_keys(L, 1);
-  check_integer_keys(L, 65537);
+  check_integer_keys(L, 8192 * (LUA_HASH_PARTS - 1), 1);
+  check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 65537);
+  check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 0x100000000LL);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);
