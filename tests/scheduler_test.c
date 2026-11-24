@@ -44,6 +44,7 @@ struct fixture {
   lua_State *metadata_peer;
   unsigned metadata_held, metadata_queued, metadata_released;
   unsigned full_stage;
+  unsigned trace_mutator_waiting;
   int hold_full;
   size_t live;
   uint64_t poll_time_ns;
@@ -59,6 +60,7 @@ static int fail_mutex = -1, fail_condition = -1, fail_carrier = -1;
 static int fail_mapping, fail_protection;
 static unsigned live_stacks;
 static int observe_idle;
+static int observe_trace_pause;
 static pthread_t idle_host;
 
 enum {
@@ -151,6 +153,22 @@ int __wrap_pthread_cond_wait(pthread_cond_t *condition,
       fixture->host_channel_entries++;
     require(pthread_cond_broadcast(&fixture->idle_changed) == 0);
     require(pthread_mutex_unlock(&fixture->idle_mutex) == 0);
+  }
+  if (observe_trace_pause && condition == &G(fixture->main)->world.rendezvous) {
+    LuaExecution *execution = luaQ_current();
+    require(execution == &fixture->tasks[1].fiber.execution);
+    require(execution->managed_depth == 1 && execution->allocation_cache);
+    __atomic_store_n(&fixture->waiting, 1, __ATOMIC_RELEASE);
+  }
+  if ((observe_trace_pause & LUA_WORLD_RETAIN_MUTATORS) &&
+      condition == &G(fixture->main)->world.resumed) {
+    LuaExecution *execution = luaQ_current();
+    require(execution == &fixture->tasks[0].fiber.execution);
+    require(execution->managed_depth == 1 && execution->allocation_cache);
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->trace_mutator_waiting = 1;
+    require(pthread_cond_broadcast(&fixture->changed) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
   }
   return __real_pthread_cond_wait(condition, mutex);
 }
@@ -854,6 +872,53 @@ static void stopped_dispatch(struct fixture *f) {
   luaQ_wake(&f->changed, &f->waiters);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(collect(f, 0, LUA_OK) == 42);
+  finish(f);
+}
+
+static int poll_at_trace_pause(lua_State *L) {
+  struct fixture *f = fixture;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  while (!__atomic_load_n(&f->waiting, __ATOMIC_ACQUIRE))
+    sched_yield();
+  luaX_pollrequests(L);
+  return 0;
+}
+
+static int close_trace_pause(lua_State *L) {
+  luaW_collectenter(L);
+  G(L)->world.stop_slots = (unsigned)observe_trace_pause;
+  luaW_stop(L);
+  luaW_heapleave(L);
+  if (observe_trace_pause & LUA_WORLD_RETAIN_MUTATORS) {
+    struct fixture *f = fixture;
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    while (!f->trace_mutator_waiting)
+      require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
+  luaW_start(L);
+  return 0;
+}
+
+static void trace_pause(struct fixture *f, int retain_mutators) {
+  observe_trace_pause = LUA_WORLD_RETAIN_COLLECTOR |
+                        (retain_mutators ? LUA_WORLD_RETAIN_MUTATORS : 0);
+  init(f, 2);
+  lua_gc(f->main, LUA_GCSTOP);
+  managed(f->main, "poll_at_trace_pause", poll_at_trace_pause);
+  managed(f->main, "close_trace_pause", close_trace_pause);
+  submit(f, 0, "poll_at_trace_pause(); return 42", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "close_trace_pause(); return 43", 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  require(collect(f, 1, LUA_OK) == 43 && f->tasks[1].parks == 0);
+  require(!retain_mutators || f->tasks[0].parks == 0);
   finish(f);
 }
 
@@ -2757,6 +2822,10 @@ int main(int argc, char **argv) {
     wake_waiters(f);
   else if (strcmp(argv[1], "stopped_dispatch") == 0)
     stopped_dispatch(f);
+  else if (strcmp(argv[1], "trace_pause_retains_collector") == 0)
+    trace_pause(f, 0);
+  else if (strcmp(argv[1], "trace_pause_retains_mutators") == 0)
+    trace_pause(f, 1);
   else if (strcmp(argv[1], "native") == 0)
     native_progress(f, 0);
   else if (strcmp(argv[1], "native_reentry") == 0)

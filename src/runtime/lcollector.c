@@ -167,6 +167,13 @@ void luaC_advancetrace (lua_State *L) {
     if (continued) luaSC_notifygc(g);
     return;
   }
+  /* Between stop and resume we only close roots, move queues and initialize
+  ** the sweep. Keep the coordinator's slot across this rendezvous. Let the
+  ** scheduler resume mutators on explicitly stepped incremental cycles so
+  ** concurrent step requests can still arrive together. */
+  lua_assert(g->world.stop_slots == 0);
+  g->world.stop_slots = LUA_WORLD_RETAIN_COLLECTOR |
+    (g->trace_plan.user_incremental ? 0 : LUA_WORLD_RETAIN_MUTATORS);
   luaW_stop(L);  /* also publishes allocations and drains barriers */
   luaW_heapleave(L);  /* retain exactly the stop's metadata ownership */
   advanceclosedtrace(L);

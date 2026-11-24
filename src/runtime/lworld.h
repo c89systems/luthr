@@ -37,6 +37,8 @@ enum {
   LUA_WORLD_EPOCH_STEP = 1u << 16
 };
 
+enum { LUA_WORLD_RETAIN_COLLECTOR = 1, LUA_WORLD_RETAIN_MUTATORS = 2 };
+
 typedef struct LuaWorld {
   pthread_mutex_t mutex;
   pthread_cond_t changed, resumed, rendezvous;
@@ -59,6 +61,7 @@ typedef struct LuaWorld {
   unsigned storage_scan_waiters;  /* mutex-owned count behind the scan wait bit */
   unsigned heap_depth;  /* owner-only after the outermost grant */
   unsigned entry_waiting;  /* mutex-owned batch owed admission after a stop */
+  unsigned stop_slots;  /* metadata owner sets before stopping, cleared at resume */
   LuaParticipation *rendezvous_cursor;  /* world.mutex, unchecked suffix */
 } LuaWorld;
 

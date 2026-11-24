@@ -495,6 +495,7 @@ typedef struct LuaTracePlan {
   unsigned weak_list;
   unsigned finish;
   int roots_pending;  /* native roots captured at the first closed boundary */
+  int user_incremental;  /* started by an explicit incremental step */
 } LuaTracePlan;
 
 /* A sweep owns its old allocation cohort until every claimed batch returns.

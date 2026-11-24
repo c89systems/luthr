@@ -60,6 +60,7 @@ int luaW_init (global_State *g) {
   int status, i;
   world->control = bitmask(MAJOR0BIT);
   world->entry_waiting = 0;
+  world->stop_slots = 0;
   g->seals_pending = 0;
   world->rendezvous_cursor = NULL;
   world->heap_depth = 0;
@@ -379,8 +380,12 @@ void luaW_resume (lua_State *L) {
 
 void luaW_waitresume (lua_State *L) {
   LuaWorld *world = &G(L)->world;
-  while (luaW_stopped(world))
-    luaQ_wait(L, &world->mutex, &world->resumed, &world->resume_waiters);
+  while (luaW_stopped(world)) {
+    if (world->stop_slots & LUA_WORLD_RETAIN_MUTATORS)
+      luaQ_waitcarrier(L, &world->mutex, &world->resumed, &world->resume_waiters);
+    else
+      luaQ_wait(L, &world->mutex, &world->resumed, &world->resume_waiters);
+  }
 }
 
 static void __attribute__((noinline)) awaitentry (lua_State *L, LuaWorld *world) {
@@ -496,8 +501,12 @@ void luaW_stop (lua_State *L) {
   }
   luaQ_wake(&world->changed, &world->waiters);
   luaW_deactivate(L);
-  while (!rendezvousready(world, 0))
-    luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
+  while (!rendezvousready(world, 0)) {
+    if (world->stop_slots & LUA_WORLD_RETAIN_COLLECTOR)
+      luaQ_waitcarrier(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
+    else
+      luaQ_wait(L, &world->mutex, &world->rendezvous, &world->rendezvous_waiters);
+  }
   L->world_depth = 1;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   luaC_publish(L);
@@ -518,6 +527,7 @@ void luaW_start (lua_State *L) {
   /* Late entrants may have published a tentative reference after the stop
   ** scan. They cannot access managed data until stopped becomes false. */
   luaW_resume(L);  /* the collector resumes as an ordinary mutator */
+  world->stop_slots = 0;
   __atomic_fetch_and(&world->control, ~cast(uint64_t, LUA_WORLD_STOPPED),
                      __ATOMIC_SEQ_CST);
   /* A gate can release during a stop that does not consume marking work. */

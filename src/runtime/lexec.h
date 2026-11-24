@@ -183,6 +183,10 @@ LUAI_FUNC void *luaQ_ownertoken (void);
 ** A wake with no registrations is a no-op. */
 LUAI_FUNC void luaQ_wait (lua_State *L, pthread_mutex_t *mutex,
                           pthread_cond_t *changed, LuaWaiter **waiters);
+/* Only for a rendezvous that can release every waiter without scheduling a
+** continuation. The carrier sleeps with its existing execution slot. */
+LUAI_FUNC void luaQ_waitcarrier (lua_State *L, pthread_mutex_t *mutex,
+                                 pthread_cond_t *changed, LuaWaiter **waiters);
 /* Owned waits only. Returns with mutex held, after retiring registration and
 ** all request-side borrows. A true result requires the caller to retire its
 ** resource lease before delivery (or return STOPPED to a quiescent driver). */

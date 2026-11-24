@@ -272,6 +272,15 @@ void luaQ_wait (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
   }
 }
 
+void __attribute__((cold)) luaQ_waitcarrier (lua_State *L, pthread_mutex_t *mutex,
+                         pthread_cond_t *changed, LuaWaiter **waiters) {
+  LuaWaiter waiter;
+  UNUSED(L);
+  linkwaiter(&waiter, NULL, waiters, NULL);
+  luaX_checksync(pthread_cond_wait(changed, mutex));
+  unlinkwaiter(&waiter);
+}
+
 static int waitstop (lua_State *L, pthread_mutex_t *mutex, pthread_cond_t *changed,
                      LuaWaiter **waiters, LuaWaitQueue *queue) {
   LuaExecution *execution = luaQ_current();

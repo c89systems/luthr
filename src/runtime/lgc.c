@@ -93,7 +93,6 @@ static void entersweep (lua_State *L);
 static void setidledebt (global_State *g);
 static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *object,
                        int quiescent);
-static void starttrace (lua_State *L, unsigned finish);
 static void finishyoung (lua_State *L, global_State *g, l_mem marked);
 static void atomic2gen (lua_State *L, global_State *g);
 static int checkmajorminor (lua_State *L, global_State *g);
@@ -608,7 +607,7 @@ static void publishmarkstate (LuaWorld *world, unsigned mark) {
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 }
 
-static void starttrace (lua_State *L, unsigned finish) {
+static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   global_State *g = G(L);
   unsigned stamps = luaC_markstate(g) & MARKSTAMPS;
   int arming = L->world_depth == 0;
@@ -662,6 +661,7 @@ static void starttrace (lua_State *L, unsigned finish) {
   __atomic_store_n(&g->trace_plan.phase, TRACE_INIT, __ATOMIC_RELAXED);
   g->trace_plan.finish = finish;
   g->trace_plan.roots_pending = arming;
+  g->trace_plan.user_incremental = user_incremental;
   publishmarkstate(&g->world,
     stamps | LUA_MARK_ACTIVE | (arming ? LUA_MARK_ARMING : 0));
   if (arming) {
@@ -720,7 +720,7 @@ static void marknativeframes (global_State *g) {
 }
 
 static void restartcollection (lua_State *L, global_State *g, unsigned finish) {
-  starttrace(L, finish);
+  starttrace(L, finish, 0);
   markobject(g, mainthread(g));
   marknativeframes(g);
   markvalue(g, &g->l_registry);
@@ -2841,7 +2841,7 @@ static int markstep (lua_State *L, l_mem debt, int concurrent, int user) {
   int complete = young && (user || budget == 0);
   uint64_t epoch;
   lua_assert(young ? luaC_state(g) == GCSpropagate : (arming && budget != 0));
-  starttrace(L, young ? TRACE_YOUNG : TRACE_MAJOR);
+  starttrace(L, young ? TRACE_YOUNG : TRACE_MAJOR, user && !young);
   if (arming && !user) finishrequest(g);
   epoch = luaC_traceepoch(g);
   if (arming) {
@@ -3160,7 +3160,7 @@ static uint64_t startfullcycle (lua_State *L) {
     minor2inc(g, KGC_INC);
     finish = TRACE_GENERATIONAL;
   }
-  starttrace(L, finish);
+  starttrace(L, finish, 0);
   luaC_advancetrace(L);
   lua_assert(epoch == luaC_traceepoch(g));
   __atomic_fetch_and(&g->world.control, ~cast(uint64_t, LUA_WORLD_SEAL_NURSERIES),

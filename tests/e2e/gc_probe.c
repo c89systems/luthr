@@ -229,6 +229,8 @@ void __real_luaW_waitcollector(lua_State *, int);
 void __real_luaM_reclaimpages(lua_State *);
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
+void __real_luaQ_waitcarrier(lua_State *, pthread_mutex_t *, pthread_cond_t *,
+                             LuaWaiter **);
 
 void __wrap_luaW_stop(lua_State *L) {
   GcProbe *record = probe(L);
@@ -842,8 +844,10 @@ void __wrap_luaCT_pause(LuaFiber *fiber) {
     wait->dispatched = now();
 }
 
-void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
-                      pthread_cond_t *changed, LuaWaiter **waiters) {
+static void probewait(lua_State *L, pthread_mutex_t *mutex,
+                      pthread_cond_t *changed, LuaWaiter **waiters,
+                      void (*wait)(lua_State *, pthread_mutex_t *,
+                                   pthread_cond_t *, LuaWaiter **)) {
   GcProbe *record = probe(L);
   struct metadata_wait pending = {0};
   uint64_t started = 0;
@@ -873,7 +877,7 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     metadata_waiters = &pending;
     luaX_checksync(pthread_mutex_unlock(&metadata_probe_mutex));
   }
-  __real_luaQ_wait(L, mutex, changed, waiters);
+  wait(L, mutex, changed, waiters);
   if (pending.waiters != NULL) {
     struct metadata_wait **link;
     luaX_checksync(pthread_mutex_lock(&metadata_probe_mutex));
@@ -906,4 +910,14 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
     record->allocator_waits++;
     record->allocator_wait_ns += now() - started;
   }
+}
+
+void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
+                      pthread_cond_t *changed, LuaWaiter **waiters) {
+  probewait(L, mutex, changed, waiters, __real_luaQ_wait);
+}
+
+void __wrap_luaQ_waitcarrier(lua_State *L, pthread_mutex_t *mutex,
+                             pthread_cond_t *changed, LuaWaiter **waiters) {
+  probewait(L, mutex, changed, waiters, __real_luaQ_waitcarrier);
 }
