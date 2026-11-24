@@ -276,6 +276,33 @@ do
 end
 equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
 do
+  for label in ('acdglpsuwxzACDGLPSUWXZ%'):gmatch('.') do
+    local atom = '%'..label
+    local members = {}
+    for i=0,255 do
+      local byte = string.char(i)
+      if byte:match('^'..atom..'$') then
+        members[#members+1] = byte
+      end
+    end
+    if #members > 0 then
+      local subject = table.concat(members):rep(128)
+      local capture, stop = subject:match('^('..atom..'+)()')
+      equal(capture, subject)
+      equal(stop, #subject + 1)
+    end
+  end
+  equal(('12345X'):match('^(%d*)45X$'), '123')
+  equal(('X'):match('^(%d*)X$'), '')
+  local mixed = string.rep('a\0b', 4096)
+  equal((mixed..'!'):match('^(.+)!$'), mixed)
+  local fields = {}
+  for i=1,32 do fields[i] = string.format('%04d', i) end
+  local captures = table.pack(table.concat(fields):match(('(....)'):rep(#fields)))
+  equal(captures.n, #fields)
+  for i=1,#fields do equal(captures[i], fields[i]) end
+end
+do
   local function readbyte(subject, index)
     local first = subject:byte(index)
     local second = subject:byte(index, index)

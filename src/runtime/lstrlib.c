@@ -68,13 +68,18 @@ static void addstring (lua_State *L, unsigned *work, luaL_Buffer *b,
   }
 }
 
-/* Caller owns the stack and roots src. Long copies may park and move it. */
+/* The caller owns the stack and checks collection after publishing results. */
+static void pushownedshortstring (lua_State *L, const char *src, size_t len) {
+  TString *ts = luaS_newlstr(L, src, len);
+  setsvalue2s(L, L->top.p, ts);
+  api_incr_top(L);
+}
+
+/* The caller owns the stack and roots src. Long copies may park and move it. */
 static void pushownedstring (lua_State *L, unsigned *work,
                              const char *src, size_t len) {
   if (len <= LUAI_MAXSHORTLEN) {
-    TString *ts = luaS_newlstr(L, src, len);
-    setsvalue2s(L, L->top.p, ts);
-    api_incr_top(L);
+    pushownedshortstring(L, src, len);
     luaC_checkGC(L);
   }
   else {
@@ -609,25 +614,49 @@ static const char *classend (MatchState *ms, const char *p) {
 }
 
 
+/* Both scalar tests and repeat scans use the active carrier's locale. */
+#define MATCHCLASSES(apply) \
+  apply('a', isalpha) apply('c', iscntrl) apply('d', isdigit) apply('g', isgraph) \
+  apply('l', islower) apply('p', ispunct) apply('s', isspace) apply('u', isupper) \
+  apply('w', isalnum) apply('x', isxdigit) apply('z', matchzero)
+
+l_sinline int matchzero (int c) {
+  return c == 0;
+}
+
 /* Keep libc's ctype TLS inside a leaf that returns before any checkpoint. */
 static int __attribute__((noinline)) match_class (int c, int cl) {
   int res;
   switch (tolower(cl)) {
-    case 'a' : res = isalpha(c); break;
-    case 'c' : res = iscntrl(c); break;
-    case 'd' : res = isdigit(c); break;
-    case 'g' : res = isgraph(c); break;
-    case 'l' : res = islower(c); break;
-    case 'p' : res = ispunct(c); break;
-    case 's' : res = isspace(c); break;
-    case 'u' : res = isupper(c); break;
-    case 'w' : res = isalnum(c); break;
-    case 'x' : res = isxdigit(c); break;
-    case 'z' : res = (c == 0); break;  /* deprecated option */
+#define SCALARCLASS(code, test) case code: res = test(c); break;
+    MATCHCLASSES(SCALARCLASS)
+#undef SCALARCLASS
     default: return (cl == c);
   }
   return (islower(cl) ? res : !res);
 }
+
+/* Choose the class once. Returning before a poll keeps libc's cached ctype
+** address on the same carrier even if the match later migrates. */
+static size_t __attribute__((noinline)) matchclassrun (const char *s,
+                                                        size_t len, int cl) {
+  size_t n = 0;
+  int positive = islower(cl) != 0;
+  switch (tolower(cl)) {
+#define RUNCLASS(code, test) \
+    case code: \
+      while (n < len && (test(cast_uchar(s[n])) != 0) == positive) n++; \
+      break;
+    MATCHCLASSES(RUNCLASS)
+#undef RUNCLASS
+    default:
+      while (n < len && cast_uchar(s[n]) == cl) n++;
+      break;
+  }
+  return n;
+}
+
+#undef MATCHCLASSES
 
 
 static int matchbracketclass (MatchState *ms, int c, const char *p,
@@ -692,18 +721,45 @@ static const char *matchbalance (MatchState *ms, const char *s,
 }
 
 
+/* Consume the greedy prefix in bounded runs. Bracket expressions retain
+** their byte-by-byte charging because a single test can scan many items. */
+static const char *greedyprefix (MatchState *ms, const char *s,
+                                 const char *p, const char *ep) {
+  if (*p == '[') {
+    while (singlematch(ms, s, p, ep)) {
+      s++;
+      luaQ_work(ms->L, &ms->work);
+    }
+  }
+  else {
+    while (s < ms->src_end) {
+      size_t left = ct_diff2sz(ms->src_end - s);
+      size_t budget = LUA_NATIVE_WORK_SLICE - ms->work;
+      size_t chunk = left < budget ? left : budget;
+      size_t n;
+      if (*p == '.') n = chunk;
+      else if (*p == L_ESC) n = matchclassrun(s, chunk, cast_uchar(p[1]));
+      else {
+        n = 0;
+        while (n < chunk && s[n] == *p) n++;
+      }
+      s += n;
+      luaQ_workn(ms->L, &ms->work, n);
+      if (n < chunk) break;
+    }
+  }
+  return s;
+}
+
 static const char *max_expand (MatchState *ms, const char *s,
                                  const char *p, const char *ep) {
-  ptrdiff_t i = 0;  /* counts maximum expand for item */
-  while (singlematch(ms, s + i, p, ep)) {
-    i++;
-    luaQ_work(ms->L, &ms->work);
-  }
+  const char *cursor = greedyprefix(ms, s, p, ep);
   /* keeps trying to match with the maximum repetitions */
-  while (i>=0) {
-    const char *res = match(ms, (s+i), ep+1);
+  for (;;) {
+    const char *res = match(ms, cursor, ep + 1);
     if (res) return res;
-    i--;  /* else didn't match; reduce 1 repetition to try again */
+    if (cursor == s) break;
+    cursor--;  /* else didn't match; reduce 1 repetition to try again */
   }
   return NULL;
 }
@@ -935,19 +991,24 @@ static void pushmatchposition (lua_State *L, lua_Integer position) {
   api_incr_top(L);
 }
 
-static void pushownedcapture (MatchState *ms, int i, const char *s,
-                              const char *e) {
+static int pushownedcapture (MatchState *ms, int i, const char *s,
+                             const char *e) {
   const char *cap;
   ptrdiff_t l = get_onecapture(ms, i, s, e, &cap, 1);
   if (l == CAP_POSITION)
     pushmatchposition(ms->L, ct_diff2S(cap - ms->src_init) + 1);
+  else if (cast_sizet(l) <= LUAI_MAXSHORTLEN) {
+    pushownedshortstring(ms->L, cap, cast_sizet(l));
+    return 1;
+  }
   else pushownedstring(ms->L, &ms->work, cap, cast_sizet(l));
+  return 0;
 }
 
 static void push_onecapture (MatchState *ms, int i, const char *s,
                                                     const char *e) {
   lua_lock(ms->L);
-  pushownedcapture(ms, i, s, e);
+  if (pushownedcapture(ms, i, s, e)) luaC_checkGC(ms->L);
   lua_unlock(ms->L);
 }
 
@@ -957,9 +1018,13 @@ static int countcaptures (const MatchState *ms, const char *s) {
 
 static void pushownedcaptures (MatchState *ms, const char *s,
                                const char *e, int count) {
-  int i;
+  int i, shortstrings = 0;
+  /* Every result is rooted on the stack before the next allocation.
+  ** Long results still collect individually; short results form a batch
+  ** bounded by the pattern capture limit. */
   for (i = 0; i < count; i++)
-    pushownedcapture(ms, i, s, e);
+    shortstrings |= pushownedcapture(ms, i, s, e);
+  if (shortstrings) luaC_checkGC(ms->L);
 }
 
 static int push_captures (MatchState *ms, const char *s, const char *e) {
