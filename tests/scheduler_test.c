@@ -616,6 +616,51 @@ static void fairness(struct fixture *f, unsigned slots, int generational) {
   finish(f);
 }
 
+static int retained_ready(lua_State *L) {
+  struct fixture *f = fixture;
+  lua_lock(L);
+  luaQ_poll(L);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->waiting++;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  while (!__atomic_load_n(&f->native_release, __ATOMIC_ACQUIRE)) {
+    luaX_pollrequests(L);
+    sched_yield();
+  }
+  lua_unlock(L);
+  return 0;
+}
+
+static void retained_fairness(struct fixture *f) {
+  init(f, 2);
+  f->scheduler.config.quantum_polls = 0;
+  lua_gc(f->main, LUA_GCGEN);
+  managed(f->main, "started", started);
+  managed(f->main, "all_started", all_started);
+  managed(f->main, "retained_ready", retained_ready);
+  for (unsigned i = 0; i < 2; ++i)
+    submit(f, i,
+           "started(...); local rows={}; "
+           "for i=1,8192 do rows[i]={i,i+1} end; retained_ready(); "
+           "while not all_started() do coroutine.yield() end; "
+           "return rows[8192][2]",
+           (int)i);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->waiting != 2)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  /* The queued tasks must start while both resident graphs remain live. */
+  for (unsigned i = 2; i < TASKS; ++i)
+    submit(f, i, "started(...); return ...", (int)i);
+  __atomic_store_n(&f->native_release, 1, __ATOMIC_RELEASE);
+  for (unsigned i = 2; i < TASKS; ++i)
+    require(collect(f, i, LUA_OK) == (lua_Integer)i);
+  for (unsigned i = 0; i < 2; ++i)
+    require(collect(f, i, LUA_OK) == 8193);
+  finish(f);
+}
+
 static void no_requests(struct fixture *f) {
   init(f, 1);
   /* Measure idle polling without an outstanding collector-assistance job. */
@@ -2661,6 +2706,8 @@ int main(int argc, char **argv) {
     fairness(f, 1, 0);
   else if (strcmp(argv[1], "parallel") == 0)
     fairness(f, 2, 1);
+  else if (strcmp(argv[1], "retained_fairness") == 0)
+    retained_fairness(f);
   else if (strcmp(argv[1], "no_requests") == 0)
     no_requests(f);
   else if (strcmp(argv[1], "metadata_progress") == 0)

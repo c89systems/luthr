@@ -24,7 +24,7 @@ struct LuaExecutionSlot {
   uintptr_t stack_offer;  /* encoded slot identity for combined withdrawals */
   pthread_mutex_t mutex;
   LuaScheduledTask *head, *tail;
-  unsigned count;
+  unsigned count, retained;  /* retained counts queued tasks with large heaps */
   LuaAllocationCache allocation;
   LuaSlotAllocPages stack_pages;
   lua_State *collector;  /* pinned until carriers have joined */
@@ -56,6 +56,8 @@ struct LuaScheduledTask {
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
   uint64_t minor_deadline;  /* owner's initial slice for an explicit minor */
   size_t slice_live;  /* private bytes observed at the start of this slice */
+  size_t ready_live;  /* last owned sample of the task-private heap */
+  uint64_t ready_deadline;  /* set on the first preferential bypass */
 };
 
 struct LuaCarrier {

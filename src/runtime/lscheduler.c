@@ -19,9 +19,12 @@ enum {
   SERIAL_SLICE_NS = 10 * 1000 * 1000,
   RETAINED_SERIAL_SLICE_NS = 40 * 1000 * 1000,
   RETAINED_HEAP_BYTES = 128 * 1024,
+  RETAINED_QUEUE_DELAY_NS = 20 * 1000 * 1000,
+  RETAINED_QUEUE_LOOKAHEAD = 16,
   NATIVE_SLOT_CHECK_NS = 100 * 1000
 };
 
+static uint64_t monotonicns (void);
 static void wakework (LuaScheduler *s, int all);
 static void wakecollectors (LuaScheduler *s);
 static void dropcachednative (LuaScheduledTask *task, int handoff);
@@ -132,12 +135,49 @@ static void wakequeued (LuaScheduler *s, LuaScheduledTask *task) {
     waketask(&s->standby, task);
 }
 
+l_sinline unsigned retainedwork (const LuaScheduledTask *task) {
+  return task->ready_live >= RETAINED_HEAP_BYTES;
+}
+
+/* Resume a larger resident graph before opening another working set.
+** The queue owns the samples while tasks are parked. A skipped head keeps
+** its deadline across steals, and resource or pinned heads take precedence. */
+static LuaScheduledTask **preferretained (LuaScheduledTask **link,
+    LuaScheduledTask **previous, LuaCarrier *carrier, int stopped) {
+  LuaScheduledTask *first = *link, *prior = first, *best = first;
+  LuaScheduledTask *before_best = NULL;
+  unsigned remaining = RETAINED_QUEUE_LOOKAHEAD;
+  uint64_t now;
+  for (; prior->next != NULL && remaining-- != 0; prior = prior->next) {
+    LuaScheduledTask *candidate = prior->next;
+    if (candidate->ready_live > best->ready_live &&
+        runnableon(candidate, carrier, stopped)) {
+      before_best = prior;
+      best = candidate;
+    }
+  }
+  if (best->ready_live - first->ready_live < RETAINED_HEAP_BYTES) return link;
+  now = monotonicns();
+  if (first->ready_deadline == 0)
+    first->ready_deadline = now + RETAINED_QUEUE_DELAY_NS;
+  if (now >= first->ready_deadline) return link;
+  *previous = before_best;
+  return &before_best->next;
+}
+
 static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
   LuaScheduledTask **link = &slot->head, *previous = NULL;
   int stopped = luaW_stopped(&carrier->scheduler->global->world);
   while (*link != NULL) {
     LuaScheduledTask *task = *link;
     if (runnableon(task, carrier, stopped)) {
+      if (slot->retained != 0 && task->next != NULL &&
+          task->reason != SC_RESOURCE &&
+          __atomic_load_n(&task->affinity, __ATOMIC_ACQUIRE) == NULL &&
+          !__atomic_load_n(&task->root.stop_requested, __ATOMIC_ACQUIRE)) {
+        link = preferretained(link, &previous, carrier, stopped);
+        task = *link;
+      }
       *link = task->next;
       if (slot->tail == task) slot->tail = previous;
       if (slot->continuation == task) {
@@ -147,6 +187,8 @@ static LuaScheduledTask *takefor (LuaExecutionSlot *slot, LuaCarrier *carrier) {
       else task->turn = slot->continuation != NULL ? TURN_PEER : TURN_NORMAL;
       task->next = NULL;
       slot->count--;
+      slot->retained -= retainedwork(task);
+      lua_assert(slot->retained <= slot->count);
       return task;
     }
     previous = task;
@@ -175,6 +217,7 @@ static void enqueue (LuaScheduler *s, LuaScheduledTask *task) {
   }
   else append(&slot->head, &slot->tail, task);
   slot->count++;
+  slot->retained += retainedwork(task);
   __atomic_fetch_add(&s->runnable, 1, __ATOMIC_SEQ_CST);
   if (task->reason != SC_CONTINUE) wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
@@ -192,7 +235,7 @@ static LuaScheduledTask *stealwork (LuaScheduler *s, unsigned index,
     unsigned peer_index = (carrier->steal_cursor + i) % s->config.slots;
     LuaExecutionSlot *peer = &s->slots[peer_index];
     LuaScheduledTask *head = NULL, *tail = NULL;
-    unsigned count, moved = 0;
+    unsigned count, moved = 0, retained = 0;
     if (peer_index == index) continue;
     luaX_checksync(pthread_mutex_lock(&peer->mutex));
     count = peer->count / 2 + peer->count % 2;
@@ -202,6 +245,7 @@ static LuaScheduledTask *stealwork (LuaScheduler *s, unsigned index,
       if (task == NULL) break;
       append(&head, &tail, task);
       moved++;
+      retained += retainedwork(task);
     }
     luaX_checksync(pthread_mutex_unlock(&peer->mutex));
     task = take(&head, &tail);
@@ -212,6 +256,7 @@ static LuaScheduledTask *stealwork (LuaScheduler *s, unsigned index,
         else local->head = head;
         local->tail = tail;
         local->count += moved - 1;
+        local->retained += retained - retainedwork(task);
       }
       luaX_checksync(pthread_mutex_unlock(&local->mutex));
       carrier->steal_cursor = (peer_index + 1) % s->config.slots;
@@ -814,6 +859,8 @@ static void poll (LuaExecution *execution, lua_State *L) {
   int serial = s->config.slots == 1;
   int reason = SC_READY;
   unsigned publishing, reentry;
+  if (!serial && L == task->root.thread)
+    task->ready_live = L->task_live_bytes;
   pollnative(task, L);
   if (!timed && --task->polls != 0) return;
   task->polls = s->config.quantum_polls;
@@ -947,7 +994,7 @@ static void resourcewake (LuaExecution *execution, LuaWaiter *waiter) {
 typedef struct LuaWakeRun {
   LuaExecutionSlot *slot;
   LuaScheduledTask *head, *tail;
-  unsigned count;
+  unsigned count, retained;
 } LuaWakeRun;
 
 static void publishwakes (LuaScheduler *s, LuaWakeRun *run) {
@@ -958,13 +1005,14 @@ static void publishwakes (LuaScheduler *s, LuaWakeRun *run) {
   else slot->head = run->head;
   slot->tail = run->tail;
   slot->count += run->count;
+  slot->retained += run->retained;
   __atomic_fetch_add(&s->runnable, run->count, __ATOMIC_SEQ_CST);
   for (task = run->head; task != NULL &&
        (s->idle != NULL || s->standby != NULL); task = task->next)
     wakequeued(s, task);
   luaX_checksync(pthread_mutex_unlock(&slot->mutex));
   run->head = run->tail = NULL;
-  run->count = 0;
+  run->count = run->retained = 0;
 }
 
 LuaWaiter *luaSC_wakewaiters (LuaWaiter *waiter) {
@@ -988,6 +1036,7 @@ LuaWaiter *luaSC_wakewaiters (LuaWaiter *waiter) {
       run->slot = slot;
       append(&run->head, &run->tail, ready);
       run->count++;
+      run->retained += retainedwork(ready);
     }
     waiter = next;
   } while (waiter != NULL && waiter->execution != NULL &&
@@ -1054,6 +1103,7 @@ static LuaScheduledTask *dispatch (LuaCarrier *carrier, int locked) {
     __atomic_store_n(&slot->owner, taskowner(task), __ATOMIC_RELEASE);
     bindslot(task, slot);
     task->slice_deadline = 0;
+    task->ready_deadline = 0;
     task->home = index;
     carrier->cursor = (index + 1) % s->config.slots;
     return task;

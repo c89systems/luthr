@@ -72,7 +72,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime -Wl,--wrap=luaC_endtask
   -Wl,--wrap=luaC_preparefull)
-foreach(case IN ITEMS fairness parallel no_requests early_incremental early_generational wake_waiters stopped_dispatch
+foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incremental early_generational wake_waiters stopped_dispatch
     native native_reentry shutdown yield saturation cancel_admission early_native_return native_grant_stopped_world native_fifo native_competitive
     native_accounting_count native_accounting_arm
     native_burst_parking native_burst_poll native_burst_single native_lease_expiry native_lease_inactive native_lease_full
