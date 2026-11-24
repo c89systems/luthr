@@ -561,6 +561,7 @@ typedef struct Udata0 {
 */
 
 #define LUA_VPROTO	makevariant(LUA_TPROTO, 0)
+#define LUA_VROOTSNAPSHOT makevariant(LUA_TPROTO, 1)  /* internal, never a TValue */
 
 
 typedef l_uint32 Instruction;

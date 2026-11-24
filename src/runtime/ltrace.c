@@ -6,6 +6,8 @@
 #define LUA_CORE
 #include "lprefix.h"
 
+#include <string.h>
+
 #include "lfunc.h"
 #include "ldo.h"
 #include "lgc.h"
@@ -130,6 +132,31 @@ void luaC_snapshotproto (lua_State *L, Proto *proto) {
   __atomic_store_n(&proto->trace_snapshot, epoch, __ATOMIC_RELEASE);
 }
 
+/* An unpublished buffer belongs to its coroutine. Once queued, the trace
+** retains it even if the coroutine replaces or drops the directory. Older
+** and newborn buffers still have new payload to trace when already marked. */
+static void __attribute__((noinline))
+publishtaskroots (lua_State *L, lua_State *thread, uint64_t epoch) {
+  global_State *g = G(L);
+  LuaRootSnapshot *snapshot = cast(LuaRootSnapshot *, *luaC_taskrootallocation(thread));
+  unsigned state;
+  lu_byte marked;
+  if (snapshot->epoch == epoch) return;
+  state = luaC_markstate(g);
+  lua_assert(state & LUA_MARK_ACTIVE);
+  marked = getmarked(snapshot);
+  lua_assert(!testbit(marked, QUEUEDBIT));
+  snapshot->marked_bytes = luaC_unmarked(state, marked)
+    ? luaC_rootsnapshotbytes(snapshot->capacity) : 0;
+  snapshot->count = thread->task_root_count;
+  lua_assert(snapshot->count <= snapshot->capacity);
+  memcpy(snapshot + 1, thread->task_roots, snapshot->count * sizeof(uintptr_t));
+  snapshot->next_root = 0;
+  snapshot->epoch = epoch;
+  setmarked(snapshot, cast_byte(luaC_stamp(state, marked) | bitmask(QUEUEDBIT)));
+  luaC_publishbarrier(L, obj2gco(snapshot), 0);
+}
+
 /* The thread's execution owns all stack/native-root descriptors. No mutable
 ** referent is inspected here: capture cells and objects are separate work.
 ** The epoch publication makes both the snapshot and its barrier queues visible
@@ -145,7 +172,9 @@ unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
   if (__atomic_load_n(&thread->trace_snapshot, __ATOMIC_ACQUIRE) == epoch)
     return 0;
   luaC_traceobject(L, obj2gco(thread));
-  if (luaC_hastaskheap(thread)) {
+  if (l_unlikely(thread->task_root_capacity > LUA_TASK_DIRECT_ROOTS))
+    publishtaskroots(L, thread, epoch);
+  else if (luaC_hastaskheap(thread)) {
     unsigned i;
     for (i = 0; i < thread->task_root_count; i++)
       luaC_traceobject(L, luaC_taskrootat(thread, i));

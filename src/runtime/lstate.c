@@ -600,7 +600,7 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
   if (thread->strcache != NULL)
     luaM_retire_(L, thread->strcache, sizeof(*thread->strcache));
   if (luaC_taskrootbytes(thread) != 0)
-    luaM_retire_(L, thread->task_roots, luaC_taskrootbytes(thread));
+    luaM_retire_(L, luaC_taskrootallocation(thread), luaC_taskrootbytes(thread));
   luaM_retire_(L, fromstate(thread), sizeof(LX));
 }
 
@@ -614,7 +614,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   freestack(L, L1);
   if (L1->strcache != NULL) luaM_free(L, L1->strcache);
   if (luaC_taskrootbytes(L1) != 0)
-    luaM_free_(L, L1->task_roots, luaC_taskrootbytes(L1));
+    luaM_free_(L, luaC_taskrootallocation(L1), luaC_taskrootbytes(L1));
   {
     LuaPolicy *policy = L1->policy;
     L1->policy = NULL;

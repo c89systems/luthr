@@ -74,17 +74,34 @@ static void clearroots (lua_State *L) {
 static int growroots (lua_State *L) {
   unsigned capacity = L->task_root_capacity * 2;
   size_t oldsize;
-  uintptr_t *old, *roots;
+  uintptr_t *old, *storage, *roots;
+  LuaRootSnapshot *snapshot = NULL;
   if (capacity > TASK_NURSERY_ROOT_MAX) return 0;
-  roots = cast(uintptr_t *, luaM_tryalloc(L, luaC_taskrootsize(capacity)));
-  if (roots == NULL) return 0;
-  if (!luaC_hastaskheap(L)) {  /* allocation may have sealed the cohort */
-    luaM_free_(L, roots, luaC_taskrootsize(capacity));
+  storage = cast(uintptr_t *, luaM_tryalloc(L, luaC_taskrootsize(capacity)));
+  if (storage == NULL) return 0;
+  if (capacity > LUA_TASK_DIRECT_ROOTS)
+    snapshot = cast(LuaRootSnapshot *, luaM_tryalloc(L, luaC_rootsnapshotbytes(capacity)));
+  if (!luaC_hastaskheap(L) || (capacity > LUA_TASK_DIRECT_ROOTS && snapshot == NULL)) {
+    /* An allocator wait can seal the cohort. Leave the old directory in
+    ** place unless both replacements are available. */
+    if (snapshot != NULL)
+      luaM_free_(L, snapshot, luaC_rootsnapshotbytes(capacity));
+    luaM_free_(L, storage, luaC_taskrootsize(capacity));
     return 0;
   }
-  old = L->task_roots;
+  if (snapshot != NULL) {
+    snapshot->tt = LUA_VROOTSNAPSHOT;
+    setmarked(snapshot, luaC_newmark(G(L)));
+    snapshot->next = snapshot->gclist = NULL;
+    snapshot->capacity = capacity;
+    snapshot->epoch = 0;
+    luaC_publishobjects(L, obj2gco(snapshot), obj2gco(snapshot));
+    *storage = cast(uintptr_t, snapshot);
+  }
+  roots = storage + (snapshot != NULL);
+  old = luaC_taskrootallocation(L);
   oldsize = luaC_taskrootbytes(L);
-  memcpy(roots, old, L->task_root_count * sizeof(*roots));
+  memcpy(roots, L->task_roots, L->task_root_count * sizeof(*roots));
   L->task_roots = roots;
   L->task_root_index = cast(uint16_t *, roots + capacity);
   L->task_root_capacity = capacity;
@@ -106,7 +123,7 @@ void luaC_freetaskroots (lua_State *L) {
   size_t size = luaC_taskrootbytes(L);
   lua_assert(L->task_root_count == 0);
   if (size != 0) {
-    uintptr_t *roots = L->task_roots;
+    uintptr_t *roots = luaC_taskrootallocation(L);
     L->task_roots = L->task_root_inline;
     L->task_root_index = L->task_root_inline_index;
     L->task_root_capacity = LUA_TASK_INLINE_ROOTS;

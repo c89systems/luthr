@@ -2266,6 +2266,54 @@ static void nursery_retained_roots(struct fixture *f, int generational) {
   finish(f);
 }
 
+static void nursery_parked_roots(struct fixture *f, int generational) {
+  lua_State *L;
+  uint64_t epoch;
+  init(f, 2);
+  L = f->main;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_inspect", nursery_inspect);
+  lua_pushcfunction(L, blocked_leaf);
+  lua_setglobal(L, "nursery_block");
+  require(luaL_dostring(L, "nursery_labels={}; "
+                           "nursery_weak=setmetatable({},{__mode='v'}); "
+                           "for i=1,4096 do local value={i}; "
+                           "nursery_weak[i]=value; nursery_labels[i]=value "
+                           "end") == LUA_OK);
+  submit(f, 0,
+         "local labels=nursery_labels; nursery_labels=nil; "
+         "local rows={}; for i=1,4096 do "
+         "  rows[i]={label=labels[i]} end; labels=nil; "
+         "nursery_block(); "
+         "local private,edges=nursery_inspect(rows); "
+         "assert(private and edges>=4096); "
+         "for i=1,4096 do assert(rows[i].label[1]==i) end; return 42",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  epoch = luaC_traceepoch(G(L));
+  /* Charge explicit work so the idle-heap shortcut cannot skip the cycle. */
+  for (unsigned i = 0;
+       i < 512 && (luaC_traceepoch(G(L)) == epoch || luaC_tracing(L)); i++)
+    require(lua_gc(L, LUA_GCSTEP, (size_t)64 * 1024 * 1024) >= 0);
+  require(luaC_traceepoch(G(L)) != epoch);
+  require(!luaC_tracing(L));
+  require(
+      luaL_dostring(L, "for i=1,4096 do assert(nursery_weak[i][1]==i) end") ==
+      LUA_OK);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 42);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(luaL_dostring(L, "assert(next(nursery_weak)==nil)") == LUA_OK);
+  finish(f);
+}
+
 static void nursery_layout_roots(struct fixture *f, int generational) {
   lua_State *L;
   int status, results;
@@ -2725,6 +2773,10 @@ int main(int argc, char **argv) {
     nursery_retained_roots(f, 0);
   else if (strcmp(argv[1], "nursery_retained_roots_generational") == 0)
     nursery_retained_roots(f, 1);
+  else if (strcmp(argv[1], "nursery_parked_roots_incremental") == 0)
+    nursery_parked_roots(f, 0);
+  else if (strcmp(argv[1], "nursery_parked_roots_generational") == 0)
+    nursery_parked_roots(f, 1);
   else if (strcmp(argv[1], "nursery_layout_roots_incremental") == 0)
     nursery_layout_roots(f, 0);
   else if (strcmp(argv[1], "nursery_layout_roots_generational") == 0)

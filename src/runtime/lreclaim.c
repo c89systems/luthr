@@ -31,6 +31,9 @@ static void freeobj (lua_State *L, GCObject *o) {
     case LUA_VPROTO:
       luaF_freeproto(L, gco2p(o));
       break;
+    case LUA_VROOTSNAPSHOT:
+      luaM_freemem(L, o, luaC_rootsnapshotbytes(gco2roots(o)->capacity));
+      break;
     case LUA_VUPVAL:
       freeupval(L, gco2upv(o));
       break;

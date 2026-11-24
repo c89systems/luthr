@@ -36,6 +36,7 @@ static inline GCObject **luaC_graylink (GCObject *o) {
     case LUA_VCCL: return &gco2ccl(o)->gclist;
     case LUA_VTHREAD: return &gco2th(o)->gclist;
     case LUA_VPROTO: return &gco2p(o)->gclist;
+    case LUA_VROOTSNAPSHOT: return &gco2roots(o)->gclist;
     case LUA_VUPVAL: return &gco2upv(o)->gclist;
     case LUA_VUSERDATA: return &gco2u(o)->gclist;
     default: lua_assert(0); return NULL;
@@ -492,7 +493,14 @@ l_sinline GCObject *luaC_taskrootat (lua_State *thread, unsigned index) {
 }
 
 l_sinline size_t luaC_taskrootsize (unsigned capacity) {
-  return capacity * (sizeof(uintptr_t) + 2 * sizeof(uint16_t));
+  return capacity * (sizeof(uintptr_t) + 2 * sizeof(uint16_t)) +
+    (capacity > LUA_TASK_DIRECT_ROOTS ? sizeof(uintptr_t) : 0);
+}
+
+/* Large directories store the prepared snapshot pointer before the roots.
+** Inline and small heap directories use the same compact layout as before. */
+l_sinline uintptr_t *luaC_taskrootallocation (const lua_State *L) {
+  return L->task_roots - (L->task_root_capacity > LUA_TASK_DIRECT_ROOTS);
 }
 
 l_sinline size_t luaC_taskrootbytes (const lua_State *L) {

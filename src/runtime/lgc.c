@@ -137,6 +137,10 @@ l_mem luaC_objsize (GCObject *o) {
       res = luaF_protosize(gco2p(o));
       break;
     }
+    case LUA_VROOTSNAPSHOT: {
+      res = luaC_rootsnapshotbytes(gco2roots(o)->capacity);
+      break;
+    }
     case LUA_VTHREAD: {
       res = luaE_threadsize(gco2th(o));
       break;
@@ -464,6 +468,24 @@ static void markwork (LuaTraceWork *work, GCObject *object) {
   }
   else if (object->tt == LUA_VTABLE) luaC_stagetracepage(work, object);
   else queuework(&work->gray, object);
+}
+
+static void __attribute__((noinline))
+scanrootsnapshot (LuaTraceWork *work, LuaRootSnapshot *snapshot) {
+  enum { SNAPSHOT_BATCH = 512 };
+  const uintptr_t *roots = cast(const uintptr_t *, snapshot + 1);
+  unsigned i, first = snapshot->next_root;
+  unsigned end = first + SNAPSHOT_BATCH;
+  if (end > snapshot->count) end = snapshot->count;
+  for (i = first; i < end; i++)
+    markwork(work, cast(GCObject *, roots[i] & ~LUA_TASK_ROOT_FLAGS));
+  work->scanned += (end - first) * sizeof(uintptr_t);
+  snapshot->next_root = end;
+  if (end < snapshot->count) queuework(&work->gray, obj2gco(snapshot));
+  else {
+    work->marked += cast(l_mem, snapshot->marked_bytes);
+    nw2black(snapshot);
+  }
 }
 
 void luaC_traceedges (LuaTraceWork *work, GCObject **objects, unsigned count) {
@@ -1120,6 +1142,10 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o,
     else if (builder != NULL) luaX_endreserve(builder, reservation);
     return 1;
   }
+  if (l_unlikely(o->tt == LUA_VROOTSNAPSHOT)) {
+    scanrootsnapshot(work, gco2roots(o));
+    return 1;
+  }
   if (!quiescent && (o->tt == LUA_VUPVAL || o->tt == LUA_VLCL ||
       o->tt == LUA_VCCL || o->tt == LUA_VUSERDATA)) {
     int scanned = luaC_scanvalues(L, work, o);
@@ -1638,7 +1664,8 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
   do {
     unsigned age = marked & AGEBITS;
     unsigned next = age;
-    int edges = novariant(o->tt) != LUA_TSTRING && age != G_SURVIVAL_CLEAN;
+    int edges = novariant(o->tt) != LUA_TSTRING && o->tt != LUA_VROOTSNAPSHOT &&
+                age != G_SURVIVAL_CLEAN;
     promoted = kind == SWEEP_YOUNG && age != G_NEW && age <= G_SURVIVAL_CLEAN;
     if (promoted) next = edges ? G_TOUCHED1 : G_OLD;
     else if (kind == SWEEP_YOUNG && age == G_NEW) next = G_SURVIVAL;

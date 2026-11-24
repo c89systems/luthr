@@ -329,6 +329,19 @@ typedef union LuaAllocationDebt {
 } LuaAllocationDebt;
 
 #define LUA_TASK_INLINE_ROOTS 32u
+#define LUA_TASK_DIRECT_ROOTS 256u
+
+typedef struct LuaRootSnapshot {
+  CommonHeader;
+  GCObject *gclist;
+  uint64_t epoch;
+  lu_mem marked_bytes;
+  unsigned capacity;
+  unsigned count;
+  unsigned next_root;
+} LuaRootSnapshot;
+
+#define luaC_rootsnapshotbytes(n) (sizeof(LuaRootSnapshot) + (n) * sizeof(uintptr_t))
 
 typedef struct LuaNurseryTrace {
   GCObject *gray;
@@ -676,6 +689,7 @@ union GCUnion {
   union Closure cl;
   struct Table h;
   struct Proto p;
+  struct LuaRootSnapshot roots;
   struct lua_State th;  /* thread */
   struct UpVal upv;
 };
@@ -698,6 +712,7 @@ union GCUnion {
 #define gco2cl(o)	gco2nv(LUA_TFUNCTION, Closure, o)
 #define gco2t(o)	gco2(LUA_VTABLE, Table, o)
 #define gco2p(o)	gco2(LUA_VPROTO, Proto, o)
+#define gco2roots(o)	gco2(LUA_VROOTSNAPSHOT, LuaRootSnapshot, o)
 #define gco2th(o)	gco2(LUA_VTHREAD, lua_State, o)
 #define gco2upv(o)	gco2(LUA_VUPVAL, UpVal, o)
 
