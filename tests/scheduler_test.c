@@ -1184,8 +1184,16 @@ static int warm_native_permit(lua_State *L) {
   return 0;
 }
 
-static void native_recall_during_stack_borrow(struct fixture *f,
-                                              int root_offer) {
+static int retire_before_native(lua_State *L) {
+  Table *table = (Table *)lua_topointer(L, 1);
+  require(table != NULL);
+  luaH_resize(L, table, 64, 0);
+  require(L->storage_retired != NULL);
+  return 0;
+}
+
+static void native_recall_during_stack_borrow(struct fixture *f, int root_offer,
+                                              int retirement) {
   lua_State *target;
   int reservation;
   init(f, 1);
@@ -1196,10 +1204,24 @@ static void native_recall_during_stack_borrow(struct fixture *f,
   lua_setglobal(f->main, "warm_native_permit");
   lua_pushcfunction(f->main, blocked_leaf);
   lua_setglobal(f->main, "blocked_leaf");
-  submit(f, 0,
-         "local value={answer=51}; warm_native_permit(); blocked_leaf(value); "
-         "return value.answer",
-         0);
+  if (retirement) {
+    lua_gc(f->main, LUA_GCSTOP);
+    lua_createtable(f->main, 32, 0);
+    lua_pushinteger(f->main, 51);
+    lua_rawseti(f->main, -2, 1);
+    lua_setglobal(f->main, "resize_target");
+    managed(f->main, "retire_before_native", retire_before_native);
+    submit(f, 0,
+           "warm_native_permit(); retire_before_native(resize_target); "
+           "blocked_leaf(resize_target); return resize_target[1]",
+           0);
+  } else {
+    submit(
+        f, 0,
+        "local value={answer=51}; warm_native_permit(); blocked_leaf(value); "
+        "return value.answer",
+        0);
+  }
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -1208,6 +1230,7 @@ static void native_recall_during_stack_borrow(struct fixture *f,
 
   reservation = luaX_tryreserve(target);
   require(reservation == 1);
+  require(target->storage_retired == NULL && target->storage_bytes == 0);
   require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
   /* The independent task can use the sole slot while this stack stays held. */
   submit(f, 1, "return 52", 0);
@@ -2751,9 +2774,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
-    native_recall_during_stack_borrow(f, 1);
+    native_recall_during_stack_borrow(f, 1, 0);
   else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
-    native_recall_during_stack_borrow(f, 0);
+    native_recall_during_stack_borrow(f, 0, 0);
+  else if (strcmp(argv[1], "native_recall_with_retirement") == 0)
+    native_recall_during_stack_borrow(f, 1, 1);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
