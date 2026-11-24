@@ -69,7 +69,7 @@ endif()
 
 set(metrics checksum cpu_ns wall_ns execution_cpu_ns execution_wall_ns
   cleanup_cpu_ns cleanup_wall_ns completion_p50_ns completion_p95_ns
-  completion_max_ns lua_live_bytes lua_peak_bytes lua_retained_bytes rss_kib
+  completion_max_ns lua_live_bytes lua_retained_bytes rss_kib
   rss_hwm_kib threads parallelism carrier_limit native_limit observed_native_peak
   completed affinity_count quota_us period_us effective_cpu_milli)
 file(MAKE_DIRECTORY "${output_dir}")
@@ -86,6 +86,9 @@ endforeach()
 string(JSON metadata SET "${metadata}" model "\"public_task_scheduler\"")
 string(JSON metadata SET "${metadata}" upstream_model "\"serial_coroutines\"")
 string(JSON metadata SET "${metadata}" embedded_model "\"serial_coroutines\"")
+string(JSON metadata SET "${metadata}" allocator "\"default\"")
+string(JSON metadata SET "${metadata}" memory
+  "\"Lua live and retained bytes are measured outside the timed window. RSS high-water is the process peak.\"")
 string(JSON metadata SET "${metadata}" latency "\"host_observed_completion\"")
 string(JSON metadata SET "${metadata}" timing
   "\"Total CPU/wall includes task cleanup, validation and final collection; completion latency covers execution.\"")
@@ -125,6 +128,7 @@ file(WRITE "${output_dir}/metadata.json" "${metadata}\n")
 function(scheduled_measure runtime slots native delay)
   execute_process(COMMAND "${${runtime}}" "${script}" "${workload}" "${collector}"
     "${slots}" "${native}" "${tasks}" "${iterations}" "${samples}" "${warmups}" "${delay}"
+    default-allocator
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
   if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
     message(FATAL_ERROR "Scheduler benchmark failed: ${runtime}/${workload}/${collector}/${slots}/${native}/${delay}: ${result}\n${output}${error}")
@@ -145,6 +149,11 @@ function(scheduled_measure runtime slots native delay)
     if(NOT sample EQUAL index)
       message(FATAL_ERROR "Out-of-order scheduler benchmark sample")
     endif()
+    string(JSON allocator GET "${row}" allocator)
+    string(JSON heap_peak TYPE "${row}" lua_peak_bytes)
+    if(NOT allocator STREQUAL "default" OR NOT heap_peak STREQUAL "NULL")
+      message(FATAL_ERROR "Scheduler benchmark used a counting allocator: ${row}")
+    endif()
     set(values)
     foreach(metric IN LISTS metrics)
       string(JSON ${metric} GET "${row}" "${metric}")
@@ -161,7 +170,7 @@ function(scheduled_measure runtime slots native delay)
     math(EXPR measured_cpu "${execution_cpu_ns} + ${cleanup_cpu_ns}")
     if(NOT wall_ns EQUAL measured_wall OR NOT cpu_ns EQUAL measured_cpu OR
         NOT checksum STREQUAL reference_checksum OR NOT completed EQUAL tasks OR
-        lua_peak_bytes LESS lua_live_bytes OR completion_p95_ns LESS completion_p50_ns OR
+        completion_p95_ns LESS completion_p50_ns OR
         completion_max_ns LESS completion_p95_ns OR completion_max_ns GREATER wall_ns OR
         observed_native_peak GREATER native_limit OR parallelism LESS 1)
       message(FATAL_ERROR "Scheduler benchmark metric invariant failed: ${row}")

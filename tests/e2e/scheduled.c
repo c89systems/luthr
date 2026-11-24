@@ -158,6 +158,12 @@ static int compare(const void *a, const void *b) {
 static void field(const char *name, uint64_t value) {
   printf(",\"%s\":%" PRIu64, name, value);
 }
+static uint64_t heap_bytes(lua_State *L) {
+  int kib = lua_gc(L, LUA_GCCOUNT);
+  int remainder = lua_gc(L, LUA_GCCOUNTB);
+  require(kib >= 0 && remainder >= 0);
+  return (uint64_t)kib * 1024 + (unsigned)remainder;
+}
 static void capacity(const struct luthr_capacity *cpus) {
   field("affinity_count", cpus->cpus);
   field("quota_us", cpus->quota_us);
@@ -175,7 +181,7 @@ int main(int argc, char **argv) {
   lua_Integer expected;
   unsigned slots, native, tasks, iterations, samples, warmups;
   unsigned selected_slots = 1, selected_carriers = 0, selected_native = 0;
-  int failed = 0, stopped;
+  int failed = 0, stopped = 0, default_allocator = 0, valid_options = 1;
 #ifdef LUTHR_BENCH_GC_PROBE
   GcProbe host_probe = {0};
 #endif
@@ -197,29 +203,36 @@ int main(int argc, char **argv) {
     puts("}");
     return 0;
   }
-  if ((argc != 11 && argc != 12) || !number(argv[4], 0, 64, &slots) ||
+  for (int i = 11; i < argc; ++i) {
+    if (!default_allocator && strcmp(argv[i], "default-allocator") == 0)
+      default_allocator = 1;
+    else if (!stopped && strcmp(argv[i], "stopped") == 0)
+      stopped = 1;
+    else
+      valid_options = 0;
+  }
+  if (argc < 11 || !valid_options || !number(argv[4], 0, 64, &slots) ||
       !number(argv[5], 0, 64, &native) || !number(argv[6], 1, 4096, &tasks) ||
       !number(argv[7], 1, 1000000, &iterations) ||
       !number(argv[8], 1, 1000, &samples) ||
       !number(argv[9], 0, 1000, &warmups) ||
       !number(argv[10], 0, 1000000, &delay_us) ||
       (strcmp(argv[3], "incremental") != 0 &&
-       strcmp(argv[3], "generational") != 0) ||
-      (argc == 12 && strcmp(argv[11], "stopped") != 0)) {
+       strcmp(argv[3], "generational") != 0)) {
     fprintf(stderr,
             "usage: %s script workload collector slots native_limit "
-            "tasks iterations samples warmups delay_us [stopped]\n",
+            "tasks iterations samples warmups delay_us "
+            "[default-allocator] [stopped]\n",
             argv[0]);
     return 2;
   }
-  stopped = argc == 12;
 #ifndef LUTHR_BENCH_SCHEDULER
   if (slots != 1 || native != 0) {
     fputs("serial host requires slots=1 and native_limit=0\n", stderr);
     return 2;
   }
 #endif
-  L = lua_newstate(allocate, &memory, 0);
+  L = default_allocator ? luaL_newstate() : lua_newstate(allocate, &memory, 0);
   require(L != NULL);
   luaL_openlibs(L);
   lua_CFunction override = NULL;
@@ -309,8 +322,12 @@ int main(int argc, char **argv) {
       lua_pushinteger(jobs[i].state, i + 1);
     }
     lua_gc(L, LUA_GCCOLLECT);
-    live = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
-    __atomic_store_n(&memory.peak, live, __ATOMIC_RELAXED);
+    if (default_allocator)
+      live = heap_bytes(L);
+    else {
+      live = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
+      __atomic_store_n(&memory.peak, live, __ATOMIC_RELAXED);
+    }
     if (stopped)
       lua_gc(L, LUA_GCSTOP);
 #ifdef LUTHR_BENCH_GC_PROBE
@@ -421,7 +438,9 @@ int main(int argc, char **argv) {
     wall = now(CLOCK_MONOTONIC) - released;
     cpu = now(CLOCK_PROCESS_CPUTIME_ID) - cpu_start;
     peak = __atomic_load_n(&memory.peak, __ATOMIC_RELAXED);
-    retained = __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
+    retained = default_allocator
+                   ? heap_bytes(L)
+                   : __atomic_load_n(&memory.live, __ATOMIC_RELAXED);
 #ifdef LUTHR_BENCH_GC_PROBE
     gc_probe_add(&total, &host_probe);
     for (unsigned i = 0; i < tasks; ++i)
@@ -442,8 +461,12 @@ int main(int argc, char **argv) {
     field("completion_p50_ns", latencies[(tasks + 1) / 2 - 1]);
     field("completion_p95_ns", latencies[(tasks * 95 + 99) / 100 - 1]);
     field("completion_max_ns", latencies[tasks - 1]);
+    printf(",\"allocator\":\"%s\"", default_allocator ? "default" : "counted");
     field("lua_live_bytes", live);
-    field("lua_peak_bytes", peak);
+    if (default_allocator)
+      printf(",\"lua_peak_bytes\":null");
+    else
+      field("lua_peak_bytes", peak);
     field("lua_retained_bytes", retained);
     field("rss_kib", usage.rss);
     field("rss_hwm_kib", usage.hwm);

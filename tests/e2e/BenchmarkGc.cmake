@@ -83,6 +83,7 @@ foreach(key IN ITEMS target config compiler samples warmups tasks work_divisor)
   string(JSON metadata SET "${metadata}" "${key}" "\"${${key}}\"")
 endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
+string(JSON metadata SET "${metadata}" allocator "\"counted\"")
 string(JSON metadata SET "${metadata}" timing
   "\"Total CPU/wall includes cleanup and final collection. Execution and cleanup times are separate fields; GC probe counters cover execution only.\"")
 string(JSON metadata SET "${metadata}" metadata_handoff
@@ -168,6 +169,10 @@ foreach(workload IN ITEMS integers independent_tables allocation_only allocation
             set(values_${metric})
           endforeach()
           foreach(row IN LISTS rows)
+            string(JSON allocator GET "${row}" allocator)
+            if(NOT allocator STREQUAL "counted")
+              message(FATAL_ERROR "GC heap counting requires a counted allocator: ${name}")
+            endif()
             string(JSON checksum GET "${row}" checksum)
             string(JSON completed GET "${row}" completed)
             if(NOT DEFINED reference_checksum)
