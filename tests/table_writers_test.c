@@ -24,7 +24,7 @@ static struct {
   lua_State *first, *second, *layout;
   Table *table;
   int entered, release, second_done, layout_waiting, layout_done;
-  int hash, graph, collision, second_parent;
+  int hash, graph, collision, second_parent, length;
   lua_Integer second_key;
   unsigned first_slot;
   char hash_second[32];
@@ -131,6 +131,46 @@ static void *resize(void *unused) {
   return NULL;
 }
 
+static int length_method(lua_State *L) {
+  lua_pushinteger(L, 88);
+  return 1;
+}
+
+static void check_length(lua_State *L, int table, lua_Integer expected) {
+  require(luaL_loadstring(L, "local t=...; return #t") == LUA_OK);
+  lua_pushvalue(L, table);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == expected);
+  lua_pop(L, 1);
+}
+
+static void check_length_changes(lua_State *L) {
+  int i, table;
+  lua_createtable(L, 4, 0);
+  table = lua_gettop(L);
+  for (i = 1; i < 4; i++) {
+    lua_pushinteger(L, i);
+    lua_rawseti(L, table, i);
+  }
+  lua_newtable(L);
+  lua_rawseti(L, table, 4);
+  require(lua_rawlen(L, table) == 4);
+  check_length(L, table, 4);
+  lua_createtable(L, 0, 2);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_pushcfunction(L, length_method);
+  lua_setfield(L, -2, "__len");
+  lua_setmetatable(L, table);
+  check_length(L, table, 88);
+  require(lua_rawlen(L, table) == 4);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawlen(L, table) == 3);
+  check_length(L, table, 88);
+  lua_pop(L, 1);
+}
+
 static void check_writer_groups(lua_State *L) {
   Table *table;
   Value *low, *high;
@@ -187,6 +227,7 @@ int main(int argc, char **argv) {
   probe.hash = strstr(argv[2], "hash") != NULL;
   probe.graph = strstr(argv[2], "graph") != NULL;
   probe.collision = strcmp(argv[2], "collision") == 0;
+  probe.length = strcmp(argv[2], "length") == 0;
   probe.second_key = 2;
   probe.second_parent = 1;
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
@@ -202,6 +243,8 @@ int main(int argc, char **argv) {
     } else
       lua_rawseti(L, 1, i);
   }
+  if (probe.length)
+    require(lua_rawlen(L, 1) == 1024);
   if (probe.hash) {
     const TValue *a;
     unsigned bucket, mask = sizenode(probe.table) - 1;
@@ -273,6 +316,12 @@ int main(int argc, char **argv) {
             0);
   require(!probe.release);
   require(pthread_mutex_unlock(&probe.mutex) == 0);
+  if (probe.length) {
+    /* The writer is paused in this table. A cached length depends on the
+     * layout and the final tag and can finish without taking ownership. */
+    require(lua_rawlen(L, 1) == 1024);
+    check_length(L, 1, 1024);
+  }
   if (!probe.graph) {
     /* A paused same-type store leaves the previous atomic payload readable. */
     require((probe.hash ? lua_getfield(L, 1, "field-1")
@@ -331,6 +380,8 @@ int main(int argc, char **argv) {
   if (probe.graph)
     require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
   require(lua_tointeger(L, -1) == 22);
+  if (probe.length)
+    check_length_changes(L);
   check_writer_groups(L);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);

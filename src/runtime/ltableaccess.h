@@ -140,6 +140,30 @@ l_sinline int luaH_strongaccess (lua_State *L, Table *table) {
   return !luaC_tracing(L) || luaC_strongtable(G(L), table);
 }
 
+/* The owned search accepts this hint. The empty hash makes size+1 absent
+** for the sampled layout. Reading the last tag needs no payload snapshot,
+** but a weak value may need the collector's pending cutoff applied. */
+l_sinline unsigned luaH_cachedborder (lua_State *L, Table *table, int nometa) {
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  const Value *array;
+  unsigned size;
+  lu_byte tag;
+  if ((layout & 1) ||
+      (nometa && __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE) != NULL) ||
+      __atomic_load_n(&table->node, __ATOMIC_ACQUIRE) != &luaH_dummynode)
+    return 0;
+  array = luaH_readarray(table);
+  if (array == NULL) return 0;
+  size = arrayheader(array)->size;
+  if (__atomic_load_n(&arrayheader(array)->hint, __ATOMIC_RELAXED) != size)
+    return 0;
+  tag = __atomic_load_n(arraytag(array, size - 1), __ATOMIC_ACQUIRE);
+  if (!tagisempty(tag) &&
+      (!(tag & BIT_ISCOLLECTABLE) || luaH_strongaccess(L, table)) &&
+      luaH_samelayout(table, layout)) return size;
+  return 0;
+}
+
 LUAI_FUNC LuaTableWriter *luaH_claimwriter (lua_State *, Table *, Value *, uint64_t);
 LUAI_FUNC int luaH_beginsplit (Table *, LuaTableWriter *, Value *, uint64_t);
 LUAI_FUNC void luaH_releasewriter (lua_State *, Table *, LuaTableWriter *);

@@ -866,7 +866,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   __atomic_store_n(&t->arraydata, cast(uintptr_t, newarray), __ATOMIC_RELEASE);
   __atomic_store_n(&t->asize, newasize, __ATOMIC_RELEASE);
   if (newarray != NULL && oldasize == newasize)
-    *lenhint(t) = newasize / 2u;  /* reset the retained image's hint */
+    __atomic_store_n(lenhint(t), newasize / 2u, __ATOMIC_RELAXED);
   /* re-insert elements from old hash part into new parts */
   reinserthash(L, &newt, t);  /* 'newt' now has the old hash */
   if (luaC_hastaskheap(L) && luaC_tasktable(t)) {
@@ -2477,7 +2477,7 @@ static unsigned int binsearch (Table *array, unsigned int i, unsigned int j) {
 /* return a border, saving it as a hint for next call */
 static lua_Unsigned newhint (Table *t, unsigned hint) {
   lua_assert(hint <= t->asize);
-  *lenhint(t) = hint;
+  __atomic_store_n(lenhint(t), hint, __ATOMIC_RELAXED);
   return hint;
 }
 
@@ -2497,7 +2497,7 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
   unsigned asize = t->asize;
   if (asize > 0) {  /* is there an array part? */
     const unsigned maxvicinity = 4;
-    unsigned limit = *lenhint(t);  /* start with the hint */
+    unsigned limit = __atomic_load_n(lenhint(t), __ATOMIC_RELAXED);
     if (limit == 0)
       limit = 1;  /* make limit a valid index in the array */
     if (arraykeyisempty(t, limit)) {  /* t[limit] empty? */
@@ -2527,7 +2527,7 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
     }
     /* last element non empty; set a hint to speed up finding that again */
     /* (keys in the hash part cannot be hints) */
-    *lenhint(t) = asize;
+    __atomic_store_n(lenhint(t), asize, __ATOMIC_RELAXED);
   }
   /* no array part or t[asize] is not empty; check the hash part */
   lua_assert(asize == 0 || !arraykeyisempty(t, asize));
@@ -2968,7 +2968,8 @@ int luaH_nextlocked (lua_State *L, Table *t, StkId key) {
 
 lua_Unsigned luaH_getn (lua_State *L, Table *t) {
   LuaObjectScope scope;
-  lua_Unsigned result;
+  lua_Unsigned result = luaH_cachedborder(L, t, 0);
+  if (result != 0) return result;
   luaA_begin(L, obj2gco(t), &scope);
   result = rawgetn(L, t);
   luaA_end(L, &scope);

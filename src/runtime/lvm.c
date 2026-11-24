@@ -826,6 +826,13 @@ void luaV_objlen (lua_State *L, StkId ra, const TValue *rb) {
     setivalue(s2v(ra), cast_st2S(tsslen(tsvalue(rb))));
     return;
   }
+  if (ttistable(rb)) {
+    unsigned border = luaH_cachedborder(L, hvalue(rb), 1);
+    if (border != 0) {
+      setivalue(s2v(ra), cast(lua_Integer, border));
+      return;
+    }
+  }
   luaR_pushroot(L, &method);
   luaT_gettmbyobj(L, rb, TM_LEN, &method);
   switch (ttypetag(rb)) {
@@ -845,7 +852,6 @@ void luaV_objlen (lua_State *L, StkId ra, const TValue *rb) {
   luaT_callTMres(L, &method.value, rb, rb, ra);
   luaR_poproot(L, &method);
 }
-
 
 /*
 ** Integer division; return 'm // n', that is, floor(m/n).
