@@ -1831,6 +1831,8 @@ static void install_library_audit(lua_State *state) {
       "__index=function(_,k) check_managed(); return backing[k] end, "
       "__newindex=function(_,k,v) check_managed(); backing[k]=v end}); "
       "table.sort(proxy); assert(table.concat(proxy,',')=='1,2,3'); "
+      "local many={}; for i=1,2048 do many[i]=2049-i end; "
+      "table.sort(many); for i=1,#many do assert(many[i]==i) end; "
       "local ok=pcall(table.sort,{3,2,1},function() check_managed(); "
       "error('sort expected') end); "
       "assert(not ok); ok=pcall(math.min,setmetatable({}, {__lt=function() "

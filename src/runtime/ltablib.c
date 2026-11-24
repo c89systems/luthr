@@ -18,8 +18,12 @@
 
 #include "lauxlib.h"
 #include "lualib.h"
+#include "lapi.h"
+#include "ldo.h"
 #include "llimits.h"
 #include "lexec.h"
+#include "ltableaccess.h"
+#include "lvm.h"
 
 
 /*
@@ -242,9 +246,37 @@ static int tunpack (lua_State *L) {
 typedef unsigned int IdxT;
 
 
-/* Versions of lua_seti/lua_geti specialized for IdxT */
-#define geti(L,idt,idx)	lua_geti(L, idt, l_castU2S(idx))
-#define seti(L,idt,idx)	lua_seti(L, idt, l_castU2S(idx))
+/* The sort owns its stack, but can still encounter shared tables or a
+** receiver with metamethods. Reenter through the API for unresolved accesses. */
+static void sort_get (lua_State *L, IdxT index) {
+  const TValue *receiver = s2v(L->ci->func.p + 1);
+  lu_byte tag;
+  if (ttistable(receiver) &&
+      luaH_trygetint(L, hvalue(receiver), l_castU2S(index), s2v(L->top.p), &tag) &&
+      !luaV_needsindex(tag)) {
+    api_incr_top(L);
+    return;
+  }
+  lua_unlock(L);
+  lua_geti(L, 1, l_castU2S(index));
+  lua_lock(L);
+}
+
+
+static void sort_set (lua_State *L, IdxT index) {
+  const TValue *receiver = s2v(L->ci->func.p + 1);
+  if (ttistable(receiver)) {
+    TValue key;
+    setivalue(&key, l_castU2S(index));
+    if (luaH_tryset(L, hvalue(receiver), &key, s2v(L->top.p - 1), 0)) {
+      L->top.p--;
+      return;
+    }
+  }
+  lua_unlock(L);
+  lua_seti(L, 1, l_castU2S(index));
+  lua_lock(L);
+}
 
 
 /*
@@ -263,8 +295,8 @@ typedef unsigned int IdxT;
 
 
 static void set2 (lua_State *L, IdxT i, IdxT j) {
-  seti(L, 1, i);
-  seti(L, 1, j);
+  sort_set(L, i);
+  sort_set(L, j);
 }
 
 
@@ -272,19 +304,42 @@ static void set2 (lua_State *L, IdxT i, IdxT j) {
 ** Return true iff value at stack index 'a' is less than the value at
 ** index 'b' (according to the order of the sort).
 */
-static int sort_comp (lua_State *L, int a, int b) {
-  if (lua_isnil(L, 2))  /* no function? */
-    return lua_compare(L, a, b, LUA_OPLT);  /* a < b */
-  else {  /* function */
-    int res;
-    lua_pushvalue(L, 2);    /* push function */
-    lua_pushvalue(L, a-1);  /* -1 to compensate function */
-    lua_pushvalue(L, b-2);  /* -2 to compensate function and 'a' */
-    lua_call(L, 2, 1);      /* call function */
-    res = lua_toboolean(L, -1);  /* get result */
-    lua_pop(L, 1);          /* pop result */
-    return res;
+static int sort_comp (lua_State *L, int a, int b, unsigned *work) {
+  StkId top;
+  TValue *compare;
+  const TValue *left, *right;
+  int result;
+  if (l_unlikely(++*work == LUA_NATIVE_WORK_SLICE)) {
+    *work = 0;
+    luaX_poll(L);
   }
+  top = L->top.p;
+  compare = s2v(L->ci->func.p + 2);
+  left = s2v(top + a);
+  right = s2v(top + b);
+  if (ttisnil(compare)) {
+    if (!((ttisnumber(left) && ttisnumber(right)) ||
+          (ttisstring(left) && ttisstring(right)))) {
+      lua_unlock(L);
+      result = lua_compare(L, a, b, LUA_OPLT);  /* rooted metamethod path */
+      lua_lock(L);
+      return result;
+    }
+    result = luaV_lessthan(L, left, right);
+  }
+  else {
+    /* The sort frame has room for the entire call. Its live slots already
+    ** root the comparator and both operands. The call may move the stack. */
+    lua_assert(top + 3 <= L->ci->top.p);
+    setobj2s(L, top, compare);
+    setobj2s(L, top + 1, left);
+    setobj2s(L, top + 2, right);
+    L->top.p = top + 3;
+    luaD_callnoyield(L, top, 1);
+    result = !l_isfalse(s2v(L->top.p - 1));
+    L->top.p--;
+  }
+  return result;
 }
 
 
@@ -295,28 +350,32 @@ static int sort_comp (lua_State *L, int a, int b) {
 ** Pos-condition: a[lo .. i - 1] <= a[i] == P <= a[i + 1 .. up]
 ** returns 'i'.
 */
-static IdxT partition (lua_State *L, IdxT lo, IdxT up) {
+static IdxT partition (lua_State *L, IdxT lo, IdxT up, unsigned *work) {
   IdxT i = lo;  /* will be incremented before first use */
   IdxT j = up - 1;  /* will be decremented before first use */
   /* loop invariant: a[lo .. i] <= P <= a[j .. up] */
   for (;;) {
     /* next loop: repeat ++i while a[i] < P */
-    while ((void)geti(L, 1, ++i), sort_comp(L, -1, -2)) {
-      if (l_unlikely(i == up - 1))  /* a[up - 1] < P == a[up - 1] */
+    while (sort_get(L, ++i), sort_comp(L, -1, -2, work)) {
+      if (l_unlikely(i == up - 1)) {  /* a[up - 1] < P == a[up - 1] */
+        lua_unlock(L);
         luaL_error(L, "invalid order function for sorting");
-      lua_pop(L, 1);  /* remove a[i] */
+      }
+      L->top.p--;  /* remove a[i] */
     }
     /* after the loop, a[i] >= P and a[lo .. i - 1] < P  (a) */
     /* next loop: repeat --j while P < a[j] */
-    while ((void)geti(L, 1, --j), sort_comp(L, -3, -1)) {
-      if (l_unlikely(j < i))  /* j <= i - 1 and a[j] > P, contradicts (a) */
+    while (sort_get(L, --j), sort_comp(L, -3, -1, work)) {
+      if (l_unlikely(j < i)) {  /* j <= i - 1 and a[j] > P, contradicts (a) */
+        lua_unlock(L);
         luaL_error(L, "invalid order function for sorting");
-      lua_pop(L, 1);  /* remove a[j] */
+      }
+      L->top.p--;  /* remove a[j] */
     }
     /* after the loop, a[j] <= P and a[j + 1 .. up] >= P */
     if (j < i) {  /* no elements out of place? */
       /* a[lo .. i - 1] <= P <= a[j + 1 .. i .. up] */
-      lua_pop(L, 1);  /* pop a[j] */
+      L->top.p--;  /* pop a[j] */
       /* swap pivot (a[up - 1]) with a[i] to satisfy pos-condition */
       set2(L, up - 1, i);
       return i;
@@ -342,50 +401,52 @@ static IdxT choosePivot (IdxT lo, IdxT up, unsigned int rnd) {
 /*
 ** Quicksort algorithm (recursive function)
 */
-static void auxsort (lua_State *L, IdxT lo, IdxT up, unsigned rnd) {
+static void auxsort (lua_State *L, IdxT lo, IdxT up, unsigned rnd,
+                     unsigned *work) {
   while (lo < up) {  /* loop for tail recursion */
     IdxT p;  /* Pivot index */
     IdxT n;  /* to be used later */
     /* sort elements 'lo', 'p', and 'up' */
-    geti(L, 1, lo);
-    geti(L, 1, up);
-    if (sort_comp(L, -1, -2))  /* a[up] < a[lo]? */
+    sort_get(L, lo);
+    sort_get(L, up);
+    if (sort_comp(L, -1, -2, work))  /* a[up] < a[lo]? */
       set2(L, lo, up);  /* swap a[lo] - a[up] */
     else
-      lua_pop(L, 2);  /* remove both values */
+      L->top.p -= 2;  /* remove both values */
     if (up - lo == 1)  /* only 2 elements? */
       return;  /* already sorted */
     if (up - lo < RANLIMIT || rnd == 0)  /* small interval or no randomize? */
       p = (lo + up)/2;  /* middle element is a good pivot */
     else  /* for larger intervals, it is worth a random pivot */
       p = choosePivot(lo, up, rnd);
-    geti(L, 1, p);
-    geti(L, 1, lo);
-    if (sort_comp(L, -2, -1))  /* a[p] < a[lo]? */
+    sort_get(L, p);
+    sort_get(L, lo);
+    if (sort_comp(L, -2, -1, work))  /* a[p] < a[lo]? */
       set2(L, p, lo);  /* swap a[p] - a[lo] */
     else {
-      lua_pop(L, 1);  /* remove a[lo] */
-      geti(L, 1, up);
-      if (sort_comp(L, -1, -2))  /* a[up] < a[p]? */
+      L->top.p--;  /* remove a[lo] */
+      sort_get(L, up);
+      if (sort_comp(L, -1, -2, work))  /* a[up] < a[p]? */
         set2(L, p, up);  /* swap a[up] - a[p] */
       else
-        lua_pop(L, 2);
+        L->top.p -= 2;
     }
     if (up - lo == 2)  /* only 3 elements? */
       return;  /* already sorted */
-    geti(L, 1, p);  /* get middle element (Pivot) */
-    lua_pushvalue(L, -1);  /* push Pivot */
-    geti(L, 1, up - 1);  /* push a[up - 1] */
+    sort_get(L, p);  /* get middle element (Pivot) */
+    setobjs2s(L, L->top.p, L->top.p - 1);
+    api_incr_top(L);
+    sort_get(L, up - 1);  /* push a[up - 1] */
     set2(L, p, up - 1);  /* swap Pivot (a[p]) with a[up - 1] */
-    p = partition(L, lo, up);
+    p = partition(L, lo, up, work);
     /* a[lo .. p - 1] <= a[p] == P <= a[p + 1 .. up] */
     if (p - lo < up - p) {  /* lower interval is smaller? */
-      auxsort(L, lo, p - 1, rnd);  /* call recursively for lower interval */
+      auxsort(L, lo, p - 1, rnd, work);  /* recurse for lower interval */
       n = p - lo;  /* size of smaller interval */
       lo = p + 1;  /* tail call for [p + 1 .. up] (upper interval) */
     }
     else {
-      auxsort(L, p + 1, up, rnd);  /* call recursively for upper interval */
+      auxsort(L, p + 1, up, rnd, work);  /* recurse for upper interval */
       n = up - p;  /* size of smaller interval */
       up = p - 1;  /* tail call for [lo .. p - 1]  (lower interval) */
     }
@@ -398,11 +459,14 @@ static void auxsort (lua_State *L, IdxT lo, IdxT up, unsigned rnd) {
 static int sort (lua_State *L) {
   lua_Integer n = aux_getn(L, 1, TAB_RW);
   if (n > 1) {  /* non-trivial interval? */
+    unsigned work = 0;
     luaL_argcheck(L, n < INT_MAX, 1, "array too big");
     if (!lua_isnoneornil(L, 2))  /* is there a 2nd argument? */
       luaL_checktype(L, 2, LUA_TFUNCTION);  /* must be a function */
     lua_settop(L, 2);  /* make sure there are two arguments */
-    auxsort(L, 1, (IdxT)n, 0);
+    lua_lock(L);
+    auxsort(L, 1, (IdxT)n, 0, &work);
+    lua_unlock(L);
   }
   return 0;
 }

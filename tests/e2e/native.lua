@@ -42,6 +42,19 @@ end
 assert(native.callback(function() return 42 end)==42)
 
 do
+  local priority={}
+  local function item(rank)
+    local function less(other) return rank<priority[other] end
+    priority[less]=rank
+    return less
+  end
+  local a,b,c=item(1),item(2),item(3)
+  local items={c,a,b}
+  table.sort(items,native.callback)
+  assert(items[1]==a and items[2]==b and items[3]==c)
+end
+
+do
   local closed=0
   local scope=setmetatable({}, {__close=function(_,err)
     assert(err==nil or err==marker)

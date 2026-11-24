@@ -217,4 +217,60 @@ assert(rawget(weak_string_mt,'__index')==nil)
 assert(not pcall(string_label))
 debug.setmetatable('',original_string_mt)
 assert(('abc'):sub(2)=='bc')
+
+do
+  local values={3,-2,0.5,-4}
+  table.sort(values)
+  assert(values[1]==-4 and values[2]==-2 and values[3]==0.5 and values[4]==3)
+  local words={'z','a\0b','a'}
+  table.sort(words)
+  assert(words[1]=='a' and words[2]=='a\0b' and words[3]=='z')
+
+  local order={__lt=function(a,b)
+    collectgarbage('collect')
+    return a.rank<b.rank
+  end}
+  local rows={setmetatable({rank=3},order),setmetatable({rank=1},order),
+    setmetatable({rank=2},order)}
+  table.sort(rows)
+  assert(rows[1].rank==1 and rows[2].rank==2 and rows[3].rank==3)
+  local function descending(a,b)
+    collectgarbage('collect')
+    return a.rank>b.rank
+  end
+  local calls,returns=0,0
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func==descending then
+      if event=='call' then calls=calls+1 else returns=returns+1 end
+    end
+  end,'cr')
+  table.sort(rows,descending)
+  debug.sethook()
+  assert(calls>0 and returns==calls)
+  assert(rows[1].rank==3 and rows[2].rank==2 and rows[3].rank==1)
+
+  local failure={}
+  local ok,err=pcall(table.sort,rows,function() error(failure) end)
+  assert(not ok and err==failure)
+  local co=coroutine.create(function()
+    table.sort(rows,function() coroutine.yield() end)
+  end)
+  assert(not coroutine.resume(co))
+
+  local backing={4,1,3,2}
+  local reads,writes=0,0
+  local proxy=setmetatable({},{
+    __len=function() return #backing end,
+    __index=function(_,i) reads=reads+1; return backing[i] end,
+    __newindex=function(_,i,v) writes=writes+1; backing[i]=v end,
+  })
+  table.sort(proxy)
+  assert(reads>0 and writes>0 and next(proxy)==nil)
+  for i=1,#backing do assert(backing[i]==i) end
+
+  local large={}
+  for i=1,4096 do large[i]=4097-i end
+  table.sort(large)
+  for i=1,#large do assert(large[i]==i) end
+end
 print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')
