@@ -22,8 +22,8 @@
 #define TASK_UNPAGED_BYTES (48u * 1024 * 1024)
 #define TASK_YOUNG_BYTES (4 * TASK_NURSERY_START)
 #define TASK_MATURE_START (TASK_NURSERY_BYTES - TASK_YOUNG_BYTES)
-/* Bound the work needed to publish a single task's outgoing roots. */
-#define TASK_NURSERY_ROOT_MAX 2048u
+/* Outgoing roots use 16-bit indices and a bounded snapshot directory. */
+#define TASK_NURSERY_ROOT_MAX 32768u
 #define TASK_MARK_BUDGET 8192u
 
 typedef enum NurseryScan {
@@ -57,9 +57,17 @@ static void clearroots (lua_State *L) {
   L->task_trace = (LuaNurseryTrace){0};
   L->task_mark_scan = 0;
   L->task_nursery_pending = 0;
-  if (L->task_root_count != 0) {
+  if (L->task_root_count > L->task_root_capacity / 32) {
     L->task_root_count = 0;
     indexroots(L);
+  }
+  else {
+    /* Both insertion and rehashing visit dense roots in order. Removing
+    ** the newest slot first cannot break a probe for an older one. */
+    while (L->task_root_count != 0) {
+      GCObject *root = luaC_taskrootat(L, --L->task_root_count);
+      *rootslot(L, cast(uintptr_t, root)) = 0;
+    }
   }
 }
 
@@ -83,6 +91,15 @@ static int growroots (lua_State *L) {
   indexroots(L);
   if (oldsize != 0) luaM_free_(L, old, oldsize);
   return 1;
+}
+
+/* A mature trace can run across several polls. Reserve room for new edges
+** while it decides whether the directory needs to grow. */
+l_sinline unsigned rootlimit (const lua_State *L) {
+  unsigned capacity = L->task_root_capacity;
+  if (L->task_old_bytes >= TASK_MATURE_START && capacity < TASK_NURSERY_ROOT_MAX)
+    return capacity - capacity / 8;
+  return capacity - 1;
 }
 
 void luaC_freetaskroots (lua_State *L) {
@@ -405,7 +422,8 @@ l_sinline int retaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
     *slot = cast(uint16_t, L->task_root_count);
     /* Grow or prune at the next instruction, including loops that only
     ** update tables. The barrier itself cannot park or allocate. */
-    if (L->task_root_count == L->task_root_capacity - 1) {
+    if (L->task_root_count == rootlimit(L) ||
+        L->task_root_count == L->task_root_capacity - 1) {
       L->task_nursery_pending = 1;
       L->poll_remaining = 1;
     }
@@ -879,9 +897,14 @@ void luaC_taskstep (lua_State *L) {
     L->task_nursery_pending = L->task_mark_scan != 0;
     return;
   }
-  if (L->task_old_bytes < TASK_NURSERY_START / 2 && luaC_taskrootpressure(L) &&
+  if (L->task_old_bytes < TASK_NURSERY_START / 2 &&
+      L->task_root_count >= rootlimit(L) &&
       L->task_nursery_bytes < L->task_nursery_limit &&
       growroots(L)) return;
+  /* If insertions consumed the reserve, extend it without restarting the
+  ** current trace or discarding the live bits discovered so far. */
+  if (L->task_mark_scan != 0 && L->task_root_count >= L->task_root_capacity - 1)
+    growroots(L);
   if (!luaC_hastaskheap(L)) return;
 #if defined(LUAI_ASSERT)
   {
@@ -896,7 +919,7 @@ void luaC_taskstep (lua_State *L) {
   lua_assert(L->task_nursery_bytes >= L->task_old_bytes);
   young_bytes = L->task_nursery_bytes - L->task_old_bytes;
   if (L->task_mark_scan != 0) scan = cast(NurseryScan, L->task_mark_scan);
-  else if (luaC_taskrootpressure(L)) scan = NURSERY_TASK_ROOTS;
+  else if (L->task_root_count >= rootlimit(L)) scan = NURSERY_TASK_ROOTS;
   else if (L->task_old_bytes >= TASK_NURSERY_START / 2 &&
            L->task_nursery_bytes < taskcapacity(L) - TASK_YOUNG_BYTES &&
            young_bytes < L->task_minor_budget)
@@ -953,7 +976,7 @@ void luaC_taskstep (lua_State *L) {
       if (L->task_nursery_limit > TASK_NURSERY_BYTES - TASK_NURSERY_START)
         L->task_nursery_limit = TASK_NURSERY_BYTES - TASK_NURSERY_START;
     }
-    if (luaC_hastaskheap(L) && luaC_taskrootpressure(L)) growroots(L);
+    if (luaC_hastaskheap(L) && L->task_root_count >= rootlimit(L)) growroots(L);
   }
 }
 

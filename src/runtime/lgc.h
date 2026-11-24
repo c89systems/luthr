@@ -500,10 +500,6 @@ l_sinline size_t luaC_taskrootbytes (const lua_State *L) {
     ? luaC_taskrootsize(L->task_root_capacity) : 0;
 }
 
-l_sinline int luaC_taskrootpressure (const lua_State *L) {
-  return L->task_root_count >= L->task_root_capacity - 1;
-}
-
 l_sinline int luaC_weakvalid (global_State *g, uint64_t state) {
   return (state & (~cast(uint64_t, LUA_WEAK_STAMP_STEP - 1) | NURSERY_TAG)) ==
          luaC_weakstamp(g);

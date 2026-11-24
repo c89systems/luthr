@@ -732,8 +732,11 @@ static unsigned snapshot(lua_State *L, lua_State *thread) {
                          : __real_luaC_checksnapshot(L);
   if (record != NULL) {
     if (outer && count) {
+      uint64_t elapsed = now() - started;
       record->root_snapshot_calls += count;
-      record->root_snapshot_ns += now() - started;
+      record->root_snapshot_ns += elapsed;
+      if (elapsed > record->root_snapshot_max_ns)
+        record->root_snapshot_max_ns = elapsed;
     }
     record->root_depth--;
   }

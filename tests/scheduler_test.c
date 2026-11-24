@@ -2227,6 +2227,45 @@ static void nursery_root_pressure(struct fixture *f, int generational) {
   finish(f);
 }
 
+static void nursery_retained_roots(struct fixture *f, int generational) {
+  lua_State *L;
+  init(f, 2);
+  L = f->main;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_inspect", nursery_inspect);
+  require(luaL_dostring(L, "nursery_labels={}; for i=1,24000 do "
+                           "nursery_labels[i]=('label-%05d'):format(i) end") ==
+          LUA_OK);
+  submit(f, 0,
+         "local labels=nursery_labels; nursery_labels=nil; "
+         "local rows={}; for i=1,24000 do "
+         "  rows[i]={sequence=i,label=labels[i]} end; labels=nil; "
+         "nursery_ready=true; while not nursery_release do end; "
+         "local private,edges=nursery_inspect(rows); "
+         "assert(private and edges>=24000); "
+         "for i=1,24000 do local row=rows[i]; "
+         "  assert(row.sequence==i and row.label==('label-%05d'):format(i)) "
+         "end; "
+         "nursery_export=rows; nursery_export=nil; rows=nil; "
+         "for i=1,20 do "
+         "  for j=1,1024 do end; "
+         "  local label=('next-%05d'):format(i); "
+         "  local row={label,label..'x'}; "
+         "  private,edges=nursery_inspect(row); assert(private and edges==2); "
+         "  nursery_export=row; nursery_export=nil; "
+         "  assert(row[1]==label and row[2]==label..'x') "
+         "end; return 42",
+         0);
+  nursery_wait(L, "nursery_ready");
+  for (unsigned i = 0; i < 4; i++)
+    lua_gc(L, LUA_GCSTEP, (size_t)256 * 1024);
+  lua_pushboolean(L, 1);
+  lua_setglobal(L, "nursery_release");
+  require(collect(f, 0, LUA_OK) == 42);
+  finish(f);
+}
+
 static void nursery_layout_roots(struct fixture *f, int generational) {
   lua_State *L;
   int status, results;
@@ -2682,6 +2721,10 @@ int main(int argc, char **argv) {
     nursery_root_pressure(f, 0);
   else if (strcmp(argv[1], "nursery_root_pressure_generational") == 0)
     nursery_root_pressure(f, 1);
+  else if (strcmp(argv[1], "nursery_retained_roots_incremental") == 0)
+    nursery_retained_roots(f, 0);
+  else if (strcmp(argv[1], "nursery_retained_roots_generational") == 0)
+    nursery_retained_roots(f, 1);
   else if (strcmp(argv[1], "nursery_layout_roots_incremental") == 0)
     nursery_layout_roots(f, 0);
   else if (strcmp(argv[1], "nursery_layout_roots_generational") == 0)

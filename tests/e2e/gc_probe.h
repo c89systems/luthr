@@ -43,7 +43,7 @@
   X(mark_peak_bytes) X(sweep_peak_bytes) X(reclaim_peak_bytes) X(idle_peak_bytes) \
   X(logical_live_peak_bytes) \
   X(pacer_parallelism_peak) X(pacer_goal_peak_bytes) X(pacer_hard_peak_bytes) \
-  X(metadata_handoff_max_ns) \
+  X(metadata_handoff_max_ns) X(root_snapshot_max_ns) \
   X(trace_peak_workers) X(sweep_peak_workers)
 // clang-format on
 
