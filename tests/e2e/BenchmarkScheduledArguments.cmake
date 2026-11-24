@@ -3,9 +3,21 @@ file(WRITE "${work_dir}/error.lua"
   "return function() error('intentional job failure') end,function() end,function() end,1\n")
 file(WRITE "${work_dir}/nonstring.lua"
   "return function() error({}) end,function() end,function() end,1\n")
+file(WRITE "${work_dir}/validation_error.lua"
+  "return function() return 1 end,function() end,function() error('intentional validation failure') end,1\n")
+file(WRITE "${work_dir}/validation_cleanup.lua" [=[
+local finalized
+local function run()
+  setmetatable({}, {__gc = function() finalized = true end})
+  return 1
+end
+local function prepare() finalized = false end
+local function validate() assert(finalized, 'validation started before cleanup collection') end
+return run, prepare, validate, 1
+]=])
 foreach(runtime IN ITEMS upstream luthr embedded)
   foreach(case IN ITEMS zero unknown missing runtime nonstring unknown_option
-      duplicate_option invalid_seed overflowing_seed duplicate_seed)
+      duplicate_option invalid_seed overflowing_seed duplicate_seed validation)
     set(source "${script}")
     set(workload integers)
     set(tasks 8)
@@ -24,6 +36,9 @@ foreach(runtime IN ITEMS upstream luthr embedded)
     elseif(case STREQUAL "nonstring")
       set(source "${work_dir}/nonstring.lua")
       set(diagnostic "non-string Lua error")
+    elseif(case STREQUAL "validation")
+      set(source "${work_dir}/validation_error.lua")
+      set(diagnostic "intentional validation failure")
     elseif(case MATCHES "^(unknown_option|duplicate_option|invalid_seed|overflowing_seed|duplicate_seed)$")
       if(case STREQUAL "unknown_option")
         set(options unknown)
@@ -64,6 +79,23 @@ foreach(runtime IN ITEMS upstream luthr embedded)
       NOT heap_peak STREQUAL "NULL" OR NOT seed EQUAL 4294967295)
     message(FATAL_ERROR "Incorrect default allocator sample: ${runtime}: ${output}")
   endif()
+  foreach(collector IN ITEMS incremental generational)
+    execute_process(COMMAND "${${runtime}}" "${work_dir}/validation_cleanup.lua"
+      integers "${collector}" 1 0 1 1 2 1 0 stopped
+      RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 10)
+    string(STRIP "${output}" output)
+    string(REPLACE "\n" ";" rows "${output}")
+    list(LENGTH rows samples)
+    if(NOT result STREQUAL "0" OR NOT error STREQUAL "" OR NOT samples EQUAL 2)
+      message(FATAL_ERROR "Validation after cleanup failed: ${runtime}/${collector}: ${result}\n${output}${error}")
+    endif()
+    foreach(row IN LISTS rows)
+      string(JSON validation GET "${row}" validation_wall_ns)
+      if(validation LESS_EQUAL 0)
+        message(FATAL_ERROR "Validation timing is missing: ${runtime}: ${row}")
+      endif()
+    endforeach()
+  endforeach()
 endforeach()
 foreach(runtime IN ITEMS upstream embedded)
   execute_process(COMMAND "${${runtime}}" "${script}" integers incremental 2 0 8 128 1 0 0

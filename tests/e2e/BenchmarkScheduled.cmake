@@ -74,7 +74,8 @@ if(automatic)
 endif()
 
 set(metrics checksum cpu_ns wall_ns execution_cpu_ns execution_wall_ns
-  cleanup_cpu_ns cleanup_wall_ns completion_p50_ns completion_p95_ns
+  cleanup_cpu_ns cleanup_wall_ns validation_cpu_ns validation_wall_ns
+  completion_p50_ns completion_p95_ns
   completion_max_ns lua_live_bytes lua_retained_bytes rss_kib
   rss_hwm_kib threads parallelism carrier_limit native_limit observed_native_peak
   completed affinity_count quota_us period_us effective_cpu_milli)
@@ -94,10 +95,10 @@ string(JSON metadata SET "${metadata}" upstream_model "\"serial_coroutines\"")
 string(JSON metadata SET "${metadata}" embedded_model "\"serial_coroutines\"")
 string(JSON metadata SET "${metadata}" allocator "\"default\"")
 string(JSON metadata SET "${metadata}" memory
-  "\"Lua live and retained bytes are measured outside the timed window. RSS high-water is the process peak.\"")
+  "\"Lua live and retained bytes are measured before post-run validation. RSS high-water is the process peak up to the sample's memory observation.\"")
 string(JSON metadata SET "${metadata}" latency "\"host_observed_completion\"")
 string(JSON metadata SET "${metadata}" timing
-  "\"Total CPU/wall includes task cleanup, validation and final collection; completion latency covers execution.\"")
+  "\"Total CPU/wall includes task cleanup and final collection. The validation fields time the post-run correctness check separately. Completion latency covers execution.\"")
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 foreach(key IN ITEMS samples warmups tasks work_divisor delay_us hash_seed)
   string(JSON metadata SET "${metadata}" "${key}" "${${key}}")

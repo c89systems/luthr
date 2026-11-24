@@ -47,7 +47,8 @@ if(NOT 1 IN_LIST levels)
 endif()
 file(MAKE_DIRECTORY "${output_dir}")
 set(metrics wall_ns cpu_ns execution_cpu_ns execution_wall_ns
-  cleanup_cpu_ns cleanup_wall_ns lua_peak_bytes lua_retained_bytes threads)
+  cleanup_cpu_ns cleanup_wall_ns validation_cpu_ns validation_wall_ns
+  lua_peak_bytes lua_retained_bytes threads)
 set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   worker_calls worker_empty_calls worker_ns worker_trace_calls worker_sweep_calls
   collector_running_calls collector_body_ns collector_disabled_ns coordination_ns
@@ -85,7 +86,7 @@ endforeach()
 string(JSON metadata SET "${metadata}" capacity "${capacity}")
 string(JSON metadata SET "${metadata}" allocator "\"counted\"")
 string(JSON metadata SET "${metadata}" timing
-  "\"Total CPU/wall includes cleanup and final collection. Execution and cleanup times are separate fields; GC probe counters cover execution only.\"")
+  "\"Total CPU/wall includes cleanup and final collection. Execution, cleanup and post-run validation have separate fields. GC probe counters cover execution only.\"")
 string(JSON metadata SET "${metadata}" metadata_handoff
   "\"Metadata grant until recipient resumes, a subset of summed metadata wait time; includes collector and mutator grants.\"")
 string(JSON metadata SET "${metadata}" minor_wait

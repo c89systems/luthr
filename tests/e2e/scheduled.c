@@ -315,7 +315,7 @@ int main(int argc, char **argv) {
 #endif
   for (unsigned sample = 0; sample < samples + warmups; ++sample) {
     uint64_t cpu_start, released, wall, cpu, execution_wall, execution_cpu,
-        live, peak, retained, checksum = 0;
+        validation_wall, validation_cpu, live, peak, retained, checksum = 0;
     unsigned done = 0, native_peak = 0;
     struct resident usage;
 #ifdef LUTHR_BENCH_GC_PROBE
@@ -439,10 +439,8 @@ int main(int argc, char **argv) {
       require(failed || status == LUA_OK);
       lua_settop(jobs[i].state, 0);
     }
-    if (failed || call(L, 3)) {
-      failed = 1;
+    if (failed)
       break;
-    }
     require(checksum == (uint64_t)expected * tasks);
     lua_gc(L, LUA_GCCOLLECT);
     wall = now(CLOCK_MONOTONIC) - released;
@@ -457,6 +455,16 @@ int main(int argc, char **argv) {
       gc_probe_add(&total, &jobs[i].probe);
 #endif
     usage = resident();
+    /* Validate retained outputs after recording both runtime and memory.
+     * A failed validation still suppresses the sample. */
+    validation_cpu = now(CLOCK_PROCESS_CPUTIME_ID);
+    validation_wall = now(CLOCK_MONOTONIC);
+    if (call(L, 3)) {
+      failed = 1;
+      break;
+    }
+    validation_wall = now(CLOCK_MONOTONIC) - validation_wall;
+    validation_cpu = now(CLOCK_PROCESS_CPUTIME_ID) - validation_cpu;
     qsort(latencies, tasks, sizeof(*latencies), compare);
     if (sample < warmups)
       continue;
@@ -468,6 +476,8 @@ int main(int argc, char **argv) {
     field("execution_wall_ns", execution_wall);
     field("cleanup_cpu_ns", cpu - execution_cpu);
     field("cleanup_wall_ns", wall - execution_wall);
+    field("validation_cpu_ns", validation_cpu);
+    field("validation_wall_ns", validation_wall);
     field("completion_p50_ns", latencies[(tasks + 1) / 2 - 1]);
     field("completion_p95_ns", latencies[(tasks * 95 + 99) / 100 - 1]);
     field("completion_max_ns", latencies[tasks - 1]);
