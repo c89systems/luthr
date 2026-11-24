@@ -802,13 +802,20 @@ int luaD_precallC (lua_State *L, StkId func,
 
 /* A successful probe returns up to two computed values, or forwards a
 ** suffix of the arguments. It never rewrites a live slot or parks. */
-static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
+static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
                        TValue *value, int *forward) {
   const TValue *first = s2v(func + 1);
-  int bytes = f == luaB_strbyte;
-  if (bytes || f == luaB_strsub)
-    return luaB_leafrange(L, func, nargs, bytes, value);
-  if (f == luaB_next) {
+  switch (builtin) {
+  case LUA_LEAF_ASSERT:
+    if (l_isfalse(first)) return -1;
+    *forward = 1;
+    return nargs;
+  case LUA_LEAF_TYPE:
+    setsvalue(L, value, G(L)->type_names[ttype(first)]);
+    return 1;
+  case LUA_LEAF_STRBYTE: case LUA_LEAF_STRSUB:
+    return luaB_leafrange(L, func, nargs, builtin == LUA_LEAF_STRBYTE, value);
+  case LUA_LEAF_NEXT: {
     int more;
     if (!ttistable(first)) return -1;
     if (nargs < 2) setnilvalue(value);
@@ -818,12 +825,7 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
     if (!more) setnilvalue(value);
     return more + 1;
   }
-  if (f == luaB_assert) {
-    if (l_isfalse(first)) return -1;
-    *forward = 1;
-    return nargs;
-  }
-  if (f == luaB_select) {
+  case LUA_LEAF_SELECT: {
     lua_Integer index;
     if (ttisstring(first) && getstr(tsvalue(first))[0] == '#') {
       setivalue(value, nargs - 1);
@@ -835,20 +837,19 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
     *forward = 1;
     return nargs - cast_int(index);
   }
-  if (f == luaB_rawget) {
+  case LUA_LEAF_RAWGET: {
     lu_byte tag;
     if (nargs < 2 || !ttistable(first) ||
         !luaH_tryget(L, hvalue(first), s2v(func + 2), value, &tag)) return -1;
     if (tagisempty(tag)) setnilvalue(value);
     return 1;
   }
-  if (f == luaB_rawequal) {
+  case LUA_LEAF_RAWEQUAL:
     if (nargs < 2) return -1;
     if (luaV_rawequalobj(first, s2v(func + 2))) { setbtvalue(value); }
     else { setbfvalue(value); }
     return 1;
-  }
-  if (f == luaB_tonumber) {
+  case LUA_LEAF_TONUMBER:
     if (nargs >= 2 && !ttisnil(s2v(func + 2))) return -1;
     if (ttisnumber(first)) { setobj(L, value, first); }
     else if (ttisshrstring(first)) {
@@ -858,25 +859,26 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
     }
     else return -1;
     return 1;
+  case LUA_LEAF_MATHABS:
+    if (!ttisinteger(first)) return -1;
+    setivalue(value, luaB_absinteger(ivalue(first)));
+    return 1;
+  default:
+    lua_assert(0);
+    return -1;
   }
-  lua_assert(f == luaB_mathabs);
-  if (!ttisinteger(first)) return -1;
-  setivalue(value, luaB_absinteger(ivalue(first)));
-  return 1;
 }
 
 /* An eligible builtin finishes in its caller's frame. Its caller delivers
 ** pending errors after publishing that frame. */
 int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
-  lua_CFunction f = fvalue(s2v(func));
   int n, forward = 0;
   TValue values[2];
-  lua_assert(luaB_isleaf(f));
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
     return -1;
-  n = leafresult(L, func, f, nargs, values, &forward);
+  n = leafresult(L, func, bcfindex(s2v(func)), nargs, values, &forward);
   if (n < 0 || l_unlikely(gethookmask(L)))
     return -1;
   if (forward) {

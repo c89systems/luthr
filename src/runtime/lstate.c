@@ -352,8 +352,8 @@ static void f_luaopen (lua_State *L, void *ud) {
   stack_init(L, L);  /* init stack */
   init_registry(L, g);
   luaS_init(L);
-  luaT_init(L);
   luaX_init(L);
+  luaT_init(L);
   g->operation_error = luaS_newliteral(L, "cannot close a coroutine with active operations");
   luaC_fix(L, obj2gco(g->operation_error));
   g->gcstp = 0;  /* allow gc */

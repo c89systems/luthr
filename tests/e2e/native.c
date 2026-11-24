@@ -55,6 +55,13 @@ static int reference(lua_State *state) {
   return 1;
 }
 
+static int rebox(lua_State *state) {
+  lua_CFunction function = lua_tocfunction(state, 1);
+  luaL_argcheck(state, function != NULL, 1, "C function expected");
+  lua_pushcfunction(state, function);
+  return 1;
+}
+
 static int pump(lua_State *state) {
   lua_Integer capacity = luaL_checkinteger(state, 3);
   lua_Integer total = 0;
@@ -88,13 +95,10 @@ static int pump(lua_State *state) {
 
 int luaopen_compat_fixture(lua_State *state);
 int luaopen_compat_fixture(lua_State *state) {
-  static const luaL_Reg functions[] = {{"callback", callback},
-                                       {"call", call},
-                                       {"reference", reference},
-                                       {"pump", pump},
-                                       {"monotonic", monotonic},
-                                       {"frame", frame},
-                                       {NULL, NULL}};
+  static const luaL_Reg functions[] = {
+      {"callback", callback}, {"call", call}, {"reference", reference},
+      {"rebox", rebox},       {"pump", pump}, {"monotonic", monotonic},
+      {"frame", frame},       {NULL, NULL}};
   luaL_newlib(state, functions);
   return 1;
 }

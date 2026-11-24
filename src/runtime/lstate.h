@@ -633,6 +633,7 @@ typedef struct global_State {
   LuaPolicy *(*policy_factory)(lua_State *, const void *, void *);
   void *policy_context;
   TString *tmname[TM_N];  /* array with tag-method names */
+  TString *type_names[LUA_NUMTYPES];  /* fixed names returned by type() */
   struct Table *mt[LUA_NUMTYPES];  /* metatables for basic types */
   struct Table *string_index;  /* atomic projection of the installed __index */
   lua_WarnFunction warnf;  /* warning function */

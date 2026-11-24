@@ -692,6 +692,12 @@ typedef struct Proto {
 #define LUA_VMCF	makevariant(LUA_TFUNCTION, 3)  /* managed light C function */
 #define LUA_VBCF	(LUA_VMCF | (1 << 7))  /* managed builtin with a leaf call */
 
+LUAI_DDEC(lua_CFunction const luaB_leafentry[];)
+
+l_sinline lua_CFunction luaO_cfunction (lu_byte tag, Value value) {
+  return tag == LUA_VBCF ? luaB_leafentry[value.i] : value.f;
+}
+
 #define ttisfunction(o)		checktype(o, LUA_TFUNCTION)
 #define ttisLclosure(o)		checktag((o), ctb(LUA_VLCL))
 #define tagislcf(t)		((t) == LUA_VLCF || (t) == LUA_VMCF || (t) == LUA_VBCF)
@@ -704,10 +710,9 @@ typedef struct Proto {
 
 #define clvalue(o)	check_exp(ttisclosure(o), gco2cl(val_(o).gc))
 #define clLvalue(o)	check_exp(ttisLclosure(o), gco2lcl(val_(o).gc))
-#define fvalue(o)	check_exp(ttislcf(o), val_(o).f)
+#define fvalue(o)	check_exp(ttislcf(o), luaO_cfunction(rawtt(o), val_(o)))
+#define bcfindex(o)	check_exp(checktag(o, LUA_VBCF), cast_uint(val_(o).i))
 #define clCvalue(o)	check_exp(ttisCclosure(o), gco2ccl(val_(o).gc))
-
-#define fvalueraw(v)	((v).f)
 
 #define setclLvalue(L,obj,x) \
   { TValue *io = (obj); LClosure *x_ = (x); \
@@ -719,8 +724,11 @@ typedef struct Proto {
 #define setfvalue(obj,x) \
   { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VLCF); }
 
-#define setmcfvalue(obj,x,leaf) \
-  { TValue *io=(obj); val_(io).f=(x); settt_(io, (leaf) ? LUA_VBCF : LUA_VMCF); }
+#define setmcfvalue(obj,x) \
+  { TValue *io=(obj); val_(io).f=(x); settt_(io, LUA_VMCF); }
+
+#define setbcfvalue(obj,index) \
+  { TValue *io=(obj); val_(io).i=(index); settt_(io, LUA_VBCF); }
 
 #define setclCvalue(L,obj,x) \
   { TValue *io = (obj); CClosure *x_ = (x); \

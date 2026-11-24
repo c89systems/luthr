@@ -52,6 +52,12 @@ void luaT_init (lua_State *L) {
     G(L)->tmname[i] = luaS_new(L, luaT_eventname[i]);
     luaC_fix(L, obj2gco(G(L)->tmname[i]));  /* never collect these names */
   }
+  for (i = 0; i < LUA_NUMTYPES; i++) {
+    TString *name = luaS_new(L, ttypename(i));
+    /* The lexer has fixed its keywords. Both userdata types share a name. */
+    if (!isreserved(name) && i != LUA_TUSERDATA) luaC_fix(L, obj2gco(name));
+    G(L)->type_names[i] = name;
+  }
 }
 
 

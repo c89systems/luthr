@@ -271,6 +271,27 @@ static int luaB_type (lua_State *L) {
   return 1;
 }
 
+LUAI_DDEF lua_CFunction const luaB_leafentry[LUA_LEAF_COUNT] = {
+  [LUA_LEAF_ASSERT] = luaB_assert,
+  [LUA_LEAF_TYPE] = luaB_type,
+  [LUA_LEAF_STRSUB] = luaB_strsub,
+  [LUA_LEAF_STRBYTE] = luaB_strbyte,
+  [LUA_LEAF_NEXT] = luaB_next,
+  [LUA_LEAF_SELECT] = luaB_select,
+  [LUA_LEAF_RAWGET] = luaB_rawget,
+  [LUA_LEAF_RAWEQUAL] = luaB_rawequal,
+  [LUA_LEAF_TONUMBER] = luaB_tonumber,
+  [LUA_LEAF_MATHABS] = luaB_mathabs,
+};
+
+int luaB_leafindex (lua_CFunction f) {
+  int i;
+  for (i = 0; i < LUA_LEAF_COUNT; i++) {
+    if (luaB_leafentry[i] == f) return i;
+  }
+  return -1;
+}
+
 
 int luaB_next (lua_State *L) {
   luaL_checktype(L, 1, LUA_TTABLE);

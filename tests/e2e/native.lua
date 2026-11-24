@@ -13,6 +13,43 @@ for _,value in ipairs({true,42,'binary\0value',{},function() return 42 end}) do
   assert(rawequal(native.reference(value),value))
 end
 assert(native.reference(nil)==nil)
+
+do
+  local functions={assert,type,string.byte,string.sub,next,select,rawget,
+                   rawequal,tonumber,math.abs}
+  local encoded,original={},{}
+  for i,f in ipairs(functions) do
+    local copy=native.rebox(f)
+    assert(f==copy and rawequal(f,copy))
+    encoded[f]=i
+    original[copy]=i
+  end
+  collectgarbage('collect')
+  for i,f in ipairs(functions) do
+    local copy=native.rebox(f)
+    assert(encoded[copy]==i and original[f]==i)
+  end
+  assert(native.rebox(type)(false)=='boolean')
+  local capture=true
+  local function upvalue() return capture end
+  local checks={{nil,'nil'},{false,'boolean'},{42,'number'},{1.5,'number'},
+                {'a','string'},{encoded,'table'},{type,'function'},
+                {io.stdout,'userdata'},{debug.upvalueid(upvalue,1),'userdata'},
+                {coroutine.create(upvalue),'thread'}}
+  for _,check in ipairs(checks) do
+    local name,extra=type(check[1])
+    assert(name==check[2] and extra==nil)
+  end
+  assert(not pcall(type))
+  local calls=0
+  debug.sethook(function()
+    if debug.getinfo(2,'f').func==type then calls=calls+1 end
+  end,'c')
+  local name=type(encoded)
+  debug.sethook()
+  assert(name=='table' and calls==1)
+end
+
 local reads,writes,bytes=0,0,0
 local payload=string.rep('x',127)..'\0'
 local total=native.pump(function(capacity)

@@ -295,7 +295,7 @@ static int equalkeybits (const TValue *k1, lu_byte tag, Value bits, int deadok) 
       return luaS_eqstr(tsvalue(k1), gco2ts(gcvalueraw(bits)));
     }
     else if (tagislcf(tag) && ttislcf(k1))
-      return fvalue(k1) == fvalueraw(bits);
+      return fvalue(k1) == luaO_cfunction(tag, bits);
     else if (deadok && tag == LUA_TDEADKEY && iscollectable(k1)) {
       /* a collectable value can be equal to a dead key */
       return gcvalue(k1) == gcvalueraw(bits);
@@ -314,7 +314,7 @@ static int equalkeybits (const TValue *k1, lu_byte tag, Value bits, int deadok) 
       case LUA_VLIGHTUSERDATA:
         return pvalue(k1) == pvalueraw(bits);
       case LUA_VLCF: case LUA_VMCF: case LUA_VBCF:
-        return fvalue(k1) == fvalueraw(bits);
+        return fvalue(k1) == luaO_cfunction(tag, bits);
       case ctb(LUA_VLNGSTR):
         return luaS_eqstr(tsvalue(k1), gco2ts(gcvalueraw(bits)));
       default:

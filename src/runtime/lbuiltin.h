@@ -14,11 +14,13 @@ LUAI_FUNC int luaB_rawequal (lua_State *L);
 LUAI_FUNC int luaB_tonumber (lua_State *L);
 LUAI_FUNC int luaB_next (lua_State *L);
 
-l_sinline int luaB_isleaf (lua_CFunction f) {
-  return f == luaB_strsub || f == luaB_strbyte || f == luaB_mathabs ||
-         f == luaB_assert || f == luaB_select || f == luaB_rawget ||
-         f == luaB_rawequal || f == luaB_tonumber || f == luaB_next;
-}
+enum {
+  LUA_LEAF_ASSERT, LUA_LEAF_TYPE, LUA_LEAF_STRSUB, LUA_LEAF_STRBYTE,
+  LUA_LEAF_NEXT, LUA_LEAF_SELECT, LUA_LEAF_RAWGET, LUA_LEAF_RAWEQUAL,
+  LUA_LEAF_TONUMBER, LUA_LEAF_MATHABS, LUA_LEAF_COUNT
+};
+
+LUAI_FUNC int luaB_leafindex (lua_CFunction f);
 
 /*
 ** Translate a relative initial string position

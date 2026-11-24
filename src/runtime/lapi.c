@@ -938,7 +938,11 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
   if (n == 0) {
     uintptr_t owner = luaX_valueenter(L, 1);
-    if (managed) { setmcfvalue(s2v(L->top.p), fn, luaB_isleaf(fn)); }
+    if (managed) {
+      int builtin = luaB_leafindex(fn);
+      if (builtin >= 0) { setbcfvalue(s2v(L->top.p), builtin); }
+      else { setmcfvalue(s2v(L->top.p), fn); }
+    }
     else { setfvalue(s2v(L->top.p), fn); }
     api_incr_top(L);
     luaX_valueleave(L, owner);
