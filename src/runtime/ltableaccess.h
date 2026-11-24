@@ -108,10 +108,13 @@ l_sinline int luaH_tryget (lua_State *L, Table *table, const TValue *key,
   return luaH_trygetkey(L, table, key, result, tag);
 }
 
-l_sinline LuaTableWriter *luaH_writer (global_State *g, const Value *slot) {
+l_sinline unsigned luaH_writerindex (const Value *slot) {
   uintptr_t address = cast(uintptr_t, slot);
-  return &g->table_writers[((address >> 3) ^ (address >> 12)) &
-                           (LUA_TABLE_WRITERS - 1)];
+  return cast_uint((address >> 3) ^ (address >> 12)) & (LUA_TABLE_WRITERS - 1);
+}
+
+l_sinline LuaTableWriter *luaH_writer (global_State *g, const Value *slot) {
+  return &g->table_writers[luaH_writerindex(slot)];
 }
 
 l_sinline int luaH_readvalue (global_State *g, const Value *payload,

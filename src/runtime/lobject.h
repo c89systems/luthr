@@ -836,12 +836,16 @@ typedef union Node {
 
 
 /* Layout owners close admission with the low bit. Element writers announce
-** their presence, and only writers changing a tag announce split values. */
+** their row group for this layout. Only tag changes announce split values. */
 enum {
-  LUA_TABLE_ELEMENT_WRITES = 2,
-  LUA_TABLE_SPLIT_VALUES = 4,
-  LUA_TABLE_WRITER_FLAGS = LUA_TABLE_ELEMENT_WRITES | LUA_TABLE_SPLIT_VALUES,
-  LUA_TABLE_VERSION_STEP = 8
+  LUA_TABLE_SPLIT_VALUES = 2,
+  LUA_TABLE_WRITER_GROUP_SHIFT = 2,
+  LUA_TABLE_WRITER_GROUPS = 16,
+  LUA_TABLE_VERSION_STEP = 1 << (LUA_TABLE_WRITER_GROUP_SHIFT +
+                                LUA_TABLE_WRITER_GROUPS),
+  LUA_TABLE_WRITER_GROUP_MASK = LUA_TABLE_VERSION_STEP -
+                               (1 << LUA_TABLE_WRITER_GROUP_SHIFT),
+  LUA_TABLE_WRITER_FLAGS = LUA_TABLE_WRITER_GROUP_MASK | LUA_TABLE_SPLIT_VALUES
 };
 
 /* Retire the direct string index before changing this metatable. */

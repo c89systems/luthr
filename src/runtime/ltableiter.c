@@ -34,9 +34,9 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
   }
   index = luaH_nextrecordslot(keys, tags, index);
   if (index == keys->asize)
-    return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == version ? 0 : -1;
+    return luaH_samelayout(table, version) ? 0 : -1;
   __atomic_load(luaH_recordvalues(table) + index, &val_(&value), __ATOMIC_ACQUIRE);
-  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != version) return -1;
+  if (!luaH_samelayout(table, version)) return -1;
   settt_(&value, luaH_recordtag(tags, index));
   arr2obj(keys, index, key);
   return emitnext(L, key, result, &value);
@@ -63,7 +63,7 @@ static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
     if (tagisempty(__atomic_load_n(tag, __ATOMIC_ACQUIRE))) continue;
     if (!luaH_readvalue(G(L), arrayval(array, index), tag, &value, rows) ||
         isempty(&value) || !cursorvalid(cursor) ||
-        __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) != layout)
+        !luaH_samelayout(t, layout))
       return -1;
     setivalue(key, cursor == NULL ? cast(lua_Integer, index) + 1 :
                          luaH_indexfrompart(cursor->partition, index + 1));
@@ -100,7 +100,7 @@ static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
     keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
     __atomic_load(&node->u.key_val, &val_(&nextkey), __ATOMIC_ACQUIRE);
     if (keytag == LUA_TDEADKEY || keytag == LUA_VNIL || !cursorvalid(cursor) ||
-        __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) != layout)
+        !luaH_samelayout(t, layout))
       return -1;
     settt_(&nextkey, keytag);
     setobj(L, key, &nextkey);
@@ -142,7 +142,7 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
     /* A deletion can only remove entries from an already scanned partition.
     ** Insertion during traversal has the ordinary 'next' restriction. */
     if (dir == NULL || ++cursor.partition == LUA_HASH_PARTS)
-      return __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) == layout ? 0 : -1;
+      return luaH_samelayout(t, layout) ? 0 : -1;
     cursor.index = 0;
     if (!luaH_cursorpart(&cursor, dir)) return -1;
   }

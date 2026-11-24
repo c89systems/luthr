@@ -32,6 +32,13 @@
 
 LUAI_DDEC(const Node luaH_dummynode;)
 
+/* Writer groups only help the next layout owner find outstanding claims.
+** Readers still validate the layout generation and split-value flag. */
+l_sinline int luaH_samelayout (const Table *table, uint64_t layout) {
+  uint64_t current = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  return ((current ^ layout) & ~cast(uint64_t, LUA_TABLE_WRITER_GROUP_MASK)) == 0;
+}
+
 /* A record keeps its payloads inline and uses the unused array pointer word
 ** for tags. The low bit distinguishes tags from an aligned array pointer.
 ** The node field points to the constructor's shared immutable key array. */

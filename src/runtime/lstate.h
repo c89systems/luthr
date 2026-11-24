@@ -524,6 +524,7 @@ typedef struct LuaBarrierQueue {
 } LuaBarrierQueue;
 
 #define LUA_TABLE_WRITERS 512
+#define LUA_TABLE_WRITERS_PER_GROUP (LUA_TABLE_WRITERS / LUA_TABLE_WRITER_GROUPS)
 typedef struct LuaTableWriter {
   Table *owner;
   uint64_t sequence;

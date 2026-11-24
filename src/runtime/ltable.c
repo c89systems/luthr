@@ -1661,13 +1661,9 @@ typedef struct LuaTableSlot {
   uint64_t revision;
 } LuaTableSlot;
 
-static int sameversion (Table *table, uint64_t sequence) {
-  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence;
-}
-
 l_sinline int samepartversion (Table *table, uint64_t layout,
                                const LuaHashPart *part, uint64_t revision) {
-  return sameversion(table, layout) && (part == NULL ||
+  return luaH_samelayout(table, layout) && (part == NULL ||
     __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) == revision);
 }
 
@@ -2318,7 +2314,7 @@ int luaH_setshared (lua_State *L, Table *table, const TValue *key,
     else if (retry.writer != NULL) luaH_waitwriters(L, table, retry.writer);
     else {
       if (luaH_waitlayout(L, table)) continue;
-      if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence)
+      if (luaH_samelayout(table, sequence))
         return 0;
     }
   }
@@ -2560,7 +2556,7 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
     if (!samepartversion(table, sequence, slot->part, slot->revision)) return 0;
   }
   else if (!luaH_readvalue(g, slot->payload, slot->tag, &value, sequence) ||
-           !sameversion(table, sequence)) return 0;
+           !luaH_samelayout(table, sequence)) return 0;
   if (slot->node != NULL) *tag = luaH_hashvalue(&value, result);
   else {
     *tag = rawtt(&value);
@@ -2601,7 +2597,7 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
                         __ATOMIC_ACQUIRE);
       }
       else settt_(&value, LUA_VABSTKEY);
-      if (!sameversion(table, *sequence)) return 0;
+      if (!luaH_samelayout(table, *sequence)) return 0;
       *tag = luaH_hashvalue(&value, result);
       return 1;
     }
@@ -2612,7 +2608,7 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
         __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
       TValue value;
       luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, 0);
-      if (!sameversion(table, *sequence)) return 0;
+      if (!luaH_samelayout(table, *sequence)) return 0;
       *tag = luaH_hashvalue(&value, result);
       return 1;
     }
@@ -2759,7 +2755,7 @@ static lu_byte finishsharedread (lua_State *L, Table *t, TValue *res,
     return tag;
   }
   if (__atomic_load_n(&t->metatable, __ATOMIC_ACQUIRE) == NULL &&
-      sameversion(t, sequence)) {
+      luaH_samelayout(t, sequence)) {
     setnilvalue(res);
     return LUA_VNIL;
   }
@@ -2818,7 +2814,7 @@ int luaH_trygetsharedint (lua_State *L, Table *t, lua_Integer key, TValue *res,
   index = retainedarrayindex(array, key);
   if (index == 0) return readsharedinthash(L, t, key, res, tag, sequence);
   if (!luaH_readvalue(G(L), array - index, arraytag(array, index - 1),
-                      &value, sequence) || !sameversion(t, sequence)) return 0;
+                      &value, sequence) || !luaH_samelayout(t, sequence)) return 0;
   found = rawtt(&value);
   if (!tagisempty(found)) setobj(L, res, &value);
   *tag = finishsharedread(L, t, res, found, sequence);

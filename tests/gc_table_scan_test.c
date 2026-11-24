@@ -203,10 +203,13 @@ static void *write_values(void *unused) {
     luaH_resizearray(L, probe.table, 2 * probe.table->asize);
     lua_unlock(L);
   } else if (probe.first_write) {
+    uint64_t layout;
     lua_pushinteger(L, LUA_MININTEGER);
     lua_rawseti(L, probe.index, 1);
-    require(__atomic_load_n(&probe.table->sequence, __ATOMIC_ACQUIRE) ==
-            (probe.initial_layout | LUA_TABLE_WRITER_FLAGS));
+    layout = __atomic_load_n(&probe.table->sequence, __ATOMIC_ACQUIRE);
+    require((layout & ~(uint64_t)LUA_TABLE_WRITER_GROUP_MASK) ==
+            (probe.initial_layout | LUA_TABLE_SPLIT_VALUES));
+    require(layout & LUA_TABLE_WRITER_GROUP_MASK);
   } else if (probe.relocate) {
     lua_pushvalue(L, 2);
     lua_pushinteger(L, 123);

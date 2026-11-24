@@ -131,6 +131,53 @@ static void *resize(void *unused) {
   return NULL;
 }
 
+static void check_writer_groups(lua_State *L) {
+  Table *table;
+  Value *low, *high;
+  LuaTableWriter *a, *b;
+  unsigned i, low_group, high_group;
+  uint64_t layout;
+  int scan;
+  lua_createtable(L, 1024, 0);
+  table = (Table *)lua_topointer(L, -1);
+  lua_pushvalue(L, -1);
+  lua_xmove(L, probe.second, 1);
+  lua_pop(probe.second, 1);
+  lua_lock(L);
+  low = getArrVal(table, 0);
+  low_group = luaH_writerindex(low) / LUA_TABLE_WRITERS_PER_GROUP;
+  for (i = 1; i < table->asize; i++) {
+    high = getArrVal(table, i);
+    high_group = luaH_writerindex(high) / LUA_TABLE_WRITERS_PER_GROUP;
+    if (low_group != high_group)
+      break;
+  }
+  require(i < table->asize);
+  if (low_group > high_group) {
+    Value *swap = low;
+    low = high;
+    high = swap;
+  }
+  layout = table->sequence;
+  a = luaH_claimwriter(L, table, low, layout);
+  b = luaH_claimwriter(L, table, high, layout);
+  require(a != NULL && b != NULL && a != b);
+  require(luaH_samelayout(table, layout));
+  require(luaH_beginsplit(table, b, high, layout));
+  require(!luaH_samelayout(table, layout));
+  require(!luaA_tryscan(L, (GCObject *)table));
+  luaH_releasewriter(L, table, a);
+  /* The first group is idle. The scan still needs the writer in the next
+   * group, even after reopening the layout following the earlier attempt. */
+  require(!luaA_tryscan(L, (GCObject *)table));
+  luaH_releasewriter(L, table, b);
+  scan = luaA_tryscan(L, (GCObject *)table);
+  require(scan && (table->sequence & LUA_TABLE_WRITER_FLAGS) == 0);
+  luaA_endscan(L, (GCObject *)table, scan);
+  lua_unlock(L);
+  lua_pop(L, 1);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   pthread_t a, b, c;
@@ -242,7 +289,7 @@ int main(int argc, char **argv) {
     /* The layout version is still even. The scanner validates a slot only
      * if a writer can change both its tag and payload. */
     require(!(probe.table->sequence & 1));
-    require(probe.table->sequence & LUA_TABLE_ELEMENT_WRITES);
+    require(probe.table->sequence & LUA_TABLE_WRITER_GROUP_MASK);
     require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == probe.graph);
     found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,
                             probe.first_slot, 1, probe.hash, edges);
@@ -255,7 +302,7 @@ int main(int argc, char **argv) {
       require(found == 0);
   }
   require(!luaA_tryscan(L, (GCObject *)probe.table));
-  require(probe.table->sequence & LUA_TABLE_ELEMENT_WRITES);
+  require(probe.table->sequence & LUA_TABLE_WRITER_GROUP_MASK);
   lua_unlock(L);
   require(pthread_create(&c, NULL, resize, NULL) == 0);
   require(pthread_mutex_lock(&probe.mutex) == 0);
@@ -284,6 +331,7 @@ int main(int argc, char **argv) {
   if (probe.graph)
     require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
   require(lua_tointeger(L, -1) == 22);
+  check_writer_groups(L);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);

@@ -4,11 +4,13 @@ assert(type(kind)=='string' and n>=1 and tasks>=1)
 local total=n*(n+1)//2
 local shared={}
 local array_growth=kind=='shared_array_growth'
-local grows=array_growth or kind=='shared_growth'
-local direction=array_growth and 1 or -1
+local sparse_growth=kind=='shared_sparse_growth'
+local grows=array_growth or sparse_growth or kind=='shared_growth'
+local direction=(array_growth or sparse_growth) and 1 or -1
+local growth_offset=sparse_growth and (1<<40) or tasks
 local function grow(id)
   local head=direction*id
-  local key=direction*(tasks+(id-1)*n)
+  local key=direction*(growth_offset+(id-1)*n)
   local sum=0
   for i=1,n do
     key=key+direction
@@ -66,6 +68,7 @@ local workloads={
   end,
   shared_growth=grow,
   shared_array_growth=grow,
+  shared_sparse_growth=grow,
   shared_reads=function()
     local sum=0
     for i=1,n do sum=sum+shared.value end
@@ -206,7 +209,7 @@ local function verify()
       for i=1,n do assert(shared[(id-1)*n+i]==i) end
     end
   elseif kind=='shared_hash' or grows then
-    local offset=grows and tasks or 0
+    local offset=grows and growth_offset or 0
     for id=1,tasks do
       if grows then assert(shared[direction*id]==n) end
       for i=1,n do assert(shared[direction*(offset+(id-1)*n+i)]==i) end

@@ -22,7 +22,7 @@ static int snapshot (Table *table, Table *view, Table **metatable,
     view->asize = arrayheader(luaH_array(view))->size;
   view->node = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   *metatable = __atomic_load_n(&table->metatable, __ATOMIC_ACQUIRE);
-  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == *sequence;
+  return luaH_samelayout(table, *sequence);
 }
 
 static int strongmode (lua_State *L, Table *table, Table *metatable,
@@ -41,7 +41,7 @@ static int strongmode (lua_State *L, Table *table, Table *metatable,
       if (strchr(text, 'k') != NULL || strchr(text, 'v') != NULL) return -1;
     }
   }
-  if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence) return 0;
+  if (!luaH_samelayout(table, sequence)) return 0;
   /* Only the claimed marker freezes this epoch. Publishing a strong mode
   ** cannot expose a weak cutoff; weak mode changes retain mutation ownership. */
   luaC_settablestate(table, luaC_weakstamp(g));
@@ -66,7 +66,7 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
     if (count == UINT_MAX ||
         (part != NULL &&
          __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) != revision) ||
-        __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+        !luaH_samelayout(table, sequence))
       return 0;
     if (young != NULL && !*young) {
       unsigned i;
@@ -163,7 +163,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
       if (tag & BIT_ISCOLLECTABLE)
         __atomic_load(&values[i].gc, &edges[count++], __ATOMIC_ACQUIRE);
     }
-    if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != sequence)
+    if (!luaH_samelayout(table, sequence))
       return 0;
     luaC_traceedges(work, edges, count);
     work->marked += sizeof(*table) + table->inline_bytes;
@@ -199,7 +199,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   ** The same image must survive all chunks. A young write vetoes the proof
   ** in the age byte even if the write preserves the layout and tag. */
   luaC_finishstrong(work, obj2gco(table), young_edges != NULL && !young &&
-                    __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) == sequence);
+                    luaH_samelayout(table, sequence));
   return 1;
 }
 

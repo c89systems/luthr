@@ -5,6 +5,9 @@
 #include "ltableaccess.h"
 #include "ldo.h"
 
+_Static_assert(LUA_TABLE_WRITERS % LUA_TABLE_WRITER_GROUPS == 0,
+               "writer groups must cover all rows");
+
 static int partbusy (const LuaHashPart *part) {
   return (__atomic_load_n(&part->gate, __ATOMIC_SEQ_CST) &
           LUA_HASH_WRITING) != 0;
@@ -18,18 +21,25 @@ static pthread_mutex_t *partmutex (global_State *g, LuaHashPart *part) {
 
 static int active (global_State *g, Table *table, LuaTableWriter *writer) {
   LuaHashDirectory *directory;
-  unsigned i;
+  unsigned i, groups;
   if (writer != NULL)
     return __atomic_load_n(&writer->owner, __ATOMIC_SEQ_CST) == table;
   directory = luaH_hashdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
   if (directory != NULL)
     for (i = 1; i < LUA_HASH_PARTS; ++i)
       if (partbusy(&directory->parts[i])) return 1;
-  if (!(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) &
-        LUA_TABLE_ELEMENT_WRITES)) return 0;
-  for (i = 0; i < LUA_TABLE_WRITERS; i++)
-    if (__atomic_load_n(&g->table_writers[i].owner, __ATOMIC_SEQ_CST) == table)
-      return 1;
+  /* Closing the layout freezes the advertised groups. A claimant whose
+  ** group was not published before that close cannot modify storage. */
+  groups = cast_uint(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) &
+                     LUA_TABLE_WRITER_GROUP_MASK) >> LUA_TABLE_WRITER_GROUP_SHIFT;
+  while (groups != 0) {
+    unsigned group = cast_uint(__builtin_ctz(groups));
+    unsigned end = (group + 1) * LUA_TABLE_WRITERS_PER_GROUP;
+    for (i = group * LUA_TABLE_WRITERS_PER_GROUP; i < end; i++)
+      if (__atomic_load_n(&g->table_writers[i].owner, __ATOMIC_SEQ_CST) == table)
+        return 1;
+    groups &= groups - 1;
+  }
   return 0;
 }
 
@@ -112,7 +122,9 @@ static int advertise (Table *table, uint64_t layout, uint64_t flag) {
 
 LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, Value *slot,
                                   uint64_t layout) {
-  LuaTableWriter *writer = luaH_writer(G(L), slot);
+  unsigned index = luaH_writerindex(slot);
+  unsigned group = index / LUA_TABLE_WRITERS_PER_GROUP;
+  LuaTableWriter *writer = &G(L)->table_writers[index];
   Table *empty = NULL;
   if (!__atomic_compare_exchange_n(&writer->owner, &empty, table, 0,
                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return NULL;
@@ -120,7 +132,7 @@ LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, Value *slot,
   ** before the claimant advertises itself. An odd version rejects new writers. */
   if (luaA_lockowner(&table->access) != NULL ||
       !luaH_strongaccess(L, table) ||
-      !advertise(table, layout, LUA_TABLE_ELEMENT_WRITES)) {
+      !advertise(table, layout, 1u << (LUA_TABLE_WRITER_GROUP_SHIFT + group))) {
     luaH_releasewriter(L, table, writer);
     return NULL;
   }
@@ -149,7 +161,7 @@ int luaH_quiescewriters (lua_State *L, Table *table, int wait) {
     if (!wait) return 0;
     luaH_waitwriters(L, table, NULL);
   }
-  if (layout & LUA_TABLE_ELEMENT_WRITES)
+  if (layout & LUA_TABLE_WRITER_FLAGS)
     __atomic_store_n(&table->sequence, layout & ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS),
                      __ATOMIC_RELEASE);
   return 1;
