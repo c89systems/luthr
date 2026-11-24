@@ -130,8 +130,9 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
         __atomic_load_n(&writer->slot, __ATOMIC_ACQUIRE) == cast(uintptr_t, payload))
       return 0;
   }
-  __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
+  /* An empty slot's first value is published by its tag. */
   value->tt_ = __atomic_load_n(tag, __ATOMIC_ACQUIRE);
+  __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
   return writer == NULL ||
          __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE) == before;
 }

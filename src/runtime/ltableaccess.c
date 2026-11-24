@@ -277,17 +277,18 @@ int luaH_waitlayout (lua_State *L, Table *table) {
 /* No allocation, wait, callback or safepoint between row claim and release. */
 void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag,
                          const TValue *value) {
-  TValue old;
-  old.tt_ = *tag;
-  if (old.tt_ == value->tt_ && !iscollectable(value)) {
+  lu_byte oldtag = *tag;
+  if (oldtag == value->tt_ && !iscollectable(value)) {
     __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
     return;
   }
-  old.value_ = *payload;
-  lua_assert(old.tt_ == value->tt_ ||
+  lua_assert(tagisempty(oldtag) || oldtag == value->tt_ ||
     (__atomic_load_n(&luaH_writer(G(L), payload)->sequence, __ATOMIC_RELAXED) & 1));
-  luaC_prewrite(L, &old, value);
+  if (luaC_tracing(L)) {
+    if (oldtag & BIT_ISCOLLECTABLE) luaC_traceobject(L, payload->gc);
+    if (iscollectable(value)) luaC_traceobject(L, gcvalue(value));
+  }
   __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
-  if (old.tt_ != value->tt_) __atomic_store_n(tag, value->tt_, __ATOMIC_RELEASE);
+  if (oldtag != value->tt_) __atomic_store_n(tag, value->tt_, __ATOMIC_RELEASE);
   luaC_barrierback(L, obj2gco(table), value);
 }

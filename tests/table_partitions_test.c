@@ -284,6 +284,7 @@ static void check_dense_allocation_failure(lua_State *L) {
   {
     const LuaPartArray *array = luaH_partarray(table, 1);
     const LuaPartArray *grown;
+    LuaTableWriter *element;
     pthread_t writer;
     /* Growing from one to four slots allocates two blocks. Fail the last
      * allocation after the first block and spare hash are prepared. */
@@ -296,12 +297,16 @@ static void check_dense_allocation_failure(lua_State *L) {
     lua_xmove(L, probe.second, 1);
     lua_lock(L);
     array = luaH_partarray(table, 1);
+    element = luaH_claimwriter(L, table, arrayval(array->blocks[0], 0),
+                               table->sequence);
+    require(element != NULL);
     require(pthread_create(&writer, NULL, append_dense_slot, probe.second) ==
             0);
     require(pthread_join(writer, NULL) == 0);
     grown = luaH_partarray(table, 1);
     require(grown != array && grown->size == 4 && array->size == 1);
     require(grown->blocks[0] == array->blocks[0]);
+    luaH_releasewriter(L, table, element);
     lua_unlock(L);
     lua_pop(probe.second, 1);
     check(L, 3, 43);
@@ -378,7 +383,7 @@ int main(int argc, char **argv) {
   pthread_t first, second, same, layout;
   struct timespec deadline;
   unsigned oldsize, total = 657;
-  lua_Integer key;
+  lua_Integer key, empty_slot;
   require(argc == 2);
   require(L != NULL);
   probe.main = L;
@@ -411,6 +416,18 @@ int main(int argc, char **argv) {
   require(directory != NULL);
   require(probe.table->asize == 0);
   probe.first_part = luaH_part(directory, partition(-1));
+  empty_slot = luaH_indexfrompart(partition(-1), 2);
+  for (unsigned i = 1; i <= 4; ++i)
+    put(L, luaH_indexfrompart(partition(-1), i), i);
+  lua_pushnil(L);
+  lua_rawseti(L, 1, empty_slot);
+  require(luaH_partcapacity(luaH_partarray(probe.table, partition(-1))) >= 2);
+  /* Reopen the layout after setting up an empty slot. */
+  lua_newtable(L);
+  require(lua_setmetatable(L, 1));
+  lua_pushnil(L);
+  require(lua_setmetatable(L, 1));
+  require(!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES));
   probe.part = partition(-1) == 1 ? 2 : 1;
   probe.sparse_key = LUA_MAXINTEGER;
   while (partition(probe.sparse_key) == partition(-1) ||
@@ -426,6 +443,16 @@ int main(int argc, char **argv) {
     require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
             0);
   require(pthread_mutex_unlock(&probe.mutex) == 0);
+  {
+    TValue index, value;
+    setivalue(&index, empty_slot);
+    setivalue(&value, 23);
+    lua_lock(L);
+    require(luaH_tryset(L, probe.table, &index, &value, 0));
+    require(!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES));
+    lua_unlock(L);
+    check(L, empty_slot, 23);
+  }
   require(pthread_create(&same, NULL, contend, NULL) == 0);
   require(pthread_mutex_lock(&probe.mutex) == 0);
   while (!probe.waiting)
@@ -463,6 +490,10 @@ int main(int argc, char **argv) {
   require(pthread_join(same, NULL) == 0 && probe.same_done);
   require(pthread_join(layout, NULL) == 0 && probe.layout_done);
   probe.first_part = NULL;
+  for (unsigned i = 1; i <= 4; ++i) {
+    lua_pushnil(L);
+    lua_rawseti(L, 1, luaH_indexfrompart(partition(-1), i));
+  }
   lua_gc(L, LUA_GCCOLLECT);
   check_sparse_value(L);
   lua_pushnil(L);
@@ -502,6 +533,7 @@ int main(int argc, char **argv) {
          "for i=1,200 do t[i]=i end; assert(#t==200 and t[-1]==7001); "
          "local mt={__newindex=function(o,k,v) rawset(o,k,v+1) end}; "
          "setmetatable(t,mt); t['missing']=9; assert(t.missing==10); "
+         "t[19]=nil; t[19]=9; assert(t[19]==10); t[19]=19; "
          "t[math.maxinteger]=7; assert(t[math.maxinteger]==8); "
          "t[math.maxinteger]=9; assert(t[math.maxinteger]==9); "
          "mt.__newindex=nil; mt.__mode='v'; "

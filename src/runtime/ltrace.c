@@ -343,7 +343,7 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   for (p = 0; p < parts; ++p) {
     Node *node = luaH_hashnodes(table, p), *end = node + luaH_nodesize(node);
     if (keys == NULL && (pending & 1)) {
-      unsigned block, removed = 0;
+      unsigned block;
       Value *array;
       for (block = 0; (array = luaH_arrayblock(table, p, block)) != NULL; ++block) {
         unsigned size = luaH_arraycapacity(array);
@@ -351,14 +351,10 @@ void luaC_prepareweak (lua_State *L, Table *table) {
           lu_byte *tag = arraytag(array, i);
           if ((*tag & BIT_ISCOLLECTABLE) && weakdead(L, arrayval(array, i)->gc)) {
             __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
-            removed++;
+            if (p != 0)
+              __atomic_fetch_sub(luaH_partcount(array, i), 1, __ATOMIC_RELAXED);
           }
         }
-      }
-      if (p != 0 && removed != 0) {
-        LuaHashPart *part = luaH_part(luaH_hashdir(table->node), p);
-        lua_assert(part->live >= removed);
-        part->live -= removed;
       }
     }
     for (; node < end; ++node) {

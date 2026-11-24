@@ -111,7 +111,6 @@ typedef struct LuaHashPart {
   LuaPartArray *array;
   uint64_t version;  /* odd during structural or split-value changes */
   unsigned gate;
-  unsigned live;  /* occupied array slots, under partition or layout ownership */
   unsigned firsthashindex;  /* lower bound on the array indices in the hash */
   pthread_cond_t changed;
   struct LuaWaiter *waiters;  /* address-sharded hash wait mutex */
@@ -270,6 +269,27 @@ l_sinline Value *luaH_partslot (const LuaPartArray *array, unsigned *index) {
   lua_assert(*index < array->size);
   *index -= luaH_partblockstart(block);
   return array->blocks[block];
+}
+
+/* Keep occupancy updates local to a range of slots. A growth heuristic can
+** sample the counters while existing slots are being filled or cleared. */
+enum { LUA_PART_COUNT_SLOTS = 64 };
+l_sinline unsigned luaH_partcounts (unsigned size) {
+  return (size + LUA_PART_COUNT_SLOTS - 1) / LUA_PART_COUNT_SLOTS;
+}
+
+l_sinline size_t luaH_partcountoffset (unsigned size) {
+  return (sizeof(LuaArrayHeader) + size + sizeof(unsigned) - 1) &
+         ~(sizeof(unsigned) - 1);
+}
+
+l_sinline unsigned *luaH_partcountbase (const Value *array, unsigned size) {
+  return cast(unsigned *, cast_charp(array) + luaH_partcountoffset(size));
+}
+
+l_sinline unsigned *luaH_partcount (const Value *array, unsigned index) {
+  return luaH_partcountbase(array, luaH_arraycapacity(array)) +
+         index / LUA_PART_COUNT_SLOTS;
 }
 
 /* Part zero remains the original flat prefix. */
