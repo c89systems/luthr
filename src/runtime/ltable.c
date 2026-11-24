@@ -1018,7 +1018,7 @@ Table *luaH_newrecord (lua_State *L, Table *keys) {
   for (i = 0; i < keys->asize; i++)
     tags |= cast(uintptr_t, LUA_VABSTKEY) << ((i + 1) * 8);
   t->arraydata = tags;
-  luaC_objbarrier(L, t, keys);
+  if (!luaC_tasklayout(L, t, keys)) luaC_objbarrier(L, t, keys);
   return t;
 }
 

@@ -1966,6 +1966,17 @@ static int nursery_marking(lua_State *L) {
   return 1;
 }
 
+static int nursery_layout_count(lua_State *L) {
+  const TValue *value = s2v(L->ci->func.p + 1);
+  unsigned count = 0;
+  require(ttistable(value) && luaC_tasktable(hvalue(value)));
+  require(luaH_recordkeys(hvalue(value)->node) != NULL);
+  for (unsigned i = 0; i < L->task_root_count; i++)
+    count += (L->task_roots[i] & LUA_TASK_ROOT_LAYOUT) != 0;
+  lua_pushinteger(L, count);
+  return 1;
+}
+
 static int nursery_resize(lua_State *L) {
   Table *table;
   lua_lock(L);
@@ -2213,6 +2224,47 @@ static void nursery_root_pressure(struct fixture *f, int generational) {
   require(luaL_dostring(L, "local r=nursery_result; "
                            "assert(r[1][r[3]]['key-42']==42 and r[3][1]==42); "
                            "assert(r[2]==('data-42'):rep(24))") == LUA_OK);
+  finish(f);
+}
+
+static void nursery_layout_roots(struct fixture *f, int generational) {
+  lua_State *L;
+  int status, results;
+  init(f, 2);
+  L = f->main;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_layout_count", nursery_layout_count);
+  managed(L, "nursery_marking", nursery_marking);
+  require(luaL_dostring(
+              L, "layout_keep=assert(load('return {answer=42,spare=17}')); "
+                 "layout_makers={}; for i=1,64 do "
+                 "  layout_makers[i]=assert(load('return {field' "
+                 "    ..i..'=1,spare=17}')) end") == LUA_OK);
+  submit(f, 0,
+         "local record=layout_keep(); layout_keep=nil; "
+         "assert(nursery_layout_count(record)==1); "
+         "local rows={}; for i=1,24000 do rows[i]={i} end; "
+         "for i=1,64 do layout_makers[i](); "
+         "  for j=1,1024 do end; while nursery_marking() do end "
+         "end; layout_makers=nil; "
+         "local count=nursery_layout_count(record); "
+         "assert(count>=1 and count<32 and record.answer==42); "
+         "assert(rows[24000][1]==24000); layout_ready=true; "
+         "while not layout_release do end; "
+         "assert(record.answer==42 and record.spare==17); "
+         "record.answer={51}; return record",
+         0);
+  nursery_wait(L, "layout_ready");
+  for (unsigned i = 0; i < 4; i++)
+    lua_gc(L, LUA_GCSTEP, (size_t)256 * 1024);
+  lua_pushboolean(L, 1);
+  lua_setglobal(L, "layout_release");
+  luaSC_wait(&f->tasks[0]);
+  require(luaSC_collect(L, &f->tasks[0], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getfield(L, -1, "answer") == LUA_TTABLE);
+  require(lua_geti(L, -1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 51);
   finish(f);
 }
 
@@ -2630,6 +2682,10 @@ int main(int argc, char **argv) {
     nursery_root_pressure(f, 0);
   else if (strcmp(argv[1], "nursery_root_pressure_generational") == 0)
     nursery_root_pressure(f, 1);
+  else if (strcmp(argv[1], "nursery_layout_roots_incremental") == 0)
+    nursery_layout_roots(f, 0);
+  else if (strcmp(argv[1], "nursery_layout_roots_generational") == 0)
+    nursery_layout_roots(f, 1);
   else if (strcmp(argv[1], "nursery_native_incremental") == 0)
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)

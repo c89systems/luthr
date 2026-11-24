@@ -40,7 +40,7 @@ l_sinline uint16_t *rootslot (lua_State *L, uintptr_t root) {
   unsigned slot = cast_uint((root >> 3) ^ (root >> 17)) & mask;
   uint16_t *index = L->task_root_index;
   while (index[slot] != 0 &&
-         (L->task_roots[index[slot] - 1] & ~LUA_TASK_ROOT_LIVE) != root)
+         (L->task_roots[index[slot] - 1] & ~LUA_TASK_ROOT_FLAGS) != root)
     slot = (slot + 1) & mask;
   return &index[slot];
 }
@@ -391,13 +391,44 @@ static void remembertarget (lua_State *L, GCObject *value) {
   L->task_remembered = value;
 }
 
+l_sinline int retaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
+  uintptr_t root = cast(uintptr_t, value);
+  uint16_t *slot = rootslot(L, root);
+  lua_assert(!(root & LUA_TASK_ROOT_FLAGS));
+  if (L->task_mark_scan != 0) flags |= LUA_TASK_ROOT_LIVE;
+  if (*slot != 0) {
+    if (flags != 0) L->task_roots[*slot - 1] |= flags;
+    return 1;
+  }
+  if (L->task_root_count < L->task_root_capacity) {
+    L->task_roots[L->task_root_count++] = root | flags;
+    *slot = cast(uint16_t, L->task_root_count);
+    /* Grow or prune at the next instruction, including loops that only
+    ** update tables. The barrier itself cannot park or allocate. */
+    if (L->task_root_count == L->task_root_capacity - 1) {
+      L->task_nursery_pending = 1;
+      L->poll_remaining = 1;
+    }
+    luaC_traceobject(L, value);
+    return 1;
+  }
+  luaC_sealtask(L);
+  return 0;
+}
+
+/* Immutable key layouts belong to the cohort's root directory. Only the
+** pass that prunes that directory needs to visit each record's layout. */
+int luaC_tasklayout (lua_State *L, Table *table, Table *keys) {
+  if (!luaC_tasktable(table)) return 0;
+  lua_assert(!luaC_tasktable(keys));
+  return retaintaskroot(L, obj2gco(keys), LUA_TASK_ROOT_LAYOUT);
+}
+
 int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
   Table *table = owner->tt == LUA_VTABLE ? gco2t(owner) : NULL;
   uint64_t state = table != NULL ? luaC_tablestate(table) : 0;
   lua_assert(luaC_hastaskheap(L));
   if (luaC_tasktablestate(table, state)) {
-    uintptr_t root;
-    uint16_t *slot;
     /* Interned strings are shared and the root directory already retains
     ** them. Everything else may need tracing even in a regular full pass. */
     if (value->tt != LUA_VSHRSTR && !(state & NURSERY_TASK_EDGES))
@@ -409,28 +440,7 @@ int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
       else if (state & NURSERY_TASKOLD) remembertarget(L, value);
       return 1;
     }
-    root = cast(uintptr_t, value);
-    lua_assert(!(root & LUA_TASK_ROOT_LIVE));
-    slot = rootslot(L, root);
-    if (*slot != 0) {
-      if (l_unlikely(L->task_mark_scan != 0))
-        L->task_roots[*slot - 1] |= LUA_TASK_ROOT_LIVE;
-      return 1;
-    }
-    if (L->task_root_count < L->task_root_capacity) {
-      L->task_roots[L->task_root_count++] = root |
-        (L->task_mark_scan != 0 ? LUA_TASK_ROOT_LIVE : 0);
-      *slot = cast(uint16_t, L->task_root_count);
-      /* Grow or prune at the next instruction, including loops that only
-      ** update tables. The barrier itself cannot park or allocate. */
-      if (L->task_root_count == L->task_root_capacity - 1) {
-        L->task_nursery_pending = 1;
-        L->poll_remaining = 1;
-      }
-      luaC_traceobject(L, value);
-      return 1;
-    }
-    luaC_sealtask(L);
+    return retaintaskroot(L, value, 0);
   }
   else if (luaC_taskobject(value)) luaC_sealtask(L);
   return 0;
@@ -629,15 +639,15 @@ void luaC_taskrelocate (lua_State *L, const Node *base, const Node *slot) {
     visitnursery(L, gcvalue(gval(slot)), &L->task_trace.gray, scan);
 }
 
-/* Compact the roots from live private tables. Keep interned strings until
-** the bounded directory needs room or the cohort dies. Removed roots still
-** belong to any shared snapshot already in progress. */
-static void prunetaskroots (lua_State *L, int prune_strings) {
+/* Keep immutable layouts and interned strings until the bounded directory
+** needs room or the cohort dies. Removed roots still belong to any shared
+** snapshot already in progress. */
+static void prunetaskroots (lua_State *L, int prune_cached) {
   unsigned i, count = 0;
   for (i = 0; i < L->task_root_count; i++) {
     uintptr_t root = L->task_roots[i];
-    if ((root & LUA_TASK_ROOT_LIVE) ||
-        (!prune_strings && cast(GCObject *, root)->tt == LUA_VSHRSTR))
+    if ((root & LUA_TASK_ROOT_LIVE) || (!prune_cached &&
+          ((root & LUA_TASK_ROOT_LAYOUT) || luaC_taskrootat(L, i)->tt == LUA_VSHRSTR)))
       L->task_roots[count++] = root & ~LUA_TASK_ROOT_LIVE;
     else luaC_traceobject(L, luaC_taskrootat(L, i));
   }
@@ -692,7 +702,8 @@ static int drainnursery (lua_State *L, LuaNurseryTrace *trace, NurseryScan scan,
         Value *values = luaH_recordvalues(t);
         uintptr_t tags = t->arraydata;
         unsigned i;
-        visitnursery(L, obj2gco(keys), &gray, scan);
+        if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS)
+          visitnursery(L, obj2gco(keys), &gray, scan);
         for (i = 0; i < keys->asize; i++)
           if (nurseryedge(luaH_recordtag(tags, i), scan))
             visitnursery(L, values[i].gc, &gray, scan);

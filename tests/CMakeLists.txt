@@ -84,6 +84,7 @@ foreach(case IN ITEMS fairness parallel no_requests early_incremental early_gene
     nursery_edges_incremental nursery_edges_generational
     nursery_survivors_incremental nursery_survivors_generational
     nursery_root_pressure_incremental nursery_root_pressure_generational
+    nursery_layout_roots_incremental nursery_layout_roots_generational
     nursery_mark_incremental nursery_mark_generational
     nursery_mark_publish_incremental nursery_mark_publish_generational
     nursery_native_incremental nursery_native_generational

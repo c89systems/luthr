@@ -464,6 +464,7 @@ enum {
 #define luaC_settablestate(t,v) __atomic_store_n(&(t)->gcstate, (v), __ATOMIC_RELEASE)
 
 LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);
+LUAI_FUNC int luaC_tasklayout (lua_State *L, Table *table, Table *keys);
 LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
 LUAI_FUNC int luaC_tasktableeligible (lua_State *L, size_t bytes);
 LUAI_FUNC int luaC_taskpagefits (lua_State *L, size_t bytes);
@@ -484,8 +485,10 @@ LUAI_FUNC void luaC_freetaskroots (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);
 
 #define LUA_TASK_ROOT_LIVE cast(uintptr_t, 1u)
+#define LUA_TASK_ROOT_LAYOUT cast(uintptr_t, 2u)
+#define LUA_TASK_ROOT_FLAGS (LUA_TASK_ROOT_LIVE | LUA_TASK_ROOT_LAYOUT)
 l_sinline GCObject *luaC_taskrootat (lua_State *thread, unsigned index) {
-  return cast(GCObject *, thread->task_roots[index] & ~LUA_TASK_ROOT_LIVE);
+  return cast(GCObject *, thread->task_roots[index] & ~LUA_TASK_ROOT_FLAGS);
 }
 
 l_sinline size_t luaC_taskrootsize (unsigned capacity) {
