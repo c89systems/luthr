@@ -35,9 +35,8 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
   index = luaH_nextrecordslot(keys, tags, index);
   if (index == keys->asize)
     return luaH_samelayout(table, version) ? 0 : -1;
-  __atomic_load(luaH_recordvalues(table) + index, &val_(&value), __ATOMIC_ACQUIRE);
-  if (!luaH_samelayout(table, version)) return -1;
-  settt_(&value, luaH_recordtag(tags, index));
+  if (!luaH_readrecord(G(L), table, index, &value, version) ||
+      !luaH_samelayout(table, version) || isempty(&value)) return -1;
   arr2obj(keys, index, key);
   return emitnext(L, key, result, &value);
 }

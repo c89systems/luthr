@@ -1724,6 +1724,7 @@ typedef struct LuaTableSlot {
   union {
     uint64_t revision;  /* hash part read */
     unsigned *occupied;  /* array part write */
+    unsigned field;  /* compact record write */
   };
 } LuaTableSlot;
 
@@ -1787,9 +1788,19 @@ l_sinline int __attribute__((always_inline)) findhashslot (
   LuaHashDirectory *directory = luaH_hashdir(base);
   Table *keys = luaH_recordkeys(base);
   uint64_t revision = 0;
-  /* Interned names use readshortslot. External string keys can use the
-  ** ordinary owned fallback, which compares their bytes against the shape. */
-  if (keys != NULL) return writing || !ttisstring(key);
+  if (keys != NULL) {
+    /* Optimistic record reads sample a complete value. Only writers need
+    ** a borrowed payload address. External names use the owned search. */
+    if (writing && ttisshrstring(key)) {
+      unsigned field = luaH_recordindex(keys, tsvalue(key));
+      if (field < keys->asize) {
+        slot->payload = luaH_recordvalues(table) + field;
+        slot->tag = NULL;
+        slot->field = field;
+      }
+    }
+    return writing || !ttisstring(key);
+  }
   if (directory != NULL) {
     unsigned index = scalar == LUA_VNUMINT ? integerpart(ivalue(key)) :
       scalar == ctb(LUA_VSHRSTR) ? distributedpart(tsvalue(key)->hash) :
@@ -2400,6 +2411,28 @@ l_sinline LuaTableWriter *claimslot (lua_State *L, Table *table, Value *payload,
   return writer;
 }
 
+static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table,
+    const LuaTableSlot *slot, const TValue *key, const TValue *value, int raw,
+    uint64_t layout, LuaTableWriteRetry *retry) {
+  LuaTableWriter *writer = claimslot(L, table, slot->payload, layout, retry);
+  lu_byte oldtag, newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
+  int assigned = 0;
+  if (writer == NULL) return 0;
+  oldtag = luaH_recordtag(__atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE),
+                        slot->field);
+  if (!tagisempty(oldtag) || raw || table->metatable == NULL) {
+    if (tagisempty(oldtag) && ttisnil(value)) assigned = 1;
+    else if (oldtag == newtag || luaH_beginsplit(table, writer, slot->payload,
+                                               layout)) {
+      luaH_recordstore(L, table, slot->field, oldtag, value);
+      invalidatemethod(L, table, tsvalue(key));
+      assigned = 1;
+    }
+  }
+  luaH_releasewriter(L, table, writer);
+  return assigned;
+}
+
 static int __attribute__((noinline)) sharedintset (lua_State *L, Table *table,
     const LuaTableSlot *slot, TValue *value, int raw, uint64_t layout,
     LuaTableWriteRetry *retry) {
@@ -2470,6 +2503,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
       return sharedintset(L, table, &slot, value, raw, layout, retry);
   }
   if (slot.payload == NULL) return 0;
+  if (slot.tag == NULL)
+    return sharedrecordset(L, table, &slot, key, value, raw, layout, retry);
   node = slot.node;
   writer = claimslot(L, table, slot.payload, layout, retry);
   if (writer == NULL) return 0;
@@ -2942,12 +2977,7 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
       unsigned index = luaH_recordindex(keys, key);
       TValue value;
       if (index < keys->asize) {
-        uintptr_t tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-        if (!(tags & LUA_RECORD_TAGS)) return 0;
-        settt_(&value, luaH_recordtag(tags, index));
-        if (!isempty(&value))
-          __atomic_load(luaH_recordvalues(table) + index, &val_(&value),
-                        __ATOMIC_ACQUIRE);
+        if (!luaH_readrecord(g, table, index, &value, *sequence)) return 0;
       }
       else settt_(&value, LUA_VABSTKEY);
       if (!luaH_samelayout(table, *sequence)) return 0;

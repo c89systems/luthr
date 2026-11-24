@@ -24,7 +24,7 @@ static struct {
   lua_State *first, *second, *layout;
   Table *table;
   int entered, release, second_done, layout_waiting, layout_done;
-  int hash, graph, collision, second_parent, length;
+  int hash, record, graph, collision, second_parent, length;
   lua_Integer second_key;
   unsigned first_slot;
   char hash_second[32];
@@ -54,6 +54,15 @@ void __wrap_luaH_elementstore(lua_State *L, Table *table, Value *payload,
   if (L == probe.first && table == probe.table && !probe.entered)
     hold(); /* The element is claimed, before its split value is stored. */
   __real_luaH_elementstore(L, table, payload, tag, value);
+}
+
+void __real_luaH_recordstore(lua_State *, Table *, unsigned, lu_byte,
+                             const TValue *);
+void __wrap_luaH_recordstore(lua_State *L, Table *table, unsigned index,
+                             lu_byte oldtag, const TValue *value) {
+  if (L == probe.first && table == probe.table && !probe.entered)
+    hold();
+  __real_luaH_recordstore(L, table, index, oldtag, value);
 }
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
@@ -224,7 +233,8 @@ int main(int argc, char **argv) {
   struct timespec deadline;
   unsigned i;
   require(argc == 3 && L != NULL);
-  probe.hash = strstr(argv[2], "hash") != NULL;
+  probe.record = strstr(argv[2], "record") != NULL;
+  probe.hash = probe.record || strstr(argv[2], "hash") != NULL;
   probe.graph = strstr(argv[2], "graph") != NULL;
   probe.collision = strcmp(argv[2], "collision") == 0;
   probe.length = strcmp(argv[2], "length") == 0;
@@ -232,9 +242,15 @@ int main(int argc, char **argv) {
   probe.second_parent = 1;
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
-  lua_createtable(L, probe.hash ? 0 : 1024, probe.hash ? 64 : 0);
+  if (probe.record) {
+    require(luaL_dostring(L, "return {['field-1']=0, ['field-2']=0}") ==
+            LUA_OK);
+    require(luaH_recordkeys(((Table *)lua_topointer(L, 1))->node) != NULL);
+    snprintf(probe.hash_second, sizeof(probe.hash_second), "field-2");
+  } else
+    lua_createtable(L, probe.hash ? 0 : 1024, probe.hash ? 64 : 0);
   probe.table = (Table *)lua_topointer(L, 1);
-  for (i = 1; i <= (probe.hash ? 1U : 1024U); i++) {
+  for (i = 1; !probe.record && i <= (probe.hash ? 1U : 1024U); i++) {
     char key[32];
     lua_pushinteger(L, 0);
     if (probe.hash) {
@@ -245,7 +261,7 @@ int main(int argc, char **argv) {
   }
   if (probe.length)
     require(lua_rawlen(L, 1) == 1024);
-  if (probe.hash) {
+  if (probe.hash && !probe.record) {
     const TValue *a;
     unsigned bucket, mask = sizenode(probe.table) - 1;
     lua_pushliteral(L, "field-1");
@@ -340,15 +356,27 @@ int main(int argc, char **argv) {
     require(!(probe.table->sequence & 1));
     require(probe.table->sequence & LUA_TABLE_WRITER_GROUP_MASK);
     require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == probe.graph);
-    found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,
-                            probe.first_slot, 1, probe.hash, edges);
-    if (probe.graph)
-      require(found == UINT_MAX);
-    else if (probe.hash) {
-      require(found == 1);
-      require(edges[0] == gckey(gnode(probe.table, probe.first_slot)));
-    } else
-      require(found == 0);
+    if (probe.record) {
+      TValue value;
+      int read =
+          luaH_readrecord(G(L), probe.table, 0, &value, probe.table->sequence);
+      require(read == !probe.graph);
+      if (read)
+        require(ttisinteger(&value) && ivalue(&value) == 0);
+      require(
+          luaH_readrecord(G(L), probe.table, 1, &value, probe.table->sequence));
+      require(probe.graph ? ttistable(&value) : ttisinteger(&value));
+    } else {
+      found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,
+                              probe.first_slot, 1, probe.hash, edges);
+      if (probe.graph)
+        require(found == UINT_MAX);
+      else if (probe.hash) {
+        require(found == 1);
+        require(edges[0] == gckey(gnode(probe.table, probe.first_slot)));
+      } else
+        require(found == 0);
+    }
   }
   require(!luaA_tryscan(L, (GCObject *)probe.table));
   require(probe.table->sequence & LUA_TABLE_WRITER_GROUP_MASK);

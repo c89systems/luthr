@@ -117,24 +117,52 @@ l_sinline LuaTableWriter *luaH_writer (global_State *g, const Value *slot) {
   return &g->table_writers[luaH_writerindex(slot)];
 }
 
+/* A busy row need only stop a read of the element it owns. The second
+** sequence check validates that identity against reuse of the row. */
+l_sinline int luaH_readrow (LuaTableWriter *writer, const Value *payload,
+                            uint64_t *before) {
+  *before = __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE);
+  return !(*before & 1) ||
+    __atomic_load_n(&writer->slot, __ATOMIC_ACQUIRE) != cast(uintptr_t, payload);
+}
+
+l_sinline int luaH_samerow (LuaTableWriter *writer, uint64_t before) {
+  return writer == NULL ||
+         __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE) == before;
+}
+
 l_sinline int luaH_readvalue (global_State *g, const Value *payload,
                               const lu_byte *tag, TValue *value, uint64_t layout) {
   LuaTableWriter *writer = NULL;
   uint64_t before = 0;
   if (layout & LUA_TABLE_SPLIT_VALUES) {
     writer = luaH_writer(g, payload);
-    before = __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE);
-    /* A busy row need only stop a read of the element it owns. The second
-    ** sequence check validates that identity against reuse of the row. */
-    if ((before & 1) &&
-        __atomic_load_n(&writer->slot, __ATOMIC_ACQUIRE) == cast(uintptr_t, payload))
-      return 0;
+    if (!luaH_readrow(writer, payload, &before)) return 0;
   }
   /* An empty slot's first value is published by its tag. */
   value->tt_ = __atomic_load_n(tag, __ATOMIC_ACQUIRE);
   __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
-  return writer == NULL ||
-         __atomic_load_n(&writer->sequence, __ATOMIC_ACQUIRE) == before;
+  return luaH_samerow(writer, before);
+}
+
+/* The record's tags share a word, but each payload has its own writer row.
+** Sample the tag after entering that row's version and leave the layout
+** check to the caller, which also validates the shape and any earlier reads. */
+l_sinline int luaH_readrecord (global_State *g, Table *table, unsigned index,
+                               TValue *value, uint64_t layout) {
+  const Value *payload = luaH_recordvalues(table) + index;
+  LuaTableWriter *writer = NULL;
+  uint64_t before = 0;
+  uintptr_t tags;
+  if (layout & LUA_TABLE_SPLIT_VALUES) {
+    writer = luaH_writer(g, payload);
+    if (!luaH_readrow(writer, payload, &before)) return 0;
+  }
+  tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+  if (!(tags & LUA_RECORD_TAGS)) return 0;
+  settt_(value, luaH_recordtag(tags, index));
+  if (!isempty(value)) __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
+  return luaH_samerow(writer, before);
 }
 
 l_sinline int luaH_strongaccess (lua_State *L, Table *table) {
@@ -178,4 +206,6 @@ LUAI_FUNC void luaH_waitwriters (lua_State *, Table *, LuaTableWriter *);
 LUAI_FUNC int luaH_waitlayout (lua_State *, Table *);
 LUAI_FUNC void luaH_elementstore (lua_State *, Table *, Value *, lu_byte *,
                                  const TValue *);
+LUAI_FUNC void luaH_recordstore (lua_State *, Table *, unsigned, lu_byte,
+                                const TValue *);
 #endif

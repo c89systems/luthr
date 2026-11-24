@@ -4,7 +4,7 @@
 #include <string.h>
 #include <limits.h>
 #include "lgc.h"
-#include "ltable.h"
+#include "ltableaccess.h"
 
 /* One chunk uses at most 512 bytes of pointer snapshots on a carrier stack.
 ** There is no retry loop, allocation, safepoint or object ownership here.
@@ -160,8 +160,12 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     edges[0] = obj2gco(keys);
     if (metatable != NULL) edges[count++] = obj2gco(metatable);
     for (i = 0; i < keys->asize; i++) {
-      lu_byte tag = luaH_recordtag(view.arraydata, i);
-      if (tag & BIT_ISCOLLECTABLE)
+      if (sequence & LUA_TABLE_SPLIT_VALUES) {
+        TValue value = {0};
+        if (!luaH_readrecord(G(L), table, i, &value, sequence)) return 0;
+        if (iscollectable(&value)) edges[count++] = val_(&value).gc;
+      }
+      else if (luaH_recordtag(view.arraydata, i) & BIT_ISCOLLECTABLE)
         __atomic_load(&values[i].gc, &edges[count++], __ATOMIC_ACQUIRE);
     }
     if (!luaH_samelayout(table, sequence))

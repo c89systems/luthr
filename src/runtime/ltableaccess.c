@@ -274,6 +274,14 @@ int luaH_waitlayout (lua_State *L, Table *table) {
   return 1;
 }
 
+l_sinline void tracewrite (lua_State *L, Value *payload, lu_byte oldtag,
+                            const TValue *value) {
+  if (luaC_tracing(L)) {
+    if (oldtag & BIT_ISCOLLECTABLE) luaC_traceobject(L, payload->gc);
+    if (iscollectable(value)) luaC_traceobject(L, gcvalue(value));
+  }
+}
+
 /* No allocation, wait, callback or safepoint between row claim and release. */
 void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag,
                          const TValue *value) {
@@ -284,11 +292,32 @@ void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag
   }
   lua_assert(tagisempty(oldtag) || oldtag == value->tt_ ||
     (__atomic_load_n(&luaH_writer(G(L), payload)->sequence, __ATOMIC_RELAXED) & 1));
-  if (luaC_tracing(L)) {
-    if (oldtag & BIT_ISCOLLECTABLE) luaC_traceobject(L, payload->gc);
-    if (iscollectable(value)) luaC_traceobject(L, gcvalue(value));
-  }
+  tracewrite(L, payload, oldtag, value);
   __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
   if (oldtag != value->tt_) __atomic_store_n(tag, value->tt_, __ATOMIC_RELEASE);
+  luaC_barrierback(L, obj2gco(table), value);
+}
+
+void luaH_recordstore (lua_State *L, Table *table, unsigned index, lu_byte oldtag,
+                       const TValue *value) {
+  Value *payload = luaH_recordvalues(table) + index;
+  lu_byte newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
+  if (oldtag == newtag && !iscollectable(value)) {
+    __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
+    return;
+  }
+  tracewrite(L, payload, oldtag, value);
+  if (!ttisnil(value)) __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
+  if (oldtag != newtag) {
+    unsigned shift = (index + 1) * 8;
+    uintptr_t mask = cast(uintptr_t, 255) << shift;
+    uintptr_t tags = __atomic_load_n(&table->arraydata, __ATOMIC_RELAXED);
+    uintptr_t next;
+    lua_assert(__atomic_load_n(&luaH_writer(G(L), payload)->sequence,
+                               __ATOMIC_RELAXED) & 1);
+    do { next = (tags & ~mask) | (cast(uintptr_t, newtag) << shift); }
+    while (!__atomic_compare_exchange_n(&table->arraydata, &tags, next, 0,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  }
   luaC_barrierback(L, obj2gco(table), value);
 }

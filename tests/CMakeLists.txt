@@ -473,9 +473,10 @@ set_target_properties(table_writers_test PROPERTIES C_STANDARD 99)
 target_compile_options(table_writers_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(table_writers_test PRIVATE luthr_static)
 target_link_options(table_writers_test PRIVATE -Wl,--wrap=luaA_begin
-  -Wl,--wrap=luaH_elementstore -Wl,--undefined=luaH_elementstore -Wl,--wrap=luaQ_wait)
+  -Wl,--wrap=luaH_elementstore -Wl,--undefined=luaH_elementstore
+  -Wl,--wrap=luaH_recordstore -Wl,--wrap=luaQ_wait)
 foreach(collector IN ITEMS incremental generational)
-  foreach(kind IN ITEMS array hash array_graph hash_graph collision length)
+  foreach(kind IN ITEMS array hash array_graph hash_graph record record_graph collision length)
     add_test(NAME table_writers_${kind}_${collector}
       COMMAND table_writers_test ${collector} ${kind})
     set_tests_properties(table_writers_${kind}_${collector} PROPERTIES
