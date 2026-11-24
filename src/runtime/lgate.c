@@ -6,6 +6,7 @@
 #define LUA_CORE
 #include "lprefix.h"
 
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "laccess.h"
@@ -64,15 +65,21 @@ void luaX_initgate (LuaStackGate *gate, int dormant) {
   gate->head = NULL;
   gate->tail = &gate->head;
   gate->ready = 1;
+  gate->values = 0;
 }
 
 void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
   lua_assert((gate->word == 0 || gate->word == LUA_GATE_DORMANT) &&
-             gate->head == NULL &&
+             gate->head == NULL && gate->values == 0 &&
              gate->tail == &gate->head);
   gate->ready = 0;
+}
+
+void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
+  while (__atomic_load_n(&gate->values, __ATOMIC_SEQ_CST))
+    sched_yield();
 }
 
 l_sinline int trygate (LuaStackGate *gate, uintptr_t *expected,
@@ -128,6 +135,7 @@ static void reserve (lua_State *L, NativeStackContext *context,
     }
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
+  luaX_joinvalues(gate);
 }
 
 l_noret luaX_badrelease (void) {
@@ -146,7 +154,10 @@ carrierentry int luaX_tryreserve (lua_State *target) {
   NativeStackContext *context = luaE_resolvestack(thread);
   uintptr_t expected = 0;
   uintptr_t owner = cast(uintptr_t, context);
-  if (trygate(gate, &expected, owner, __ATOMIC_ACQUIRE)) return 1;
+  if (trygate(gate, &expected, owner, __ATOMIC_SEQ_CST)) {
+    luaX_joinvalues(gate);
+    return 1;
+  }
   if (expected == LUA_GATE_DORMANT &&
       __atomic_compare_exchange_n(&gate->word, &expected, owner | LUA_GATE_DORMANT,
                                   0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
@@ -285,6 +296,7 @@ l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
             (expected & LUA_GATE_WAITING);
   if (!__atomic_compare_exchange_n(&L->stack_gate.word, &expected, managed, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return 0;
+  luaX_joinvalues(&L->stack_gate);
   task->stack_offer = 0;
   execution->allocation_cache = &task->slot->allocation;
   execution->managed_depth = 1;
@@ -327,6 +339,7 @@ l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
         cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     uint64_t control = luaW_control(&G(L)->world);
+    luaX_joinvalues(&L->stack_gate);
     if (l_unlikely((control & (LUA_WORLD_REQUESTS | LUA_MARK_ACTIVE)) ||
         __atomic_load_n(&L->admission->storage_epoch, __ATOMIC_RELAXED) !=
           luaW_epoch(control)))
@@ -418,14 +431,25 @@ int luaX_tryworker (lua_State *L) {
   return 0;
 }
 
-static int attachedapi (lua_State *L, NativeStackContext *context) {
+l_sinline void pollattached (lua_State *L, NativeStackContext *context) {
   LuaApiRegion *region = context->api_region;
-  if (region == NULL) return 0;
-  if (region->state != L || luaX_boundcontext(L) != context) {
+  global_State *g = G(L);
+  uintptr_t gate = __atomic_load_n(&L->stack_gate.word, __ATOMIC_ACQUIRE);
+  uint64_t control;
+  if (l_unlikely(region->state != L || luaX_gateowner(gate) != context)) {
     fputs("Luthr API crossed an attached runtime activation\n", stderr);
     abort();
   }
-  return 1;
+  /* This activation already owns the stack. Only a pending request can
+  ** require publication or a handoff before another API operation. */
+  control = luaW_control(&g->world);
+  if (l_unlikely((gate & LUA_GATE_WAITING) ||
+                 (control & (LUA_WORLD_REQUESTS | LUA_MARK_ACTIVE)) ||
+                 __atomic_load_n(&g->barrier_ready, __ATOMIC_ACQUIRE))) {
+    luaX_pollrequests(L);
+    if (luaW_control(&g->world) & LUA_WORLD_SEAL_NURSERIES)
+      luaC_pollseal(L);
+  }
 }
 
 /* Enter the storage epoch before borrowing any table buffers. A grace
@@ -445,10 +469,8 @@ static void managestack (lua_State *L, NativeStackContext *context) {
 }
 
 l_sinline uintptr_t apienter (lua_State *L, NativeStackContext *context) {
-  if (attachedapi(L, context)) {
-    luaX_pollrequests(L);
-    if (l_unlikely(luaW_control(&G(L)->world) & LUA_WORLD_SEAL_NURSERIES))
-      luaC_pollseal(L);
+  if (context->api_region != NULL) {
+    pollattached(L, context);
     return 0;
   }
   lockstate(L, context);
@@ -500,7 +522,7 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
   if (context->api_region != NULL) {
     StkId func;
     const Proto *p;
-    apienter(L, context);
+    pollattached(L, context);
     p = scalarcallee(L, nargs, nresults, &func);
     if (p != NULL && luaD_tryscalarcall(L, func, p, nargs, nresults, context)) {
       adjustresults(L, nresults);
@@ -514,6 +536,7 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
     ** executing anything that needs a managed slot or table storage. */
     if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {
       int traced = 0;
+      luaX_joinvalues(&L->stack_gate);
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         StkId func;
         const Proto *p = scalarcallee(L, nargs, nresults, &func);
@@ -560,6 +583,14 @@ carrierentry uintptr_t luaX_valueenterslow (lua_State *L, int reserved) {
   return apienter(L, luaE_resolvestack(&thread_context));
 }
 
+uintptr_t luaX_reservevalues (lua_State *L) {
+  return luaX_valueenter(L, 1);
+}
+
+void luaX_releasevalues (lua_State *L, uintptr_t owner) {
+  luaX_valueleave(L, owner);
+}
+
 void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
   if (owner & LUA_VALUE_STACK) {
     lua_assert(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
@@ -569,6 +600,10 @@ void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {
+  if (owner == LUA_VALUE_BOUNDED) {
+    luaX_leavebounded(L);
+    return 0;
+  }
   if (owner & LUA_VALUE_STACK) {
     LuaThreadContext *thread = &thread_context;
     NativeStackContext *context = luaE_resolvestack(thread);

@@ -40,10 +40,12 @@ l_sinline void luaX_releasegate (lua_State *L, uintptr_t reservation) {
 }
 
 /* A stack-only token carries the obligations of this admission. */
-enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2 };
+enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2, LUA_VALUE_BOUNDED = 4 };
 
 LUAI_FUNC uintptr_t luaX_valueenterslow (lua_State *L, int reserved);
 LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
+LUAI_FUNC uintptr_t luaX_reservevalues (lua_State *L);
+LUAI_FUNC void luaX_releasevalues (lua_State *L, uintptr_t owner);
 
 /* Stack-only scopes can borrow stack slots and immutable payloads. Heap
 ** mutation, allocation, parking, and other stack reservations require
@@ -55,6 +57,7 @@ l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
         !__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
           expected | LUA_GATE_STACK, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
       return luaX_valueenterslow(L, 0);
+    luaX_joinvalues(&L->stack_gate);
     /* A stop sees this reservation or precedes the control-word check. */
     if (l_likely(!(luaW_control(&G(L)->world) &
                    (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE))))
@@ -64,9 +67,42 @@ l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
   return luaX_valueenterslow(L, 0);
 }
 
+l_sinline void luaX_leavebounded (lua_State *L) {
+  __atomic_store_n(&L->stack_gate.values, 0, __ATOMIC_RELEASE);
+}
+
+/* The two-sided claim uses sequentially consistent publication and checks.
+** Either the full owner or collector sees this scope, or this scope sees
+** its request and withdraws before reading the stack. Its release has no
+** waiters to notify and never changes the scheduler's slot offer. */
+l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
+  if (stackonly) {
+    LuaStackGate *gate = &L->stack_gate;
+    if (l_unlikely(__atomic_load_n(&gate->word, __ATOMIC_RELAXED) &
+                   ~LUA_GATE_OFFER_MASK))
+      return luaX_valueenterslow(L, 0);
+    if (l_likely(__atomic_exchange_n(&gate->values, 1, __ATOMIC_SEQ_CST) == 0)) {
+      if (l_likely((__atomic_load_n(&gate->word, __ATOMIC_SEQ_CST) &
+                    ~LUA_GATE_OFFER_MASK) == 0 &&
+                   !(luaW_control(&G(L)->world) &
+                     (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE | LUA_WORLD_STACK_ROOTS |
+                      LUA_WORLD_SEAL_NURSERIES))))
+        return LUA_VALUE_BOUNDED;
+      luaX_leavebounded(L);
+    }
+    return luaX_reservevalues(L);
+  }
+  return luaX_valueenterslow(L, 0);
+}
+
 l_sinline void luaX_valueleave (lua_State *L, uintptr_t owner) {
   if (owner == LUA_VALUE_STACK) luaX_releasegate(L, LUA_GATE_STACK);
   else if (owner != 0) luaX_valueleaveslow(L, owner);
+}
+
+l_sinline void luaX_leaveboundedvalue (lua_State *L, uintptr_t owner) {
+  if (l_likely(owner == LUA_VALUE_BOUNDED)) luaX_leavebounded(L);
+  else if (owner != 0) luaX_releasevalues(L, owner);
 }
 
 /* If managed capacity requires a new reservation, release the stack so the

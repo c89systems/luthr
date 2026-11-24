@@ -16,7 +16,7 @@
     }                                                                          \
   } while (0)
 
-enum { FIFO, RETIRE, WORLD_STOP, RENDEZVOUS, GROW };
+enum { FIFO, RETIRE, WORLD_STOP, RENDEZVOUS, GROW, BOUNDED };
 struct fixture {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
@@ -39,6 +39,19 @@ void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
                       LuaWaiter **);
 __typeof__(luaW_leave) __real_luaW_leave;
 __typeof__(luaW_enter) __real_luaW_enter;
+__typeof__(luaX_waitvalues) __real_luaX_waitvalues;
+
+void __wrap_luaX_waitvalues(LuaStackGate *gate) {
+  struct fixture *fixture = current;
+  if (fixture != NULL && fixture->mode == BOUNDED && role > 0 &&
+      gate == &fixture->state->stack_gate) {
+    require(pthread_mutex_lock(&fixture->mutex) == 0);
+    fixture->queued[role] = 1;
+    require(pthread_cond_broadcast(&fixture->changed) == 0);
+    require(pthread_mutex_unlock(&fixture->mutex) == 0);
+  }
+  __real_luaX_waitvalues(gate);
+}
 
 void __wrap_luaW_enter(lua_State *state) {
   struct fixture *fixture = current;
@@ -108,6 +121,49 @@ static void resume_owner(struct fixture *fixture) {
   fixture->resume = 1;
   require(pthread_cond_broadcast(&fixture->changed) == 0);
   require(pthread_mutex_unlock(&fixture->mutex) == 0);
+}
+
+static void *read_bounded(void *argument) {
+  lua_State *thread = argument;
+  role = 1;
+  require(lua_tointeger(thread, -1) == 42 && lua_gettop(thread) == 2);
+  return NULL;
+}
+
+static void *collect_bounded(void *argument) {
+  lua_State *parent = argument;
+  role = 2;
+  require(lua_gc(parent, LUA_GCCOLLECT) == 0);
+  return NULL;
+}
+
+static void bounded_handoff(lua_State *parent, struct fixture *fixture) {
+  lua_State *thread = lua_newthread(parent);
+  pthread_t contender;
+  uintptr_t owner;
+  fixture->state = thread;
+  lua_gc(parent, LUA_GCSTOP);
+  lua_pushliteral(thread, "retained after stack handoff");
+  owner = luaX_enterbounded(thread, 1);
+  require(owner == LUA_VALUE_BOUNDED);
+  require(pthread_create(&contender, NULL, read_bounded, thread) == 0);
+  wait_flag(fixture, &fixture->queued[1]);
+  setivalue(s2v(thread->top.p), 42);
+  thread->top.p++;
+  luaX_leaveboundedvalue(thread, owner);
+  require(pthread_join(contender, NULL) == 0);
+
+  owner = luaX_enterbounded(thread, 1);
+  require(owner == LUA_VALUE_BOUNDED);
+  require(pthread_create(&contender, NULL, collect_bounded, parent) == 0);
+  wait_flag(fixture, &fixture->queued[2]);
+  setobjs2s(thread, thread->top.p - 1, thread->top.p - 2);
+  setivalue(s2v(thread->top.p - 2), 43);
+  luaX_leaveboundedvalue(thread, owner);
+  require(pthread_join(contender, NULL) == 0);
+  const char *retained = lua_tostring(thread, 2);
+  require(lua_tointeger(thread, 1) == 43 && retained != NULL &&
+          strcmp(retained, "retained after stack handoff") == 0);
 }
 
 static void *invoke(void *argument) {
@@ -454,6 +510,9 @@ int main(int argc, char **argv) {
     world_stop(state, &fixture);
   } else if (strncmp(argv[1], "dormant_", 8) == 0) {
     dormant(state, &fixture);
+  } else if (strncmp(argv[1], "bounded_", 8) == 0) {
+    fixture.mode = BOUNDED;
+    bounded_handoff(state, &fixture);
   } else if (strncmp(argv[1], "rendezvous_", 11) == 0) {
     fixture.mode = RENDEZVOUS;
     rendezvous(state, &fixture);

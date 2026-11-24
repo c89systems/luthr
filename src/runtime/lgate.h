@@ -38,6 +38,7 @@ typedef struct LuaStackGate {
   struct LuaGateWaiter *head;
   struct LuaGateWaiter **tail;
   int ready;
+  unsigned values;  /* bounded API scope, with its own uncontended release */
 } LuaStackGate;
 
 l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
@@ -47,6 +48,15 @@ l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
 
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
+LUAI_FUNC void luaX_waitvalues (LuaStackGate *gate);
+
+/* A full claim is published before this join. A racing bounded claim must
+** observe the full claim or finish before the full owner reads the stack. */
+l_sinline void luaX_joinvalues (LuaStackGate *gate) {
+  if (l_unlikely(__atomic_load_n(&gate->values, __ATOMIC_SEQ_CST)))
+    luaX_waitvalues(gate);
+}
+
 LUAI_FUNC void luaX_lockstate (lua_State *L);
 LUAI_FUNC void luaX_unlockstate (lua_State *L);
 /* A rooted system worker must never park while borrowing managed capacity.

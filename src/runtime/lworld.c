@@ -280,7 +280,10 @@ l_sinline int rendezvousready (LuaWorld *world, int arming) {
          active) && (!arming || part->trace_armed != epoch)) return 0;
     /* A pre-arm owner settled its active debt when acknowledging, or
     ** sealed it in the withdrawn batch before releasing its admission. */
-    if (arming) luaM_publishwithdrawn(part->thread);
+    if (arming) {
+      luaX_joinvalues(&part->thread->stack_gate);
+      luaM_publishwithdrawn(part->thread);
+    }
     world->rendezvous_cursor = part->next;
   }
   return 1;
@@ -491,6 +494,7 @@ void luaW_stop (lua_State *L) {
     lua_assert(world->rendezvous_cursor == NULL);
     for (participant = world->participants; participant != NULL;
          participant = participant->next) {
+      luaX_joinvalues(&participant->thread->stack_gate);
       if (luaW_active(participant)) {
         if (world->rendezvous_cursor == NULL && participant != L->admission)
           world->rendezvous_cursor = participant;
