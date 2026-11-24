@@ -2643,7 +2643,7 @@ static void nursery_pacing(struct fixture *f) {
          "return row[32768]",
          0);
   nursery_wait(L, "nursery_ready");
-  require(nursery_bytes(L) == 128 * 1024);
+  require(nursery_bytes(L) >= 256 * 1024);
   require(lua_getglobal(L, "nursery_weak") == LUA_TTABLE);
   require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
   lua_pop(L, 2);

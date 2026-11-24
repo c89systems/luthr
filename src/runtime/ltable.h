@@ -291,7 +291,7 @@ LUAI_FUNC lu_mem luaH_size (const Table *owner, const Table *layout);
 /* A dead table and its buffers can be freed by a sweep worker if all are
 ** pooled. Returning those blocks cannot enter the host allocator. */
 LUAI_FUNC size_t luaH_pooledsize (Table *t);
-LUAI_FUNC void luaH_freeparts (lua_State *L, Table *t);
+LUAI_FUNC void luaH_freeparts (lua_State *L, Table *t, int private);
 LUAI_FUNC l_mem luaH_freepooled (lua_State *L, Table *t);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);

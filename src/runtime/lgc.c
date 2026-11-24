@@ -2068,7 +2068,7 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
     for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
          offset += stride) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-      luaH_freeparts(L, cast(Table *, block + 1));
+      luaH_freeparts(L, cast(Table *, block + 1), 0);
     }
   }
   work->page = NULL;

@@ -133,20 +133,9 @@ void luaC_freetaskroots (lua_State *L) {
 }
 
 static void taskresize (lua_State *L, l_mem change) {
-  size_t before = L->task_live_bytes - L->task_paced_bytes;
-  size_t after;
   lua_assert(change >= 0 || cast(size_t, -change) <= L->task_live_bytes);
   L->task_live_bytes += change;
-  if (L->task_paced_bytes > L->task_live_bytes)
-    L->task_paced_bytes = L->task_live_bytes;
-  after = L->task_live_bytes - L->task_paced_bytes;
-  /* Limit the storage a growing task can add to the shared budget at once.
-  ** A small local working set still collects without shared allocation debt. */
-  if (after > TASK_NURSERY_START) {
-    L->task_paced_bytes = L->task_live_bytes - TASK_NURSERY_START;
-    after = TASK_NURSERY_START;
-  }
-  luaM_privatebytes(L, cast(l_mem, after) - cast(l_mem, before));
+  luaM_privatebytes(L, change);
 }
 
 void luaC_taskresize (lua_State *L, Table *t, l_mem change) {
@@ -215,7 +204,8 @@ int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
     L->task_nursery_pending = 1;
     L->poll_remaining = 1;
   }
-  taskresize(L, cast(l_mem, bytes));
+  if (page) L->task_live_bytes += bytes;  /* already charged as private */
+  else taskresize(L, cast(l_mem, bytes));
   return 1;
 }
 
@@ -251,9 +241,8 @@ static void sealtask (lua_State *L, lua_State *thread) {
   unsigned i;
   if (!luaC_hastaskheap(thread)) return;
   luaC_noteyoung(g);
-  luaM_privatebytes(L, -cast(l_mem, thread->task_live_bytes -
-                                   thread->task_paced_bytes));
-  thread->task_live_bytes = thread->task_paced_bytes = 0;
+  luaM_privatebytes(L, -cast(l_mem, thread->task_live_bytes));
+  thread->task_live_bytes = 0;
   /* Arming can rotate the stamp during the transfer. A single stamp makes
   ** the whole cohort black in this trace or visible from its roots in the
   ** next one. A black parent must never hide a child with the old stamp. */
@@ -497,14 +486,15 @@ void luaC_taskbacking (lua_State *L, Table *table, size_t bytes) {
 static void pacenursery (lua_State *L, size_t live) {
   global_State *g = G(L);
   size_t dead = L->task_live_bytes - live;
-  /* Charge surviving storage before it can escape in bulk. Allocation since
-  ** this checkpoint belongs to the local budget until the next scan. */
-  luaM_privatebytes(L, -cast(l_mem, L->task_live_bytes - L->task_paced_bytes));
-  L->task_live_bytes = L->task_paced_bytes = live;
-  /* Private churn still drives weak references and finalizers on the shared
-  ** heap. Charge a fraction once per local collection, even at task exit. */
-  if (dead != 0 && gcrunning(g) && !luaC_tracing(L) && !luaC_sweeping(L))
-    luaP_spend(g, cast(l_mem, dead / 16 + 1));
+  lua_assert(L->task_old_bytes <= L->task_live_bytes);
+  size_t young = L->task_live_bytes - L->task_old_bytes;
+  /* The private heap governs its own live bytes. Charge a fraction of local
+  ** allocation or reclamation to keep shared weak references and finalizers
+  ** progressing even in programs which mostly use private objects. */
+  size_t work = young > dead ? young : dead;
+  L->task_live_bytes = live;
+  if (work != 0 && gcrunning(g) && !luaC_tracing(L) && !luaC_sweeping(L))
+    luaP_spend(g, cast(l_mem, work / 16 + 1));
 }
 
 /* Task-private headers never enter shared sweep. Return contiguous
@@ -525,7 +515,7 @@ l_sinline void freeset (lua_State *L, GCObject *o, int allocation_links) {
         Table *table = gco2t(o);
         lua_assert(luaC_tasktable(table) && luaA_lockowner(&table->access) == NULL);
         bytes += sizeof(*table) + table->inline_bytes;
-        if (!inlineonly) luaH_freeparts(L, table);
+        if (!inlineonly) luaH_freeparts(L, table, 1);
       }
       else {
         lua_assert(luaC_taskstring(o));
@@ -537,7 +527,7 @@ l_sinline void freeset (lua_State *L, GCObject *o, int allocation_links) {
       first = block;
       if (o == NULL || luaMP_page(cast(LuaAllocBlock *, o) - 1) != page) break;
     }
-    luaM_freeobjectbatch(L, page, first, last, count, bytes);
+    luaM_freeobjectbatch(L, page, first, last, count, bytes, 1);
   }
 }
 
@@ -551,7 +541,7 @@ static void discardtaskpages (lua_State *L, LuaAllocPage *page) {
         while (slots != 0) {
           unsigned index = word * 64 + cast_uint(__builtin_ctzll(slots));
           LuaAllocBlock *block = luaMP_slotblock(page, index);
-          luaH_freeparts(L, cast(Table *, block + 1));
+          luaH_freeparts(L, cast(Table *, block + 1), 1);
           slots &= slots - 1;
         }
       }
@@ -582,6 +572,7 @@ void luaC_endtask (lua_State *L) {
     luaC_traceobject(L, luaC_taskrootat(L, i));
   o = L->task_objects;
   pages = detachtaskpages(L);
+  pacenursery(L, 0);
   L->task_objects = NULL;
   L->task_old_objects = NULL;
   L->task_remembered = obj2gco(L);
@@ -591,7 +582,6 @@ void luaC_endtask (lua_State *L) {
   clearroots(L);
   L->task_nursery_bytes = 0;
   L->task_nursery_closed = 1;
-  pacenursery(L, 0);
   freeset(L, o, 1);
   discardtaskpages(L, pages);
   luaM_flushdebt(L);
@@ -878,9 +868,9 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
     bytes = L->task_live_bytes - reclaimed;
     if (scan >= NURSERY_TASK_FULL)
       prunetaskroots(L, scan == NURSERY_TASK_ROOTS || bytes == 0);
+    pacenursery(L, bytes);
     L->task_old_objects = L->task_objects;
     L->task_old_bytes = bytes;
-    pacenursery(L, bytes);
   }
   if (dead == NULL) return bytes;
   /* A later safepoint can widen top. Discard stale registers before freeing

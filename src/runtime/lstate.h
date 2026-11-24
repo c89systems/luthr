@@ -431,7 +431,6 @@ struct lua_State {
   uintptr_t task_root_inline[LUA_TASK_INLINE_ROOTS];
   size_t task_nursery_bytes;
   size_t task_live_bytes;
-  size_t task_paced_bytes;  /* bytes already charged to the shared budget */
   size_t task_nursery_limit;
   unsigned task_root_count;
   int task_nursery_closed;

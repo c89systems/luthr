@@ -71,11 +71,6 @@
 
 #define DEBT_BATCH 65536
 
-static void adddebt (global_State *g, l_mem change) {
-  __atomic_fetch_sub(&g->GCbytes, change, __ATOMIC_RELAXED);
-  __atomic_fetch_sub(&g->GCused, change, __ATOMIC_RELAXED);
-}
-
 static void accountassist (lua_State *L, l_mem change) {
   LuaWorld *world = &G(L)->world;
   uint64_t epoch;
@@ -175,25 +170,31 @@ void luaM_withdrawdebt (lua_State *L) {
   accountassist(L, local.batch.shared);
 }
 
-static void accountowned (lua_State *L, l_mem change, int exclusive) {
+static void accountowned (lua_State *L, l_mem change, int exclusive, int shared) {
   if (exclusive || change >= DEBT_BATCH || change <= -DEBT_BATCH) {
     luaM_flushdebt(L);
-    if (!exclusive) accountassist(L, change);
-    adddebt(G(L), change);
+    if (shared && !exclusive) accountassist(L, change);
+    __atomic_fetch_sub(&G(L)->GCbytes, change, __ATOMIC_RELAXED);
+    if (shared) __atomic_fetch_sub(&G(L)->GCused, change, __ATOMIC_RELAXED);
   }
   else {
     int32_t total = L->allocation_debt.batch.total + cast(int32_t, change);
-    int32_t shared = L->allocation_debt.batch.shared + cast(int32_t, change);
+    int32_t debt = L->allocation_debt.batch.shared;
+    if (shared) debt += cast(int32_t, change);
     L->allocation_debt.batch.total = total;
-    L->allocation_debt.batch.shared = shared;
+    L->allocation_debt.batch.shared = debt;
     if (total >= DEBT_BATCH || total <= -DEBT_BATCH ||
-        shared >= DEBT_BATCH || shared <= -DEBT_BATCH)
+        debt >= DEBT_BATCH || debt <= -DEBT_BATCH)
       luaM_flushdebt(L);
   }
 }
 
 static void account (lua_State *L, l_mem change) {
-  accountowned(L, change, !completestate(G(L)) || luaW_iscollector(L));
+  accountowned(L, change, !completestate(G(L)) || luaW_iscollector(L), 1);
+}
+
+static void accountprivate (lua_State *L, l_mem change) {
+  accountowned(L, change, luaW_iscollector(L), 0);
 }
 
 #define ALLOC_PAGE_MIN 1024
@@ -691,7 +692,7 @@ l_sinline void returnpooled (lua_State *L, LuaAllocPage *page,
 
 void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                           LuaAllocBlock *first, LuaAllocBlock *last,
-                          unsigned count, l_mem bytes) {
+                          unsigned count, l_mem bytes, int private) {
   lua_assert(count != 0 && bytes > 0);
   if (__atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE)) {
     lua_assert(page->used >= count && page->task_bytes >= cast_sizet(bytes));
@@ -701,14 +702,15 @@ void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
     page->local = first;
   }
   else returnpooled(L, page, first, last, count);
-  account(L, bytes);
+  if (private) accountprivate(L, bytes);
+  else account(L, bytes);
 }
 
 
 /*
 ** Free memory
 */
-void luaM_free_ (lua_State *L, void *block, size_t osize) {
+l_sinline void freememory (lua_State *L, void *block, size_t osize, int shared) {
   LuaAllocBlock *allocation;
   LuaAllocPage *page;
   uintptr_t header;
@@ -719,6 +721,7 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
   allocation = cast(LuaAllocBlock *, block) - 1;
   header = luaMP_header(allocation);
   retired = (header & LUA_BLOCK_RETIRED) != 0;
+  lua_assert(!retired || shared);
   page = luaMP_pageof(header);
   if (page != NULL) {
     if (header & LUA_BLOCK_TABLE)
@@ -742,7 +745,15 @@ void luaM_free_ (lua_State *L, void *block, size_t osize) {
       if (L->reclaim_credit >= DEBT_BATCH) luaM_flushdebt(L);
     }
   }
-  else accountowned(L, cast(l_mem, osize), exclusive);
+  else accountowned(L, cast(l_mem, osize), exclusive, shared);
+}
+
+void luaM_free_ (lua_State *L, void *block, size_t osize) {
+  freememory(L, block, osize, 1);
+}
+
+void luaM_freeprivate_ (lua_State *L, void *block, size_t osize) {
+  freememory(L, block, osize, 0);
 }
 
 void luaM_creditretired (lua_State *L, l_mem bytes) {
@@ -923,7 +934,7 @@ void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page) {
   size_t bytes = page->task_bytes;
   lua_assert(page->task_private);
   callfrealloc(L, page, page->bytes, 0);
-  if (bytes != 0) account(L, cast(l_mem, bytes));
+  if (bytes != 0) accountprivate(L, cast(l_mem, bytes));
 }
 
 l_sinline int taskpageavailable (const LuaAllocPage *page) {
@@ -1009,7 +1020,7 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
     L->task_young_pages = page;
   }
   page->task_bytes += size;
-  account(L, -cast(l_mem, size));
+  accountprivate(L, -cast(l_mem, size));
   return block + 1;
 }
 

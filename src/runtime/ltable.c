@@ -428,9 +428,14 @@ static int separate (const Table *owner, const void *base) {
   return cast(uintptr_t, base) - cast(uintptr_t, owner + 1) >= owner->inline_bytes;
 }
 
-static void freehash (lua_State *L, Table *t, Node *nodes) {
+static void freepart (lua_State *L, void *part, size_t bytes, int private) {
+  if (private) luaM_freeprivate_(L, part, bytes);
+  else luaM_free_(L, part, bytes);
+}
+
+static void freehash (lua_State *L, Table *t, Node *nodes, int private) {
   if (luaH_nodesize(nodes) != 0 && separate(t, hashbase(nodes)))
-    luaM_freemem(L, hashbase(nodes), sizehash(nodes));
+    freepart(L, hashbase(nodes), sizehash(nodes), private);
 }
 
 
@@ -819,7 +824,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   newt.asize = 0;
   if (l_unlikely(newarray == NULL && newasize > 0)) {  /* allocation failed? */
     if (retirement != NULL) luaM_free(L, retirement);
-    freehash(L, &newt, newt.node);
+    freehash(L, &newt, newt.node, 0);
     luaR_poproot(L, &image);
     luaM_error(L);  /* raise error (with array unchanged) */
   }
@@ -907,13 +912,13 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     part->gate = 0;
     part->waiters = NULL;
     if (pthread_cond_init(&part->changed, NULL) != 0) {
-      freehash(L, table, part->nodes);
+      freehash(L, table, part->nodes, 0);
       break;
     }
   }
   if (i != LUA_HASH_PARTS) {
     destroyparts(directory, i);
-    while (i != 0) freehash(L, table, directory->parts[--i].nodes);
+    while (i != 0) freehash(L, table, directory->parts[--i].nodes, 0);
     luaM_free(L, directory);
     luaM_free(L, retirement);
     luaM_error(L);
@@ -1118,7 +1123,7 @@ l_mem luaH_freepooled (lua_State *L, Table *t) {
   size_t header = sizeof(*t) + t->inline_bytes;
   lua_assert(luaMP_page(cast(LuaAllocBlock *, t) - 1) != NULL);
   if (size == 0) return 0;
-  if (size != header) luaH_freeparts(L, t);
+  if (size != header) luaH_freeparts(L, t, 0);
   luaM_freemem(L, t, header);
   return cast(l_mem, size);
 }
@@ -1140,21 +1145,21 @@ void luaH_retire (lua_State *L, Table *t) {
   luaM_retire_(L, t, sizeof(*t) + t->inline_bytes);
 }
 
-void luaH_freeparts (lua_State *L, Table *t) {
+void luaH_freeparts (lua_State *L, Table *t, int private) {
   unsigned i, parts = luaH_hashparts(t);
-  for (i = 0; i < parts; ++i) freehash(L, t, luaH_hashnodes(t, i));
+  for (i = 0; i < parts; ++i) freehash(L, t, luaH_hashnodes(t, i), private);
   if (parts > 1) {
     LuaHashDirectory *directory = luaH_hashdir(t->node);
     destroyparts(directory, parts);
-    luaM_free(L, directory);
+    freepart(L, directory, sizeof(*directory), private);
   }
   if (t->asize != 0 && separate(t, luaH_array(t) - t->asize))
-    luaM_freemem(L, luaH_array(t) - t->asize, concretesize(t->asize));
+    freepart(L, luaH_array(t) - t->asize, concretesize(t->asize), private);
 }
 
 void luaH_free (lua_State *L, Table *t) {
   lua_assert(luaA_lockowner(&t->access) == NULL);
-  luaH_freeparts(L, t);
+  luaH_freeparts(L, t, 0);
   luaM_freemem(L, t, sizeof(*t) + t->inline_bytes);
 }
 

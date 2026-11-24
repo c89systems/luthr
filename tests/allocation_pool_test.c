@@ -297,7 +297,7 @@ static void return_batch(struct return_wave *wave) {
       last = next;
     }
     luaM_freeobjectbatch(wave->state, page, first, last, end - start,
-                         (end - start) * BYTES);
+                         (end - start) * BYTES, 0);
     start = end;
   }
 }

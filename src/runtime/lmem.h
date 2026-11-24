@@ -120,6 +120,7 @@ LUAI_FUNC void *luaM_realloc_ (lua_State *L, void *block, size_t oldsize,
 LUAI_FUNC void *luaM_saferealloc_ (lua_State *L, void *block, size_t oldsize,
                                                               size_t size);
 LUAI_FUNC void luaM_free_ (lua_State *L, void *block, size_t osize);
+LUAI_FUNC void luaM_freeprivate_ (lua_State *L, void *block, size_t osize);
 LUAI_FUNC void *luaM_growaux_ (lua_State *L, void *block, int nelems,
                                int *size, unsigned size_elem, int limit,
                                const char *what);

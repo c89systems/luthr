@@ -407,7 +407,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   memset(L->task_alloc_pages, 0, sizeof(L->task_alloc_pages));
   L->task_page_bytes = 0;
   L->task_nursery_bytes = L->task_nursery_limit = 0;
-  L->task_live_bytes = L->task_paced_bytes = 0;
+  L->task_live_bytes = 0;
   L->task_root_count = 0;
   L->task_roots = L->task_root_inline;
   L->task_root_index = L->task_root_inline_index;
