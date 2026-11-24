@@ -993,19 +993,22 @@ static void pushclosure (lua_State *L, Proto *p, LClosure *enclosing, StkId base
 ** shadow is needed only for operands/results of the operation in flight; the
 ** cell itself is traced separately. Decode on root publication, never dispatch.
 ** A C frame can borrow caller slots, so its complete live stack stays rooted. */
-int luaV_shadowroot (lua_State *L, StkId slot) {
-  CallInfo *ci;
+int luaV_shadowroot (CallInfo **frame, StkId slot, StkId stacktop) {
+  CallInfo *ci = *frame;
   Instruction i;
   OpCode op;
   int reg, a, b, c, top;
-  for (ci = L->ci; ci != NULL; ci = ci->previous) {
-    if (slot < ci->func.p) continue;
+  /* Later slots in the scan are lower, so they cannot need a frame
+  ** whose function is above this slot. */
+  while (ci != NULL && slot < ci->func.p) ci = ci->previous;
+  *frame = ci;
+  if (ci != NULL) {
     if (!isLua(ci) || slot == ci->func.p) return 1;
     if (ci->u.l.rootpc == NULL) return 0;
     i = *ci->u.l.rootpc;
     op = GET_OPCODE(i);
     reg = cast_int(slot - (ci->func.p + 1));
-    top = cast_int(L->top.p - (ci->func.p + 1));
+    top = cast_int(stacktop - (ci->func.p + 1));
     a = GETARG_A(i);
     /* These formats do not have B/C fields. */
     b = getarg(i, POS_B, SIZE_B);

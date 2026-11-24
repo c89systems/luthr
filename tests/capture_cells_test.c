@@ -198,6 +198,34 @@ static void run(lua_State *state, const char *source) {
   }
 }
 
+static int collect_shared_stack(lua_State *state) {
+  unsigned shared = 0;
+  luaX_lockstate(state);
+  luaA_sharevalue(state, s2v(state->top.p - 1));
+  for (UpVal *cell = state->openupval; cell != NULL; cell = cell->open.next)
+    if (!luaF_localupval(state, cell))
+      ++shared;
+  luaX_unlockstate(state);
+  require(shared >= 64);
+  lua_gc(state, LUA_GCCOLLECT);
+  return 0;
+}
+
+static void deep_snapshot(lua_State *state) {
+  lua_pushcfunction(state, collect_shared_stack);
+  lua_setglobal(state, "collect_shared_stack");
+  run(state,
+      "local closures = {}; "
+      "local function walk(i) "
+      "  local value = {i}; "
+      "  if i % 2 == 0 then closures[i+1] = function() return value end end; "
+      "  if i == 0 then collect_shared_stack(closures) else walk(i-1) end; "
+      "  assert(value[1] == i); "
+      "end; "
+      "walk(128); "
+      "for i = 0,128,2 do assert(closures[i+1]()[1] == i) end");
+}
+
 /* Deliberately retain the owner's execution gate. A shared capture must make
  * progress without a reservation on this unrelated execution resource. */
 static int hold_owner(lua_State *state) {
@@ -837,7 +865,11 @@ int main(int argc, char **argv) {
     foreign_shadow(state);
   } else if (strcmp(argv[1], "semantics") == 0)
     run(state, semantics);
-  else {
+  else if (strncmp(argv[1], "deep_snapshot_", 14) == 0) {
+    if (strcmp(argv[1], "deep_snapshot_generational") == 0)
+      lua_gc(state, LUA_GCGEN);
+    deep_snapshot(state);
+  } else {
     require(strcmp(argv[1], "incremental") == 0 ||
             strcmp(argv[1], "generational") == 0);
     if (strcmp(argv[1], "generational") == 0)

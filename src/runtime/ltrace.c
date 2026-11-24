@@ -181,7 +181,9 @@ unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
   }
   if (thread->stack.p != NULL) {
     /* Open private bindings live on the stack. For shared bindings, a
-    ** register shadow is a root only while an operation can still use it. */
+    ** register shadow is a root only while an operation can still use it.
+    ** Stack slots, open bindings, and the frame search descend together. */
+    CallInfo *frame = thread->ci;
     upvalue = thread->openupval;
     for (slot = thread->top.p; slot > thread->stack.p;) {
       ptrdiff_t level = savestack(thread, --slot);
@@ -189,7 +191,7 @@ unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
         upvalue = upvalue->open.next;
       if (upvalue == NULL || upvalue->level != level ||
           luaF_localupval(thread, upvalue) ||
-          luaV_shadowroot(thread, slot))
+          luaV_shadowroot(&frame, slot, thread->top.p))
         luaC_tracevalue(L, s2v(slot));
     }
   }

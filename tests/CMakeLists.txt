@@ -120,6 +120,7 @@ target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
 foreach(case IN ITEMS independent readers access uncaptured operands semantics pair_boundaries incremental generational
     private_incremental private_generational mixed_incremental mixed_generational
+    deep_snapshot_incremental deep_snapshot_generational
     shadow_incremental shadow_generational lowered_source_incremental lowered_source_generational
     lowered_binary_incremental lowered_binary_generational lowered_fixed_incremental lowered_fixed_generational)
   add_test(NAME capture_cells_${case} COMMAND capture_cells_test ${case})
