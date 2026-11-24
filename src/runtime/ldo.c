@@ -699,6 +699,11 @@ l_sinline void moveresults (lua_State *L, StkId res, int nres,
 }
 
 
+l_sinline void checkreturn (lua_State *L) {
+  if (l_unlikely(luaTK_hasstops(L))) luaTK_deliverstop(L);
+  if (l_unlikely(L->policy != NULL)) luaCP_checklimit(L);
+}
+
 /*
 ** Finishes a function call: calls hook if necessary, moves current
 ** number of results to proper place, and returns to previous call
@@ -717,8 +722,7 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
   lua_assert(!(ci->callstatus &
         (CIST_HOOKED | CIST_YPCALL | CIST_FIN | CIST_CLSRET)));
   L->ci = ci->previous;  /* back to caller (after closing variables) */
-  luaTK_checkstop(L);
-  luaCP_checklimit(L);
+  checkreturn(L);
 }
 
 
@@ -768,10 +772,10 @@ static int __attribute__((noinline)) callCwithscope (lua_State *L, StkId func,
   return n;
 }
 
-/* Both regular and tail calls use the same result completion. Keep the
-** exceptional ownership record out of the common native activation. */
-static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
-                         unsigned status, lua_CFunction f, int managed) {
+/* Opaque and managed C frames share the same ABI and result completion. */
+int luaD_precallC (lua_State *L, StkId func,
+                     unsigned status, lua_CFunction f, int managed) {
+  CallInfo *ci;
   int n;
 #if !defined(HARDSTACKTESTS)
   NativeStackContext *context = managed ? NULL : luaW_trynativeframe(L, func, status);
@@ -783,7 +787,16 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
 #endif
     n = callCwithscope(L, func, status, f, managed);
   api_checknelems(L, n);
-  luaD_poscall(L, L->ci, n);
+  ci = L->ci;
+  /* The frame can have moved or acquired cleanup during the call. Use the
+  ** live frame after reentry, with the full return path for hooks and captures. */
+  if (ci->callstatus == (CIST_C | (1 + 1)) && L->openupval == NULL &&
+      gethookmask(L) == 0) {
+    moveresults(L, ci->func.p, n, 1 + 1);
+    L->ci = ci->previous;
+    checkreturn(L);
+  }
+  else luaD_poscall(L, ci, n);
   return n;
 }
 
@@ -885,7 +898,7 @@ int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
 
 void luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
   lua_assert(checktag(s2v(func), LUA_VBCF));
-  precallC(L, func, cast_uint(wanted + 1), fvalue(s2v(func)), 1);
+  luaD_precallC(L, func, cast_uint(wanted + 1), fvalue(s2v(func)), 1);
 }
 
 l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
@@ -898,7 +911,7 @@ l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
       return n;
     }
   }
-  return precallC(L, func, status, fvalue(s2v(func)), 1);
+  return luaD_precallC(L, func, status, fvalue(s2v(func)), 1);
 }
 
 /*
@@ -916,10 +929,10 @@ int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
   switch (tag) {
     case LUA_VCCL: {  /* C closure */
       CClosure *closure = clCvalue(s2v(func));
-      return precallC(L, func, status, closure->f, closure->managed);
+      return luaD_precallC(L, func, status, closure->f, closure->managed);
     }
     case LUA_VLCF:
-      return precallC(L, func, status, fvalue(s2v(func)), 0);
+      return luaD_precallC(L, func, status, fvalue(s2v(func)), 0);
     case LUA_VMCF:
       return precallmanaged(L, func, status);
     case LUA_VLCL: {  /* Lua function */
@@ -970,11 +983,11 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
   switch (tag) {
     case LUA_VCCL: {  /* C closure */
       CClosure *closure = clCvalue(s2v(func));
-      precallC(L, func, status, closure->f, closure->managed);
+      luaD_precallC(L, func, status, closure->f, closure->managed);
       return NULL;
     }
     case LUA_VLCF:
-      precallC(L, func, status, fvalue(s2v(func)), 0);
+      luaD_precallC(L, func, status, fvalue(s2v(func)), 0);
       return NULL;
     case LUA_VMCF:
       precallmanaged(L, func, status);

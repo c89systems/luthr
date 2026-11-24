@@ -477,6 +477,11 @@
           }
         }
 #endif
+        if (checktag(s2v(ra), LUA_VLCF)) {
+          luaD_precallC(L, ra, GETARG_C(i), fvalue(s2v(ra)), 0);
+          updatetrap(ci);
+          vmbreak;
+        }
         if ((newci = luaD_precall(L, ra, nresults)) == NULL)
           updatetrap(ci);  /* C call; nothing else to be done */
         else {  /* Lua call: run function in this same C frame */

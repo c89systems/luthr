@@ -131,6 +131,8 @@ LUAI_FUNC void luaW_finishnativeframe (lua_State *L, NativeStackContext *context
 LUAI_FUNC int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
                                               int narg1, int delta);
 LUAI_FUNC CallInfo *luaD_precall (lua_State *L, StkId func, int nResults);
+LUAI_FUNC int luaD_precallC (lua_State *L, StkId func, unsigned status,
+                             lua_CFunction f, int managed);
 /* A leaf probe cannot transfer control. Failure leaves the stack intact. */
 LUAI_FUNC int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted);
 LUAI_FUNC void luaD_callleaffallback (lua_State *L, StkId func, int wanted);
