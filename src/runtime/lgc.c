@@ -807,13 +807,16 @@ static int traversearray (LuaTraceWork *work, Table *h) {
   int marked = 0;  /* true if some object is marked in this traversal */
   unsigned p, parts = luaH_hashparts(h);
   for (p = 0; p < parts; p++) {
-    Value *array = luaH_arraypart(h, p);
-    unsigned i, asize = luaH_arraycapacity(array);
-    for (i = 0; i < asize; i++) {
-      GCObject *o = gcvalarr(array, i);
-      if (o != NULL && iswhite(work->global, o)) {
-        marked = 1;
-        markwork(work, o);
+    unsigned block;
+    Value *array;
+    for (block = 0; (array = luaH_arrayblock(h, p, block)) != NULL; ++block) {
+      unsigned i, asize = luaH_arraycapacity(array);
+      for (i = 0; i < asize; i++) {
+        GCObject *o = gcvalarr(array, i);
+        if (o != NULL && iswhite(work->global, o)) {
+          marked = 1;
+          markwork(work, o);
+        }
       }
     }
   }

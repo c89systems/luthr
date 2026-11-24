@@ -52,7 +52,8 @@ static int cursorvalid (const LuaHashCursor *cursor) {
 ** can exhaust the scan budget and use the ordinary owned traversal. */
 static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
                          Value *array,
-                         unsigned index, unsigned size, uint64_t layout,
+                         unsigned index, unsigned size, unsigned start,
+                         uint64_t layout,
                          unsigned *budget, const LuaHashCursor *cursor) {
   unsigned count = size - index < *budget ? size - index : *budget;
   unsigned end = index + count;
@@ -66,7 +67,7 @@ static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
         !luaH_samelayout(t, layout))
       return -1;
     setivalue(key, cursor == NULL ? cast(lua_Integer, index) + 1 :
-                         luaH_indexfrompart(cursor->partition, index + 1));
+                         luaH_indexfrompart(cursor->partition, start + index + 1));
     return emitnext(L, key, result, &value);
   }
   *budget -= count;
@@ -78,14 +79,18 @@ static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
                          unsigned *budget) {
   unsigned size = luaH_nodesize(cursor->nodes);
   unsigned index = cursor->index;
-  unsigned capacity = luaH_arraycapacity(cursor->array);
+  unsigned capacity = luaH_partcapacity(cursor->array);
   unsigned count, end;
   uint64_t rows = cursor->part == NULL ? layout : 0;
-  if (index < capacity) {
-    int more = nextarrayview(L, t, key, result, cursor->array, index,
-                             capacity, layout, budget, cursor);
+  while (index < capacity) {
+    unsigned offset = index;
+    Value *array = luaH_partslot(cursor->array, &offset);
+    unsigned length = luaH_arraycapacity(array);
+    unsigned start = index - offset;
+    int more = nextarrayview(L, t, key, result, array, offset, length,
+                             start, layout, budget, cursor);
     if (more != 0) return more;
-    index = capacity;
+    index = start + length;
   }
   index -= capacity;
   count = size - index < *budget ? size - index : *budget;
@@ -129,7 +134,7 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
   cursor.nodes = image;
   if (index != 0 || ttisnil(key)) {
     if (index < size) {
-      int more = nextarrayview(L, t, key, result, array, index, size, layout,
+      int more = nextarrayview(L, t, key, result, array, index, size, 0, layout,
                                &budget, NULL);
       if (more != 0) return more;
     }

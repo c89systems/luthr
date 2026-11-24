@@ -184,11 +184,15 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   for (i = directory != NULL ? 1u : 0u; i < parts; ++i) {
     const LuaHashPart *part = directory != NULL ? luaH_part(directory, i) : NULL;
     if (i != 0) {
-      Value *array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
-      view.arraydata = cast(uintptr_t, array);
+      const LuaPartArray *array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
+      unsigned block, count = luaH_partblocks(luaH_partcapacity(array));
       view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-      if (!scanpart(L, work, table, &view, 0, luaH_arraycapacity(array),
-                    0, part, young_edges)) return 0;
+      for (block = 0; block < count; ++block) {
+        Value *slots = array->blocks[block];
+        view.arraydata = cast(uintptr_t, slots);
+        if (!scanpart(L, work, table, &view, 0, luaH_arraycapacity(slots),
+                      0, part, young_edges)) return 0;
+      }
     }
     if (!scanpart(L, work, table, &view, 0, luaH_nodesize(view.node), 1,
                   part, young_edges)) return 0;

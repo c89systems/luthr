@@ -99,11 +99,20 @@ enum {
   LUA_HASH_WRITING = 1,
   LUA_HASH_WAITING = 2
 };
+/* Growth appends blocks. A retained directory keeps its original bound,
+** and every published block stays at the same address until table death. */
+typedef struct LuaPartArray {
+  unsigned size;
+  Value *blocks[];
+} LuaPartArray;
+
 typedef struct LuaHashPart {
   Node *nodes;
-  Value *array;  /* independently sized positive integer slots */
+  LuaPartArray *array;
   uint64_t version;  /* odd during structural or split-value changes */
   unsigned gate;
+  unsigned live;  /* occupied array slots, under partition or layout ownership */
+  unsigned firsthashindex;  /* lower bound on the array indices in the hash */
   pthread_cond_t changed;
   struct LuaWaiter *waiters;  /* address-sharded hash wait mutex */
 } LuaHashPart;
@@ -119,7 +128,7 @@ enum { LUA_NEXT_PROBE_LIMIT = 128 };
 
 typedef struct LuaHashCursor {
   Node *nodes;
-  Value *array;
+  const LuaPartArray *array;
   const LuaHashPart *part;
   uint64_t version;
   unsigned partition, index;
@@ -233,12 +242,44 @@ l_sinline unsigned luaH_arraycapacity (const Value *array) {
   return array != NULL ? arrayheader(array)->size : 0;
 }
 
-/* Part zero is the original dense prefix. A partitioned table never moves
-** an index between that prefix and secondary parts. */
-l_sinline Value *luaH_arraypart (const Table *table, unsigned part) {
-  if (part == 0) return luaH_array(table);
+l_sinline const LuaPartArray *luaH_partarray (const Table *table, unsigned part) {
   return __atomic_load_n(&luaH_part(luaH_hashdir(table->node), part)->array,
                          __ATOMIC_ACQUIRE);
+}
+
+l_sinline unsigned luaH_partcapacity (const LuaPartArray *array) {
+  return array != NULL ? array->size : 0;
+}
+
+/* Blocks cover [0, 1), [1, 2), [2, 4), and so on. Use the high set bit
+** of the zero-based index to select a block and subtract its start. */
+l_sinline unsigned luaH_partblock (unsigned index) {
+  return index != 0 ? l_numbits(unsigned) - __builtin_clz(index) : 0;
+}
+
+l_sinline unsigned luaH_partblockstart (unsigned block) {
+  return block != 0 ? 1u << (block - 1) : 0;
+}
+
+l_sinline unsigned luaH_partblocks (unsigned capacity) {
+  return capacity != 0 ? luaH_partblock(capacity - 1) + 1 : 0;
+}
+
+l_sinline Value *luaH_partslot (const LuaPartArray *array, unsigned *index) {
+  unsigned block = luaH_partblock(*index);
+  lua_assert(*index < array->size);
+  *index -= luaH_partblockstart(block);
+  return array->blocks[block];
+}
+
+/* Part zero remains the original flat prefix. */
+l_sinline Value *luaH_arrayblock (const Table *table, unsigned part,
+                                  unsigned block) {
+  const LuaPartArray *array;
+  if (part == 0) return block == 0 ? luaH_array(table) : NULL;
+  array = luaH_partarray(table, part);
+  return block < luaH_partblocks(luaH_partcapacity(array)) ? array->blocks[block]
+                                                           : NULL;
 }
 
 /* Computes the address of the tag for the abstract C-index 'k' */

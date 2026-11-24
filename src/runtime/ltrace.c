@@ -100,8 +100,10 @@ void luaC_traceview (lua_State *L, const Table *view) {
   for (p = 0; p < parts; ++p) {
     Node *nodes = luaH_hashnodes(view, p), *end = nodes + luaH_nodesize(nodes);
     if (p != 0) {
-      Value *array = luaH_arraypart(view, p);
-      traceviewarray(L, array, 0, luaH_arraycapacity(array));
+      unsigned block;
+      Value *array;
+      for (block = 0; (array = luaH_arrayblock(view, p, block)) != NULL; ++block)
+        traceviewarray(L, array, 0, luaH_arraycapacity(array));
     }
     for (; nodes < end; ++nodes) {
       if (!isempty(gval(nodes))) {
@@ -341,12 +343,22 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   for (p = 0; p < parts; ++p) {
     Node *node = luaH_hashnodes(table, p), *end = node + luaH_nodesize(node);
     if (keys == NULL && (pending & 1)) {
-      Value *array = luaH_arraypart(table, p);
-      unsigned size = luaH_arraycapacity(array);
-      for (i = 0; i < size; i++) {
-        lu_byte *tag = arraytag(array, i);
-        if ((*tag & BIT_ISCOLLECTABLE) && weakdead(L, arrayval(array, i)->gc))
-          __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
+      unsigned block, removed = 0;
+      Value *array;
+      for (block = 0; (array = luaH_arrayblock(table, p, block)) != NULL; ++block) {
+        unsigned size = luaH_arraycapacity(array);
+        for (i = 0; i < size; i++) {
+          lu_byte *tag = arraytag(array, i);
+          if ((*tag & BIT_ISCOLLECTABLE) && weakdead(L, arrayval(array, i)->gc)) {
+            __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
+            removed++;
+          }
+        }
+      }
+      if (p != 0 && removed != 0) {
+        LuaHashPart *part = luaH_part(luaH_hashdir(table->node), p);
+        lua_assert(part->live >= removed);
+        part->live -= removed;
       }
     }
     for (; node < end; ++node) {

@@ -164,6 +164,8 @@ static void *change_metatable(void *unused) {
 
 static void *grow_partition(void *unused) {
   lua_Integer key = (lua_Integer)1 << 40;
+  const Value *first_block = NULL;
+  const LuaPartArray *array;
   unsigned inserted = 0;
   (void)unused;
   /* Update and grow sparse positive keys while another partition is held. */
@@ -185,8 +187,13 @@ static void *grow_partition(void *unused) {
   for (unsigned i = 1; i <= 512; ++i) {
     lua_Integer index = luaH_indexfrompart(probe.part, i);
     put(probe.second, index, i);
+    array = luaH_partarray(probe.table, probe.part);
+    if (array != NULL && first_block == NULL)
+      first_block = array->blocks[0];
   }
-  require(luaH_arraycapacity(luaH_arraypart(probe.table, probe.part)) >= 256);
+  array = luaH_partarray(probe.table, probe.part);
+  require(luaH_partcapacity(array) >= 256);
+  require(first_block != NULL && array->blocks[0] == first_block);
   for (unsigned i = 1; i <= 512; ++i) {
     lua_Integer index = luaH_indexfrompart(probe.part, i);
     check(probe.second, index, i);
@@ -236,8 +243,16 @@ static void check_dense_parts(lua_State *L) {
   require(luaH_arrayslots(probe.table) == capacity);
 }
 
+static void *append_dense_slot(void *state) {
+  lua_State *L = state;
+  lua_pushinteger(L, 43);
+  lua_rawseti(L, -2, 3);
+  return NULL;
+}
+
 static void check_dense_allocation_failure(lua_State *L) {
   Table *table;
+  Node *nodes;
   lua_Integer hash_key = -1, sparse = LUA_MAXINTEGER;
   lua_settop(L, 0);
   lua_createtable(L, 0, 256);
@@ -245,8 +260,7 @@ static void check_dense_allocation_failure(lua_State *L) {
   lua_pushvalue(L, 1);
   lua_xmove(L, probe.second, 1);
   lua_pop(probe.second, 1);
-  /* Seed other partitions so the first can force a mixed resize from one
-   * hash entry when it first receives a positive array index. */
+  /* Give partition one a full hash while leaving its array empty. */
   for (unsigned i = 0; i <= 256; ++i) {
     while (partition(sparse) == 1)
       --sparse;
@@ -256,15 +270,42 @@ static void check_dense_allocation_failure(lua_State *L) {
   while (partition(hash_key) != 1)
     --hash_key;
   put(L, hash_key, 31);
+  nodes = luaH_hashnodes(table, 1);
   reject(L, 1, 2);
   require(luaH_arrayslots(table) == 0);
   check(L, hash_key, 31);
   put(L, 1, 42);
   check(L, 1, 42);
+  require(luaH_hashnodes(table, 1) == nodes);
   require(luaH_arrayslots(table) == 1);
   require(lua_rawlen(L, 1) == 1);
   check(L, hash_key, 31);
   check(L, sparse + 1, 256);
+  {
+    const LuaPartArray *array = luaH_partarray(table, 1);
+    const LuaPartArray *grown;
+    pthread_t writer;
+    /* Growing from one to four slots allocates two blocks. Fail the last
+     * allocation after the first block and spare hash are prepared. */
+    reject(L, 3, 4);
+    require(luaH_partarray(table, 1) == array);
+    require(luaH_arrayslots(table) == 1);
+    check(L, 1, 42);
+    check(L, hash_key, 31);
+    lua_pushvalue(L, 1);
+    lua_xmove(L, probe.second, 1);
+    lua_lock(L);
+    array = luaH_partarray(table, 1);
+    require(pthread_create(&writer, NULL, append_dense_slot, probe.second) ==
+            0);
+    require(pthread_join(writer, NULL) == 0);
+    grown = luaH_partarray(table, 1);
+    require(grown != array && grown->size == 4 && array->size == 1);
+    require(grown->blocks[0] == array->blocks[0]);
+    lua_unlock(L);
+    lua_pop(probe.second, 1);
+    check(L, 3, 43);
+  }
   /* A constructor hook can make SETLIST target this published receiver. */
   lua_pushvalue(L, 1);
   lua_pushinteger(L, 92);

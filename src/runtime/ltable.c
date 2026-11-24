@@ -384,7 +384,7 @@ static unsigned findindex (lua_State *L, Table *t, TValue *key,
     unsigned capacity = 0;
     if (luaH_hashdir(t->node) != NULL) *part = hashpart(key);
     if (*part != 0) {
-      capacity = luaH_arraycapacity(luaH_arraypart(t, *part));
+      capacity = luaH_partcapacity(luaH_partarray(t, *part));
       if (ttisinteger(key)) {
         i = partarrayindex(ivalue(key));
         if (i != 0 && i <= capacity) return asize + i;
@@ -417,15 +417,20 @@ static int rawnext (lua_State *L, Table *t, StkId key) {
   for (; part < parts; part++, i = 0) {
     Node *nodes = luaH_hashnodes(t, part);
     if (part != 0) {
-      Value *array = luaH_arraypart(t, part);
-      unsigned capacity = luaH_arraycapacity(array);
-      for (; i < capacity; ++i) {
-        lu_byte tag = *arraytag(array, i);
-        if (!tagisempty(tag)) {
-          setivalue(s2v(key), luaH_indexfrompart(part, i + 1));
-          s2v(key + 1)->tt_ = tag;
-          s2v(key + 1)->value_ = *arrayval(array, i);
-          return 1;
+      const LuaPartArray *segments = luaH_partarray(t, part);
+      unsigned capacity = luaH_partcapacity(segments);
+      while (i < capacity) {
+        unsigned offset = i;
+        Value *array = luaH_partslot(segments, &offset);
+        unsigned end = luaH_arraycapacity(array);
+        for (; offset < end; ++offset, ++i) {
+          lu_byte tag = *arraytag(array, offset);
+          if (!tagisempty(tag)) {
+            setivalue(s2v(key), luaH_indexfrompart(part, i + 1));
+            s2v(key + 1)->tt_ = tag;
+            s2v(key + 1)->value_ = *arrayval(array, offset);
+            return 1;
+          }
         }
       }
       i -= capacity;
@@ -619,6 +624,10 @@ static size_t arraypayload (unsigned int size) {
     return 0;
   else
     return size * (sizeof(Value) + 1) + sizeof(LuaArrayHeader);
+}
+
+static size_t partarraybytes (unsigned size) {
+  return sizeof(LuaPartArray) + luaH_partblocks(size) * sizeof(Value *);
 }
 
 static size_t concretesize (unsigned int size) {
@@ -945,6 +954,8 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     part->array = NULL;
     part->version = 0;
     part->gate = 0;
+    part->live = 0;
+    part->firsthashindex = UINT_MAX;
     part->waiters = NULL;
     if (pthread_cond_init(&part->changed, NULL) != 0) {
       freehash(L, table, part->nodes, 0);
@@ -963,10 +974,15 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     Node *node = source + i;
     if (!isempty(gval(node))) {
       TValue key;
+      LuaHashPart *part;
       int inserted;
       getnodekey(L, &key, node);
-      inserted = insertkey(NULL, luaH_part(directory, hashpart(&key))->nodes,
-                           &key, gval(node));
+      part = luaH_part(directory, hashpart(&key));
+      if (keyisinteger(node)) {
+        unsigned index = partarrayindex(keyival(node));
+        if (index != 0 && index < part->firsthashindex) part->firsthashindex = index;
+      }
+      inserted = insertkey(NULL, part->nodes, &key, gval(node));
       lua_assert(inserted);
       UNUSED(inserted);
     }
@@ -1127,10 +1143,12 @@ lu_mem luaH_size (const Table *owner, const Table *layout) {
     for (i = 1; i < LUA_HASH_PARTS; ++i) {
       const LuaHashPart *part = luaH_part(directory, i);
       Node *nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-      unsigned asize = luaH_arraycapacity(
+      unsigned asize = luaH_partcapacity(
         __atomic_load_n(&part->array, __ATOMIC_ACQUIRE));
       sz += hashbytes(owner, nodes);
-      sz += arraypayload(asize);
+      if (asize != 0)
+        sz += partarraybytes(asize) + cast_sizet(asize) * (sizeof(Value) + 1) +
+              luaH_partblocks(asize) * sizeof(LuaArrayHeader);
     }
   }
   return sz;
@@ -1141,7 +1159,7 @@ l_mem luaH_tablework (const Table *table) {
   unsigned i, parts = luaH_hashparts(table);
   for (i = 0; i < parts; ++i) {
     size += 2 * cast(l_mem, luaH_nodesize(luaH_hashnodes(table, i)));
-    if (i != 0) size += luaH_arraycapacity(luaH_arraypart(table, i));
+    if (i != 0) size += luaH_partcapacity(luaH_partarray(table, i));
   }
   return size;
 }
@@ -1149,7 +1167,7 @@ l_mem luaH_tablework (const Table *table) {
 l_mem luaH_arrayslots (const Table *table) {
   l_mem size = table->asize;
   unsigned i, parts = luaH_hashparts(table);
-  for (i = 1; i < parts; ++i) size += luaH_arraycapacity(luaH_arraypart(table, i));
+  for (i = 1; i < parts; ++i) size += luaH_partcapacity(luaH_partarray(table, i));
   return size;
 }
 
@@ -1187,12 +1205,17 @@ void luaH_retire (lua_State *L, Table *t) {
   unsigned i, parts = luaH_hashparts(t);
   for (i = 0; i < parts; ++i) {
     Node *nodes = luaH_hashnodes(t, i);
-    Value *array = i != 0 ? luaH_arraypart(t, i) : NULL;
+    const LuaPartArray *array = i != 0 ? luaH_partarray(t, i) : NULL;
     if (luaH_nodesize(nodes) != 0 && separate(t, hashbase(nodes)))
       luaM_retire_(L, hashbase(nodes), sizehash(nodes));
     if (array != NULL) {
-      unsigned asize = luaH_arraycapacity(array);
-      luaM_retire_(L, array - asize, arraypayload(asize));
+      unsigned block, count = luaH_partblocks(array->size);
+      for (block = 0; block < count; ++block) {
+        Value *slots = array->blocks[block];
+        unsigned size = luaH_arraycapacity(slots);
+        luaM_retire_(L, slots - size, arraypayload(size));
+      }
+      luaM_retire_(L, cast_voidp(array), partarraybytes(array->size));
     }
   }
   if (parts > 1) {
@@ -1208,11 +1231,16 @@ void luaH_retire (lua_State *L, Table *t) {
 void luaH_freeparts (lua_State *L, Table *t, int private) {
   unsigned i, parts = luaH_hashparts(t);
   for (i = 0; i < parts; ++i) {
-    Value *array = i != 0 ? luaH_arraypart(t, i) : NULL;
+    const LuaPartArray *array = i != 0 ? luaH_partarray(t, i) : NULL;
     freehash(L, t, luaH_hashnodes(t, i), private);
     if (array != NULL) {
-      unsigned asize = luaH_arraycapacity(array);
-      freepart(L, array - asize, arraypayload(asize), private);
+      unsigned block, count = luaH_partblocks(array->size);
+      for (block = 0; block < count; ++block) {
+        Value *slots = array->blocks[block];
+        unsigned size = luaH_arraycapacity(slots);
+        freepart(L, slots - size, arraypayload(size), private);
+      }
+      freepart(L, cast_voidp(array), partarraybytes(array->size), private);
     }
   }
   if (parts > 1) {
@@ -1408,12 +1436,16 @@ lu_byte luaH_getinthash (Table *t, lua_Integer key, TValue *res) {
   if (directory != NULL) {
     LuaHashPart *part = luaH_part(directory, integerpart(key));
     unsigned i = partarrayindex(key);
-    Value *array = part->array;
-    if (i != 0 && i <= luaH_arraycapacity(array)) {
-      lu_byte tag = *arraytag(array, i - 1);
+    const LuaPartArray *segments = part->array;
+    if (i != 0 && i <= luaH_partcapacity(segments)) {
+      Value *array;
+      lu_byte tag;
+      --i;
+      array = luaH_partslot(segments, &i);
+      tag = *arraytag(array, i);
       if (!tagisempty(tag)) {
         res->tt_ = tag;
-        res->value_ = *arrayval(array, i - 1);
+        res->value_ = *arrayval(array, i);
       }
       return tag;
     }
@@ -1722,8 +1754,9 @@ l_sinline int __attribute__((always_inline)) probehash (
   return 0;
 }
 
-l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
-                            uint64_t layout, LuaTableSlot *slot, int writing) {
+l_sinline int __attribute__((always_inline)) findhashslot (
+    Table *table, const TValue *key, lu_byte scalar, uint64_t layout,
+    LuaTableSlot *slot, int writing) {
   Node *base = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   LuaHashDirectory *directory = luaH_hashdir(base);
   Table *keys = luaH_recordkeys(base);
@@ -1745,10 +1778,13 @@ l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
     if (scalar == LUA_VNUMINT) {
       unsigned i = partarrayindex(ivalue(key));
       if (i != 0) {
-        Value *array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
-        if (i <= luaH_arraycapacity(array)) {
-          slot->payload = arrayval(array, i - 1);
-          slot->tag = arraytag(array, i - 1);
+        const LuaPartArray *segments = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
+        if (i <= luaH_partcapacity(segments)) {
+          Value *array;
+          --i;
+          array = luaH_partslot(segments, &i);
+          slot->payload = arrayval(array, i);
+          slot->tag = arraytag(array, i);
           return 1;
         }
       }
@@ -1803,21 +1839,35 @@ l_sinline int __attribute__((always_inline)) locateslot (
   return locategeneric(table, key, layout, slot, writing);
 }
 
+enum { LUA_PART_KEEP_HASH = -2 };
+
 typedef struct LuaPartSize {
   unsigned array;
+  unsigned previous;
   int log;
 } LuaPartSize;
 
 typedef struct LuaHashGrowth {
   Node *nodes;
-  Value *array;
+  LuaPartArray *array;
   LuaTableRetirement *retirement;
   LuaPartSize size;
 } LuaHashGrowth;
 
+static void freegrowtharray (lua_State *L, LuaPartArray *array,
+                              unsigned first, unsigned last) {
+  for (; first < last; ++first) {
+    Value *block = array->blocks[first];
+    unsigned size = luaH_arraycapacity(block);
+    luaM_freemem(L, block - size, arraypayload(size));
+  }
+  luaM_freemem(L, array, partarraybytes(array->size));
+}
+
 static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
                             LuaPartSize size) {
   char *storage = NULL;
+  unsigned first = luaH_partblocks(size.previous), next = first;
   if (size.log > MAXHBITS || (size.log >= 0 && (1u << size.log) > MAXHSIZE))
     luaG_runerror(L, "table overflow");
   luaHS_reclaim(L, LUAHS_ASSIST);
@@ -1828,21 +1878,28 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
     storage = luaM_realloc_(L, NULL, 0, nodebytes(size.log));
     if (storage == NULL) goto failed;
   }
-  growth->nodes = initnodes(storage, size.log, 1);
+  growth->nodes = size.log == LUA_PART_KEEP_HASH ? NULL : initnodes(storage, size.log, 1);
   if (size.array != 0) {
-    Value *array = cast(Value *, luaM_realloc_(L, NULL, 0,
-                                              arraypayload(size.array)));
-    if (array == NULL) goto failed;
-    array += size.array;
-    arrayheader(array)->size = size.array;
-    arrayheader(array)->hint = 0;
-    memset(arraytag(array, 0), LUA_VEMPTY, size.array);
-    growth->array = array;
+    unsigned count = luaH_partblocks(size.array);
+    growth->array = luaM_realloc_(L, NULL, 0, partarraybytes(size.array));
+    if (growth->array == NULL) goto failed;
+    growth->array->size = size.array;
+    for (; next < count; ++next) {
+      unsigned capacity = next != 0 ? luaH_partblockstart(next) : 1;
+      Value *block = luaM_realloc_(L, NULL, 0, arraypayload(capacity));
+      if (block == NULL) goto failed;
+      block += capacity;
+      arrayheader(block)->size = capacity;
+      arrayheader(block)->hint = 0;
+      memset(arraytag(block, 0), LUA_VEMPTY, capacity);
+      growth->array->blocks[next] = block;
+    }
   }
   growth->retirement->array = growth->retirement->nodes = NULL;
   growth->retirement->array_bytes = growth->retirement->node_bytes = 0;
   return;
  failed:
+  if (growth->array != NULL) freegrowtharray(L, growth->array, first, next);
   if (storage != NULL) luaM_freemem(L, storage, nodebytes(size.log));
   luaM_free(L, growth->retirement);
   luaM_error(L);
@@ -1850,8 +1907,8 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
 
 static void finishgrowth (lua_State *L, LuaHashGrowth *growth) {
   if (growth->array != NULL)
-    luaM_freemem(L, growth->array - growth->size.array,
-                 arraypayload(growth->size.array));
+    freegrowtharray(L, growth->array, luaH_partblocks(growth->size.previous),
+                     luaH_partblocks(growth->size.array));
   if (growth->nodes != NULL && growth->size.log >= 0)
     luaM_freemem(L, hashbase(growth->nodes), sizehash(growth->nodes));
   if (growth->retirement->nodes != NULL || growth->retirement->array != NULL)
@@ -1865,16 +1922,14 @@ static LuaPartSize __attribute__((noinline)) partsize (
   LuaPartSize result;
   Node *nodes = part->nodes;
   unsigned count = luaH_nodesize(nodes), i;
-  unsigned oldsize = luaH_arraycapacity(part->array);
+  unsigned oldsize = luaH_partcapacity(part->array);
   unsigned index = ttisinteger(key) ? partarrayindex(ivalue(key)) : 0;
-  unsigned oldlive = 0;
+  unsigned oldlive = part->live;
   /* A non-array insertion needs only free hash capacity. */
   if (index != 0) {
-    Table view;
-    view.arraydata = cast(uintptr_t, part->array);
-    view.asize = oldsize;
-    numusearray(&view, &ct);
-    oldlive = ct.na;
+    /* Every candidate that grows this partition includes all old slots. */
+    if (oldsize != 0) ct.nums[luaO_ceillog2(oldsize)] = oldlive;
+    ct.na = oldlive;
     countint(index, &ct);
   }
   ct.total = 1;
@@ -1887,6 +1942,7 @@ static LuaPartSize __attribute__((noinline)) partsize (
     }
   }
   result.array = 0;
+  result.previous = oldsize;
   if (index != 0) {
     unsigned capacity = computesizes(&ct);
     if (capacity > oldsize) {
@@ -1903,18 +1959,54 @@ l_sinline void setpartarray (Value *array, unsigned index, const TValue *value) 
   __atomic_store_n(arraytag(array, index), rawtt(value), __ATOMIC_RELEASE);
 }
 
+static void retainpartblocks (LuaHashPart *part, LuaHashGrowth *growth) {
+  LuaPartArray *old = part->array;
+  if (old != NULL) {
+    memcpy(growth->array->blocks, old->blocks,
+           luaH_partblocks(old->size) * sizeof(Value *));
+    growth->retirement->array = old;
+    growth->retirement->array_bytes = partarraybytes(old->size);
+  }
+}
+
+static void publishpartblocks (LuaHashPart *part, LuaHashGrowth *growth) {
+  __atomic_store_n(&part->array, growth->array, __ATOMIC_RELEASE);
+  growth->array = NULL;
+}
+
+/* A newly appended range below every eligible hash key changes only the
+** array bound. There are no hash entries to move or retire. */
+static int __attribute__((noinline)) appendpartarray (lua_State *L, Table *table,
+    LuaHashPart *part, unsigned index, const TValue *value,
+    LuaHashGrowth *growth, LuaPartSize *needed) {
+  unsigned oldsize = luaH_partcapacity(part->array);
+  unsigned capacity = oldsize != 0 ? oldsize * 2 : 1;
+  Value *block;
+  if (capacity <= oldsize || capacity > MAXASIZE || capacity >= part->firsthashindex)
+    return 0;
+  if (needed != NULL)
+    *needed = (LuaPartSize){capacity, oldsize, LUA_PART_KEEP_HASH};
+  if (growth == NULL || growth->size.array != capacity ||
+      growth->size.previous != oldsize || growth->size.log != LUA_PART_KEEP_HASH)
+    return -1;
+  retainpartblocks(part, growth);
+  --index;
+  block = luaH_partslot(growth->array, &index);
+  luaC_tracevalue(L, value);
+  setpartarray(block, index, value);
+  part->live++;
+  publishpartblocks(part, growth);
+  luaC_barrierback(L, obj2gco(table), value);
+  return 1;
+}
+
 static void __attribute__((noinline)) growpart (
     lua_State *L, LuaHashPart *part, LuaHashGrowth *growth,
     const TValue *key, TValue *value) {
   unsigned i, size = luaH_nodesize(part->nodes);
-  unsigned oldsize = luaH_arraycapacity(part->array);
   unsigned capacity = growth->size.array;
-  if (capacity != 0 && oldsize != 0) {
-    memcpy(growth->array - oldsize, part->array - oldsize, oldsize * sizeof(Value));
-    memcpy(arraytag(growth->array, 0), arraytag(part->array, 0), oldsize);
-    growth->retirement->array = part->array - oldsize;
-    growth->retirement->array_bytes = arraypayload(oldsize);
-  }
+  unsigned firsthashindex = UINT_MAX;
+  if (capacity != 0) retainpartblocks(part, growth);
   for (i = 0; i <= size; ++i) {
     const TValue *index = key, *item = value;
     TValue source;
@@ -1928,19 +2020,24 @@ static void __attribute__((noinline)) growpart (
       luaC_tracevalue(L, index);
       luaC_tracevalue(L, item);
     }
-    slot = capacity != 0 && ttisinteger(index) ? partarrayindex(ivalue(index)) : 0;
-    if (slot != 0 && slot <= capacity)
-      setpartarray(growth->array, slot - 1, item);
+    slot = ttisinteger(index) ? partarrayindex(ivalue(index)) : 0;
+    if (slot != 0 && slot <= capacity) {
+      Value *block;
+      lua_assert(slot > growth->size.previous);
+      --slot;
+      block = luaH_partslot(growth->array, &slot);
+      setpartarray(block, slot, item);
+      part->live++;
+    }
     else {
       int inserted = insertkey(NULL, growth->nodes, index, cast(TValue *, item));
+      if (slot != 0 && slot < firsthashindex) firsthashindex = slot;
       lua_assert(inserted);
       UNUSED(inserted);
     }
   }
-  if (capacity != 0) {
-    __atomic_store_n(&part->array, growth->array, __ATOMIC_RELEASE);
-    growth->array = NULL;
-  }
+  if (capacity != 0) publishpartblocks(part, growth);
+  part->firsthashindex = firsthashindex;
   growth->retirement->nodes = size != 0 ? hashbase(part->nodes) : NULL;
   growth->retirement->node_bytes = sizehash(part->nodes);
   __atomic_store_n(&part->nodes, growth->nodes, __ATOMIC_RELEASE);
@@ -1968,27 +2065,38 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
   Node *position;
   const TValue *slot;
   int existing;
+  unsigned arrayindex = 0;
   uint64_t revision;
   if (ttisinteger(key)) {
     lua_Integer integer = ivalue(key);
-    unsigned index = partarrayindex(integer);
-    Value *array = part->array;
-    if (index != 0 && index <= luaH_arraycapacity(array)) {
+    const LuaPartArray *segments = part->array;
+    unsigned capacity = luaH_partcapacity(segments);
+    arrayindex = partarrayindex(integer);
+    if (arrayindex != 0 && arrayindex <= capacity) {
       TValue old;
-      old.tt_ = *arraytag(array, index - 1);
+      Value *array;
+      unsigned index = arrayindex - 1;
+      array = luaH_partslot(segments, &index);
+      old.tt_ = *arraytag(array, index);
       if (!raw && isempty(&old) && table->metatable != NULL) return 0;
-      if (iscollectable(&old)) old.value_ = *arrayval(array, index - 1);
+      if (iscollectable(&old)) old.value_ = *arrayval(array, index);
       luaC_prewrite(L, &old, value);
       if (old.tt_ != value->tt_) {
         revision = __atomic_load_n(&part->version, __ATOMIC_RELAXED);
         __atomic_store_n(&part->version, revision + 1, __ATOMIC_RELEASE);
-        setpartarray(array, index - 1, value);
+        setpartarray(array, index, value);
+        part->live += cast_uint(isempty(&old)) - cast_uint(ttisnil(value));
         __atomic_store_n(&part->version, revision + 2, __ATOMIC_RELEASE);
       }
-      else __atomic_store(arrayval(array, index - 1), &value->value_,
+      else __atomic_store(arrayval(array, index), &value->value_,
                           __ATOMIC_RELEASE);
       luaC_barrierback(L, obj2gco(table), value);
       return 1;
+    }
+    if (arrayindex == capacity + 1 && part->live >= capacity / 2 &&
+        !ttisnil(value) && (raw || table->metatable == NULL)) {
+      int appended = appendpartarray(L, table, part, arrayindex, value, growth, needed);
+      if (appended != 0) return appended;
     }
     position = nodes + hashint(nodesteps(nodes), integer, 1);
     slot = findinteger(position, integer);
@@ -2029,12 +2137,15 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
     if (!insertat(L, nodes, key, value, position)) {
       if (needed != NULL) *needed = partsize(part, key);
       if (growth == NULL || growth->size.array != needed->array ||
+          growth->size.previous != needed->previous ||
           growth->size.log < needed->log) {
         __atomic_store_n(&part->version, revision + 2, __ATOMIC_RELEASE);
         return -1;
       }
       growpart(L, part, growth, key, value);
     }
+    else if (arrayindex != 0 && arrayindex < part->firsthashindex)
+      part->firsthashindex = arrayindex;
     if (ttisshrstring(key)) invalidatemethod(L, table, tsvalue(key));
     luaC_barrierback(L, obj2gco(table), key);
   }
@@ -2989,7 +3100,7 @@ int luaH_hashresume (Table *t, const LuaHashDirectory *dir, const TValue *key,
     cursor->partition = hashpart(key);
     if (!luaH_cursorpart(cursor, dir)) return 0;
   }
-  capacity = luaH_arraycapacity(cursor->array);
+  capacity = luaH_partcapacity(cursor->array);
   if (capacity != 0) {
     unsigned index = ttisinteger(key) ? partarrayindex(ivalue(key)) : 0;
     if (index != 0 && index <= capacity) {
