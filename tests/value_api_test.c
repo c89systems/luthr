@@ -147,6 +147,7 @@ static int exercise(lua_State *L) {
       lua_pushnil(L);
       lua_copy(L, -2, -1);
       require(lua_rawequal(L, -1, -2));
+      require(lua_rawequal(L, -1, (int)i + 1));
       lua_rotate(L, -2, 1);
       verify(L, -1, i);
       lua_copy(L, (int)i + 1, lua_upvalueindex((int)i + 1));
@@ -180,6 +181,8 @@ static int exercise(lua_State *L) {
     lua_settop(L, VALUES);
     require(lua_type(L, VALUES + 1) == LUA_TNONE);
     require(lua_type(L, lua_upvalueindex(VALUES + 1)) == LUA_TNONE);
+    require(!lua_rawequal(L, VALUES + 1, VALUES + 1));
+    require(!lua_rawequal(L, 1, VALUES + 1));
     lua_pushvalue(L, LUA_REGISTRYINDEX);
     require(lua_istable(L, -1));
     lua_pop(L, 1);

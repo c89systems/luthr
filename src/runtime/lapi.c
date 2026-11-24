@@ -402,7 +402,8 @@ LUA_API void lua_rotate (lua_State *L, int idx, int n) {
 }
 
 
-LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
+static void __attribute__((noinline))
+copyshared (lua_State *L, int fromidx, int toidx) {
   LuaNativeRoot source;
   TValue *fr;
   uintptr_t owner = luaX_valueenter(L, 0);
@@ -413,6 +414,28 @@ LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
   else
     writeindex(L, toidx, fr);
   luaR_poproot(L, &source);
+  luaX_valueleave(L, owner);
+}
+
+
+LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
+  const TValue *from;
+  TValue *to;
+  uintptr_t owner;
+  if (ispseudo(fromidx) || ispseudo(toidx)) {
+    copyshared(L, fromidx, toidx);
+    return;
+  }
+  owner = luaX_valueenter(L, 1);
+  from = index2addr(L, fromidx);
+  to = index2addr(L, toidx);
+  api_check(L, isvalid(L, to), "invalid index");
+  if (fromidx != toidx) {
+    /* A hook can read shadow registers of a Lua frame. Keep the
+    ** conservative source barrier when copying one into a live slot. */
+    if (isLua(L->ci)) luaC_tracevalue(L, from);
+    setobj(L, to, from);
+  }
   luaX_valueleave(L, owner);
 }
 
@@ -514,7 +537,8 @@ LUA_API int lua_isuserdata (lua_State *L, int idx) {
 }
 
 
-LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
+static int __attribute__((noinline))
+equalshared (lua_State *L, int index1, int index2) {
   LuaNativeRoot first, second;
   const TValue *o1, *o2;
   int result;
@@ -530,6 +554,21 @@ LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
   result = (isvalid(L, o1) && isvalid(L, o2)) ? luaV_rawequalobj(o1, o2) : 0;
   luaR_poproot(L, &second);
   luaR_poproot(L, &first);
+  luaX_valueleave(L, owner);
+  return result;
+}
+
+
+LUA_API int lua_rawequal (lua_State *L, int index1, int index2) {
+  const TValue *o1, *o2;
+  uintptr_t owner;
+  int result;
+  if (ispseudo(index1) || ispseudo(index2))
+    return equalshared(L, index1, index2);
+  owner = luaX_valueenter(L, 1);
+  o1 = index2addr(L, index1);
+  o2 = index2addr(L, index2);
+  result = isvalid(L, o1) && isvalid(L, o2) && luaV_rawequalobj(o1, o2);
   luaX_valueleave(L, owner);
   return result;
 }
