@@ -708,6 +708,80 @@ static void index_metatable_change(lua_State *state) {
   fixture = NULL;
 }
 
+static lua_Integer check_object_binding(lua_State *state, int object) {
+  lua_Integer revision;
+  require(lua_getfield(state, -1, "revision") == LUA_TNUMBER);
+  revision = lua_tointeger(state, -1);
+  require(revision > 0 && revision <= 600);
+  lua_pop(state, 1);
+  require(lua_getfield(state, -1, "object") == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == object);
+  lua_pop(state, 2);
+  return revision;
+}
+
+static void *read_object_bindings(void *context) {
+  struct stack_reader *reader = context;
+  lua_State *state = reader->child;
+  require(lua_getmetatable(state, 1));
+  require(lua_getmetatable(state, 2));
+  rendezvous(&reader->admitted);
+  rendezvous(&reader->admitted);
+  require(check_object_binding(state, 2) == 1);
+  require(check_object_binding(state, 1) == 1);
+  for (unsigned i = 0; i < 3000; i++) {
+    for (int object = 1; object <= 2; object++)
+      if (lua_getmetatable(state, object))
+        check_object_binding(state, object);
+    require(lua_gettop(state) == 2);
+  }
+  return NULL;
+}
+
+static void set_object_binding(lua_State *state, int object, int revision) {
+  if (revision % 3 == 0)
+    lua_pushnil(state);
+  else {
+    lua_newtable(state);
+    lua_pushinteger(state, object);
+    lua_setfield(state, -2, "object");
+    lua_pushinteger(state, revision);
+    lua_setfield(state, -2, "revision");
+  }
+  require(lua_setmetatable(state, object));
+}
+
+static void object_bindings(lua_State *state, int generational) {
+  struct stack_reader reader;
+  pthread_t thread;
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_newtable(state);
+  lua_newuserdatauv(state, 1, 0);
+  set_object_binding(state, 1, 1);
+  set_object_binding(state, 2, 1);
+  reader.child = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_pushvalue(state, 2);
+  lua_xmove(state, reader.child, 2);
+  require(pthread_barrier_init(&reader.admitted, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, read_object_bindings, &reader) == 0);
+  rendezvous(&reader.admitted);
+  set_object_binding(state, 1, 0);
+  set_object_binding(state, 2, 0);
+  lua_gc(state, LUA_GCCOLLECT);
+  rendezvous(&reader.admitted);
+  for (int revision = 2; revision <= 600; revision++) {
+    set_object_binding(state, 1, revision);
+    set_object_binding(state, 2, revision);
+    if (revision % 29 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+  }
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&reader.admitted) == 0);
+  require(!lua_getmetatable(reader.child, 1));
+  require(!lua_getmetatable(reader.child, 2));
+}
+
 static void *writer(void *argument) {
   struct fixture *test = argument;
   lua_State *state = test->writer;
@@ -1340,21 +1414,23 @@ static void long_string_hash(lua_State *parent, int partition) {
   lua_close(state);
 }
 
-struct record_iteration {
+struct iteration_probe {
   lua_State *reader;
   pthread_barrier_t ready;
+  int arguments;
+  lua_Integer expected;
 };
 
-static void *iterate_record(void *argument) {
-  struct record_iteration *test = argument;
+static void *iterate_table(void *argument) {
+  struct iteration_probe *test = argument;
   rendezvous(&test->ready);
-  require(lua_pcall(test->reader, 1, 1, 0) == LUA_OK);
-  require(lua_tointeger(test->reader, -1) == 2000 * 53);
+  require(lua_pcall(test->reader, test->arguments, 1, 0) == LUA_OK);
+  require(lua_tointeger(test->reader, -1) == test->expected);
   return NULL;
 }
 
 static void shared_record_iteration(lua_State *state, int generational) {
-  struct record_iteration test;
+  struct iteration_probe test = {.arguments = 1, .expected = 2000 * 53};
   pthread_t thread;
   luaL_openlibs(state);
   lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
@@ -1379,7 +1455,7 @@ static void shared_record_iteration(lua_State *state, int generational) {
           !luaA_localtable(state, record));
   luaX_unlockstate(state);
   require(pthread_barrier_init(&test.ready, NULL, 2) == 0);
-  require(pthread_create(&thread, NULL, iterate_record, &test) == 0);
+  require(pthread_create(&thread, NULL, iterate_table, &test) == 0);
   rendezvous(&test.ready);
   for (unsigned i = 0; i < 500; i++) {
     if (i % 2) {
@@ -1396,6 +1472,80 @@ static void shared_record_iteration(lua_State *state, int generational) {
   require(pthread_barrier_destroy(&test.ready) == 0);
 }
 
+static void shared_ordinary_iteration(lua_State *state, int generational) {
+  static const int sizes[][2] = {{64, 0}, {0, 24}, {16, 600}};
+  luaL_openlibs(state);
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  for (unsigned shape = 0; shape < sizeof(sizes) / sizeof(sizes[0]); shape++) {
+    enum { scans = 80 };
+    int array = sizes[shape][0], hash = sizes[shape][1];
+    int size = array + hash;
+    struct iteration_probe test = {
+        .arguments = 4, .expected = (lua_Integer)scans * size * (size + 1) / 2};
+    pthread_t thread;
+    lua_createtable(state, array, 0);
+    test.reader = lua_newthread(state);
+    require(luaL_loadstring(test.reader,
+                            "local row, scans, size, array = ...; "
+                            "local wanted, sum = {}, 0; "
+                            "for i=array+1,size do wanted['k'..i]=i end; "
+                            "for i=1,scans do "
+                            "  local count = 0; "
+                            "  for k,v in pairs(row) do "
+                            "    local n = wanted[k] or k; "
+                            "    if type(v)=='table' then v=v.number end; "
+                            "    assert(v==n); sum=sum+v; count=count+1 "
+                            "  end; "
+                            "  assert(count==size) "
+                            "end; return sum") == LUA_OK);
+    lua_pushvalue(state, 1);
+    lua_xmove(state, test.reader, 1);
+    lua_pushinteger(test.reader, scans);
+    lua_pushinteger(test.reader, size);
+    lua_pushinteger(test.reader, array);
+    for (int i = 1; i <= size; i++) {
+      if (i > array)
+        lua_pushfstring(state, "k%d", i);
+      lua_pushinteger(state, i);
+      if (i <= array)
+        lua_rawseti(state, 1, i);
+      else
+        lua_rawset(state, 1);
+    }
+    luaX_lockstate(state);
+    Table *table = hvalue(s2v(state->ci->func.p + 1));
+    require(luaH_recordkeys(table->node) == NULL &&
+            table->asize == (unsigned)array);
+    require(luaH_hashparts(table) == (shape == 2 ? LUA_HASH_PARTS : 1));
+    luaX_unlockstate(state);
+    require(pthread_barrier_init(&test.ready, NULL, 2) == 0);
+    require(pthread_create(&thread, NULL, iterate_table, &test) == 0);
+    rendezvous(&test.ready);
+    for (unsigned i = 0; i < 500; i++) {
+      /* Exercise array rows, flat hash rows and independent hash writers. */
+      int target = hash != 0 && (array == 0 || i % 2) ? size : 1;
+      int hashkey = target > array;
+      if (hashkey)
+        lua_pushfstring(state, "k%d", target);
+      if (i & 2) {
+        lua_newtable(state);
+        lua_pushinteger(state, target);
+        lua_setfield(state, -2, "number");
+      } else
+        lua_pushinteger(state, target);
+      if (hashkey)
+        lua_rawset(state, 1);
+      else
+        lua_rawseti(state, 1, target);
+      if (i % 97 == 0)
+        lua_gc(state, LUA_GCCOLLECT);
+    }
+    require(pthread_join(thread, NULL) == 0);
+    require(pthread_barrier_destroy(&test.ready) == 0);
+    lua_settop(state, 0);
+  }
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -1410,6 +1560,9 @@ int main(int argc, char **argv) {
   else if (strncmp(argv[1], "record_iteration_", 17) == 0)
     shared_record_iteration(
         state, strcmp(argv[1], "record_iteration_generational") == 0);
+  else if (strncmp(argv[1], "ordinary_iteration_", 19) == 0)
+    shared_ordinary_iteration(
+        state, strcmp(argv[1], "ordinary_iteration_generational") == 0);
   else if (strcmp(argv[1], "mixed_incremental") == 0 ||
            strcmp(argv[1], "mixed_generational") == 0)
     mixed(state, strcmp(argv[1], "mixed_generational") == 0);
@@ -1435,6 +1588,9 @@ int main(int argc, char **argv) {
     index_miss(state);
   else if (strcmp(argv[1], "index_metatable_change") == 0)
     index_metatable_change(state);
+  else if (strncmp(argv[1], "object_bindings_", 16) == 0)
+    object_bindings(state,
+                    strcmp(argv[1], "object_bindings_generational") == 0);
   else if (strncmp(argv[1], "primitive_", 10) == 0)
     primitive_replacement(state,
                           strcmp(argv[1], "primitive_generational") == 0);

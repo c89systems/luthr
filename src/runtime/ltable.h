@@ -104,10 +104,32 @@ typedef struct LuaHashDirectory {
   LuaHashPart parts[LUA_HASH_PARTS];
 } LuaHashDirectory;
 
+enum { LUA_NEXT_PROBE_LIMIT = 128 };
+
+typedef struct LuaHashCursor {
+  Node *nodes;
+  const LuaHashPart *part;
+  uint64_t version;
+  unsigned partition, index;
+} LuaHashCursor;
+
 l_sinline LuaHashDirectory *luaH_hashdir (const Node *image) {
   uintptr_t address = cast(uintptr_t, image);
   return address & 1 ? cast(LuaHashDirectory *, address & ~cast(uintptr_t, 1))
                      : NULL;
+}
+
+/* The directory is retained by the reader's storage epoch. Part zero uses
+** the table layout and element writer versions, like an ordinary hash. */
+l_sinline int luaH_cursorpart (LuaHashCursor *cursor,
+                               const LuaHashDirectory *dir) {
+  const LuaHashPart *part = &dir->parts[cursor->partition];
+  cursor->part = cursor->partition != 0 ? part : NULL;
+  cursor->version = cursor->part != NULL ?
+    __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
+  if (cursor->version & 1) return 0;
+  cursor->nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  return 1;
 }
 
 l_sinline unsigned luaH_nodesize (const Node *nodes) {
@@ -304,6 +326,9 @@ LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);
 LUAI_FUNC int luaH_nextlocked (lua_State *L, Table *t, StkId key);
+LUAI_FUNC int luaH_hashresume (Table *t, const LuaHashDirectory *dir,
+                               const TValue *key, uint64_t layout,
+                               LuaHashCursor *cursor);
 LUAI_FUNC lua_Unsigned luaH_getn (lua_State *L, Table *t);
 
 

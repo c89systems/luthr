@@ -228,27 +228,21 @@ void luaA_release (lua_State *L) {
 }
 
 static Table *objectmeta (const TValue *object) {
-  return ttistable(object) ? hvalue(object)->metatable : uvalue(object)->metatable;
+  Table **binding = ttistable(object) ? &hvalue(object)->metatable
+                                    : &uvalue(object)->metatable;
+  return __atomic_load_n(binding, __ATOMIC_ACQUIRE);
 }
 
 void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *result) {
-  Table *mt;
-  if (ttistable(object) || ttisfulluserdata(object)) {
-    LuaObjectScope scope;
-    luaA_begin(L, gcvalue(object), &scope);
-    mt = objectmeta(object);
-    if (mt) { sethvalue(L, &result->value, mt); }
-    else setnilvalue(&result->value);
-    luaA_end(L, &scope);
+  /* A binding is a single pointer. Managed admission and the writer's
+  ** deletion barrier keep a detached metatable alive until we root it. */
+  Table *mt = ttistable(object) || ttisfulluserdata(object) ? objectmeta(object)
+    : __atomic_load_n(&G(L)->mt[ttype(object)], __ATOMIC_ACQUIRE);
+  if (mt != NULL) {
+    sethvalue(L, &result->value, mt);
+    luaC_tracepointer(L, mt);
   }
-  else {
-    mt = __atomic_load_n(&G(L)->mt[ttype(object)], __ATOMIC_ACQUIRE);
-    if (mt) {
-      sethvalue(L, &result->value, mt);
-      luaC_tracepointer(L, mt);
-    }
-    else setnilvalue(&result->value);
-  }
+  else setnilvalue(&result->value);
 }
 
 /* The layout scope excludes all writers. A detached metatable may still

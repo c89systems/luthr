@@ -1604,17 +1604,19 @@ l_sinline int samepartversion (Table *table, uint64_t layout,
 ** might require dereferencing it, and bound every link to the retained image. */
 l_sinline int __attribute__((always_inline)) probehash (
     Table *table, Node *base, const TValue *key, lu_byte scalar, uint64_t layout,
-    LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision) {
+    LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision, int deadok) {
   unsigned size = nodesteps(base);
   unsigned index, steps;
   if (scalar == LUA_VNUMINT) index = hashint(size, ivalue(key));
   else if (scalar == ctb(LUA_VSHRSTR)) index = lmod(tsvalue(key)->hash, size);
   else index = mainindex(size, key);
-  for (steps = 0; steps < size; steps++) {
+  for (steps = 0; steps < size && (!deadok || steps < LUA_NEXT_PROBE_LIMIT);
+       steps++) {
     Node *node = base + index;
     lu_byte tag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
     int next;
-    if (!scalar || tag == scalar) {
+    if (!scalar || tag == scalar ||
+        (deadok && scalar == ctb(LUA_VSHRSTR) && tag == LUA_TDEADKEY)) {
       Value bits;
       int match;
       __atomic_load(&node->u.key_val, &bits, __ATOMIC_ACQUIRE);
@@ -1624,7 +1626,7 @@ l_sinline int __attribute__((always_inline)) probehash (
         match = memcmp(&bits, &val_(key).gc, sizeof(bits.gc)) == 0;
       else {
         if (!samepartversion(table, layout, part, revision)) return 0;
-        match = equalkeybits(key, tag, bits, 0);
+        match = equalkeybits(key, tag, bits, deadok);
       }
       if (match) {
         /* The result is an address in retained storage. Its caller checks
@@ -1667,7 +1669,7 @@ l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
     }
     base = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
   }
-  return probehash(table, base, key, scalar, layout, slot, slot->part, revision);
+  return probehash(table, base, key, scalar, layout, slot, slot->part, revision, 0);
 }
 
 /* Storage admission retains the backing image until both the slot and the
@@ -2760,6 +2762,28 @@ lua_Unsigned luaH_getn (lua_State *L, Table *t) {
   result = rawgetn(L, t);
   luaA_end(L, &scope);
   return result;
+}
+
+/* Resume in the retained image using the normal hash probe. Accept a
+** deleted cursor as 'next' does, and leave unbounded string comparisons to
+** the owned path. */
+int luaH_hashresume (Table *t, const LuaHashDirectory *dir, const TValue *key,
+                      uint64_t layout, LuaHashCursor *cursor) {
+  LuaTableSlot slot = {0};
+  lu_byte scalar;
+  if (ttislngstring(key)) return 0;
+  if (dir != NULL) {
+    cursor->partition = hashpart(key);
+    if (!luaH_cursorpart(cursor, dir)) return 0;
+  }
+  if (luaH_nodesize(cursor->nodes) == 0) return 0;
+  scalar = ttisshrstring(key) ? ctb(LUA_VSHRSTR) :
+    ttisinteger(key) ? LUA_VNUMINT : 0;
+  if (!probehash(t, cursor->nodes, key, scalar, layout, &slot, cursor->part,
+                 cursor->version, 1) || slot.node == NULL)
+    return 0;
+  cursor->index = cast_uint(slot.node - cursor->nodes) + 1;
+  return 1;
 }
 
 #if defined(LUA_DEBUG)

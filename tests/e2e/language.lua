@@ -134,6 +134,21 @@ do
   end)
   assert(not ok and err:find("invalid key to 'next'", 1, true))
 
+  local ordinary = {}
+  ordinary.word, ordinary[{}], ordinary[-12] = 10, 11, 21
+  ordinary[string.rep('k',96)] = 1
+  sum = 0
+  for key, value in next,ordinary do
+    sum = sum + value
+    ordinary[key] = nil
+  end
+  assert(sum == 43 and next(ordinary) == nil)
+  local sparse = {}
+  for i=1,400 do sparse[i]=i end
+  for i=1,399 do sparse[i]=nil end
+  local position, value = next(sparse)
+  assert(position == 400 and value == 400 and next(sparse,position) == nil)
+
   local iterator = next
   local calls, returns = 0, 0
   debug.sethook(function(event)
