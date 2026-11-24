@@ -109,8 +109,11 @@ typedef struct LuaHashPart {
 } LuaHashPart;
 
 typedef struct LuaHashDirectory {
-  LuaHashPart parts[LUA_HASH_PARTS];
+  LuaHashPart parts[LUA_HASH_PARTS - 1];
 } LuaHashDirectory;
+
+/* Index zero denotes the flat array prefix and has no directory entry. */
+#define luaH_part(dir, index) (&(dir)->parts[(index) - 1])
 
 enum { LUA_NEXT_PROBE_LIMIT = 128 };
 
@@ -128,18 +131,15 @@ l_sinline LuaHashDirectory *luaH_hashdir (const Node *image) {
                      : NULL;
 }
 
-/* The directory is retained by the reader's storage epoch. Part zero uses
-** the table layout and element writer versions, like an ordinary hash. */
+/* The directory is retained by the reader's storage epoch. */
 l_sinline int luaH_cursorpart (LuaHashCursor *cursor,
                                const LuaHashDirectory *dir) {
-  const LuaHashPart *part = &dir->parts[cursor->partition];
-  cursor->part = cursor->partition != 0 ? part : NULL;
-  cursor->version = cursor->part != NULL ?
-    __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
+  const LuaHashPart *part = luaH_part(dir, cursor->partition);
+  cursor->part = part;
+  cursor->version = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
   if (cursor->version & 1) return 0;
   cursor->nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-  cursor->array = cursor->part != NULL
-    ? __atomic_load_n(&part->array, __ATOMIC_ACQUIRE) : NULL;
+  cursor->array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
   return 1;
 }
 
@@ -156,9 +156,10 @@ l_sinline unsigned luaH_hashparts (const Table *table) {
 l_sinline Node *luaH_hashnodes (const Table *table, unsigned index) {
   Node *image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   LuaHashDirectory *directory = luaH_hashdir(image);
-  if (luaH_recordkeys(image) != NULL) return cast(Node *, &luaH_dummynode);
+  if (luaH_recordkeys(image) != NULL || (directory != NULL && index == 0))
+    return cast(Node *, &luaH_dummynode);
   return directory == NULL ? image :
-    __atomic_load_n(&directory->parts[index].nodes, __ATOMIC_ACQUIRE);
+    __atomic_load_n(&luaH_part(directory, index)->nodes, __ATOMIC_ACQUIRE);
 }
 
 LUAI_FUNC l_mem luaH_tablework (const Table *);
@@ -236,7 +237,7 @@ l_sinline unsigned luaH_arraycapacity (const Value *array) {
 ** an index between that prefix and secondary parts. */
 l_sinline Value *luaH_arraypart (const Table *table, unsigned part) {
   if (part == 0) return luaH_array(table);
-  return __atomic_load_n(&luaH_hashdir(table->node)->parts[part].array,
+  return __atomic_load_n(&luaH_part(luaH_hashdir(table->node), part)->array,
                          __ATOMIC_ACQUIRE);
 }
 

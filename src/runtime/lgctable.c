@@ -181,18 +181,17 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   if (!scanarray(L, work, table, &view, young_edges)) return 0;
   parts = directory != NULL ? LUA_HASH_PARTS : 1;
   bytes = luaH_size(table, &view);
-  for (i = 0; i < parts; ++i) {
-    const LuaHashPart *part = directory != NULL ? &directory->parts[i] : NULL;
-    if (part != NULL)
-      view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  for (i = directory != NULL ? 1u : 0u; i < parts; ++i) {
+    const LuaHashPart *part = directory != NULL ? luaH_part(directory, i) : NULL;
     if (i != 0) {
       Value *array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
       view.arraydata = cast(uintptr_t, array);
+      view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
       if (!scanpart(L, work, table, &view, 0, luaH_arraycapacity(array),
                     0, part, young_edges)) return 0;
     }
     if (!scanpart(L, work, table, &view, 0, luaH_nodesize(view.node), 1,
-                  i != 0 ? part : NULL, young_edges)) return 0;
+                  part, young_edges)) return 0;
   }
   work->marked += cast(l_mem, bytes);
   /* A structural move can carry an existing young edge behind the scan.

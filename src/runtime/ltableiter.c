@@ -133,7 +133,10 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
                                &budget, NULL);
       if (more != 0) return more;
     }
-    if (dir != NULL && !luaH_cursorpart(&cursor, dir)) return -1;
+    if (dir != NULL) {
+      cursor.partition = 1;
+      if (!luaH_cursorpart(&cursor, dir)) return -1;
+    }
   }
   else if (!luaH_hashresume(t, dir, key, layout, &cursor)) return -1;
   for (;;) {

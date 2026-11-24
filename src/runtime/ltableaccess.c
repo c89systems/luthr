@@ -27,7 +27,7 @@ static int active (global_State *g, Table *table, LuaTableWriter *writer) {
   directory = luaH_hashdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
   if (directory != NULL)
     for (i = 1; i < LUA_HASH_PARTS; ++i)
-      if (partbusy(&directory->parts[i])) return 1;
+      if (partbusy(luaH_part(directory, i))) return 1;
   /* Closing the layout freezes the advertised groups. A claimant whose
   ** group was not published before that close cannot modify storage. */
   groups = cast_uint(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) &

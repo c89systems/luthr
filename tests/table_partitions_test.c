@@ -24,7 +24,7 @@ static struct {
   lua_State *main, *first, *second, *same, *layout;
   Table *table;
   LuaHashPart *first_part;
-  lua_Integer denied_key;
+  lua_Integer denied_key, sparse_key;
   unsigned deny_count;
   unsigned part, deny_after;
   int entered, release, finished, waiting, part_woken, same_done,
@@ -111,7 +111,7 @@ static void check(lua_State *L, lua_Integer key, lua_Integer number) {
 }
 
 static void check_sparse_value(lua_State *L) {
-  require(lua_rawgeti(L, 1, LUA_MAXINTEGER) == LUA_TTABLE);
+  require(lua_rawgeti(L, 1, probe.sparse_key) == LUA_TTABLE);
   require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
   require(lua_tointeger(L, -1) == 8002);
   lua_pop(L, 2);
@@ -163,25 +163,24 @@ static void *change_metatable(void *unused) {
 }
 
 static void *grow_partition(void *unused) {
-  lua_Integer key = -1024;
+  lua_Integer key = (lua_Integer)1 << 40;
   unsigned inserted = 0;
   (void)unused;
-  /* A sparse positive key stays in the primary hash. Its existing slot
-   * can be updated while an unrelated partition still has a writer. */
-  put(probe.second, LUA_MAXINTEGER, 8001);
-  check(probe.second, LUA_MAXINTEGER, 8001);
+  /* Update and grow sparse positive keys while another partition is held. */
+  put(probe.second, probe.sparse_key, 8001);
+  check(probe.second, probe.sparse_key, 8001);
   lua_newtable(probe.second);
   lua_pushinteger(probe.second, 8002);
   lua_rawseti(probe.second, -2, 1);
-  lua_rawseti(probe.second, 1, LUA_MAXINTEGER);
+  lua_rawseti(probe.second, 1, probe.sparse_key);
   check_sparse_value(probe.second);
   while (inserted < 400) {
     if (partition(key) == probe.part) {
-      put(probe.second, key, -key);
-      check(probe.second, key, -key);
+      put(probe.second, key, key);
+      check(probe.second, key, key);
       ++inserted;
     }
-    --key;
+    ++key;
   }
   for (unsigned i = 1; i <= 512; ++i) {
     lua_Integer index = luaH_indexfrompart(probe.part, i);
@@ -211,10 +210,15 @@ static void run(lua_State *L, const char *source) {
 
 static void check_dense_parts(lua_State *L) {
   l_mem capacity;
-  run(L, "for i=1,8192 do t[i]=i end; assert(rawlen(t)==8192); "
-         "local count=0; for k,v in pairs(t) do "
-         "if type(k)=='number' then assert(k==v); count=count+1 end end; "
-         "assert(count==8192); "
+  run(L, "local big=1<<40; "
+         "for i=1,8192 do t[i]=i end; assert(rawlen(t)==8192); "
+         "for i=1,128 do t[big+i]=-i end; "
+         "assert(t[17]==17 and t[big+17.0]==-17 and t[big+129]==nil); "
+         "local dense,sparse=0,0; for k,v in pairs(t) do "
+         "if type(k)=='number' then "
+         "if k>big then assert(v==big-k); sparse=sparse+1 "
+         "else assert(k==v); dense=dense+1 end end end; "
+         "assert(dense==8192 and sparse==128); "
          "setmetatable(t,nil); "
          "t[2048.0]={42}; collectgarbage('collect'); assert(t[2048][1]==42); "
          "setmetatable(t,{__mode='k'}); "
@@ -234,15 +238,20 @@ static void check_dense_parts(lua_State *L) {
 
 static void check_dense_allocation_failure(lua_State *L) {
   Table *table;
-  lua_Integer hash_key = -1;
+  lua_Integer hash_key = -1, sparse = LUA_MAXINTEGER;
   lua_settop(L, 0);
   lua_createtable(L, 0, 256);
   table = (Table *)lua_topointer(L, 1);
   lua_pushvalue(L, 1);
   lua_xmove(L, probe.second, 1);
   lua_pop(probe.second, 1);
-  for (unsigned i = 0; i <= 256; ++i)
-    put(L, LUA_MAXINTEGER - i, i);
+  /* Seed other partitions so the first can force a mixed resize from one
+   * hash entry when it first receives a positive array index. */
+  for (unsigned i = 0; i <= 256; ++i) {
+    while (partition(sparse) == 1)
+      --sparse;
+    put(L, sparse--, i);
+  }
   require(luaH_hashparts(table) == LUA_HASH_PARTS);
   while (partition(hash_key) != 1)
     --hash_key;
@@ -255,7 +264,7 @@ static void check_dense_allocation_failure(lua_State *L) {
   require(luaH_arrayslots(table) == 1);
   require(lua_rawlen(L, 1) == 1);
   check(L, hash_key, 31);
-  check(L, LUA_MAXINTEGER - 256, 256);
+  check(L, sparse + 1, 256);
   /* A constructor hook can make SETLIST target this published receiver. */
   lua_pushvalue(L, 1);
   lua_pushinteger(L, 92);
@@ -359,10 +368,14 @@ int main(int argc, char **argv) {
   put(L, -257, 257);
   directory = luaH_hashdir(probe.table->node);
   require(directory != NULL);
-  put(L, LUA_MAXINTEGER, 8000);
   require(probe.table->asize == 0);
-  probe.first_part = &directory->parts[partition(-1)];
+  probe.first_part = luaH_part(directory, partition(-1));
   probe.part = partition(-1) == 1 ? 2 : 1;
+  probe.sparse_key = LUA_MAXINTEGER;
+  while (partition(probe.sparse_key) == partition(-1) ||
+         partition(probe.sparse_key) == probe.part)
+    --probe.sparse_key;
+  put(L, probe.sparse_key, 8000);
   oldsize = luaH_nodesize(luaH_hashnodes(probe.table, probe.part));
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
   deadline.tv_sec += 10;
@@ -412,7 +425,7 @@ int main(int argc, char **argv) {
   lua_gc(L, LUA_GCCOLLECT);
   check_sparse_value(L);
   lua_pushnil(L);
-  lua_rawseti(L, 1, LUA_MAXINTEGER);
+  lua_rawseti(L, 1, probe.sparse_key);
   require(lua_getmetatable(L, 1));
   lua_pop(L, 1);
   {
@@ -442,7 +455,8 @@ int main(int argc, char **argv) {
   lua_pushvalue(L, 1);
   lua_setglobal(L, "t");
   run(L, "local count=0; for k,v in pairs(t) do "
-         "assert(k<0 and (v==-k or k==-1 and v==7001)); count=count+1 end; "
+         "assert((k<0 and (v==-k or k==-1 and v==7001)) or "
+         "(k>=(1<<40) and k<(1<<41) and k==v)); count=count+1 end; "
          "assert(count==expected and t[-257.0]==257); "
          "for i=1,200 do t[i]=i end; assert(#t==200 and t[-1]==7001); "
          "local mt={__newindex=function(o,k,v) rawset(o,k,v+1) end}; "

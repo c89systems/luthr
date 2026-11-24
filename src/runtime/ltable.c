@@ -126,22 +126,35 @@ const Node luaH_dummynode = {
 
 const TValue luaH_absentkey = {ABSTKEYCONSTANT};
 
+/* Zero denotes a key that cannot reside in a dense array. */
+#define arrayindex(k) luaH_indexin(k, MAXASIZE)
+
+l_sinline unsigned partarrayindex (lua_Integer key) {
+  unsigned index = arrayindex(key);
+  return index != 0 ? luaH_partindex(index) : 0;
+}
+
 
 l_sinline lua_Unsigned distributedbits (lua_Unsigned bits) {
   return bits ^ (bits >> 16);
 }
 
-/* Secondary images start with the quotient of the division that selects
-** their partition. Fold high bits into the slot index for sparse keys. */
-l_sinline unsigned hashint (const Node *nodes, unsigned size, lua_Integer i) {
+l_sinline unsigned foldint (uint64_t bits, unsigned size) {
+  uint64_t high = (bits >> 16) * UINT64_C(0x9e3779b97f4a7c15);
+  return lmod(cast_uint(bits ^ (high >> 32)), size);
+}
+
+/* Partitioned images use the integer's rank within its partition. Fold
+** high bits into the slot index for sparse keys. */
+l_sinline unsigned hashint (unsigned size, lua_Integer i, int partitioned) {
   lua_Unsigned ui = l_castS2U(i);
-  if (i < 0 || nodes->u.partitioned) {
-    uint64_t bits = nodes->u.partitioned
-      ? (i > 0 ? luaH_partindex(cast_uint(i)) - 1 :
-         distributedbits(ui) / (LUA_HASH_PARTS - 1)) : ui;
-    uint64_t high = (bits >> 16) * UINT64_C(0x9e3779b97f4a7c15);
-    return lmod(cast_uint(bits ^ (high >> 32)), size);
+  if (partitioned) {
+    unsigned index = partarrayindex(i);
+    uint64_t bits = index != 0 ? index - 1 :
+                    distributedbits(ui) / (LUA_HASH_PARTS - 1);
+    return foldint(bits, size);
   }
+  if (i < 0) return foldint(ui, size);
   if (ui <= cast_uint(INT_MAX)) return hashmod(size, cast_uint(ui));
   return cast_uint(hashmod(size, ui));
 }
@@ -183,7 +196,7 @@ static unsigned l_hashfloat (lua_Number n) {
 */
 static unsigned mainindex (const Node *nodes, unsigned size, const TValue *key) {
   switch (ttypetag(key)) {
-    case LUA_VNUMINT: return hashint(nodes, size, ivalue(key));
+    case LUA_VNUMINT: return hashint(size, ivalue(key), nodes->u.partitioned);
     case LUA_VNUMFLT: return hashmod(size, l_hashfloat(fltvalue(key)));
     case LUA_VSHRSTR: return lmod(tsvalue(key)->hash, size);
     case LUA_VLNGSTR: return lmod(luaS_hashlongstr(tsvalue(key)), size);
@@ -216,10 +229,10 @@ l_sinline unsigned distributedpart (lua_Unsigned bits) {
 }
 
 l_sinline unsigned integerpart (lua_Integer integer) {
-  if (integer <= 0) return distributedpart(l_castS2U(integer));
-  return integer <= MAXASIZE
-    ? 1 + ((cast_uint(integer) - 1) / LUA_ARRAY_BLOCK) % (LUA_HASH_PARTS - 1)
-    : 0;
+  unsigned index = arrayindex(integer);
+  return index != 0
+    ? 1 + ((index - 1) / LUA_ARRAY_BLOCK) % (LUA_HASH_PARTS - 1)
+    : distributedpart(l_castS2U(integer));
 }
 
 static unsigned hashpart (const TValue *key) {
@@ -250,7 +263,9 @@ l_sinline Node *keynodes (const Table *table, const TValue *key) {
   Node *image = __atomic_load_n(&table->node, __ATOMIC_RELAXED);
   LuaHashDirectory *directory = luaH_hashdir(image);
   if (luaH_recordkeys(image) != NULL) return cast(Node *, &luaH_dummynode);
-  return directory == NULL ? image : directory->parts[hashpart(key)].nodes;
+  if (directory == NULL) return image;
+  return ttisnil(key) ? cast(Node *, &luaH_dummynode) :
+                       luaH_part(directory, hashpart(key))->nodes;
 }
 
 
@@ -336,13 +351,6 @@ l_sinline const TValue *getgeneric (Node *nodes, const TValue *key, int deadok) 
 }
 
 /*
-** Return the index 'k' if 'k' is an appropriate key to live in the
-** array part of a table, 0 otherwise.
-*/
-#define arrayindex(k)	luaH_indexin(k, MAXASIZE)
-
-
-/*
 ** Check whether an integer key is in the array part of a table and
 ** return its index there, or zero.
 */
@@ -377,9 +385,9 @@ static unsigned findindex (lua_State *L, Table *t, TValue *key,
     if (luaH_hashdir(t->node) != NULL) *part = hashpart(key);
     if (*part != 0) {
       capacity = luaH_arraycapacity(luaH_arraypart(t, *part));
-      if (ttisinteger(key) && ivalue(key) > 0) {
-        i = luaH_partindex(cast_uint(ivalue(key)));
-        if (i <= capacity) return asize + i;
+      if (ttisinteger(key)) {
+        i = partarrayindex(ivalue(key));
+        if (i != 0 && i <= capacity) return asize + i;
       }
     }
     nodes = luaH_hashnodes(t, *part);
@@ -751,10 +759,8 @@ static void reinserthash (lua_State *L, Table *ot, Table *t) {
 ** pointer identifies the dummy image. Metamethod flags belong to the table.
 */
 static void exchangehashpart (Table *t1, Table *t2) {
-  LuaHashDirectory *directory = luaH_hashdir(t1->node);
-  Node **primary = directory == NULL ? &t1->node : &directory->parts[0].nodes;
-  Node *node = *primary;
-  __atomic_store_n(primary, t2->node, __ATOMIC_RELEASE);
+  Node *node = t1->node;
+  __atomic_store_n(&t1->node, t2->node, __ATOMIC_RELEASE);
   __atomic_store_n(&t2->node, node, __ATOMIC_RELEASE);
 }
 
@@ -772,14 +778,14 @@ static void reinsertOldSlice (Table *t, unsigned oldasize,
       TValue key, aux;
       setivalue(&key, l_castU2S(i) + 1);  /* make the key */
       farr2val(t, i, tag, &aux);  /* copy value into 'aux' */
-      insertkey(NULL, luaH_hashnodes(t, 0), &key, &aux);
+      insertkey(NULL, t->node, &key, &aux);
     }
   }
 }
 
 
 /*
-** Resize table 't' for the new given sizes. Both allocations (for
+** Resize a flat table 't' for the new sizes. Both allocations (for
 ** the hash part and for the array part) can fail, which creates some
 ** subtleties. If the first allocation, for the hash part, fails, an
 ** error is raised and that is it. Otherwise, it copies the elements from
@@ -801,7 +807,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   unsigned oldasize = t->asize;
   Value *newarray;
   Value *oldarray = luaH_array(t);
-  Node *oldnodes = luaH_hashnodes(t, 0);
+  Node *oldnodes = t->node;
   void *retired_array = oldasize != newasize && oldasize != 0 &&
     separate(t, oldarray - oldasize) ? oldarray - oldasize : NULL;
   void *retired_nodes = luaH_nodesize(oldnodes) != 0 && separate(t, hashbase(oldnodes))
@@ -812,7 +818,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
   int defer = replace && (!local || luaHS_scanning(L));
   LuaTableRetirement *retirement = NULL;
   int lsize = nhsize == 0 ? -1 : luaO_ceillog2(nhsize);
-  lua_assert(newasize == oldasize || luaH_hashdir(t->node) == NULL);
+  lua_assert(luaH_hashdir(t->node) == NULL);
   if (!local || defer) luaHS_reclaim(L, LUAHS_ASSIST);
   luaC_traceview(L, t);
   if (newasize > MAXASIZE)
@@ -891,7 +897,7 @@ static void rawresize (lua_State *L, Table *t, unsigned newasize,
 
 
 static void rawresizearray (lua_State *L, Table *t, unsigned int nasize) {
-  unsigned nsize = luaH_nodesize(luaH_hashnodes(t, 0));
+  unsigned nsize = luaH_nodesize(t->node);
   rawresize(L, t, nasize, nsize);
 }
 
@@ -920,7 +926,8 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
       counts[hashpart(&key)]++;
     }
   }
-  for (i = 0; i < LUA_HASH_PARTS; ++i)
+  lua_assert(counts[0] == 0);
+  for (i = 1; i < LUA_HASH_PARTS; ++i)
     if (counts[i] > MAXHSIZE) luaG_runerror(L, "table overflow");
   retirement = luaM_new(L, LuaTableRetirement);
   directory = luaM_realloc_(L, NULL, 0, sizeof(*directory));
@@ -928,13 +935,13 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     luaM_free(L, retirement);
     luaM_error(L);
   }
-  for (i = 0; i < LUA_HASH_PARTS; ++i) {
+  for (i = 1; i < LUA_HASH_PARTS; ++i) {
     unsigned count = counts[i];
-    LuaHashPart *part = &directory->parts[i];
+    LuaHashPart *part = luaH_part(directory, i);
     int log = count != 0 ? luaO_ceillog2(count) : -1;
     char *storage = log >= 0 ? luaM_realloc_(L, NULL, 0, nodebytes(log)) : NULL;
     if (log >= 0 && storage == NULL) break;
-    part->nodes = initnodes(storage, log, i != 0);
+    part->nodes = initnodes(storage, log, 1);
     part->array = NULL;
     part->version = 0;
     part->gate = 0;
@@ -945,8 +952,8 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     }
   }
   if (i != LUA_HASH_PARTS) {
-    destroyparts(directory, i);
-    while (i != 0) freehash(L, table, directory->parts[--i].nodes, 0);
+    destroyparts(directory, i - 1);
+    while (i > 1) freehash(L, table, luaH_part(directory, --i)->nodes, 0);
     luaM_free(L, directory);
     luaM_free(L, retirement);
     luaM_error(L);
@@ -958,7 +965,7 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
       TValue key;
       int inserted;
       getnodekey(L, &key, node);
-      inserted = insertkey(NULL, directory->parts[hashpart(&key)].nodes,
+      inserted = insertkey(NULL, luaH_part(directory, hashpart(&key))->nodes,
                            &key, gval(node));
       lua_assert(inserted);
       UNUSED(inserted);
@@ -987,6 +994,7 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   unsigned i;
   unsigned nsize;  /* size for the hash part */
   int arraykey = ttisinteger(ek) && arrayindex(ivalue(ek)) != 0;
+  lua_assert(luaH_hashdir(t->node) == NULL);
   /* reset counts */
   for (i = 0; i <= MAXABITS; i++) ct.nums[i] = 0;
   ct.na = 0;
@@ -994,7 +1002,7 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   ct.total = 1;  /* count extra key */
   if (ttisinteger(ek))
     countint(ivalue(ek), &ct);  /* extra key may go to array */
-  numusehash(luaH_hashnodes(t, 0), &ct);  /* count keys in the primary hash */
+  numusehash(t->node, &ct);  /* count keys in the flat hash */
   if (ct.na == 0) {
     /* no new keys to enter array part; keep it with the same size */
     asize = t->asize;
@@ -1012,8 +1020,7 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   }
   /* A serial positive-index sequence can keep its inexpensive flat array.
   ** Once growing a contested prefix, freeze it and grow by partition. */
-  if (luaH_hashdir(t->node) == NULL &&
-      (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) &&
+  if ((__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) &&
       ((asize == t->asize && nsize >= HASH_PARTITION_THRESHOLD &&
         luaH_nodesize(t->node) >= HASH_PARTITION_THRESHOLD &&
         (!arraykey || luaA_lockwatched(&t->access))) ||
@@ -1117,10 +1124,11 @@ lu_mem luaH_size (const Table *owner, const Table *layout) {
   else {
     unsigned i;
     sz += sizeof(*directory);
-    for (i = 0; i < LUA_HASH_PARTS; ++i) {
-      Node *nodes = __atomic_load_n(&directory->parts[i].nodes, __ATOMIC_ACQUIRE);
+    for (i = 1; i < LUA_HASH_PARTS; ++i) {
+      const LuaHashPart *part = luaH_part(directory, i);
+      Node *nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
       unsigned asize = luaH_arraycapacity(
-        __atomic_load_n(&directory->parts[i].array, __ATOMIC_ACQUIRE));
+        __atomic_load_n(&part->array, __ATOMIC_ACQUIRE));
       sz += hashbytes(owner, nodes);
       sz += arraypayload(asize);
     }
@@ -1189,7 +1197,7 @@ void luaH_retire (lua_State *L, Table *t) {
   }
   if (parts > 1) {
     LuaHashDirectory *directory = luaH_hashdir(t->node);
-    destroyparts(directory, parts);
+    destroyparts(directory, parts - 1);
     luaM_retire_(L, directory, sizeof(*directory));
   }
   if (t->asize != 0 && separate(t, luaH_array(t) - t->asize))
@@ -1209,7 +1217,7 @@ void luaH_freeparts (lua_State *L, Table *t, int private) {
   }
   if (parts > 1) {
     LuaHashDirectory *directory = luaH_hashdir(t->node);
-    destroyparts(directory, parts);
+    destroyparts(directory, parts - 1);
     freepart(L, directory, sizeof(*directory), private);
   }
   if (t->asize != 0 && separate(t, luaH_array(t) - t->asize))
@@ -1353,10 +1361,11 @@ static void newcheckedkey (Table *t, const TValue *key, TValue *value) {
 
 static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value) {
+  lua_assert(luaH_hashdir(t->node) == NULL);
   luaC_tracevalue(L, key);
   luaC_tracevalue(L, value);
   if (!ttisnil(value)) {  /* do not insert nil values */
-    int done = insertkey(L, keynodes(t, key), key, value);
+    int done = insertkey(L, t->node, key, value);
     if (!done) {  /* could not find a free place? */
       rehash(L, t, key);  /* grow table */
       newcheckedkey(t, key, value);  /* insert key in grown table */
@@ -1381,14 +1390,10 @@ l_sinline const TValue *findinteger (Node *n, lua_Integer key) {
   return &luaH_absentkey;
 }
 
-static const TValue *getintfromhash (Table *t, lua_Integer key) {
-  Node *nodes = t->node;
-  LuaHashDirectory *directory = luaH_hashdir(nodes);
+static const TValue *getintfromhash (Node *nodes, lua_Integer key) {
   if (luaH_recordkeys(nodes) != NULL) return &luaH_absentkey;
-  if (directory != NULL)
-    nodes = directory->parts[integerpart(key)].nodes;
-  lua_assert(!ikeyinarray(t, key));
-  return findinteger(nodes + hashint(nodes, nodesteps(nodes), key), key);
+  return findinteger(nodes + hashint(nodesteps(nodes), key, nodes->u.partitioned),
+                     key);
 }
 
 static int hashkeyisempty (Table *t, lua_Unsigned key) {
@@ -1398,11 +1403,13 @@ static int hashkeyisempty (Table *t, lua_Unsigned key) {
 
 
 lu_byte luaH_getinthash (Table *t, lua_Integer key, TValue *res) {
-  LuaHashDirectory *directory = luaH_hashdir(t->node);
-  if (directory != NULL && key > 0 && key <= MAXASIZE) {
-    Value *array = directory->parts[integerpart(key)].array;
-    unsigned i = luaH_partindex(cast_uint(key));
-    if (i <= luaH_arraycapacity(array)) {
+  Node *nodes = t->node;
+  LuaHashDirectory *directory = luaH_hashdir(nodes);
+  if (directory != NULL) {
+    LuaHashPart *part = luaH_part(directory, integerpart(key));
+    unsigned i = partarrayindex(key);
+    Value *array = part->array;
+    if (i != 0 && i <= luaH_arraycapacity(array)) {
       lu_byte tag = *arraytag(array, i - 1);
       if (!tagisempty(tag)) {
         res->tt_ = tag;
@@ -1410,8 +1417,9 @@ lu_byte luaH_getinthash (Table *t, lua_Integer key, TValue *res) {
       }
       return tag;
     }
+    nodes = part->nodes;
   }
-  return luaH_hashvalue(getintfromhash(t, key), res);
+  return luaH_hashvalue(getintfromhash(nodes, key), res);
 }
 
 
@@ -1425,7 +1433,7 @@ static const TValue *gethashshortstr (Table *t, TString *key) {
   Node *nodes = t->node;
   LuaHashDirectory *directory = luaH_hashdir(nodes);
   if (directory != NULL)
-    nodes = directory->parts[distributedpart(key->hash)].nodes;
+    nodes = luaH_part(directory, distributedpart(key->hash))->nodes;
   return luaH_shortslot(luaH_shortposition(nodes, key), key);
 }
 
@@ -1508,7 +1516,7 @@ static int retpsetcode (Table *t, const TValue *slot) {
   if (isabstkey(slot))
     return HNOTFOUND;  /* no slot with that key */
   else  /* return node encoded */
-    return cast_int((cast(Node*, slot) - luaH_hashnodes(t, 0))) + HFIRSTNODE;
+    return cast_int(cast(Node *, slot) - t->node) + HFIRSTNODE;
 }
 
 
@@ -1551,7 +1559,7 @@ static int rawfinishnodeset (lua_State *L, const TValue *slot, TValue *val) {
 
 static int rawpsetint (lua_State *L, Table *t, lua_Integer key, TValue *val) {
   lua_assert(!ikeyinarray(t, key));
-  return finishnodeset(L, t, getintfromhash(t, key), val);
+  return finishnodeset(L, t, getintfromhash(t->node, key), val);
 }
 
 
@@ -1634,7 +1642,7 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
     luaH_newkey(L, t, actk, value);
   }
   else if (hres > 0) {  /* regular Node? */
-    Node *node = luaH_hashnodes(t, 0) + hres - HFIRSTNODE;
+    Node *node = t->node + hres - HFIRSTNODE;
     tracenodewrite(L, gval(node), value);
     setnodevalue(L, node, value);
   }
@@ -1675,7 +1683,7 @@ l_sinline int __attribute__((always_inline)) probehash (
     LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision, int deadok) {
   unsigned size = nodesteps(base);
   unsigned index, steps;
-  if (scalar == LUA_VNUMINT) index = hashint(base, size, ivalue(key));
+  if (scalar == LUA_VNUMINT) index = hashint(size, ivalue(key), part != NULL);
   else if (scalar == ctb(LUA_VSHRSTR)) index = lmod(tsvalue(key)->hash, size);
   else index = mainindex(base, size, key);
   for (steps = 0; steps < size && (!deadok || steps < LUA_NEXT_PROBE_LIMIT);
@@ -1727,16 +1735,17 @@ l_sinline int findhashslot (Table *table, const TValue *key, lu_byte scalar,
     unsigned index = scalar == LUA_VNUMINT ? integerpart(ivalue(key)) :
       scalar == ctb(LUA_VSHRSTR) ? distributedpart(tsvalue(key)->hash) :
       hashpart(key);
-    LuaHashPart *part = &directory->parts[index];
-    if (index != 0) {
-      slot->part = part;
-      if (writing) return 1;  /* probe after claiming this partition */
-      revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
-      if (revision & 1) return 0;
-      slot->revision = revision;
-      if (scalar == LUA_VNUMINT && ivalue(key) > 0) {
+    LuaHashPart *part = luaH_part(directory, index);
+    lua_assert(index != 0);
+    slot->part = part;
+    if (writing) return 1;  /* probe after claiming this partition */
+    revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
+    if (revision & 1) return 0;
+    slot->revision = revision;
+    if (scalar == LUA_VNUMINT) {
+      unsigned i = partarrayindex(ivalue(key));
+      if (i != 0) {
         Value *array = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
-        unsigned i = luaH_partindex(cast_uint(ivalue(key)));
         if (i <= luaH_arraycapacity(array)) {
           slot->payload = arrayval(array, i - 1);
           slot->tag = arraytag(array, i - 1);
@@ -1850,12 +1859,6 @@ static void finishgrowth (lua_State *L, LuaHashGrowth *growth) {
   else luaM_free(L, growth->retirement);
 }
 
-/* In a secondary part only positive array candidates use integer slots. */
-l_sinline unsigned partarrayindex (const TValue *key) {
-  return ttisinteger(key) && ivalue(key) > 0 && ivalue(key) <= MAXASIZE
-    ? luaH_partindex(cast_uint(ivalue(key))) : 0;
-}
-
 static LuaPartSize __attribute__((noinline)) partsize (
     LuaHashPart *part, const TValue *key) {
   Counters ct = {0};
@@ -1863,7 +1866,7 @@ static LuaPartSize __attribute__((noinline)) partsize (
   Node *nodes = part->nodes;
   unsigned count = luaH_nodesize(nodes), i;
   unsigned oldsize = luaH_arraycapacity(part->array);
-  unsigned index = partarrayindex(key);
+  unsigned index = ttisinteger(key) ? partarrayindex(ivalue(key)) : 0;
   unsigned oldlive = 0;
   /* A non-array insertion needs only free hash capacity. */
   if (index != 0) {
@@ -1879,8 +1882,8 @@ static LuaPartSize __attribute__((noinline)) partsize (
     Node *node = nodes + i;
     if (!isempty(gval(node))) {
       ct.total++;
-      if (index != 0 && keyisinteger(node) && keyival(node) > 0)
-        countint(luaH_partindex(cast_uint(keyival(node))), &ct);
+      if (index != 0 && keyisinteger(node))
+        countint(partarrayindex(keyival(node)), &ct);
     }
   }
   result.array = 0;
@@ -1925,7 +1928,7 @@ static void __attribute__((noinline)) growpart (
       luaC_tracevalue(L, index);
       luaC_tracevalue(L, item);
     }
-    slot = capacity != 0 ? partarrayindex(index) : 0;
+    slot = capacity != 0 && ttisinteger(index) ? partarrayindex(ivalue(index)) : 0;
     if (slot != 0 && slot <= capacity)
       setpartarray(growth->array, slot - 1, item);
     else {
@@ -1968,7 +1971,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
   uint64_t revision;
   if (ttisinteger(key)) {
     lua_Integer integer = ivalue(key);
-    unsigned index = partarrayindex(key);
+    unsigned index = partarrayindex(integer);
     Value *array = part->array;
     if (index != 0 && index <= luaH_arraycapacity(array)) {
       TValue old;
@@ -1987,7 +1990,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
       luaC_barrierback(L, obj2gco(table), value);
       return 1;
     }
-    position = nodes + hashint(nodes, nodesteps(nodes), integer);
+    position = nodes + hashint(nodesteps(nodes), integer, 1);
     slot = findinteger(position, integer);
   }
   else if (ttisshrstring(key)) {
@@ -2053,7 +2056,7 @@ static LuaHashPart *keypart (Table *table, const TValue *key) {
       return NULL;
   }
   index = hashpart(key);
-  return index != 0 ? &directory->parts[index] : NULL;
+  return index != 0 ? luaH_part(directory, index) : NULL;
 }
 
 static int partassignment (lua_State *L, Table *table, LuaHashPart *part,
@@ -2387,7 +2390,7 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
 */
 static void rawsetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
   unsigned ik = ikeyinarray(t, key);
-  if (ik == 0 && luaH_hashdir(t->node) != NULL && integerpart(key) != 0) {
+  if (ik == 0 && luaH_hashdir(t->node) != NULL) {
     TValue index;
     setivalue(&index, key);
     luaH_assignowned(L, t, &index, value, 1);
@@ -2400,7 +2403,7 @@ static void rawsetint (lua_State *L, Table *t, lua_Integer key, TValue *value) {
     obj2arr(t, ik - 1, value);
   }
   else {
-    int ok = rawfinishnodeset(L, getintfromhash(t, key), value);
+    int ok = rawfinishnodeset(L, getintfromhash(t->node, key), value);
     if (!ok) {
       TValue k;
       setivalue(&k, key);
@@ -2987,7 +2990,7 @@ int luaH_hashresume (Table *t, const LuaHashDirectory *dir, const TValue *key,
   }
   capacity = luaH_arraycapacity(cursor->array);
   if (capacity != 0) {
-    unsigned index = partarrayindex(key);
+    unsigned index = ttisinteger(key) ? partarrayindex(ivalue(key)) : 0;
     if (index != 0 && index <= capacity) {
       cursor->index = index;
       return 1;
