@@ -424,6 +424,14 @@ static int rawnext (lua_State *L, Table *t, StkId key) {
         Value *array = luaH_partslot(segments, &offset);
         unsigned end = luaH_arraycapacity(array);
         for (; offset < end; ++offset, ++i) {
+          if (luaH_partinteger(array)) {
+            lua_Integer value = luaH_partintload(arrayval(array, offset));
+            lua_assert(value != LUA_PART_FROZEN);
+            if (value == LUA_PART_EMPTY) continue;
+            setivalue(s2v(key), luaH_indexfrompart(part, i + 1));
+            setivalue(s2v(key + 1), value);
+            return 1;
+          }
           lu_byte tag = *arraytag(array, offset);
           if (!tagisempty(tag)) {
             setivalue(s2v(key), luaH_indexfrompart(part, i + 1));
@@ -957,7 +965,9 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     if (log >= 0 && storage == NULL) break;
     part->nodes = initnodes(storage, log, 1);
     part->array = NULL;
+    part->general_array = 0;
     part->version = 0;
+    part->block_version = 0;
     part->gate = 0;
     part->firsthashindex = UINT_MAX;
     part->waiters = NULL;
@@ -1153,7 +1163,7 @@ lu_mem luaH_size (const Table *owner, const Table *layout) {
         unsigned block, count = luaH_partblocks(array->size);
         sz += partarraybytes(array->size);
         for (block = 0; block < count; ++block)
-          sz += partblockbytes(luaH_arraycapacity(array->blocks[block]));
+          sz += partblockbytes(luaH_arraycapacity(luaH_partblockview(array, block)));
       }
     }
   }
@@ -1448,6 +1458,13 @@ lu_byte luaH_getinthash (Table *t, lua_Integer key, TValue *res) {
       lu_byte tag;
       --i;
       array = luaH_partslot(segments, &i);
+      if (luaH_partinteger(array)) {
+        lua_Integer value = luaH_partintload(arrayval(array, i));
+        lua_assert(value != LUA_PART_FROZEN);
+        if (value == LUA_PART_EMPTY) return LUA_VEMPTY;
+        setivalue(res, value);
+        return LUA_VNUMINT;
+      }
       tag = *arraytag(array, i);
       if (!tagisempty(tag)) {
         res->tt_ = tag;
@@ -1789,7 +1806,7 @@ l_sinline int __attribute__((always_inline)) findhashslot (
           --i;
           array = luaH_partslot(segments, &i);
           slot->payload = arrayval(array, i);
-          slot->tag = arraytag(array, i);
+          slot->tag = luaH_partinteger(array) ? NULL : arraytag(array, i);
           if (writing) slot->occupied = luaH_partcount(array, i);
           return 1;
         }
@@ -1818,15 +1835,20 @@ l_sinline unsigned retainedarrayindex (Value *array, lua_Integer key) {
   return array != NULL ? luaH_indexin(key, arrayheader(array)->size) : 0;
 }
 
-l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
-                             LuaTableSlot *slot, int writing) {
+l_sinline int locateprefix (Table *table, lua_Integer key, LuaTableSlot *slot) {
   Value *array = luaH_readarray(table);
-  unsigned k = retainedarrayindex(array, ivalue(key));
+  unsigned k = retainedarrayindex(array, key);
   if (k != 0) {
     slot->payload = array - k;
     slot->tag = arraytag(array, k - 1);
     return 1;
   }
+  return 0;
+}
+
+l_sinline int locateinteger (Table *table, const TValue *key, uint64_t layout,
+                             LuaTableSlot *slot, int writing) {
+  if (locateprefix(table, ivalue(key), slot)) return 1;
   return findhashslot(table, key, LUA_VNUMINT, layout, slot, writing);
 }
 
@@ -1863,11 +1885,14 @@ typedef struct LuaPartSize {
   unsigned array;
   unsigned previous;
   int log;
+  int integer;
 } LuaPartSize;
 
 typedef struct LuaHashGrowth {
   Node *nodes;
   LuaPartArray *array;
+  LuaPartArray *previous;
+  uint64_t block_version;
   LuaTableRetirement *retirement;
   LuaPartSize size;
 } LuaHashGrowth;
@@ -1882,8 +1907,21 @@ static void freegrowtharray (lua_State *L, LuaPartArray *array,
   luaM_freemem(L, array, partarraybytes(array->size));
 }
 
-static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
-                            LuaPartSize size) {
+static Value *allocpartblock (lua_State *L, unsigned capacity) {
+  Value *block = luaM_realloc_(L, NULL, 0, partblockbytes(capacity));
+  if (block != NULL) {
+    block += capacity;
+    arrayheader(block)->size = capacity;
+    arrayheader(block)->hint = 0;
+    memset(arraytag(block, 0), LUA_VEMPTY, capacity);
+    memset(luaH_partcountbase(block, capacity), 0,
+           luaH_partcounts(capacity) * sizeof(unsigned));
+  }
+  return block;
+}
+
+static void preparegrowth (lua_State *L, LuaHashPart *part,
+                            LuaHashGrowth *growth, LuaPartSize size) {
   char *storage = NULL;
   unsigned first = luaH_partblocks(size.previous), next = first;
   if (size.log > MAXHBITS || (size.log >= 0 && (1u << size.log) > MAXHSIZE))
@@ -1891,6 +1929,8 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
   luaHS_reclaim(L, LUAHS_ASSIST);
   growth->size = size;
   growth->array = NULL;
+  growth->previous = NULL;
+  growth->block_version = 0;
   growth->retirement = luaM_new(L, LuaTableRetirement);
   if (size.log >= 0) {
     storage = luaM_realloc_(L, NULL, 0, nodebytes(size.log));
@@ -1903,16 +1943,25 @@ static void preparegrowth (lua_State *L, LuaHashGrowth *growth,
     if (growth->array == NULL) goto failed;
     growth->array->size = size.array;
     for (; next < count; ++next) {
-      unsigned capacity = next != 0 ? luaH_partblockstart(next) : 1;
-      Value *block = luaM_realloc_(L, NULL, 0, partblockbytes(capacity));
+      unsigned capacity = luaH_partblocksize(next);
+      Value *block = allocpartblock(L, capacity);
       if (block == NULL) goto failed;
-      block += capacity;
-      arrayheader(block)->size = capacity;
-      arrayheader(block)->hint = 0;
-      memset(arraytag(block, 0), LUA_VEMPTY, capacity);
-      memset(luaH_partcountbase(block, capacity), 0,
-             luaH_partcounts(capacity) * sizeof(unsigned));
+      if (size.integer) {
+        unsigned i;
+        arrayheader(block)->hint = 1;
+        for (i = 0; i < capacity; ++i) arrayval(block, i)->i = LUA_PART_EMPTY;
+      }
       growth->array->blocks[next] = block;
+    }
+    /* Copy the directory after the last allocation and before acquiring
+    ** a shared partition. The storage epoch retains the sampled directory.
+    ** Commit checks both the directory and its block replacement version. */
+    growth->block_version = __atomic_load_n(&part->block_version, __ATOMIC_ACQUIRE);
+    growth->previous = __atomic_load_n(&part->array, __ATOMIC_ACQUIRE);
+    if (growth->previous != NULL && growth->previous->size == size.previous) {
+      unsigned i;
+      for (i = 0; i < first; ++i)
+        growth->array->blocks[i] = luaH_partblockview(growth->previous, i);
     }
   }
   growth->retirement->array = growth->retirement->nodes = NULL;
@@ -1939,7 +1988,7 @@ static void finishgrowth (lua_State *L, LuaHashGrowth *growth) {
 static unsigned partlive (const LuaPartArray *array) {
   unsigned total = 0, block, count = luaH_partblocks(luaH_partcapacity(array));
   for (block = 0; block < count; ++block) {
-    const Value *values = array->blocks[block];
+    const Value *values = luaH_partblockview(array, block);
     unsigned size = luaH_arraycapacity(values);
     const unsigned *counters = luaH_partcountbase(values, size);
     unsigned i;
@@ -1952,7 +2001,7 @@ static unsigned partlive (const LuaPartArray *array) {
 static LuaPartSize __attribute__((noinline)) partsize (
     LuaHashPart *part, const TValue *key) {
   Counters ct = {0};
-  LuaPartSize result;
+  LuaPartSize result = {0};
   Node *nodes = part->nodes;
   unsigned count = luaH_nodesize(nodes), i;
   unsigned oldsize = luaH_partcapacity(part->array);
@@ -1996,17 +2045,28 @@ l_sinline void setpartarray (Value *array, unsigned index, const TValue *value) 
     __atomic_fetch_add(luaH_partcount(array, index), delta, __ATOMIC_RELAXED);
 }
 
-static void retainpartblocks (LuaHashPart *part, LuaHashGrowth *growth) {
-  LuaPartArray *old = part->array;
-  if (old != NULL) {
-    memcpy(growth->array->blocks, old->blocks,
-           luaH_partblocks(old->size) * sizeof(Value *));
-    growth->retirement->array = old;
-    growth->retirement->array_bytes = partarraybytes(old->size);
-  }
+/* Changes to presence still hold the element admission. Integer overwrites
+** can race with this publication, but they cannot change the count. */
+l_sinline void storepartint (Value *cell, unsigned *count, lua_Integer old,
+                              const TValue *value) {
+  unsigned delta = cast_uint(old == LUA_PART_EMPTY) - cast_uint(ttisnil(value));
+  lua_Integer integer = ttisnil(value) ? LUA_PART_EMPTY : ivalue(value);
+  __atomic_store_n(&cell->i, integer, __ATOMIC_RELEASE);
+  if (delta != 0) __atomic_fetch_add(count, delta, __ATOMIC_RELAXED);
+}
+
+l_sinline int currentblocks (const LuaHashPart *part, const LuaHashGrowth *growth) {
+  return growth->array == NULL || (part->array == growth->previous &&
+         luaH_partcapacity(growth->previous) == growth->size.previous &&
+         __atomic_load_n(&part->block_version, __ATOMIC_RELAXED) == growth->block_version);
 }
 
 static void publishpartblocks (LuaHashPart *part, LuaHashGrowth *growth) {
+  lua_assert(currentblocks(part, growth));
+  if (growth->previous != NULL) {
+    growth->retirement->array = growth->previous;
+    growth->retirement->array_bytes = partarraybytes(growth->previous->size);
+  }
   __atomic_store_n(&part->array, growth->array, __ATOMIC_RELEASE);
   growth->array = NULL;
 }
@@ -2019,19 +2079,23 @@ static int __attribute__((noinline)) appendpartarray (lua_State *L, Table *table
   unsigned oldsize = luaH_partcapacity(part->array);
   unsigned capacity = oldsize != 0 ? oldsize * 2 : 1;
   Value *block;
+  int integer = oldsize >= LUA_ARRAY_BLOCK && luaH_partintfits(value) &&
+    !__atomic_load_n(&part->general_array, __ATOMIC_RELAXED);
   if (capacity <= oldsize || capacity > MAXASIZE || capacity >= part->firsthashindex)
     return 0;
   if (partlive(part->array) < oldsize / 2) return 0;
   if (needed != NULL)
-    *needed = (LuaPartSize){capacity, oldsize, LUA_PART_KEEP_HASH};
+    *needed = (LuaPartSize){capacity, oldsize, LUA_PART_KEEP_HASH, integer};
   if (growth == NULL || growth->size.array != capacity ||
-      growth->size.previous != oldsize || growth->size.log != LUA_PART_KEEP_HASH)
+      growth->size.previous != oldsize || growth->size.log != LUA_PART_KEEP_HASH ||
+      growth->size.integer != integer || !currentblocks(part, growth))
     return -1;
-  retainpartblocks(part, growth);
   --index;
   block = luaH_partslot(growth->array, &index);
   luaC_tracevalue(L, value);
-  setpartarray(block, index, value);
+  if (luaH_partinteger(block))
+    storepartint(arrayval(block, index), luaH_partcount(block, index), LUA_PART_EMPTY, value);
+  else setpartarray(block, index, value);
   publishpartblocks(part, growth);
   luaC_barrierback(L, obj2gco(table), value);
   return 1;
@@ -2043,7 +2107,6 @@ static void __attribute__((noinline)) growpart (
   unsigned i, size = luaH_nodesize(part->nodes);
   unsigned capacity = growth->size.array;
   unsigned firsthashindex = UINT_MAX;
-  if (capacity != 0) retainpartblocks(part, growth);
   for (i = 0; i <= size; ++i) {
     const TValue *index = key, *item = value;
     TValue source;
@@ -2063,6 +2126,8 @@ static void __attribute__((noinline)) growpart (
       lua_assert(slot > growth->size.previous);
       --slot;
       block = luaH_partslot(growth->array, &slot);
+      if (!luaH_partintfits(item))
+        __atomic_store_n(&part->general_array, 1, __ATOMIC_RELAXED);
       setpartarray(block, slot, item);
     }
     else {
@@ -2092,6 +2157,48 @@ static void invalidatemethod (lua_State *L, Table *table, TString *name) {
   }
 }
 
+/* Layout ownership excludes every presence-changing write. A scalar writer
+** already holding the old address either finishes before the exchange of
+** its cell, or sees the frozen value and resolves the new image. */
+static Value *generalizepartblock (lua_State *L, LuaHashPart *part,
+                                   unsigned block) {
+  unsigned i, size = luaH_partblocksize(block);
+  LuaTableRetirement *retirement = luaM_new(L, LuaTableRetirement);
+  Value *replacement = allocpartblock(L, size);
+  LuaPartArray *array;
+  Value *old;
+  if (replacement == NULL) {
+    luaM_free(L, retirement);
+    luaM_error(L);
+  }
+  array = part->array;
+  old = luaH_partblockview(array, block);
+  if (!luaH_partinteger(old)) {
+    luaM_freemem(L, replacement - size, partblockbytes(size));
+    luaM_free(L, retirement);
+    return old;
+  }
+  __atomic_store_n(&part->general_array, 1, __ATOMIC_RELAXED);
+  for (i = 0; i < size; ++i) {
+    lua_Integer integer = __atomic_exchange_n(&arrayval(old, i)->i,
+        LUA_PART_FROZEN, __ATOMIC_ACQ_REL);
+    if (integer != LUA_PART_EMPTY) {
+      TValue value;
+      lua_assert(integer != LUA_PART_FROZEN);
+      setivalue(&value, integer);
+      setpartarray(replacement, i, &value);
+    }
+  }
+  retirement->array = old - size;
+  retirement->array_bytes = partblockbytes(size);
+  retirement->nodes = NULL;
+  retirement->node_bytes = 0;
+  __atomic_store_n(&array->blocks[block], replacement, __ATOMIC_RELEASE);
+  __atomic_fetch_add(&part->block_version, 1, __ATOMIC_RELEASE);
+  luaHS_publish(L, retirement, 0);
+  return replacement;
+}
+
 /* A held partition may mutate or publish a prepared image without crossing
 ** a safepoint. A negative result requests preparation outside the claim. */
 static int writepart (lua_State *L, Table *table, LuaHashPart *part,
@@ -2114,6 +2221,19 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
       unsigned index = arrayindex - 1;
       lua_assert(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1);
       array = luaH_partslot(segments, &index);
+      if (luaH_partinteger(array)) {
+        Value *cell = arrayval(array, index);
+        lua_Integer integer = luaH_partintload(cell);
+        if (!raw && integer == LUA_PART_EMPTY && table->metatable != NULL)
+          return 0;
+        if (ttisnil(value) || luaH_partintfits(value)) {
+          storepartint(cell, luaH_partcount(array, index), integer, value);
+          return 1;
+        }
+        array = generalizepartblock(L, part, luaH_partblock(arrayindex - 1));
+      }
+      if (!ttisnil(value) && !luaH_partintfits(value))
+        __atomic_store_n(&part->general_array, 1, __ATOMIC_RELAXED);
       old.tt_ = *arraytag(array, index);
       if (!raw && isempty(&old) && table->metatable != NULL) return 0;
       if (iscollectable(&old)) old.value_ = *arrayval(array, index);
@@ -2174,7 +2294,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
       if (needed != NULL) *needed = partsize(part, key);
       if (growth == NULL || growth->size.array != needed->array ||
           growth->size.previous != needed->previous ||
-          growth->size.log < needed->log) {
+          growth->size.log < needed->log || !currentblocks(part, growth)) {
         __atomic_store_n(&part->version, revision + 2, __ATOMIC_RELEASE);
         return -1;
       }
@@ -2212,7 +2332,7 @@ static int partassignment (lua_State *L, Table *table, LuaHashPart *part,
   LuaPartSize needed;
   int result = writepart(L, table, part, key, value, raw, NULL, &needed);
   while (result < 0) {
-    preparegrowth(L, &growth, needed);
+    preparegrowth(L, part, &growth, needed);
     result = writepart(L, table, part, key, value, raw, &growth, &needed);
     finishgrowth(L, &growth);
   }
@@ -2269,6 +2389,55 @@ typedef struct LuaTableWriteRetry {
   LuaPartSize needed;
 } LuaTableWriteRetry;
 
+l_sinline LuaTableWriter *claimslot (lua_State *L, Table *table, Value *payload,
+                                    uint64_t layout, LuaTableWriteRetry *retry) {
+  LuaTableWriter *writer = luaH_claimwriter(L, table, payload, layout);
+  if (writer == NULL && retry != NULL) {
+    LuaTableWriter *row = luaH_writer(G(L), payload);
+    if (__atomic_load_n(&row->owner, __ATOMIC_SEQ_CST) == table)
+      retry->writer = row;
+  }
+  return writer;
+}
+
+static int __attribute__((noinline)) sharedintset (lua_State *L, Table *table,
+    const LuaTableSlot *slot, TValue *value, int raw, uint64_t layout,
+    LuaTableWriteRetry *retry) {
+  lua_Integer integer = luaH_partintload(slot->payload);
+  LuaTableWriter *writer;
+  int assigned;
+  if (integer == LUA_PART_FROZEN || (!ttisnil(value) && !luaH_partintfits(value)))
+    return 0;
+  if (integer != LUA_PART_EMPTY && !ttisnil(value) &&
+      __atomic_compare_exchange_n(&slot->payload->i, &integer, ivalue(value), 0,
+                                  __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+    return 1;
+  writer = claimslot(L, table, slot->payload, layout, retry);
+  if (writer == NULL) return 0;
+  integer = luaH_partintload(slot->payload);
+  assigned = integer != LUA_PART_FROZEN &&
+    (raw || integer != LUA_PART_EMPTY || table->metatable == NULL);
+  if (assigned) storepartint(slot->payload, slot->occupied, integer, value);
+  luaH_releasewriter(L, table, writer);
+  return assigned;
+}
+
+/* The prefix address is retained by the storage epoch. The element writer
+** validates its layout and excludes tag changes before the payload store. */
+l_sinline int setflatint (lua_State *L, Table *table, const LuaTableSlot *slot,
+                           const TValue *value, uint64_t layout,
+                           LuaTableWriteRetry *retry) {
+  LuaTableWriter *writer;
+  int assigned;
+  if (__atomic_load_n(slot->tag, __ATOMIC_ACQUIRE) != LUA_VNUMINT) return -1;
+  writer = claimslot(L, table, slot->payload, layout, retry);
+  if (writer == NULL) return 0;
+  assigned = *slot->tag == LUA_VNUMINT;
+  if (assigned) luaH_elementstore(L, table, slot->payload, slot->tag, value);
+  luaH_releasewriter(L, table, writer);
+  return assigned ? 1 : -1;
+}
+
 /* Keep the shared snapshot's frame out of ordinary private assignments. */
 static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
                        const TValue *key, TValue *value, int raw,
@@ -2279,21 +2448,31 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   lu_byte oldtag;
   uint64_t layout = sharedlayout(L, table, key, value);
   if (layout & 1) return 0;
-  if (!locateslot(table, key, rawtt(key), layout, &slot, 1)) return 0;
-  if (slot.part != NULL && slot.payload == NULL)
-    return sharedpartset(L, table, slot.part, key, value, raw, layout,
+  if (ttisinteger(key)) {
+    slot.payload = NULL;
+    slot.node = NULL;
+    slot.part = NULL;
+    if (locateprefix(table, ivalue(key), &slot)) {
+      if (ttisinteger(value)) {
+        int result = setflatint(L, table, &slot, value, layout, retry);
+        if (result >= 0) return result;
+      }
+    }
+    else if (!findhashslot(table, key, LUA_VNUMINT, layout, &slot, 1)) return 0;
+  }
+  else if (!locateslot(table, key, rawtt(key), layout, &slot, 1)) return 0;
+  if (slot.part != NULL) {
+    if (slot.payload == NULL)
+      return sharedpartset(L, table, slot.part, key, value, raw, layout,
                          retry != NULL ? &retry->part : NULL, NULL,
                          retry != NULL ? &retry->needed : NULL);
+    if (slot.tag == NULL)
+      return sharedintset(L, table, &slot, value, raw, layout, retry);
+  }
   if (slot.payload == NULL) return 0;
   node = slot.node;
-  writer = luaH_claimwriter(L, table, slot.payload, layout);
-  if (writer == NULL) {
-    LuaTableWriter *row = luaH_writer(G(L), slot.payload);
-    if (retry != NULL &&
-        __atomic_load_n(&row->owner, __ATOMIC_SEQ_CST) == table)
-      retry->writer = row;
-    return 0;
-  }
+  writer = claimslot(L, table, slot.payload, layout, retry);
+  if (writer == NULL) return 0;
   /* Key retirement is a layout operation. A missing value may also invoke
   ** __newindex; resolve that under ordinary ordered metatable ownership. */
   oldtag = *slot.tag;
@@ -2312,6 +2491,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   luaH_elementstore(L, table, slot.payload, slot.tag, value);
   if (slot.part != NULL) {
     unsigned delta = cast_uint(tagisempty(oldtag)) - cast_uint(ttisnil(value));
+    if (!ttisnil(value) && !luaH_partintfits(value))
+      __atomic_store_n(&slot.part->general_array, 1, __ATOMIC_RELAXED);
     if (delta != 0) __atomic_fetch_add(slot.occupied, delta, __ATOMIC_RELAXED);
   }
   else if (node == NULL && iscollectable(value))
@@ -2467,7 +2648,7 @@ int luaH_setshared (lua_State *L, Table *table, const TValue *key,
       LuaHashGrowth growth;
       LuaHashPart *part = retry.part;
       retry.part = NULL;
-      preparegrowth(L, &growth, retry.needed);
+      preparegrowth(L, part, &growth, retry.needed);
       result = sharedpartset(L, table, part, key, value, raw,
                              sharedlayout(L, table, key, value), &retry.part,
                              &growth, &retry.needed);
@@ -2714,6 +2895,13 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
   TValue value;
   if (slot->payload == NULL) {
     *tag = LUA_VABSTKEY;
+    return 1;
+  }
+  if (slot->tag == NULL) {
+    lua_Integer integer = luaH_partintload(slot->payload);
+    if (integer == LUA_PART_FROZEN || !luaH_samelayout(table, sequence)) return 0;
+    *tag = integer == LUA_PART_EMPTY ? LUA_VEMPTY : LUA_VNUMINT;
+    if (integer != LUA_PART_EMPTY) setivalue(result, integer);
     return 1;
   }
   if (slot->part != NULL && slot->node != NULL) {

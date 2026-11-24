@@ -189,7 +189,8 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
       unsigned block, count = luaH_partblocks(luaH_partcapacity(array));
       view.node = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
       for (block = 0; block < count; ++block) {
-        Value *slots = array->blocks[block];
+        Value *slots = luaH_partblockview(array, block);
+        if (luaH_partinteger(slots)) continue;
         view.arraydata = cast(uintptr_t, slots);
         if (!scanpart(L, work, table, &view, 0, luaH_arraycapacity(slots),
                       0, part, young_edges)) return 0;

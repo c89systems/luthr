@@ -57,12 +57,22 @@ static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
                          unsigned *budget, const LuaHashCursor *cursor) {
   unsigned count = size - index < *budget ? size - index : *budget;
   unsigned end = index + count;
+  int integers = cursor != NULL && luaH_partinteger(array);
   for (; index < end; index++) {
     const lu_byte *tag = arraytag(array, index);
     TValue value;
-    if (tagisempty(__atomic_load_n(tag, __ATOMIC_ACQUIRE))) continue;
-    if (!luaH_readvalue(G(L), arrayval(array, index), tag, &value, layout) ||
-        isempty(&value) || !cursorvalid(cursor) ||
+    if (integers) {
+      lua_Integer integer = luaH_partintload(arrayval(array, index));
+      if (integer == LUA_PART_FROZEN) return -1;
+      if (integer == LUA_PART_EMPTY) continue;
+      setivalue(&value, integer);
+    }
+    else {
+      if (tagisempty(__atomic_load_n(tag, __ATOMIC_ACQUIRE))) continue;
+      if (!luaH_readvalue(G(L), arrayval(array, index), tag, &value, layout) ||
+          isempty(&value)) return -1;
+    }
+    if (!cursorvalid(cursor) ||
         !luaH_samelayout(t, layout))
       return -1;
     setivalue(key, cursor == NULL ? cast(lua_Integer, index) + 1 :

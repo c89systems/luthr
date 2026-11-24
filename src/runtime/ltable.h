@@ -99,8 +99,8 @@ enum {
   LUA_HASH_WRITING = 1,
   LUA_HASH_WAITING = 2
 };
-/* Growth appends blocks. A retained directory keeps its original bound,
-** and every published block stays at the same address until table death. */
+/* Growth appends blocks without moving published slots. A retained directory
+** keeps its original bound. A type change can replace one integer block. */
 typedef struct LuaPartArray {
   unsigned size;
   Value *blocks[];
@@ -110,8 +110,10 @@ typedef struct LuaHashPart {
   Node *nodes;
   LuaPartArray *array;
   uint64_t version;  /* odd during structural or split-value changes */
+  uint64_t block_version;  /* advances when a published block changes type */
   unsigned gate;
   unsigned firsthashindex;  /* lower bound on the array indices in the hash */
+  unsigned general_array;  /* an array assignment needed the full value format */
   pthread_cond_t changed;
   struct LuaWaiter *waiters;  /* address-sharded hash wait mutex */
 } LuaHashPart;
@@ -213,7 +215,7 @@ LUAI_FUNC l_mem luaH_arrayslots (const Table *);
 */
 
 typedef struct LuaArrayHeader {
-  unsigned hint;  /* length search hint, under layout ownership */
+  unsigned hint;  /* flat length hint, or immutable integer block flag */
   unsigned size;  /* immutable capacity of this backing allocation */
 } LuaArrayHeader;
 
@@ -250,25 +252,56 @@ l_sinline unsigned luaH_partcapacity (const LuaPartArray *array) {
   return array != NULL ? array->size : 0;
 }
 
-/* Blocks cover [0, 1), [1, 2), [2, 4), and so on. Use the high set bit
-** of the zero-based index to select a block and subtract its start. */
+/* Start with geometric blocks. Cap a block so a representation change
+** never copies an unbounded number of slots under layout ownership. */
+enum { LUA_PART_BLOCK_SHIFT = 8, LUA_PART_BLOCK_SIZE = 1 << LUA_PART_BLOCK_SHIFT };
 l_sinline unsigned luaH_partblock (unsigned index) {
+  if (index >= LUA_PART_BLOCK_SIZE)
+    return (index >> LUA_PART_BLOCK_SHIFT) + LUA_PART_BLOCK_SHIFT;
   return index != 0 ? l_numbits(unsigned) - __builtin_clz(index) : 0;
 }
 
 l_sinline unsigned luaH_partblockstart (unsigned block) {
+  if (block > LUA_PART_BLOCK_SHIFT)
+    return (block - LUA_PART_BLOCK_SHIFT) << LUA_PART_BLOCK_SHIFT;
   return block != 0 ? 1u << (block - 1) : 0;
+}
+
+l_sinline unsigned luaH_partblocksize (unsigned block) {
+  return block > LUA_PART_BLOCK_SHIFT ? LUA_PART_BLOCK_SIZE :
+    block != 0 ? luaH_partblockstart(block) : 1;
 }
 
 l_sinline unsigned luaH_partblocks (unsigned capacity) {
   return capacity != 0 ? luaH_partblock(capacity - 1) + 1 : 0;
 }
 
+l_sinline Value *luaH_partblockview (const LuaPartArray *array, unsigned block) {
+  return __atomic_load_n(&array->blocks[block], __ATOMIC_ACQUIRE);
+}
+
 l_sinline Value *luaH_partslot (const LuaPartArray *array, unsigned *index) {
   unsigned block = luaH_partblock(*index);
   lua_assert(*index < array->size);
   *index -= luaH_partblockstart(block);
-  return array->blocks[block];
+  return luaH_partblockview(array, block);
+}
+
+/* The integer format uses the existing payload lane as the whole value.
+** The ordinary tag lane remains empty, so it never supplies collector edges. */
+#define LUA_PART_EMPTY LUA_MININTEGER
+#define LUA_PART_FROZEN (LUA_MININTEGER + 1)
+
+l_sinline int luaH_partinteger (const Value *block) {
+  return arrayheader(block)->hint != 0;
+}
+
+l_sinline int luaH_partintfits (const TValue *value) {
+  return ttisinteger(value) && ivalue(value) > LUA_PART_FROZEN;
+}
+
+l_sinline lua_Integer luaH_partintload (const Value *cell) {
+  return __atomic_load_n(&cell->i, __ATOMIC_ACQUIRE);
 }
 
 /* Keep occupancy updates local to a range of slots. A growth heuristic can
@@ -298,8 +331,8 @@ l_sinline Value *luaH_arrayblock (const Table *table, unsigned part,
   const LuaPartArray *array;
   if (part == 0) return block == 0 ? luaH_array(table) : NULL;
   array = luaH_partarray(table, part);
-  return block < luaH_partblocks(luaH_partcapacity(array)) ? array->blocks[block]
-                                                           : NULL;
+  return block < luaH_partblocks(luaH_partcapacity(array))
+    ? luaH_partblockview(array, block) : NULL;
 }
 
 /* Computes the address of the tag for the abstract C-index 'k' */

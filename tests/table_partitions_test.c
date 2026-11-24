@@ -330,6 +330,120 @@ static void check_dense_allocation_failure(lua_State *L) {
   require(lua_rawlen(L, 1) == 3);
 }
 
+static int reject_block_change(lua_State *L) {
+  probe.deny_after = 1;
+  put(L, probe.denied_key, LUA_MININTEGER);
+  return 0;
+}
+
+struct retained_integer {
+  lua_State *observer;
+  Table *table;
+  int loaded, converted;
+};
+
+static void *try_retired_integer(void *argument) {
+  struct retained_integer *race = argument;
+  unsigned offset = 259;
+  Value *block, *cell;
+  lua_Integer expected;
+  lua_lock(race->observer);
+  block = luaH_partslot(luaH_partarray(race->table, 1), &offset);
+  require(luaH_partinteger(block));
+  cell = arrayval(block, offset);
+  expected = luaH_partintload(cell);
+  require(expected == LUA_MAXINTEGER);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  race->loaded = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  while (!race->converted)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(!__atomic_compare_exchange_n(&cell->i, &expected, 520, 0,
+                                       __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+  require(expected == LUA_PART_FROZEN);
+  lua_unlock(race->observer);
+  return NULL;
+}
+
+static void check_integer_blocks(lua_State *L) {
+  const lua_Integer key = luaH_indexfrompart(1, 260);
+  const lua_Integer other = luaH_indexfrompart(1, 515);
+  const LuaPartArray *array;
+  Table *table;
+  Value *integers, *next_block;
+  unsigned offset = 259, next_offset = 514;
+  TValue index, value;
+  LuaTableWriter *row;
+  struct retained_integer race = {0};
+  pthread_t writer;
+  lua_settop(L, 0);
+  lua_createtable(L, 0, 256);
+  race.observer = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, race.observer, 1);
+  lua_pop(race.observer, 1);
+  for (int i = 1; i <= 257; ++i)
+    put(L, -i, i);
+  for (unsigned i = 1; i <= 520; ++i)
+    put(L, luaH_indexfrompart(1, i), i);
+  table = (Table *)lua_topointer(L, 1);
+  array = luaH_partarray(table, 1);
+  integers = luaH_partslot(array, &offset);
+  next_block = luaH_partslot(array, &next_offset);
+  require(luaH_partinteger(integers) && luaH_partinteger(next_block));
+
+  lua_lock(L);
+  row = luaH_claimwriter(L, table, arrayval(integers, offset), table->sequence);
+  require(row != NULL);
+  setivalue(&index, key);
+  setivalue(&value, LUA_MAXINTEGER);
+  require(luaH_tryset(L, table, &index, &value, 1));
+  luaH_releasewriter(L, table, row);
+  lua_unlock(L);
+  check(L, key, LUA_MAXINTEGER);
+
+  probe.denied_key = key;
+  lua_pushcfunction(L, reject_block_change);
+  lua_pushvalue(L, 1);
+  require(lua_pcall(L, 1, 0, 0) == LUA_ERRMEM);
+  lua_pop(L, 1);
+  require(probe.deny_after == 0);
+  check(L, key, LUA_MAXINTEGER);
+
+  lua_gc(L, LUA_GCSTOP);
+  race.table = table;
+  require(pthread_create(&writer, NULL, try_retired_integer, &race) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!race.loaded)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  put(L, key, LUA_MININTEGER);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  race.converted = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_join(writer, NULL) == 0);
+  lua_gc(L, LUA_GCRESTART);
+  check(L, key, LUA_MININTEGER);
+  offset = 259;
+  require(!luaH_partinteger(luaH_partslot(array, &offset)));
+  next_offset = 514;
+  require(luaH_partslot(array, &next_offset) == next_block);
+  check(L, other, 515);
+
+  lua_createtable(L, 0, 1);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  require(lua_setmetatable(L, 1));
+  lua_newtable(L);
+  lua_rawseti(L, 1, other);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(L, 1, other) == LUA_TNIL);
+  lua_pop(L, 1);
+  check(L, key, LUA_MININTEGER);
+}
+
 static void check_integer_keys(lua_State *L, int count, lua_Integer stride) {
   int linked = 0;
   Table *table;
@@ -559,6 +673,7 @@ int main(int argc, char **argv) {
   check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 65537);
   check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 0x100000000LL);
   check_dense_allocation_failure(L);
+  check_integer_blocks(L);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);
