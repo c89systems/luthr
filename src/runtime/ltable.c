@@ -1206,6 +1206,8 @@ static int insertat (lua_State *L, Node *nodes, const TValue *key, TValue *value
         if (keyiscollectable(mp)) luaC_traceobject(L, gckey(mp));
         luaC_tracevalue(L, gval(mp));
       }
+      if (L != NULL && L->task_trace.table != NULL)
+        luaC_taskrelocate(L, nodes, mp);
       /* yes; move colliding node into free position */
       while (othern + gnext(othern) != mp)  /* find previous */
         othern += gnext(othern);

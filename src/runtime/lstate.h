@@ -330,6 +330,12 @@ typedef union LuaAllocationDebt {
 
 #define LUA_TASK_INLINE_ROOTS 32u
 
+typedef struct LuaNurseryTrace {
+  GCObject *gray;
+  Table *table;  /* partially scanned table, under the task's gate */
+  size_t offset;
+} LuaNurseryTrace;
+
 struct lua_State {
   CommonHeader;
   lu_byte allowhook;
@@ -423,6 +429,7 @@ struct lua_State {
   lu_byte task_nursery_pending;
   lu_byte task_seal_requested;  /* atomic request, retired under world.mutex */
   uint16_t task_root_inline_index[2 * LUA_TASK_INLINE_ROOTS];
+  lu_byte task_mark_scan;  /* active mature scan, zero when idle */
   GCObject *task_old_objects;  /* first survivor in task_objects */
   GCObject *task_remembered;  /* young targets, terminated by this thread */
   size_t task_old_bytes;
@@ -432,6 +439,7 @@ struct lua_State {
   struct LuaAllocPage *task_young_pages;
   struct LuaAllocPage *task_alloc_pages[LUA_ALLOC_BINS];
   size_t task_page_bytes;
+  LuaNurseryTrace task_trace;
 };
 
 

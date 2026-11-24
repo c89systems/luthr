@@ -24,11 +24,14 @@
 #define TASK_MATURE_START (TASK_NURSERY_BYTES - TASK_YOUNG_BYTES)
 /* Bound the work needed to publish a single task's outgoing roots. */
 #define TASK_NURSERY_ROOT_MAX 2048u
-#define TASK_ROOT_LIVE cast(uintptr_t, 1u)
+#define TASK_MARK_BUDGET 8192u
 
 typedef enum NurseryScan {
   NURSERY_CONSTRUCTION, NURSERY_TASK_YOUNG, NURSERY_TASK_FULL, NURSERY_TASK_ROOTS
 } NurseryScan;
+
+static void visitnursery (lua_State *L, GCObject *object, GCObject **gray,
+                          NurseryScan scan);
 
 /* The hash stores dense indices, so root snapshots visit only actual roots.
 ** During a local trace the low pointer bit records which roots remain live. */
@@ -37,7 +40,7 @@ l_sinline uint16_t *rootslot (lua_State *L, uintptr_t root) {
   unsigned slot = cast_uint((root >> 3) ^ (root >> 17)) & mask;
   uint16_t *index = L->task_root_index;
   while (index[slot] != 0 &&
-         (L->task_roots[index[slot] - 1] & ~TASK_ROOT_LIVE) != root)
+         (L->task_roots[index[slot] - 1] & ~LUA_TASK_ROOT_LIVE) != root)
     slot = (slot + 1) & mask;
   return &index[slot];
 }
@@ -47,10 +50,12 @@ static void indexroots (lua_State *L) {
   memset(L->task_root_index, 0,
          L->task_root_capacity * 2 * sizeof(*L->task_root_index));
   for (i = 0; i < L->task_root_count; i++)
-    *rootslot(L, L->task_roots[i]) = cast(uint16_t, i + 1);
+    *rootslot(L, cast(uintptr_t, luaC_taskrootat(L, i))) = cast(uint16_t, i + 1);
 }
 
 static void clearroots (lua_State *L) {
+  L->task_trace = (LuaNurseryTrace){0};
+  L->task_mark_scan = 0;
   L->task_nursery_pending = 0;
   if (L->task_root_count != 0) {
     L->task_root_count = 0;
@@ -112,6 +117,7 @@ static void taskresize (lua_State *L, l_mem change) {
 
 void luaC_taskresize (lua_State *L, Table *t, l_mem change) {
   lua_assert(luaC_tasktable(t));
+  if (L->task_trace.table == t) L->task_trace.offset = 0;
   if (luaC_tablestate(t) & NURSERY_TASKOLD) {
     lua_assert(change >= 0 || cast(size_t, -change) <= L->task_old_bytes);
     L->task_old_bytes += change;
@@ -221,7 +227,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
   epoch = g->sweep_plan.epoch;
   if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
   for (i = 0; i < thread->task_root_count; i++) {
-    GCObject *root = cast(GCObject *, thread->task_roots[i]);
+    GCObject *root = luaC_taskrootat(thread, i);
     /* The outgoing directory is about to disappear. The published cohort
     ** can still refer into this thread's current construction nursery. */
     if (root->tt == LUA_VTABLE && !luaC_tracingglobal(g)) {
@@ -249,7 +255,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
     }
     else {
       TString *s = gco2ts(o);
-      __atomic_fetch_and(&s->extra, cast_byte(~(LSTR_TASK | LSTR_TASKOLD)),
+      __atomic_fetch_and(&s->extra, cast_byte(~(LSTR_TASK | LSTR_TASKOLD | LSTR_TASKLIVE)),
                          __ATOMIC_RELEASE);
       luaC_allocnext(o) = strings;
       strings = o;
@@ -397,15 +403,23 @@ int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
     if (value->tt != LUA_VSHRSTR && !(state & NURSERY_TASK_EDGES))
       luaC_settablestate(table, state | NURSERY_TASK_EDGES);
     if (luaC_taskobject(value)) {
-      if (state & NURSERY_TASKOLD) remembertarget(L, value);
+      if (l_unlikely(L->task_mark_scan != 0))
+        visitnursery(L, value, &L->task_trace.gray,
+                     cast(NurseryScan, L->task_mark_scan));
+      else if (state & NURSERY_TASKOLD) remembertarget(L, value);
       return 1;
     }
     root = cast(uintptr_t, value);
-    lua_assert(!(root & TASK_ROOT_LIVE));
+    lua_assert(!(root & LUA_TASK_ROOT_LIVE));
     slot = rootslot(L, root);
-    if (*slot != 0) return 1;
+    if (*slot != 0) {
+      if (l_unlikely(L->task_mark_scan != 0))
+        L->task_roots[*slot - 1] |= LUA_TASK_ROOT_LIVE;
+      return 1;
+    }
     if (L->task_root_count < L->task_root_capacity) {
-      L->task_roots[L->task_root_count++] = root;
+      L->task_roots[L->task_root_count++] = root |
+        (L->task_mark_scan != 0 ? LUA_TASK_ROOT_LIVE : 0);
       *slot = cast(uint16_t, L->task_root_count);
       /* Grow or prune at the next instruction, including loops that only
       ** update tables. The barrier itself cannot park or allocate. */
@@ -520,7 +534,7 @@ void luaC_endtask (lua_State *L) {
   }
   for (; slot < L->stack_last.p + EXTRA_STACK; slot++) setnilvalue2s(slot);
   for (i = 0; i < L->task_root_count; i++)
-    luaC_traceobject(L, cast(GCObject *, L->task_roots[i]));
+    luaC_traceobject(L, luaC_taskrootat(L, i));
   o = L->task_objects;
   pages = detachtaskpages(L);
   L->task_objects = NULL;
@@ -599,8 +613,20 @@ l_sinline void visitnursery (lua_State *L, GCObject *object, GCObject **gray,
   if (!marknursery(L, object, gray, scan) && scan >= NURSERY_TASK_FULL) {
     uint16_t index = *rootslot(L, cast(uintptr_t, object));
     lua_assert(index != 0 && index <= L->task_root_count);
-    if (index != 0) L->task_roots[index - 1] |= TASK_ROOT_LIVE;
+    if (index != 0) L->task_roots[index - 1] |= LUA_TASK_ROOT_LIVE;
   }
+}
+
+/* In-place insertion may move an unscanned pair behind the cursor. Unlike
+** backing replacement, it can preserve progress by visiting just that pair. */
+void luaC_taskrelocate (lua_State *L, const Node *base, const Node *slot) {
+  NurseryScan scan = cast(NurseryScan, L->task_mark_scan);
+  lua_assert(scan == NURSERY_TASK_FULL || scan == NURSERY_TASK_ROOTS);
+  if (L->task_trace.table->node != base) return;
+  if (nurseryedge(keytt(slot), scan))
+    visitnursery(L, gckey(slot), &L->task_trace.gray, scan);
+  if (nurseryedge(rawtt(gval(slot)), scan))
+    visitnursery(L, gcvalue(gval(slot)), &L->task_trace.gray, scan);
 }
 
 /* Compact the roots from live private tables. Keep interned strings until
@@ -610,10 +636,10 @@ static void prunetaskroots (lua_State *L, int prune_strings) {
   unsigned i, count = 0;
   for (i = 0; i < L->task_root_count; i++) {
     uintptr_t root = L->task_roots[i];
-    if ((root & TASK_ROOT_LIVE) ||
+    if ((root & LUA_TASK_ROOT_LIVE) ||
         (!prune_strings && cast(GCObject *, root)->tt == LUA_VSHRSTR))
-      L->task_roots[count++] = root & ~TASK_ROOT_LIVE;
-    else luaC_traceobject(L, cast(GCObject *, root));
+      L->task_roots[count++] = root & ~LUA_TASK_ROOT_LIVE;
+    else luaC_traceobject(L, luaC_taskrootat(L, i));
   }
   if (count != L->task_root_count) {
     L->task_root_count = count;
@@ -621,49 +647,85 @@ static void prunetaskroots (lua_State *L, int prune_strings) {
   }
 }
 
-static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
+static void markstack (lua_State *L, GCObject **gray, NurseryScan scan) {
   StkId slot;
+  for (slot = L->stack.p; slot < L->top.p; slot++)
+    if (nurseryedge(rawtt(s2v(slot)), scan))
+      marknursery(L, gcvalue(s2v(slot)), gray, scan);
+}
+
+static void seednursery (lua_State *L, LuaNurseryTrace *trace, NurseryScan scan) {
   if (scan != NURSERY_CONSTRUCTION) {
     GCObject *o = L->task_remembered;
     while (o != obj2gco(L)) {
       GCObject *next = o->next;
       o->next = NULL;
-      if (scan == NURSERY_TASK_YOUNG) marknursery(L, o, &gray, scan);
+      if (scan == NURSERY_TASK_YOUNG) marknursery(L, o, &trace->gray, scan);
       o = next;
     }
     L->task_remembered = obj2gco(L);
   }
-  for (slot = L->stack.p; slot < L->top.p; slot++)
-    if (nurseryedge(rawtt(s2v(slot)), scan))
-      marknursery(L, gcvalue(s2v(slot)), &gray, scan);
-  while (gray != NULL) {
-    Table *t = gco2t(gray);
-    Table *keys = luaH_recordkeys(t->node);
-    unsigned i;
-    gray = t->gclist;
-    if (t->metatable != NULL)
-      visitnursery(L, obj2gco(t->metatable), &gray, scan);
-    if (keys != NULL) {
-      Value *values = luaH_recordvalues(t);
-      uintptr_t tags = t->arraydata;
-      visitnursery(L, obj2gco(keys), &gray, scan);
-      for (i = 0; i < keys->asize; i++)
-        if (nurseryedge(luaH_recordtag(tags, i), scan))
-          visitnursery(L, values[i].gc, &gray, scan);
-      continue;
+  markstack(L, &trace->gray, scan);
+}
+
+/* Charge slots as well as tables. A single large array or hash image must
+** be resumable even when the rest of the gray queue is empty. */
+static int drainnursery (lua_State *L, LuaNurseryTrace *trace, NurseryScan scan,
+                         size_t budget) {
+  GCObject *gray = trace->gray;
+  Table *t = trace->table;
+  size_t offset = trace->offset;
+  while (budget != 0 && (gray != NULL || t != NULL)) {
+    size_t start, stop, end;
+    if (t == NULL) {
+      t = gco2t(gray);
+      gray = t->gclist;
+      offset = 0;
+      budget--;
     }
-    for (i = 0; i < t->asize; i++)
-      if (nurseryedge(*getArrTag(t, i), scan))
-        visitnursery(L, getArrVal(t, i)->gc, &gray, scan);
-    for (i = 0; i < allocsizenode(t); i++) {
-      Node *node = gnode(t, i);
+    start = offset;
+    if (start == 0) {
+      Table *keys = luaH_recordkeys(t->node);
+      if (t->metatable != NULL)
+        visitnursery(L, obj2gco(t->metatable), &gray, scan);
+      if (keys != NULL) {
+        Value *values = luaH_recordvalues(t);
+        uintptr_t tags = t->arraydata;
+        unsigned i;
+        visitnursery(L, obj2gco(keys), &gray, scan);
+        for (i = 0; i < keys->asize; i++)
+          if (nurseryedge(luaH_recordtag(tags, i), scan))
+            visitnursery(L, values[i].gc, &gray, scan);
+        budget -= budget < keys->asize ? budget : keys->asize;
+        t = NULL;
+        continue;
+      }
+    }
+    end = cast(size_t, t->asize) + allocsizenode(t);
+    stop = budget < end - start ? start + budget : end;
+    budget -= stop - start;
+    for (; start < stop && start < t->asize; start++)
+      if (nurseryedge(*getArrTag(t, start), scan))
+        visitnursery(L, getArrVal(t, start)->gc, &gray, scan);
+    for (; start < stop; start++) {
+      Node *node = gnode(t, start - t->asize);
       if (isempty(gval(node))) continue;
       if (nurseryedge(keytt(node), scan))
         visitnursery(L, gckey(node), &gray, scan);
       if (nurseryedge(rawtt(gval(node)), scan))
         visitnursery(L, gcvalue(gval(node)), &gray, scan);
     }
+    offset = stop;
+    if (stop == end) t = NULL;
   }
+  *trace = (LuaNurseryTrace){gray, t, offset};
+  return t == NULL && gray == NULL;
+}
+
+static void tracenursery (lua_State *L, GCObject *gray, NurseryScan scan) {
+  LuaNurseryTrace trace = {gray, NULL, 0};
+  seednursery(L, &trace, scan);
+  while (!drainnursery(L, &trace, scan, MAX_SIZET)) {}
 }
 
 /* Sweep whole words and leave mature survivors' headers untouched. Remove
@@ -797,12 +859,13 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
 void luaC_taskstep (lua_State *L) {
   global_State *g = G(L);
   size_t live, young_bytes;
-  NurseryScan scan = NURSERY_TASK_FULL;
+  NurseryScan scan;
   L->task_nursery_pending = 0;
   if (!gcrunning(g) || L->native_roots != NULL ||
       L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
       !g->gcparams[LUA_GCPSTEPSIZE] || !g->gcparams[LUA_GCPSTEPMUL]) {
     L->task_nursery_limit = taskcapacity(L) + 1;
+    L->task_nursery_pending = L->task_mark_scan != 0;
     return;
   }
   if (L->task_old_bytes < TASK_NURSERY_START / 2 && luaC_taskrootpressure(L) &&
@@ -821,12 +884,41 @@ void luaC_taskstep (lua_State *L) {
   /* Charge each young interval to a budget fixed by the last full scan. */
   lua_assert(L->task_nursery_bytes >= L->task_old_bytes);
   young_bytes = L->task_nursery_bytes - L->task_old_bytes;
-  if (luaC_taskrootpressure(L)) scan = NURSERY_TASK_ROOTS;
+  if (L->task_mark_scan != 0) scan = cast(NurseryScan, L->task_mark_scan);
+  else if (luaC_taskrootpressure(L)) scan = NURSERY_TASK_ROOTS;
   else if (L->task_old_bytes >= TASK_NURSERY_START / 2 &&
            L->task_nursery_bytes < taskcapacity(L) - TASK_YOUNG_BYTES &&
            young_bytes < L->task_minor_budget)
     scan = NURSERY_TASK_YOUNG;
-  tracenursery(L, NULL, scan);
+  else scan = NURSERY_TASK_FULL;
+  if (L->task_mark_scan != 0 ||
+      (scan >= NURSERY_TASK_FULL && L->task_old_bytes >= TASK_MATURE_START)) {
+    size_t limit = taskcapacity(L) - TASK_YOUNG_BYTES;
+    if (L->task_nursery_bytes >= limit) {
+      /* Keep the same space bound if application allocation outruns a mark. */
+      luaC_sealtask(L);
+      return;
+    }
+    if (L->task_mark_scan == 0) {
+      L->task_mark_scan = cast_byte(scan);
+      L->task_nursery_limit = limit;
+      seednursery(L, &L->task_trace, scan);
+    }
+    if (drainnursery(L, &L->task_trace, scan, TASK_MARK_BUDGET)) {
+      /* Values can move from a heap edge to a register during the trace.
+      ** The insertion barrier covers table writes and this closes the stack. */
+      markstack(L, &L->task_trace.gray, scan);
+      if (L->task_trace.gray == NULL) {
+        L->task_mark_scan = 0;
+        L->task_trace = (LuaNurseryTrace){0};
+      }
+    }
+    if (L->task_mark_scan != 0) {
+      L->task_nursery_pending = 1;
+      return;
+    }
+  }
+  else tracenursery(L, NULL, scan);
   live = sweepnursery(L, &L->task_objects, scan);
   if (luaC_hastaskheap(L)) {
     if (scan == NURSERY_TASK_YOUNG)
@@ -903,8 +995,7 @@ void luaC_collectnursery (lua_State *L) {
   ** before the handoff remain unpublished. Its outgoing edges are roots
   ** even when no stack slot points directly into that older cohort. */
   for (i = 0; i < L->task_root_count; i++)
-    marknursery(L, cast(GCObject *, L->task_roots[i]), &gray,
-                NURSERY_CONSTRUCTION);
+    marknursery(L, luaC_taskrootat(L, i), &gray, NURSERY_CONSTRUCTION);
   tracenursery(L, gray, NURSERY_CONSTRUCTION);
   sweepnursery(L, &L->new_tables, NURSERY_CONSTRUCTION);
 }

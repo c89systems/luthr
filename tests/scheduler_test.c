@@ -4,6 +4,7 @@
 #include <lauxlib.h>
 #include <lgc.h>
 #include <lscheduler.h>
+#include <ltable.h>
 #include <lualib.h>
 #include <sched.h>
 #include <stdio.h>
@@ -1960,6 +1961,21 @@ static int nursery_inspect(lua_State *L) {
   return 2;
 }
 
+static int nursery_marking(lua_State *L) {
+  lua_pushboolean(L, L->task_mark_scan != 0);
+  return 1;
+}
+
+static int nursery_resize(lua_State *L) {
+  Table *table;
+  lua_lock(L);
+  table = hvalue(s2v(L->ci->func.p + 1));
+  require(luaC_tasktable(table));
+  luaH_resize(L, table, table->asize * 2, 8);
+  lua_unlock(L);
+  return 0;
+}
+
 static int nursery_roundtrip(lua_State *L) {
   struct fixture *f = fixture;
   size_t length;
@@ -2197,6 +2213,38 @@ static void nursery_root_pressure(struct fixture *f, int generational) {
   require(luaL_dostring(L, "local r=nursery_result; "
                            "assert(r[1][r[3]]['key-42']==42 and r[3][1]==42); "
                            "assert(r[2]==('data-42'):rep(24))") == LUA_OK);
+  finish(f);
+}
+
+static void nursery_mark(struct fixture *f, int generational, int publish) {
+  init(f, 2);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(f->main, "nursery_inspect", nursery_inspect);
+  managed(f->main, "nursery_marking", nursery_marking);
+  managed(f->main, "nursery_resize", nursery_resize);
+  require(luaL_dostring(f->main, "nursery_external={answer=42}") == LUA_OK);
+  submit(f, 0,
+         "local publish=...; local graph={}; local last; "
+         "for i=1,131072 do graph[i]={i}; "
+         "  if i%64==0 and nursery_marking() then last=i; break end end; "
+         "assert(last and nursery_inspect(graph)); "
+         "local stackonly={89}; "
+         "graph[1][2]={57}; graph[1][3]=nursery_external; "
+         "nursery_external=nil; graph[2]=nil; nursery_resize(graph); "
+         "assert(nursery_marking()); "
+         "if publish==1 then collectgarbage('collect'); "
+         "  assert(not nursery_marking() and not nursery_inspect(graph)); "
+         "else for j=1,128 do "
+         "    if not nursery_marking() then break end; "
+         "    local n=0; for i=1,1024 do n=n+i end; "
+         "  end; assert(not nursery_marking() and nursery_inspect(graph)); "
+         "end; "
+         "for i=1,12000 do local row={i,i+1}; assert(row[2]==i+1) end; "
+         "assert(graph[2]==nil and graph[last][1]==last); "
+         "assert(graph[1][3].answer==42 and stackonly[1]==89); "
+         "return graph[1][2][1]",
+         publish);
+  require(collect(f, 0, LUA_OK) == 57);
   finish(f);
 }
 
@@ -2588,6 +2636,14 @@ int main(int argc, char **argv) {
     nursery_native_call(f, 1);
   else if (strcmp(argv[1], "nursery_full_incremental") == 0)
     nursery_full(f, 0);
+  else if (strcmp(argv[1], "nursery_mark_incremental") == 0)
+    nursery_mark(f, 0, 0);
+  else if (strcmp(argv[1], "nursery_mark_generational") == 0)
+    nursery_mark(f, 1, 0);
+  else if (strcmp(argv[1], "nursery_mark_publish_incremental") == 0)
+    nursery_mark(f, 0, 1);
+  else if (strcmp(argv[1], "nursery_mark_publish_generational") == 0)
+    nursery_mark(f, 1, 1);
   else if (strcmp(argv[1], "nursery_full_generational") == 0)
     nursery_full(f, 1);
   else if (strcmp(argv[1], "nursery_full_cutoff_incremental") == 0)

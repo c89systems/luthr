@@ -799,6 +799,13 @@ static void pollnative (LuaScheduledTask *task, lua_State *L) {
   dropcachednative(task, 1);
 }
 
+/* The previous survivor count is stable until an incremental trace finishes.
+** Count its current cohort so a growing job keeps its continuation turn. */
+l_sinline size_t taskfootprint (lua_State *L, LuaScheduledTask *task) {
+  if (L->task_owner != &task->root) return 0;
+  return L->task_mark_scan != 0 ? L->task_live_bytes : L->task_old_bytes;
+}
+
 static void poll (LuaExecution *execution, lua_State *L) {
   LuaScheduledTask *task = execution->context;
   LuaScheduler *s = task->scheduler;
@@ -844,16 +851,15 @@ static void poll (LuaExecution *execution, lua_State *L) {
       if (serial && task->dispatches == 1) slice = FIRST_SERIAL_SLICE_NS;
       else if (serial && task->turn != TURN_PEER) slice = SERIAL_SLICE_NS;
       task->slice_deadline = now + slice;
-      task->slice_live = serial && L->task_owner == &task->root
-        ? L->task_old_bytes : 0;
+      task->slice_live = serial ? taskfootprint(L, task) : 0;
     }
     if (now < task->slice_deadline) return;
     /* The first turn and each FIFO peer get a short slice. A continuation
     ** keeps its longer slice while consuming the graph it just built. */
     live = serial && !task->external && task->dispatches != 1 &&
-        task->turn != TURN_PEER && L->task_owner == &task->root &&
+        task->turn != TURN_PEER &&
         execution->allocation_cache != NULL && execution->native_depth == 0
-      ? L->task_old_bytes : 0;
+      ? taskfootprint(L, task) : 0;
     if (live >= RETAINED_HEAP_BYTES && reentry == 0 && publishing == 0 &&
         __atomic_load_n(&s->external_yields, __ATOMIC_ACQUIRE) == 0) {
       int changing = live != task->slice_live;

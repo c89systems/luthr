@@ -148,7 +148,7 @@ unsigned luaC_snapshot (lua_State *L, lua_State *thread) {
   if (luaC_hastaskheap(thread)) {
     unsigned i;
     for (i = 0; i < thread->task_root_count; i++)
-      luaC_traceobject(L, cast(GCObject *, thread->task_roots[i]));
+      luaC_traceobject(L, luaC_taskrootat(thread, i));
   }
   if (thread->stack.p != NULL) {
     /* Open private bindings live on the stack. For shared bindings, a

@@ -55,7 +55,7 @@ struct LuaScheduledTask {
   lu_byte turn;  /* queue position at dispatch */
   uint64_t native_deadline;  /* expiry after the first contended Lua poll */
   uint64_t minor_deadline;  /* owner's initial slice for an explicit minor */
-  size_t slice_live;  /* private survivors at the start of this slice */
+  size_t slice_live;  /* private bytes observed at the start of this slice */
 };
 
 struct LuaCarrier {

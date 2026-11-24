@@ -477,9 +477,16 @@ LUAI_FUNC void luaC_retireseal (lua_State *L);
 LUAI_FUNC void luaC_endtask (lua_State *L);
 LUAI_FUNC void luaC_taskbacking (lua_State *L, Table *table, size_t bytes);
 LUAI_FUNC void luaC_taskresize (lua_State *L, Table *table, l_mem change);
+LUAI_FUNC void luaC_taskrelocate (lua_State *L, const Node *base,
+                                 const Node *slot);
 LUAI_FUNC void luaC_taskstep (lua_State *L);
 LUAI_FUNC void luaC_freetaskroots (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);
+
+#define LUA_TASK_ROOT_LIVE cast(uintptr_t, 1u)
+l_sinline GCObject *luaC_taskrootat (lua_State *thread, unsigned index) {
+  return cast(GCObject *, thread->task_roots[index] & ~LUA_TASK_ROOT_LIVE);
+}
 
 l_sinline size_t luaC_taskrootsize (unsigned capacity) {
   return capacity * (sizeof(uintptr_t) + 2 * sizeof(uint16_t));
