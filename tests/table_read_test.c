@@ -1340,6 +1340,62 @@ static void long_string_hash(lua_State *parent, int partition) {
   lua_close(state);
 }
 
+struct record_iteration {
+  lua_State *reader;
+  pthread_barrier_t ready;
+};
+
+static void *iterate_record(void *argument) {
+  struct record_iteration *test = argument;
+  rendezvous(&test->ready);
+  require(lua_pcall(test->reader, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(test->reader, -1) == 2000 * 53);
+  return NULL;
+}
+
+static void shared_record_iteration(lua_State *state, int generational) {
+  struct record_iteration test;
+  pthread_t thread;
+  luaL_openlibs(state);
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  require(luaL_dostring(state, "return {a=42,b=11}") == LUA_OK);
+  test.reader = lua_newthread(state);
+  require(luaL_loadstring(test.reader,
+                          "local row = ...; local sum = 0; "
+                          "for i=1,2000 do "
+                          "  local count = 0; "
+                          "  for k,v in pairs(row) do "
+                          "    assert(k == 'a' or k == 'b'); "
+                          "    if type(v) == 'table' then v = v.number end; "
+                          "    sum = sum + v; count = count + 1 "
+                          "  end; "
+                          "  assert(count == 2) "
+                          "end; return sum") == LUA_OK);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, test.reader, 1);
+  luaX_lockstate(state);
+  Table *record = hvalue(s2v(state->ci->func.p + 1));
+  require(luaH_recordkeys(record->node) != NULL &&
+          !luaA_localtable(state, record));
+  luaX_unlockstate(state);
+  require(pthread_barrier_init(&test.ready, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, iterate_record, &test) == 0);
+  rendezvous(&test.ready);
+  for (unsigned i = 0; i < 500; i++) {
+    if (i % 2) {
+      lua_newtable(state);
+      lua_pushinteger(state, 42);
+      lua_setfield(state, -2, "number");
+    } else
+      lua_pushinteger(state, 42);
+    lua_setfield(state, 1, "a");
+    if (i % 97 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+  }
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&test.ready) == 0);
+}
+
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
   require(state != NULL && argc == 2);
@@ -1351,6 +1407,9 @@ int main(int argc, char **argv) {
     captured_lookup(state, strcmp(argv[1], "captured_generational") == 0);
   else if (strncmp(argv[1], "writes_", 7) == 0)
     writes(state, strcmp(argv[1], "writes_generational") == 0);
+  else if (strncmp(argv[1], "record_iteration_", 17) == 0)
+    shared_record_iteration(
+        state, strcmp(argv[1], "record_iteration_generational") == 0);
   else if (strcmp(argv[1], "mixed_incremental") == 0 ||
            strcmp(argv[1], "mixed_generational") == 0)
     mixed(state, strcmp(argv[1], "mixed_generational") == 0);

@@ -116,6 +116,44 @@ do
   assert(observed==42 and table.concat(events,',')=='call,return')
 end
 
+do
+  local record = {left=20,right=22}
+  local sum = 0
+  for key, value in pairs(record) do
+    assert(record[key] == value)
+    sum = sum + value
+    record[key] = nil
+  end
+  assert(sum == 42 and next(record) == nil)
+  local mixed = {11,22,letter=9}
+  sum = 0
+  for key in next,mixed do sum = sum + mixed[key] end
+  assert(sum == 42)
+  local ok, err = pcall(function()
+    for key in next,mixed,'unknown' do error(key) end
+  end)
+  assert(not ok and err:find("invalid key to 'next'", 1, true))
+
+  local iterator = next
+  local calls, returns = 0, 0
+  debug.sethook(function(event)
+    if debug.getinfo(2,'f').func == iterator then
+      if event == 'call' then calls = calls + 1 end
+      if event == 'return' then returns = returns + 1 end
+    end
+  end,'cr')
+  for key, value in iterator,{answer=42} do
+    assert(key == 'answer' and value == 42)
+  end
+  debug.sethook()
+  assert(calls == 2 and returns == 2)
+
+  local weak = setmetatable({stable=42,dead={}}, {__mode='v'})
+  collectgarbage('collect')
+  local key, value = next(weak)
+  assert(key == 'stable' and value == 42 and next(weak,key) == nil)
+end
+
 local closed, marker = {}, {}
 local function resource(id)
   return setmetatable({}, {__close=function(_,err)

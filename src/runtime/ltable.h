@@ -190,6 +190,13 @@ l_sinline unsigned luaH_recordindex (const Table *keys, const TString *key) {
   return keys->asize;
 }
 
+l_sinline unsigned luaH_nextrecordslot (const Table *keys, uintptr_t tags,
+                                         unsigned index) {
+  while (index < keys->asize && tagisempty(luaH_recordtag(tags, index)))
+    index++;
+  return index;
+}
+
 /* Large arrays carry one stamp per group of slots. Scalar cards have
 ** never held a reference in this image. Other cards are zero when dirty,
 ** or retain the major epoch in which a young scan proved them clean. */
@@ -296,6 +303,7 @@ LUAI_FUNC l_mem luaH_freepooled (lua_State *L, Table *t);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);
+LUAI_FUNC int luaH_nextlocked (lua_State *L, Table *t, StkId key);
 LUAI_FUNC lua_Unsigned luaH_getn (lua_State *L, Table *t);
 
 

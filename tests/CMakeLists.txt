@@ -207,6 +207,7 @@ foreach(case IN ITEMS fast primitive batching stack_grace private_resize overlap
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     long_string_hash long_string_partition
     index_hit index_miss index_metatable_change
+    record_iteration_incremental record_iteration_generational
     mixed_incremental mixed_generational writes_incremental writes_generational
     write_error_incremental write_error_generational retained_incremental retained_generational
     captured_incremental captured_generational)

@@ -2715,28 +2715,30 @@ void luaH_resizearray (lua_State *L, Table *t, unsigned asize) {
 }
 
 static int nextrecord (lua_State *L, Table *t, Table *keys, StkId key) {
+  uintptr_t tags = t->arraydata;
   unsigned i = 0;
   if (!ttisnil(s2v(key))) {
     const TValue *previous = s2v(key);
     if (ttisshrstring(previous)) i = luaH_recordindex(keys, tsvalue(previous));
     else if (ttislngstring(previous)) i = recordlongindex(keys, tsvalue(previous));
     else i = keys->asize;
-    if (i == keys->asize || luaH_recordtag(t->arraydata, i) == LUA_VABSTKEY)
+    if (i == keys->asize || luaH_recordtag(tags, i) == LUA_VABSTKEY)
       luaG_runerror(L, "invalid key to 'next'");
     i++;
   }
-  for (; i < keys->asize; i++) {
+  i = luaH_nextrecordslot(keys, tags, i);
+  if (i < keys->asize) {
     TValue value;
-    if (!tagisempty(luaH_recordvalue(t, i, &value))) {
-      arr2obj(keys, i, s2v(key));
-      setobj2s(L, key + 1, &value);
-      return 1;
-    }
+    val_(&value) = luaH_recordvalues(t)[i];
+    settt_(&value, luaH_recordtag(tags, i));
+    arr2obj(keys, i, s2v(key));
+    setobj2s(L, key + 1, &value);
+    return 1;
   }
   return 0;
 }
 
-int luaH_next (lua_State *L, Table *t, StkId key) {
+int luaH_nextlocked (lua_State *L, Table *t, StkId key) {
   LuaObjectScope scope;
   Table *keys;
   int result;
