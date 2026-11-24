@@ -3,18 +3,19 @@
 #include "lprefix.h"
 #include "ltableaccess.h"
 
-static int emitnext (lua_State *L, StkId key, const TValue *value) {
-  setobj2s(L, key + 1, value);
-  luaC_tracevalue(L, s2v(key));
-  luaC_tracevalue(L, s2v(key + 1));
+static int emitnext (lua_State *L, TValue *key, TValue *result,
+                     const TValue *value) {
+  setobj(L, result, value);
+  luaC_tracevalue(L, key);
+  luaC_tracevalue(L, result);
   return 1;
 }
 
 /* The managed reader's storage epoch retains the shape. Sample the layout
 ** before reading its tags and payload, and validate before exposing either. */
-static int nextrecordview (lua_State *L, Table *table, StkId key) {
+static int nextrecordview (lua_State *L, Table *table, TValue *key,
+                           TValue *result) {
   uint64_t version = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
-  const TValue *previous = s2v(key);
   Table *keys;
   uintptr_t tags;
   unsigned index = 0;
@@ -24,9 +25,9 @@ static int nextrecordview (lua_State *L, Table *table, StkId key) {
   if (keys == NULL) return -1;
   tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
   if (!(tags & LUA_RECORD_TAGS)) return -1;
-  if (!ttisnil(previous)) {
-    if (!ttisshrstring(previous)) return -1;
-    index = luaH_recordindex(keys, tsvalue(previous));
+  if (!ttisnil(key)) {
+    if (!ttisshrstring(key)) return -1;
+    index = luaH_recordindex(keys, tsvalue(key));
     if (index == keys->asize || luaH_recordtag(tags, index) == LUA_VABSTKEY)
       return -1;
     index++;
@@ -37,13 +38,14 @@ static int nextrecordview (lua_State *L, Table *table, StkId key) {
   __atomic_load(luaH_recordvalues(table) + index, &val_(&value), __ATOMIC_ACQUIRE);
   if (__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) != version) return -1;
   settt_(&value, luaH_recordtag(tags, index));
-  arr2obj(keys, index, s2v(key));
-  return emitnext(L, key, &value);
+  arr2obj(keys, index, key);
+  return emitnext(L, key, result, &value);
 }
 
 /* Each step borrows storage only within the read scope. A sparse table
 ** can exhaust the scan budget and use the ordinary owned traversal. */
-static int nextarrayview (lua_State *L, Table *t, StkId key, Value *array,
+static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
+                         Value *array,
                          unsigned index, unsigned size, uint64_t layout,
                          unsigned *budget) {
   unsigned count = size - index < *budget ? size - index : *budget;
@@ -56,8 +58,8 @@ static int nextarrayview (lua_State *L, Table *t, StkId key, Value *array,
         isempty(&value) ||
         __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) != layout)
       return -1;
-    setivalue(s2v(key), cast(lua_Integer, index) + 1);
-    return emitnext(L, key, &value);
+    setivalue(key, cast(lua_Integer, index) + 1);
+    return emitnext(L, key, result, &value);
   }
   *budget -= count;
   return index == size ? 0 : -1;
@@ -69,7 +71,7 @@ static int cursorvalid (const LuaHashCursor *cursor) {
            cursor->version;
 }
 
-static int nexthashview (lua_State *L, Table *t, StkId key,
+static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
                          const LuaHashCursor *cursor, uint64_t layout,
                          unsigned *budget) {
   unsigned size = luaH_nodesize(cursor->nodes);
@@ -90,17 +92,16 @@ static int nexthashview (lua_State *L, Table *t, StkId key,
         __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) != layout)
       return -1;
     settt_(&nextkey, keytag);
-    setobj2s(L, key, &nextkey);
-    return emitnext(L, key, &value);
+    setobj(L, key, &nextkey);
+    return emitnext(L, key, result, &value);
   }
   *budget -= count;
   return index == size && cursorvalid(cursor) ? 0 : -1;
 }
 
 static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
-                                                    StkId key) {
+                                                    TValue *key, TValue *result) {
   uint64_t layout = __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE);
-  const TValue *previous = s2v(key);
   Node *image;
   LuaHashDirectory *dir;
   LuaHashCursor cursor = {0};
@@ -113,18 +114,19 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
   dir = luaH_hashdir(image);
   array = luaH_readarray(t);
   size = array != NULL ? arrayheader(array)->size : 0;
-  index = ttisinteger(previous) ? luaH_indexin(ivalue(previous), size) : 0;
+  index = ttisinteger(key) ? luaH_indexin(ivalue(key), size) : 0;
   cursor.nodes = image;
-  if (index != 0 || ttisnil(previous)) {
+  if (index != 0 || ttisnil(key)) {
     if (index < size) {
-      int more = nextarrayview(L, t, key, array, index, size, layout, &budget);
+      int more = nextarrayview(L, t, key, result, array, index, size, layout,
+                               &budget);
       if (more != 0) return more;
     }
     if (dir != NULL && !luaH_cursorpart(&cursor, dir)) return -1;
   }
-  else if (!luaH_hashresume(t, dir, previous, layout, &cursor)) return -1;
+  else if (!luaH_hashresume(t, dir, key, layout, &cursor)) return -1;
   for (;;) {
-    int more = nexthashview(L, t, key, &cursor, layout, &budget);
+    int more = nexthashview(L, t, key, result, &cursor, layout, &budget);
     if (more != 0) return more;
     /* A deletion can only remove entries from an already scanned partition.
     ** Insertion during traversal has the ordinary 'next' restriction. */
@@ -135,10 +137,15 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
   }
 }
 
-int luaH_next (lua_State *L, Table *table, StkId key) {
+/* A failed snapshot or the end of iteration leaves both slots unchanged. */
+int luaH_trynext (lua_State *L, Table *table, TValue *key, TValue *result) {
   Node *image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  int more = luaH_recordkeys(image) != NULL ? nextrecordview(L, table, key)
-                                           : nexttableview(L, table, key);
+  return luaH_recordkeys(image) != NULL ? nextrecordview(L, table, key, result)
+                                       : nexttableview(L, table, key, result);
+}
+
+int luaH_next (lua_State *L, Table *table, StkId key) {
+  int more = luaH_trynext(L, table, s2v(key), s2v(key + 1));
   if (more >= 0) return more;
   return luaH_nextlocked(L, table, key);
 }

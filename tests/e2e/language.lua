@@ -149,6 +149,36 @@ do
   local position, value = next(sparse)
   assert(position == 400 and value == 400 and next(sparse,position) == nil)
 
+  local result = table.pack(next({answer=42}))
+  assert(result.n == 2 and result[1] == 'answer' and result[2] == 42)
+  local exhausted = table.pack(next({answer=42},'answer','ignored'))
+  assert(exhausted.n == 1 and exhausted[1] == nil)
+  local k, v, extra = next({answer=42})
+  assert(k == 'answer' and v == 42 and extra == nil)
+  local function tail_next(t)
+    return next(t)
+  end
+  k, v = tail_next({answer=42})
+  assert(k == 'answer' and v == 42)
+  local function wrong_state()
+    local ignored = next(false)
+    return ignored
+  end
+  ok, err = pcall(wrong_state)
+  assert(not ok and err:find("table expected", 1, true))
+  local captured = {}
+  for _, item, third, fourth in next,{10,20} do
+    assert(third == nil and fourth == nil)
+    captured[#captured+1] = function() return item end
+  end
+  assert(captured[1]() == 10 and captured[2]() == 20)
+  local raw_results = 0
+  for item, extra in rawget,{42},1 do
+    assert(item == 42 and extra == nil)
+    raw_results = raw_results + 1
+  end
+  assert(raw_results == 1)
+
   local iterator = next
   local calls, returns = 0, 0
   debug.sethook(function(event)

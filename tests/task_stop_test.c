@@ -50,21 +50,39 @@ static void notify(struct fixture *test) {
 static void waitfor(struct fixture *test) {
   require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
 }
+
+static void wait_for_leaf_stop(struct fixture *test) {
+  test->armed = 0;
+  lock(test);
+  test->entered = 1;
+  notify(test);
+  while (!test->release)
+    waitfor(test);
+  unlock(test);
+}
+
 int __real_luaD_tryleaf(lua_State *, StkId, int, int);
 int __wrap_luaD_tryleaf(lua_State *state, StkId func, int nargs, int wanted) {
   struct fixture *test = active;
   int observe = state == test->roots[0].thread && test->armed &&
                 fvalue(s2v(func)) == luaB_mathabs &&
-                strstr(test->mode, "leaf_return") != NULL;
+                strstr(test->mode, "leaf_return") != NULL &&
+                strstr(test->mode, "iterator") == NULL;
   int result = __real_luaD_tryleaf(state, func, nargs, wanted);
-  if (observe && result >= 0) {
-    test->armed = 0;
-    lock(test);
-    test->entered = 1;
-    notify(test);
-    while (!test->release)
-      waitfor(test);
-    unlock(test);
+  if (observe && result >= 0)
+    wait_for_leaf_stop(test);
+  return result;
+}
+
+int __real_luaH_trynext(lua_State *, Table *, TValue *, TValue *);
+int __wrap_luaH_trynext(lua_State *state, Table *table, TValue *key,
+                        TValue *value) {
+  struct fixture *test = active;
+  int result = __real_luaH_trynext(state, table, key, value);
+  if (state == test->roots[0].thread && test->armed &&
+      strstr(test->mode, "iterator") != NULL && result > 0) {
+    require(isLua(state->ci));
+    wait_for_leaf_stop(test);
   }
   return result;
 }
@@ -272,6 +290,8 @@ static void create_tasks(struct fixture *test) {
             "if xcatching then while true do xpcall(function() while true do "
             "end "
             "end,handler) end end; "
+            "if iterator_leaf then "
+            "for k,v in next,{42} do after_leaf=(k+v==43) end end; "
             "local n=0; if leaf then local abs=math.abs; "
             "n=abs(-1); after_leaf=true; "
             "while true do n=abs(-n-1) end end; "
@@ -517,6 +537,8 @@ static void *run(void *context) {
   lua_setglobal(state, "xcatching");
   lua_pushboolean(state, strstr(test->mode, "leaf") != NULL);
   lua_setglobal(state, "leaf");
+  lua_pushboolean(state, strstr(test->mode, "iterator") != NULL);
+  lua_setglobal(state, "iterator_leaf");
   lua_pushboolean(state, 0);
   lua_setglobal(state, "after_leaf");
   lua_pushboolean(state, strstr(test->mode, "cleanup_error") != NULL);

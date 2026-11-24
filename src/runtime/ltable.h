@@ -325,6 +325,7 @@ LUAI_FUNC l_mem luaH_freepooled (lua_State *L, Table *t);
 LUAI_FUNC void luaH_free (lua_State *L, Table *t);
 LUAI_FUNC void luaH_retire (lua_State *L, Table *t);
 LUAI_FUNC int luaH_next (lua_State *L, Table *t, StkId key);
+LUAI_FUNC int luaH_trynext (lua_State *L, Table *t, TValue *key, TValue *value);
 LUAI_FUNC int luaH_nextlocked (lua_State *L, Table *t, StkId key);
 LUAI_FUNC int luaH_hashresume (Table *t, const LuaHashDirectory *dir,
                                const TValue *key, uint64_t layout,

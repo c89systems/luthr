@@ -12,11 +12,12 @@ LUAI_FUNC int luaB_select (lua_State *L);
 LUAI_FUNC int luaB_rawget (lua_State *L);
 LUAI_FUNC int luaB_rawequal (lua_State *L);
 LUAI_FUNC int luaB_tonumber (lua_State *L);
+LUAI_FUNC int luaB_next (lua_State *L);
 
 l_sinline int luaB_isleaf (lua_CFunction f) {
   return f == luaB_strsub || f == luaB_strbyte || f == luaB_mathabs ||
          f == luaB_assert || f == luaB_select || f == luaB_rawget ||
-         f == luaB_rawequal || f == luaB_tonumber;
+         f == luaB_rawequal || f == luaB_tonumber || f == luaB_next;
 }
 
 /*

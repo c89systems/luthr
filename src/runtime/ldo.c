@@ -787,7 +787,7 @@ static int __attribute__((noinline)) precallC (lua_State *L, StkId func,
   return n;
 }
 
-/* A successful probe returns zero or one computed value, or forwards a
+/* A successful probe returns up to two computed values, or forwards a
 ** suffix of the arguments. It never rewrites a live slot or parks. */
 static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
                        TValue *value, int *forward) {
@@ -795,6 +795,16 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
   int bytes = f == luaB_strbyte;
   if (bytes || f == luaB_strsub)
     return luaB_leafrange(L, func, nargs, bytes, value);
+  if (f == luaB_next) {
+    int more;
+    if (!ttistable(first)) return -1;
+    if (nargs < 2) setnilvalue(value);
+    else { setobj(L, value, s2v(func + 2)); }
+    more = luaH_trynext(L, hvalue(first), value, value + 1);
+    if (more < 0) return -1;
+    if (!more) setnilvalue(value);
+    return more + 1;
+  }
   if (f == luaB_assert) {
     if (l_isfalse(first)) return -1;
     *forward = 1;
@@ -847,13 +857,13 @@ static int leafresult (lua_State *L, StkId func, lua_CFunction f, int nargs,
 int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   lua_CFunction f = fvalue(s2v(func));
   int n, forward = 0;
-  TValue value;
+  TValue values[2];
   lua_assert(luaB_isleaf(f));
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
     return -1;
-  n = leafresult(L, func, f, nargs, &value, &forward);
+  n = leafresult(L, func, f, nargs, values, &forward);
   if (n < 0 || l_unlikely(gethookmask(L)))
     return -1;
   if (forward) {
@@ -862,9 +872,12 @@ int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   }
   else {
     int i;
-    if (wanted == LUA_MULTRET) wanted = n;
-    if (wanted != 0 && n != 0) { setobj2s(L, func, &value); }
-    for (i = n; i < wanted; i++) setnilvalue2s(func + i);
+    if (wanted == LUA_MULTRET) {
+      if (n > L->ci->top.p - func) return -1;
+      wanted = n;
+    }
+    for (i = 0; i < n && i < wanted; i++) setobj2s(L, func + i, values + i);
+    for (; i < wanted; i++) setnilvalue2s(func + i);
     L->top.p = func + wanted;
   }
   return n;
@@ -1017,6 +1030,14 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
 ** External interface for 'ccall'
 */
 void luaD_call (lua_State *L, StkId func, int nResults) {
+  /* A bounded builtin needs no fresh C activation. Keep the ordinary call
+  ** path at the recursion limit so it reports the same overflow. */
+  if (checktag(s2v(func), LUA_VBCF) && getCcalls(L) < LUAI_MAXCCALLS - 1 &&
+      luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1, nResults) >= 0) {
+    luaTK_checkstop(L);
+    luaCP_checklimit(L);
+    return;
+  }
   ccall(L, func, nResults, 1);
 }
 
