@@ -48,15 +48,11 @@ void luaL_rootarg (lua_State *L, int arg, LuaNativeRoot *root) {
 ** or releases ownership, inspect the slot again before borrowing bytes. */
 const char *luaL_rootstring (lua_State *L, int arg, LuaNativeRoot *root,
                              size_t *len) {
-  lua_assert(arg > 0);
-  for (;;) {
-    const char *string;
-    lua_lock(L);
-    string = luaL_tryrootstring(L, arg, root, len);
-    lua_unlock(L);
-    if (string != NULL) return string;
-    luaL_checklstring(L, arg, NULL);
-  }
+  const char *string;
+  lua_lock(L);
+  string = luaL_ownedrootstring(L, arg, root, len);
+  lua_unlock(L);
+  return string;
 }
 
 const char *luaL_roottostring (lua_State *L, LuaNativeRoot *root, size_t *len) {

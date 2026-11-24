@@ -153,6 +153,19 @@ equal(string.gsub('alpha=12 beta=21','(%a+)=(%d+)',function(k,v)
 end),'alpha=24 beta=42')
 equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
 do
+  local capture = string.rep('x',8192)
+  local subject = '['..capture..']'
+  local pattern = '%[(x+)()%]'
+  local first, last, text, position = string.find(subject,pattern)
+  equal(first,1)
+  equal(last,#subject)
+  equal(text,capture)
+  equal(position,#subject)
+  text, position = string.match(subject,pattern)
+  equal(text,capture)
+  equal(position,#subject)
+end
+do
   local format = string.format
   equal(format('%d,%i,%u',0,-42,42),'0,-42,42')
   equal(format('%d/%d',math.mininteger,math.maxinteger),

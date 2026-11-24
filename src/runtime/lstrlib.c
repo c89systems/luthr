@@ -162,11 +162,7 @@ static const char *readrange (lua_State *L, LuaNativeRoot *root, int bytes,
   size_t len;
   lua_Integer first, last;
   lua_lock(L);
-  while ((source = luaL_tryrootstring(L, 1, root, &len)) == NULL) {
-    lua_unlock(L);
-    luaL_checklstring(L, 1, NULL);
-    lua_lock(L);
-  }
+  source = luaL_ownedrootstring(L, 1, root, &len);
   first = readposition(L, 2, bytes, 1);
   last = readposition(L, 3, 1, bytes ? first : -1);
   *start = luaB_firstpos(first, len);
@@ -910,49 +906,68 @@ static const char *lmemfind (MatchState *ms, const char *s1, size_t l1,
 ** get information about the i-th capture. If there are no captures
 ** and 'i==0', return information about the whole match, which
 ** is the range 's'..'e'. If the capture is a string, return
-** its length and put its address in '*cap'. If it is an integer
-** (a position), push it on the stack and return CAP_POSITION.
+** its length and put its address in '*cap'. If it is a position,
+** put its address in '*cap' and return CAP_POSITION.
 */
 static ptrdiff_t get_onecapture (MatchState *ms, int i, const char *s,
-                              const char *e, const char **cap) {
+                                const char *e, const char **cap, int owned) {
   if (i >= ms->level) {
-    if (l_unlikely(i != 0))
+    if (l_unlikely(i != 0)) {
+      if (owned) lua_unlock(ms->L);
       luaL_error(ms->L, "invalid capture index %%%d", i + 1);
+    }
     *cap = s;
     return (e - s);
   }
   else {
     ptrdiff_t capl = ms->capture[i].len;
     *cap = ms->capture[i].init;
-    if (l_unlikely(capl == CAP_UNFINISHED))
+    if (l_unlikely(capl == CAP_UNFINISHED)) {
+      if (owned) lua_unlock(ms->L);
       luaL_error(ms->L, "unfinished capture");
-    else if (capl == CAP_POSITION)
-      lua_pushinteger(ms->L,
-          ct_diff2S(ms->capture[i].init - ms->src_init) + 1);
+    }
     return capl;
   }
 }
 
-
-/*
-** Push the i-th capture on the stack.
-*/
-static void push_onecapture (MatchState *ms, int i, const char *s,
-                                                    const char *e) {
-  const char *cap;
-  ptrdiff_t l = get_onecapture(ms, i, s, e, &cap);
-  if (l != CAP_POSITION)
-    lua_pushlstring(ms->L, cap, cast_sizet(l));
-  /* else position was already pushed */
+static void pushmatchposition (lua_State *L, lua_Integer position) {
+  setivalue(s2v(L->top.p), position);
+  api_incr_top(L);
 }
 
+static void pushownedcapture (MatchState *ms, int i, const char *s,
+                              const char *e) {
+  const char *cap;
+  ptrdiff_t l = get_onecapture(ms, i, s, e, &cap, 1);
+  if (l == CAP_POSITION)
+    pushmatchposition(ms->L, ct_diff2S(cap - ms->src_init) + 1);
+  else pushownedstring(ms->L, &ms->work, cap, cast_sizet(l));
+}
+
+static void push_onecapture (MatchState *ms, int i, const char *s,
+                                                    const char *e) {
+  lua_lock(ms->L);
+  pushownedcapture(ms, i, s, e);
+  lua_unlock(ms->L);
+}
+
+static int countcaptures (const MatchState *ms, const char *s) {
+  return (ms->level == 0 && s != NULL) ? 1 : ms->level;
+}
+
+static void pushownedcaptures (MatchState *ms, const char *s,
+                               const char *e, int count) {
+  int i;
+  for (i = 0; i < count; i++)
+    pushownedcapture(ms, i, s, e);
+}
 
 static int push_captures (MatchState *ms, const char *s, const char *e) {
-  int i;
-  int nlevels = (ms->level == 0 && s) ? 1 : ms->level;
+  int nlevels = countcaptures(ms, s);
   luaL_checkstack(ms->L, nlevels, "too many captures");
-  for (i = 0; i < nlevels; i++)
-    push_onecapture(ms, i, s, e);
+  lua_lock(ms->L);
+  pushownedcaptures(ms, s, e, nlevels);
+  lua_unlock(ms->L);
   return nlevels;  /* number of strings pushed */
 }
 
@@ -993,27 +1008,56 @@ static void reprepstate (MatchState *ms) {
 }
 
 
+static int findresult (MatchState *ms, LuaNativeRoot *roots,
+                        const char *start, const char *end, int find) {
+  lua_State *L = ms->L;
+  int count = end != NULL ? countcaptures(ms, find ? NULL : start) : 0;
+  int results = end != NULL ? count + 2 * find : 1;
+  if (count != 0) luaL_checkstack(L, results, "too many captures");
+  lua_lock(L);
+  if (end == NULL) {
+#if defined(LUA_FAILISFALSE)
+    setbfvalue(s2v(L->top.p));
+#else
+    setnilvalue2s(L->top.p);
+#endif
+    api_incr_top(L);
+  }
+  else {
+    if (find) {
+      pushmatchposition(L, ct_diff2S(start - ms->src_init) + 1);
+      pushmatchposition(L, ct_diff2S(end - ms->src_init));
+    }
+    pushownedcaptures(ms, start, end, count);
+  }
+  luaR_poproot(L, &roots[1]);
+  luaR_poproot(L, &roots[0]);
+  lua_unlock(L);
+  return results;
+}
+
 static int str_find_aux (lua_State *L, int find) {
   LuaNativeRoot roots[2];
   MatchState ms;
-  size_t ls, lp;
-  const char *s = luaL_rootstring(L, 1, &roots[0], &ls);
-  const char *p = luaL_rootstring(L, 2, &roots[1], &lp);
-  size_t init = luaB_firstpos(luaL_optinteger(L, 3, 1), ls) - 1;
+  size_t ls, lp, init;
+  const char *s, *p;
+  int plain;
+  lua_lock(L);
+  s = luaL_ownedrootstring(L, 1, &roots[0], &ls);
+  p = luaL_ownedrootstring(L, 2, &roots[1], &lp);
+  init = luaB_firstpos(readposition(L, 3, 1, 1), ls) - 1;
+  plain = find && L->top.p - L->ci->func.p > 4 &&
+          !l_isfalse(s2v(L->ci->func.p + 4));
+  lua_unlock(L);
   prepstate(&ms, L, s, ls, p, lp);
-  if (init > ls) {  /* start after string's end? */
-    luaL_pushfail(L);  /* cannot find anything */
-    return luaL_rootresult(L, roots, 2, 1);
-  }
+  if (init > ls)  /* start after string's end? */
+    return findresult(&ms, roots, NULL, NULL, find);
   /* explicit request or no special characters? */
-  if (find && (lua_toboolean(L, 4) || nospecials(&ms, p, lp))) {
+  if (find && (plain || nospecials(&ms, p, lp))) {
     /* do a plain search */
     const char *s2 = lmemfind(&ms, s + init, ls - init, p, lp);
-    if (s2) {
-      lua_pushinteger(L, ct_diff2S(s2 - s) + 1);
-      lua_pushinteger(L, cast_st2S(ct_diff2sz(s2 - s) + lp));
-      return luaL_rootresult(L, roots, 2, 2);
-    }
+    ms.level = 0;
+    if (s2 != NULL) return findresult(&ms, roots, s2, s2 + lp, find);
   }
   else {
     const char *s1 = s + init;
@@ -1024,19 +1068,11 @@ static int str_find_aux (lua_State *L, int find) {
     do {
       const char *res;
       reprepstate(&ms);
-      if ((res=match(&ms, s1, p)) != NULL) {
-        if (find) {
-          lua_pushinteger(L, ct_diff2S(s1 - s) + 1);  /* start */
-          lua_pushinteger(L, ct_diff2S(res - s));   /* end */
-          return luaL_rootresult(L, roots, 2, push_captures(&ms, NULL, 0) + 2);
-        }
-        else
-          return luaL_rootresult(L, roots, 2, push_captures(&ms, s1, res));
-      }
+      if ((res=match(&ms, s1, p)) != NULL)
+        return findresult(&ms, roots, s1, res, find);
     } while (s1++ < ms.src_end && !anchor);
   }
-  luaL_pushfail(L);  /* not found */
-  return luaL_rootresult(L, roots, 2, 1);
+  return findresult(&ms, roots, NULL, NULL, find);
 }
 
 
@@ -1225,11 +1261,12 @@ static void add_s (MatchState *ms, luaL_Buffer *b, const char *s,
         addbytes(ms, b, s, ct_diff2sz(e - s));
     else if (*p >= '1' && *p <= '9') {  /* '%n', independent of libc TLS */
       const char *cap;
-      ptrdiff_t resl = get_onecapture(ms, *p - '1', s, e, &cap);
+      ptrdiff_t resl = get_onecapture(ms, *p - '1', s, e, &cap, 0);
       if (resl == CAP_POSITION) {
         LuaNativeRoot position;
         size_t len;
         const char *value;
+        lua_pushinteger(L, ct_diff2S(cap - ms->src_init) + 1);
         luaL_rootarg(L, lua_gettop(L), &position);
         lua_pop(L, 1);  /* Restore the buffer box before a possible wait. */
         value = luaL_roottostring(L, &position, &len);
@@ -1658,6 +1695,10 @@ static void addlenmod (char *form, const char *lenmod) {
 }
 
 
+static lua_Integer formatinteger (lua_State *L, int arg, const TValue *value) {
+  return ttisinteger(value) ? ivalue(value) : luaL_checkinteger(L, arg);
+}
+
 static int str_format (lua_State *L) {
   LuaNativeRoot format;
   unsigned work = 0;
@@ -1687,7 +1728,8 @@ static int str_format (lua_State *L) {
       switch (*strfrmt++) {
         case 'c': {
           checkformat(L, form, L_FMTFLAGSC, 0);
-          nb = l_sprintf(buff, maxitem, form, (int)luaL_checkinteger(L, arg));
+          nb = l_sprintf(buff, maxitem, form,
+                          (int)formatinteger(L, arg, &value.value));
           break;
         }
         case 'd': case 'i':
@@ -1699,7 +1741,7 @@ static int str_format (lua_State *L) {
         case 'o': case 'x': case 'X':
           flags = L_FMTFLAGSX;
          intcase: {
-          lua_Integer n = luaL_checkinteger(L, arg);
+          lua_Integer n = formatinteger(L, arg, &value.value);
           if (form[2] == '\0' &&
               (form[1] == 'd' || form[1] == 'i' || form[1] == 'u'))
             nb = cast_int(luaO_todecimal(buff, l_castS2U(n),

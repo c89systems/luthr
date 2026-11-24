@@ -2,6 +2,8 @@
 #ifndef lauxowned_h
 #define lauxowned_h
 
+#include "lauxlib.h"
+#include "lapi.h"
 #include "lroots.h"
 
 /* Caller owns the stack. A missing or non-string argument leaves root unused. */
@@ -17,6 +19,19 @@ l_sinline const char *luaL_tryrootstring (lua_State *L, int arg,
     }
   }
   return NULL;
+}
+
+/* Return with the stack owned. Numeric conversion and argument errors can
+** call back into Lua, so perform them outside this ownership scope. */
+l_sinline const char *luaL_ownedrootstring (lua_State *L, int arg,
+                                           LuaNativeRoot *root, size_t *len) {
+  const char *string;
+  while ((string = luaL_tryrootstring(L, arg, root, len)) == NULL) {
+    lua_unlock(L);
+    luaL_checklstring(L, arg, NULL);
+    lua_lock(L);
+  }
+  return string;
 }
 
 /* Positive argument indices only. Storage belongs to the current C activation;
