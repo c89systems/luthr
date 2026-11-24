@@ -79,7 +79,7 @@ set(callback_workloads lua_callback native_callbacks native_callbacks_local nati
   native_direct_local native_leaf native_stack native_identity
   native_scalar native_scalar_direct native_protected native_records native_streaming)
 set(scheduled_workloads integers independent_tables shared_table shared_hash
-  shared_growth shared_reads closures allocation_gc ${callback_workloads})
+  shared_growth shared_array_growth shared_reads closures allocation_gc ${callback_workloads})
 foreach(runtime IN ITEMS upstream luthr embedded)
   luthr_test_program(scheduled_${runtime} scheduled.c)
   target_sources(scheduled_${runtime} PRIVATE native.c "${PROJECT_SOURCE_DIR}/src/cpu_capacity.c")

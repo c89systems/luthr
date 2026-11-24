@@ -94,6 +94,7 @@ enum {
 };
 typedef struct LuaHashPart {
   Node *nodes;
+  Value *array;  /* independently sized positive integer slots */
   uint64_t version;  /* odd during structural or split-value changes */
   unsigned gate;
   pthread_cond_t changed;
@@ -108,6 +109,7 @@ enum { LUA_NEXT_PROBE_LIMIT = 128 };
 
 typedef struct LuaHashCursor {
   Node *nodes;
+  Value *array;
   const LuaHashPart *part;
   uint64_t version;
   unsigned partition, index;
@@ -129,6 +131,8 @@ l_sinline int luaH_cursorpart (LuaHashCursor *cursor,
     __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
   if (cursor->version & 1) return 0;
   cursor->nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  cursor->array = cursor->part != NULL
+    ? __atomic_load_n(&part->array, __ATOMIC_ACQUIRE) : NULL;
   return 1;
 }
 
@@ -150,7 +154,8 @@ l_sinline Node *luaH_hashnodes (const Table *table, unsigned index) {
     __atomic_load_n(&directory->parts[index].nodes, __ATOMIC_ACQUIRE);
 }
 
-LUAI_FUNC l_mem luaH_hashsize (const Table *);
+LUAI_FUNC l_mem luaH_tablework (const Table *);
+LUAI_FUNC l_mem luaH_arrayslots (const Table *);
 
 
 
@@ -198,12 +203,41 @@ typedef struct LuaArrayHeader {
 
 #define arrayheader(a) cast(LuaArrayHeader *, (a))
 #define arraytag(a,k) (cast(lu_byte *, (a)) + sizeof(LuaArrayHeader) + (k))
+#define arrayval(a,k) ((a) - 1 - (k))
+
+/* Adjacent indices share a lane until the end of their block. Keep the
+** mapping stable as either the array or hash in that lane grows. */
+enum { LUA_ARRAY_BLOCK = 64 };
+l_sinline unsigned luaH_partindex (unsigned index) {
+  unsigned offset = index - 1;
+  return offset / (LUA_ARRAY_BLOCK * (LUA_HASH_PARTS - 1)) * LUA_ARRAY_BLOCK +
+         offset % LUA_ARRAY_BLOCK + 1;
+}
+
+l_sinline lua_Integer luaH_indexfrompart (unsigned part, unsigned index) {
+  unsigned offset = index - 1;
+  return cast(lua_Integer, offset / LUA_ARRAY_BLOCK) *
+    (LUA_ARRAY_BLOCK * (LUA_HASH_PARTS - 1)) +
+    (part - 1) * LUA_ARRAY_BLOCK + offset % LUA_ARRAY_BLOCK + 1;
+}
+
+l_sinline unsigned luaH_arraycapacity (const Value *array) {
+  return array != NULL ? arrayheader(array)->size : 0;
+}
+
+/* Part zero is the original dense prefix. A partitioned table never moves
+** an index between that prefix and secondary parts. */
+l_sinline Value *luaH_arraypart (const Table *table, unsigned part) {
+  if (part == 0) return luaH_array(table);
+  return __atomic_load_n(&luaH_hashdir(table->node)->parts[part].array,
+                         __ATOMIC_ACQUIRE);
+}
 
 /* Computes the address of the tag for the abstract C-index 'k' */
 #define getArrTag(t,k)	arraytag(luaH_array(t), (k))
 
 /* Computes the address of the value for the abstract C-index 'k' */
-#define getArrVal(t,k)	(luaH_array(t) - 1 - (k))
+#define getArrVal(t,k)	arrayval(luaH_array(t), (k))
 
 l_sinline unsigned luaH_recordindex (const Table *keys, const TString *key) {
   unsigned i;

@@ -66,8 +66,8 @@
 /*
 ** Access to collectable objects in array part of tables
 */
-#define gcvalarr(t,i)  \
-	((*getArrTag(t,i) & BIT_ISCOLLECTABLE) ? getArrVal(t,i)->gc : NULL)
+#define gcvalarr(a,i)  \
+	((*arraytag(a,i) & BIT_ISCOLLECTABLE) ? arrayval(a,i)->gc : NULL)
 
 
 #define markvalue(g,o) { checkliveness(mainthread(g),o); \
@@ -777,7 +777,7 @@ static void traverseweakvalue (LuaTraceWork *work, Table *h) {
   unsigned p, parts = luaH_hashparts(h);
   /* if there is array part, assume it may have white values (it is not
      worth traversing it now just to check) */
-  int hasclears = h->asize > 0 || luaH_recordkeys(h->node) != NULL;
+  int hasclears = luaH_arrayslots(h) > 0 || luaH_recordkeys(h->node) != NULL;
   for (p = 0; p < parts; ++p) {
     Node *n = luaH_hashnodes(h, p), *limit = n + luaH_nodesize(n);
     for (; n < limit; n++) {
@@ -804,14 +804,17 @@ static void traverseweakvalue (LuaTraceWork *work, Table *h) {
 ** Traverse the array part of a table.
 */
 static int traversearray (LuaTraceWork *work, Table *h) {
-  unsigned asize = h->asize;
   int marked = 0;  /* true if some object is marked in this traversal */
-  unsigned i;
-  for (i = 0; i < asize; i++) {
-    GCObject *o = gcvalarr(h, i);
-    if (o != NULL && iswhite(work->global, o)) {
-      marked = 1;
-      markwork(work, o);
+  unsigned p, parts = luaH_hashparts(h);
+  for (p = 0; p < parts; p++) {
+    Value *array = luaH_arraypart(h, p);
+    unsigned i, asize = luaH_arraycapacity(array);
+    for (i = 0; i < asize; i++) {
+      GCObject *o = gcvalarr(array, i);
+      if (o != NULL && iswhite(work->global, o)) {
+        marked = 1;
+        markwork(work, o);
+      }
     }
   }
   return marked;
@@ -985,8 +988,7 @@ static l_mem traversetable (LuaTraceWork *work, Table *h) {
         linkwork(&work->allweak, obj2gco(h));
       break;
   }
-  return keys != NULL ? 2 + keys->asize
-                      : 1 + 2 * luaH_hashsize(h) + h->asize;
+  return keys != NULL ? 2 + keys->asize : luaH_tablework(h);
 }
 
 

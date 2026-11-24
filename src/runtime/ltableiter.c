@@ -42,33 +42,35 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
   return emitnext(L, key, result, &value);
 }
 
+static int cursorvalid (const LuaHashCursor *cursor) {
+  return cursor == NULL || cursor->part == NULL ||
+         __atomic_load_n(&cursor->part->version, __ATOMIC_ACQUIRE) ==
+           cursor->version;
+}
+
 /* Each step borrows storage only within the read scope. A sparse table
 ** can exhaust the scan budget and use the ordinary owned traversal. */
 static int nextarrayview (lua_State *L, Table *t, TValue *key, TValue *result,
                          Value *array,
                          unsigned index, unsigned size, uint64_t layout,
-                         unsigned *budget) {
+                         unsigned *budget, const LuaHashCursor *cursor) {
   unsigned count = size - index < *budget ? size - index : *budget;
   unsigned end = index + count;
+  uint64_t rows = cursor == NULL ? layout : 0;
   for (; index < end; index++) {
     const lu_byte *tag = arraytag(array, index);
     TValue value;
     if (tagisempty(__atomic_load_n(tag, __ATOMIC_ACQUIRE))) continue;
-    if (!luaH_readvalue(G(L), array - index - 1, tag, &value, layout) ||
-        isempty(&value) ||
+    if (!luaH_readvalue(G(L), arrayval(array, index), tag, &value, rows) ||
+        isempty(&value) || !cursorvalid(cursor) ||
         __atomic_load_n(&t->sequence, __ATOMIC_ACQUIRE) != layout)
       return -1;
-    setivalue(key, cast(lua_Integer, index) + 1);
+    setivalue(key, cursor == NULL ? cast(lua_Integer, index) + 1 :
+                         luaH_indexfrompart(cursor->partition, index + 1));
     return emitnext(L, key, result, &value);
   }
   *budget -= count;
-  return index == size ? 0 : -1;
-}
-
-static int cursorvalid (const LuaHashCursor *cursor) {
-  return cursor->part == NULL ||
-         __atomic_load_n(&cursor->part->version, __ATOMIC_ACQUIRE) ==
-           cursor->version;
+  return index == size && cursorvalid(cursor) ? 0 : -1;
 }
 
 static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
@@ -76,9 +78,18 @@ static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
                          unsigned *budget) {
   unsigned size = luaH_nodesize(cursor->nodes);
   unsigned index = cursor->index;
-  unsigned count = size - index < *budget ? size - index : *budget;
-  unsigned end = index + count;
+  unsigned capacity = luaH_arraycapacity(cursor->array);
+  unsigned count, end;
   uint64_t rows = cursor->part == NULL ? layout : 0;
+  if (index < capacity) {
+    int more = nextarrayview(L, t, key, result, cursor->array, index,
+                             capacity, layout, budget, cursor);
+    if (more != 0) return more;
+    index = capacity;
+  }
+  index -= capacity;
+  count = size - index < *budget ? size - index : *budget;
+  end = index + count;
   for (; index < end; index++) {
     const Node *node = cursor->nodes + index;
     TValue value, nextkey;
@@ -119,7 +130,7 @@ static int __attribute__((noinline)) nexttableview (lua_State *L, Table *t,
   if (index != 0 || ttisnil(key)) {
     if (index < size) {
       int more = nextarrayview(L, t, key, result, array, index, size, layout,
-                               &budget);
+                               &budget, NULL);
       if (more != 0) return more;
     }
     if (dir != NULL && !luaH_cursorpart(&cursor, dir)) return -1;

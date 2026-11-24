@@ -60,12 +60,12 @@ void luaC_leavegc (lua_State *L, LuaGCFrame *frame) {
   L->native_depth--;
 }
 
-l_sinline void traceviewarray (lua_State *L, const Table *view,
+l_sinline void traceviewarray (lua_State *L, const Value *array,
                                 unsigned first, unsigned end) {
   unsigned i;
   for (i = first; i < end; i++) {
-    if (*getArrTag(view, i) & BIT_ISCOLLECTABLE)
-      luaC_traceobject(L, getArrVal(view, i)->gc);
+    if (*arraytag(array, i) & BIT_ISCOLLECTABLE)
+      luaC_traceobject(L, arrayval(array, i)->gc);
   }
 }
 
@@ -84,7 +84,7 @@ void luaC_traceview (lua_State *L, const Table *view) {
     return;
   }
   if (view->asize < LUA_ARRAY_CARD_MIN)
-    traceviewarray(L, view, 0, view->asize);
+    traceviewarray(L, luaH_array(view), 0, view->asize);
   else {
     const uint64_t *cards = luaH_arraycards(view);
     unsigned first;
@@ -92,13 +92,17 @@ void luaC_traceview (lua_State *L, const Table *view) {
       unsigned end = first + LUA_ARRAY_CARD_SLOTS;
       if (__atomic_load_n(&cards[first / LUA_ARRAY_CARD_SLOTS],
                           __ATOMIC_ACQUIRE) != LUA_ARRAY_CARD_SCALAR)
-        traceviewarray(L, view, first, end < view->asize ? end : view->asize);
+        traceviewarray(L, luaH_array(view), first, end < view->asize ? end : view->asize);
     }
   }
   if (view->node == NULL) return;
   parts = luaH_hashparts(view);
   for (p = 0; p < parts; ++p) {
     Node *nodes = luaH_hashnodes(view, p), *end = nodes + luaH_nodesize(nodes);
+    if (p != 0) {
+      Value *array = luaH_arraypart(view, p);
+      traceviewarray(L, array, 0, luaH_arraycapacity(array));
+    }
     for (; nodes < end; ++nodes) {
       if (!isempty(gval(nodes))) {
         if (keyiscollectable(nodes)) luaC_traceobject(L, gckey(nodes));
@@ -333,17 +337,18 @@ void luaC_prepareweak (lua_State *L, Table *table) {
           luaH_setrecordtag(table, i, LUA_VEMPTY);
     }
   }
-  else if (pending & 1) {
-    for (i = 0; i < table->asize; i++) {
-      lu_byte *tag = getArrTag(table, i);
-      if ((*tag & BIT_ISCOLLECTABLE) &&
-          weakdead(L, getArrVal(table, i)->gc))
-        __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
-    }
-  }
   parts = luaH_hashparts(table);
   for (p = 0; p < parts; ++p) {
     Node *node = luaH_hashnodes(table, p), *end = node + luaH_nodesize(node);
+    if (keys == NULL && (pending & 1)) {
+      Value *array = luaH_arraypart(table, p);
+      unsigned size = luaH_arraycapacity(array);
+      for (i = 0; i < size; i++) {
+        lu_byte *tag = arraytag(array, i);
+        if ((*tag & BIT_ISCOLLECTABLE) && weakdead(L, arrayval(array, i)->gc))
+          __atomic_store_n(tag, LUA_VEMPTY, __ATOMIC_RELEASE);
+      }
+    }
     for (; node < end; ++node) {
       if (isempty(gval(node))) continue;
       if (((pending & 1) && iscollectable(gval(node)) &&

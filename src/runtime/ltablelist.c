@@ -31,8 +31,20 @@ static void __attribute__((noinline)) setlistrooted (lua_State *L, Table *t,
       luaA_sharevalue(L, s2v(restorestack(L, offset) + i));
   }
   luaA_begin(L, obj2gco(t), &scope);
-  if (last > t->asize) luaH_resizearray(L, t, last);
-  storelist(L, t, restorestack(L, offset), count, last, luaC_tracing(L));
+  if (last > t->asize && luaH_hashdir(t->node) != NULL) {
+    /* A hook can replace the constructor's receiver with a partitioned
+    ** table. Its dense prefix is fixed; route excess keys normally. */
+    for (; count != 0; --count, --last) {
+      TValue key, value;
+      setivalue(&key, last);
+      setobj(L, &value, s2v(restorestack(L, offset) + count));
+      luaH_assignowned(L, t, &key, &value, 1);
+    }
+  }
+  else {
+    if (last > t->asize) luaH_resizearray(L, t, last);
+    storelist(L, t, restorestack(L, offset), count, last, luaC_tracing(L));
+  }
   luaA_end(L, &scope);
 }
 

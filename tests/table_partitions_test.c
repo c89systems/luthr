@@ -183,6 +183,17 @@ static void *grow_partition(void *unused) {
     }
     --key;
   }
+  for (unsigned i = 1; i <= 512; ++i) {
+    lua_Integer index = luaH_indexfrompart(probe.part, i);
+    put(probe.second, index, i);
+  }
+  require(luaH_arraycapacity(luaH_arraypart(probe.table, probe.part)) >= 256);
+  for (unsigned i = 1; i <= 512; ++i) {
+    lua_Integer index = luaH_indexfrompart(probe.part, i);
+    check(probe.second, index, i);
+    lua_pushnil(probe.second);
+    lua_rawseti(probe.second, 1, index);
+  }
   check(probe.second, -1, 7000);
   require(pthread_mutex_lock(&probe.mutex) == 0);
   probe.finished = 1;
@@ -196,6 +207,72 @@ static void run(lua_State *L, const char *source) {
   if (status != LUA_OK)
     fprintf(stderr, "%s\n", lua_tostring(L, -1));
   require(status == LUA_OK);
+}
+
+static void check_dense_parts(lua_State *L) {
+  l_mem capacity;
+  run(L, "for i=1,8192 do t[i]=i end; assert(rawlen(t)==8192); "
+         "local count=0; for k,v in pairs(t) do "
+         "if type(k)=='number' then assert(k==v); count=count+1 end end; "
+         "assert(count==8192); "
+         "setmetatable(t,nil); "
+         "t[2048.0]={42}; collectgarbage('collect'); assert(t[2048][1]==42); "
+         "setmetatable(t,{__mode='k'}); "
+         "collectgarbage('collect'); assert(t[2048][1]==42); "
+         "setmetatable(t,{__mode='v'}); "
+         "local keep={84}; t[2047]=keep; "
+         "collectgarbage('collect'); collectgarbage('collect'); "
+         "assert(t[2048]==nil and t[2047]==keep); "
+         "local k=next(t); while k do t[k]=nil; k=next(t,k) end; "
+         "assert(next(t)==nil and #t==0)");
+  capacity = luaH_arrayslots(probe.table);
+  require(capacity >= 4096);
+  put(L, 1 << 30, 17);
+  check(L, 1 << 30, 17);
+  require(luaH_arrayslots(probe.table) == capacity);
+}
+
+static void check_dense_allocation_failure(lua_State *L) {
+  Table *table;
+  lua_Integer hash_key = -1;
+  lua_settop(L, 0);
+  lua_createtable(L, 0, 256);
+  table = (Table *)lua_topointer(L, 1);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, probe.second, 1);
+  lua_pop(probe.second, 1);
+  for (unsigned i = 0; i <= 256; ++i)
+    put(L, LUA_MAXINTEGER - i, i);
+  require(luaH_hashparts(table) == LUA_HASH_PARTS);
+  while (partition(hash_key) != 1)
+    --hash_key;
+  put(L, hash_key, 31);
+  reject(L, 1, 2);
+  require(luaH_arrayslots(table) == 0);
+  check(L, hash_key, 31);
+  put(L, 1, 42);
+  check(L, 1, 42);
+  require(luaH_arrayslots(table) == 1);
+  require(lua_rawlen(L, 1) == 1);
+  check(L, hash_key, 31);
+  check(L, LUA_MAXINTEGER - 256, 256);
+  /* A constructor hook can make SETLIST target this published receiver. */
+  lua_pushvalue(L, 1);
+  lua_pushinteger(L, 92);
+  lua_newtable(L);
+  lua_pushinteger(L, 93);
+  lua_rawseti(L, -2, 1);
+  lua_lock(L);
+  luaH_setlist(L, table, L->top.p - 3, 2, 3);
+  lua_unlock(L);
+  lua_pop(L, 3);
+  lua_gc(L, LUA_GCCOLLECT);
+  check(L, 1, 42);
+  check(L, 2, 92);
+  require(lua_rawgeti(L, 1, 3) == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 93);
+  lua_pop(L, 2);
+  require(lua_rawlen(L, 1) == 3);
 }
 
 static void check_integer_keys(lua_State *L, int count, lua_Integer stride) {
@@ -390,9 +467,11 @@ int main(int argc, char **argv) {
   lua_pop(L, 1);
   lua_pushexternalstring(L, "external", 8, NULL, NULL);
   require(lua_rawget(L, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 1337);
+  check_dense_parts(L);
   check_integer_keys(L, 8192 * (LUA_HASH_PARTS - 1), 1);
   check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 65537);
   check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 0x100000000LL);
+  check_dense_allocation_failure(L);
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);

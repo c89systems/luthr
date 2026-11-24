@@ -3,6 +3,21 @@ local kind,n,tasks=...
 assert(type(kind)=='string' and n>=1 and tasks>=1)
 local total=n*(n+1)//2
 local shared={}
+local array_growth=kind=='shared_array_growth'
+local grows=array_growth or kind=='shared_growth'
+local direction=array_growth and 1 or -1
+local function grow(id)
+  local head=direction*id
+  local key=direction*(tasks+(id-1)*n)
+  local sum=0
+  for i=1,n do
+    key=key+direction
+    shared[head]=i
+    shared[key]=i
+    sum=sum+shared[head]
+  end
+  return sum
+end
 local workloads={
   integers=function()
     local sum=0
@@ -49,16 +64,8 @@ local workloads={
     for i=1,n do sum=sum+shared[-(base+i)] end
     return sum
   end,
-  shared_growth=function(id)
-    local base=tasks+(id-1)*n
-    local sum=0
-    for i=1,n do
-      shared[-id]=i
-      shared[-(base+i)]=i
-      sum=sum+shared[-id]
-    end
-    return sum
-  end,
+  shared_growth=grow,
+  shared_array_growth=grow,
   shared_reads=function()
     local sum=0
     for i=1,n do sum=sum+shared.value end
@@ -188,9 +195,9 @@ local function prepare()
     for i=1,n*tasks do shared[i]=0 end
   elseif kind=='shared_hash' then
     for i=1,n*tasks do shared[-i]=0 end
-  elseif kind=='shared_growth' then
+  elseif grows then
     shared={}
-    for id=1,tasks do shared[-id]=0 end
+    for id=1,tasks do shared[direction*id]=0 end
   end
 end
 local function verify()
@@ -198,12 +205,13 @@ local function verify()
     for id=1,tasks do
       for i=1,n do assert(shared[(id-1)*n+i]==i) end
     end
-  elseif kind=='shared_hash' or kind=='shared_growth' then
-    local offset=kind=='shared_growth' and tasks or 0
+  elseif kind=='shared_hash' or grows then
+    local offset=grows and tasks or 0
     for id=1,tasks do
-      if kind=='shared_growth' then assert(shared[-id]==n) end
-      for i=1,n do assert(shared[-(offset+(id-1)*n+i)]==i) end
+      if grows then assert(shared[direction*id]==n) end
+      for i=1,n do assert(shared[direction*(offset+(id-1)*n+i)]==i) end
     end
+    if array_growth then assert(rawlen(shared)==tasks*(n+1)) end
   end
 end
 return function(id)
