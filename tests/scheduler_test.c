@@ -1891,6 +1891,41 @@ static void native_lease(struct fixture *f, int continuous, unsigned permits) {
   finish(f);
 }
 
+static int native_noop(lua_State *L) {
+  (void)L;
+  return 0;
+}
+
+static int native_yield_value(lua_State *L) {
+  lua_pushinteger(L, 43);
+  return lua_yield(L, 1);
+}
+
+static int native_permit_cached(lua_State *L) {
+  lua_pushboolean(L, luaSC_nativeactive(&fixture->scheduler) == 1);
+  return 1;
+}
+
+static void native_lease_yield(struct fixture *f) {
+  init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_pushcfunction(f->main, native_noop);
+  lua_setglobal(f->main, "native_noop");
+  lua_pushcfunction(f->main, native_yield_value);
+  lua_setglobal(f->main, "native_yield_value");
+  managed(f->main, "native_permit_cached", native_permit_cached);
+  submit(f, 0,
+         "local co=coroutine.wrap(function() native_noop(); "
+         "coroutine.yield(42) end); local result=co(); "
+         "assert(native_permit_cached(), 'managed yield released permit'); "
+         "local native=coroutine.wrap(native_yield_value); "
+         "assert(native()==43 and not native_permit_cached()); return result",
+         0);
+  require(collect(f, 0, LUA_OK) == 42);
+  require(luaSC_nativeactive(&f->scheduler) == 0);
+  finish(f);
+}
+
 static int poll_after_native_waiter(lua_State *L) {
   struct fixture *f = fixture;
   require(pthread_mutex_lock(&f->mutex) == 0);
@@ -3176,6 +3211,8 @@ int main(int argc, char **argv) {
     native_lease(f, 0, 1);
   else if (strcmp(argv[1], "native_lease_full") == 0)
     native_lease(f, 1, 2);
+  else if (strcmp(argv[1], "native_lease_yield") == 0)
+    native_lease_yield(f);
   else if (strcmp(argv[1], "late_native_waiter") == 0)
     late_native_waiter(f);
   else if (strcmp(argv[1], "startup_failures") == 0)

@@ -289,10 +289,13 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
     lj.execution->protected = lj.execution_previous;
     lj.execution->trusted = lj.execution_trusted;
   }
-  /* Self-close can abandon native frames while reporting LUA_OK. */
-  if (lj.status != LUA_OK ||
-      (lj.execution != NULL &&
-       lj.execution->native_depth != lj.execution_native_depth))
+  /* A managed coroutine yield can keep running on this task. Release the
+  ** cached permit on a scheduler park, an error, or an abandoned native frame.
+  ** Self-close can abandon a native frame while reporting LUA_OK. */
+  if (lj.execution != NULL &&
+      (lj.execution->native_depth != lj.execution_native_depth ||
+       (lj.status != LUA_OK &&
+        (lj.status != LUA_YIELD || lj.execution->scheduler == NULL))))
     luaQ_restorenative(lj.execution, L, lj.execution_native_depth);
   if (lj.status != LUA_OK) {
     L->native_roots = lj.native_roots;  /* native scopes have unwound */
