@@ -95,7 +95,7 @@ LUAI_FUNC void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                                   LuaAllocBlock *first, LuaAllocBlock *last,
                                     unsigned count, l_mem bytes, int private);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
-LUAI_FUNC void *luaM_trytasktable (lua_State *L, size_t size);
+LUAI_FUNC void *luaM_trytasktable (lua_State *L, size_t size, int refill);
 LUAI_FUNC void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page,
                                  uint64_t epoch, lu_byte mark);
 LUAI_FUNC void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page);

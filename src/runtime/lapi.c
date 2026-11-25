@@ -1257,10 +1257,39 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
 
 
 LUA_API void lua_createtable (lua_State *L, int narray, int nrec) {
+  unsigned asize = narray > 0 ? cast_uint(narray) : 0;
+  unsigned hsize = nrec > 0 ? cast_uint(nrec) : 0;
+  /* A small inline array keeps short native result sequences on one page. */
+  enum { NATIVE_SMALL_ARRAY = 6 };
   Table *t;
+#if !defined(HARDMEMTESTS)
+  if (localheap(L, 0)) {
+    /* This is a private cache hit with no backing allocation to pace. A
+    ** registered publisher lets a stop settle its batched byte accounting.
+    ** Leave refills and any GC assistance to the ordinary path. */
+    if (!isLua(L->ci) && !L->task_nursery_pending &&
+        __atomic_load_n(&L->publish_previous, __ATOMIC_RELAXED) != NULL &&
+        !luaC_needassist(L) && !luaC_cyclepressure(L) &&
+        (luaC_sweeping(L) ? L->trace_debt < LUA_GC_ASSIST_BYTES
+          : (!luaC_needstep(L) ||
+             __atomic_load_n(&G(L)->gcstep_pending, __ATOMIC_RELAXED)))) {
+      t = luaH_trycachedtable(L,
+        asize == 0 && hsize == 0 ? NATIVE_SMALL_ARRAY : asize, hsize);
+      if (t != NULL) {
+        sethvalue2s(L, L->top.p, t);
+        api_incr_top(L);
+        luaX_leavebounded(L);
+        return;
+      }
+    }
+    luaX_leavebounded(L);
+  }
+#endif
   lua_lock(L);
-  t = luaH_new(L, narray > 0 ? cast_uint(narray) : 0,
-                  nrec > 0 ? cast_uint(nrec) : 0);
+  if (asize == 0 && hsize == 0 && !isLua(L->ci) && L->task_owner != NULL &&
+      L->native_depth != 0 && luaC_tasktableeligible(L, LUA_TABLE_INLINE_LIMIT))
+    asize = NATIVE_SMALL_ARRAY;
+  t = luaH_new(L, asize, hsize);
   sethvalue2s(L, L->top.p, t);
   api_incr_top(L);
   luaC_checkGC(L);

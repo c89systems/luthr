@@ -316,20 +316,36 @@ static void publishslot (lua_State *L, LuaAllocBlock *block, LuaAllocPage *page)
   luaMP_publishslot(L, page, epoch + 1);
 }
 
+GCObject *luaC_trytasktable (lua_State *L, size_t size, int refill) {
+  GCObject *o;
+  if (L->task_owner == NULL || !luaC_tasktableeligible(L, size) ||
+      (refill && luaW_iscollector(L))) return NULL;
+  o = luaM_trytasktable(L, size, refill);
+  if (o != NULL) {
+    int owned;
+    setmarked(o, LUA_TASK_PAGE_MARK);
+    o->tt = LUA_VTABLE;
+    o->next = NULL;
+    owned = luaC_taskallocate(L, o, size);
+    lua_assert(owned);
+    UNUSED(owned);
+  }
+  return o;
+}
+
 static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
                            int tasklocal) {
   global_State *g = G(L);
   char *p;
   GCObject *o;
-  int collector, taskpage;
-  p = NULL;
-  if (tt == LUA_VTABLE && tasklocal && L->task_owner != NULL &&
-      luaC_tasktableeligible(L, sz) && !luaW_iscollector(L))
-    p = cast_charp(luaM_trytasktable(L, sz));
-  taskpage = p != NULL;
-  if (p == NULL) p = cast_charp(luaM_newobject(L, novariant(tt), sz));
+  int collector;
+  if (tt == LUA_VTABLE && tasklocal) {
+    o = luaC_trytasktable(L, sz, 1);
+    if (o != NULL) return o;
+  }
+  p = cast_charp(luaM_newobject(L, novariant(tt), sz));
   o = cast(GCObject *, p + offset);
-  setmarked(o, taskpage ? LUA_TASK_PAGE_MARK : luaC_newmark(g));
+  setmarked(o, luaC_newmark(g));
   o->tt = tt;
   o->next = NULL;
   if (tt == LUA_VLNGSTR) gco2ts(o)->extra = 0;

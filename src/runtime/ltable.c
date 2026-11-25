@@ -1084,9 +1084,14 @@ _Static_assert(sizeof(Table) % _Alignof(Value) == 0 &&
                sizeof(Table) % _Alignof(Node) == 0 &&
                sizeof(Value) % _Alignof(Node) == 0, "inline table alignment");
 
-static Table *newtable (lua_State *L, size_t bytes, int tasklocal) {
-  GCObject *o = luaC_newtable(L, sizeof(Table) + bytes, tasklocal);
-  Table *t = gco2t(o);
+l_sinline Table *newtable (lua_State *L, size_t bytes, int tasklocal,
+                            int cached) {
+  size_t size = sizeof(Table) + bytes;
+  GCObject *o = cached ? luaC_trytasktable(L, size, 0)
+                       : luaC_newtable(L, size, tasklocal);
+  Table *t;
+  if (cached && o == NULL) return NULL;
+  t = gco2t(o);
   luaA_initlock(&t->access);
   luaA_initsharing(L, t);
   t->sequence = 0;
@@ -1101,7 +1106,7 @@ static Table *newtable (lua_State *L, size_t bytes, int tasklocal) {
 Table *luaH_newrecord (lua_State *L, Table *keys, int tasklocal) {
   unsigned i;
   uintptr_t tags = LUA_RECORD_TAGS;
-  Table *t = newtable(L, keys->asize * sizeof(Value), tasklocal);
+  Table *t = newtable(L, keys->asize * sizeof(Value), tasklocal, 0);
   lua_assert(keys->asize <= LUA_RECORD_MAX_FIELDS);
   t->node = cast(Node *, cast(uintptr_t, keys) | LUA_RECORD_TAG);
   for (i = 0; i < keys->asize; i++)
@@ -1111,8 +1116,8 @@ Table *luaH_newrecord (lua_State *L, Table *keys, int tasklocal) {
   return t;
 }
 
-Table *luaH_newtable (lua_State *L, unsigned asize, unsigned hsize,
-                      int tasklocal) {
+l_sinline Table *createtable (lua_State *L, unsigned asize, unsigned hsize,
+                               int tasklocal, int cached) {
   const size_t limit = LUA_TABLE_INLINE_LIMIT - sizeof(Table);
   size_t bytes = 0, arraybytes = 0;
   int lsize = -1;
@@ -1128,7 +1133,9 @@ Table *luaH_newtable (lua_State *L, unsigned asize, unsigned hsize,
       arraybytes = (arraybytes + sizeof(Value) - 1) & ~(sizeof(Value) - 1);
     if (arraybytes + hashbytes <= limit) bytes = arraybytes + hashbytes;
   }
-  t = newtable(L, bytes, tasklocal);
+  if (cached && bytes == 0 && (asize != 0 || hsize != 0)) return NULL;
+  t = newtable(L, bytes, tasklocal, cached);
+  if (cached && t == NULL) return NULL;
   if (bytes != 0) {
     char *storage = cast_charp(t + 1);
     if (asize != 0) {
@@ -1148,6 +1155,15 @@ Table *luaH_newtable (lua_State *L, unsigned asize, unsigned hsize,
     }
   }
   return t;
+}
+
+Table *luaH_newtable (lua_State *L, unsigned asize, unsigned hsize,
+                      int tasklocal) {
+  return createtable(L, asize, hsize, tasklocal, 0);
+}
+
+Table *luaH_trycachedtable (lua_State *L, unsigned asize, unsigned hsize) {
+  return createtable(L, asize, hsize, 1, 1);
 }
 
 

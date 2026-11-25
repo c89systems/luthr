@@ -1000,15 +1000,16 @@ void luaM_trimtaskpages (lua_State *L) {
   }
 }
 
-void *luaM_trytasktable (lua_State *L, size_t size) {
+void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
   unsigned pool = luaMP_sizeclass(size);
   LuaAllocPage *page = L->task_alloc_pages[pool];
   LuaAllocBlock *block;
   unsigned slot;
   uint64_t bit;
   if (!taskpageavailable(page)) {
-    size_t bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8
-                                 : page->bytes * 2;
+    size_t bytes;
+    if (!refill) return NULL;
+    bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8 : page->bytes * 2;
     if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
     if (!luaC_taskpagefits(L, bytes)) {
       luaC_sealtask(L);
