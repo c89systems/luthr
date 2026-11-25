@@ -1015,9 +1015,8 @@ int main(int argc, char **argv) {
   if (strstr(argv[1], "generational") != NULL)
     lua_gc(L, LUA_GCGEN);
   for (round = 0; round < 2; round++) {
-    int skipped;
-    /* These rounds measure coalescing of new automatic requests. A poll of
-     * an existing shared job may simply defer a busy phase boundary. */
+    /* Exercise startup with busy metadata before an active collection can
+     * satisfy either request. */
     lua_gc(L, LUA_GCCOLLECT);
     require(!luaC_tracing(L) && !luaC_sweeping(L));
     fixture.arrived[0] = fixture.arrived[1] = fixture.startup_waits =
@@ -1033,15 +1032,21 @@ int main(int argc, char **argv) {
       require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
     require(pthread_mutex_unlock(&fixture.mutex) == 0);
     require(pthread_create(&workers[1], NULL, request, &requests[1]) == 0);
-    require(pthread_mutex_lock(&fixture.mutex) == 0);
-    while (fixture.arrived[1] == 0 && fixture.startup_waits == 0 &&
-           !fixture.done)
-      require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
-    if (overdue)
+    if (overdue) {
+      require(pthread_mutex_lock(&fixture.mutex) == 0);
+      while (fixture.arrived[1] == 0 && fixture.startup_waits == 0 &&
+             !fixture.done)
+        require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
+      /* The overdue follower waits for the shared startup decision. */
       require(fixture.startup_waits != 0 && fixture.arrived[1] == 0 &&
               !fixture.done);
-    skipped = fixture.done && fixture.arrived[1] == 0;
-    require(pthread_mutex_unlock(&fixture.mutex) == 0);
+      require(pthread_mutex_unlock(&fixture.mutex) == 0);
+    } else {
+      /* Both ordinary requests return while metadata is still held. */
+      require(pthread_join(workers[0], NULL) == 0);
+      require(pthread_join(workers[1], NULL) == 0);
+      require(fixture.done && fixture.startup_waits == 0);
+    }
     if (explicit_step) {
       unsigned steps;
       /* The public API owns its stack entry. Retain this carrier's metadata
@@ -1060,11 +1065,10 @@ int main(int argc, char **argv) {
     }
     luaW_heapleave(L);
     lua_unlock(L);
-    require(pthread_join(workers[0], NULL) == 0);
-    require(pthread_join(workers[1], NULL) == 0);
-    /* Ordinary requests can return. An overdue request waits for the shared
-     * startup decision even with a positive explicit work quota. */
-    require(overdue ? !skipped : skipped);
+    if (overdue) {
+      require(pthread_join(workers[0], NULL) == 0);
+      require(pthread_join(workers[1], NULL) == 0);
+    }
     if (stop)
       lua_gc(L, LUA_GCRESTART);
   }

@@ -788,6 +788,8 @@ static void coalesced_gc(lua_State *state) {
   luaX_lockstate(state);
   luaW_heapenter(state);
   luaE_setdebt(G(state), 0);
+  /* Only a request at the pressure limit queues behind the metadata owner. */
+  __atomic_store_n(&G(state)->pacer.hard, 0, __ATOMIC_RELAXED);
   require(pthread_create(&peer, NULL, stale_step, waiter) == 0);
   require(pthread_mutex_lock(&world->mutex) == 0);
   while (waiter->heap_waiting == 0)

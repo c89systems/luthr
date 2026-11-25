@@ -2969,10 +2969,17 @@ void luaC_step (lua_State *L) {
       return;
     }
   }
-  /* Another collector can service this request while metadata access waits.
-  ** Revalidate under metadata ownership before requesting global quiescence.
-  ** Include unpublished local debt, just like the allocation-side check. */
-  luaW_collectenter(L);
+  /* An automatic step needs no queued metadata grant until shared allocation
+  ** reaches the pressure limit. A full collector preparing its trace can
+  ** still need the allocating task to reach a nursery checkpoint. */
+  if (automatic && !luaC_cyclepressure(L)) {
+    if (!luaW_trycollectenter(L)) {
+      finishrequest(g);
+      return;
+    }
+  }
+  else luaW_collectenter(L);
+  /* Revalidate under metadata ownership, including unpublished local debt. */
   if (luaC_tracing(L) || luaC_sweeping(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) {
     if (automatic) finishrequest(g);
