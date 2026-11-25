@@ -295,8 +295,13 @@ static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
     if (knownmethod && ttisnil(&firstmethod)) return tag;
   }
   else
-    knownmethod = !ttisfulluserdata(t) &&
-      luaA_readtypefield(L, ttype(t), G(L)->tmname[TM_INDEX], &firstmethod);
+    knownmethod = ttisfulluserdata(t)
+      ? luaA_readobjectfield(L, t, G(L)->tmname[TM_INDEX], &firstmethod)
+      : luaA_readtypefield(L, ttype(t), G(L)->tmname[TM_INDEX], &firstmethod);
+  if (knownmethod && ttisfunction(&firstmethod)) {
+    luaC_tracevalue(L, &firstmethod);
+    return luaT_callTMres(L, &firstmethod, t, key, val);
+  }
   /* Resolve an inherited hit with both objects retained by managed
   ** admission. If lookup must continue, keep the validated method. */
   if (knownmethod && ttistable(&firstmethod)) {

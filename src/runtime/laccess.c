@@ -267,6 +267,16 @@ void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *resul
   else setnilvalue(&result->value);
 }
 
+void luaA_storeudatameta (Udata *owner, Table *mt) {
+  /* Saturate at an odd version to prevent reuse after counter exhaustion. */
+  uint32_t changing = __atomic_load_n(&owner->metatable_version,
+                                      __ATOMIC_RELAXED) | 1u;
+  __atomic_store_n(&owner->metatable_version, changing, __ATOMIC_RELEASE);
+  __atomic_store_n(&owner->metatable, mt, __ATOMIC_RELEASE);
+  if (l_likely(changing != UINT32_MAX))
+    __atomic_store_n(&owner->metatable_version, changing + 1u, __ATOMIC_RELEASE);
+}
+
 /* The layout scope excludes all writers. A detached metatable may still
 ** carry the flag. Invalidating a newer binding is harmless if it changes
 ** after the identity check. */
@@ -302,7 +312,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
         luaA_invalidatestringindex(L, table);
       __atomic_store_n(&table->metatable, mt, __ATOMIC_RELEASE);
     }
-    else __atomic_store_n(&uvalue(object)->metatable, mt, __ATOMIC_RELEASE);
+    else luaA_storeudatameta(uvalue(object), mt);
     if (mt) {
       luaC_objbarrier(L, gcvalue(object), mt);
       luaC_checkfinalizer(L, gcvalue(object), mt);
@@ -430,19 +440,31 @@ int luaA_readtypefield (lua_State *L, int type, TString *key, TValue *result) {
 /* The receiver version covers the entire method lookup, including a
 ** detach/reattach of the same metatable. The table reader covers its fields
 ** and falls back if weak cutoffs or layout changes need ownership. */
-static int readobjectfield (lua_State *L, const TValue *object, TString *key,
-                            TValue *result) {
-  uint64_t *binding = luaA_sequence(gcvalue(object));
-  uint64_t before = binding ? __atomic_load_n(binding, __ATOMIC_ACQUIRE) : 0;
+l_sinline int readboundfield (lua_State *L, const TValue *object, TString *key,
+                              TValue *result) {
   Table *mt;
-  if (before & 1) return 0;
   mt = luaA_objectmeta(object);
   if (mt == NULL) {
     setnilvalue(result);
     return 1;
   }
-  if (binding == NULL || !luaH_readshortstr(G(L), L, mt, key, result)) return 0;
-  return before == __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+  return luaH_readshortstr(G(L), L, mt, key, result);
+}
+
+int luaA_readobjectfield (lua_State *L, const TValue *object, TString *key,
+                          TValue *result) {
+  if (ttisfulluserdata(object)) {
+    const uint32_t *binding = &uvalue(object)->metatable_version;
+    uint32_t before = __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+    return !(before & 1) && readboundfield(L, object, key, result) &&
+           before == __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+  }
+  else {
+    const uint64_t *binding = &hvalue(object)->sequence;
+    uint64_t before = __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+    return !(before & 1) && readboundfield(L, object, key, result) &&
+           before == __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+  }
 }
 
 void luaA_metafield (lua_State *L, const TValue *object, TString *key,
@@ -451,7 +473,7 @@ void luaA_metafield (lua_State *L, const TValue *object, TString *key,
   LuaObjectScope first, second;
   TValue value;
   int perobject = ttistable(object) || ttisfulluserdata(object);
-  if (perobject ? readobjectfield(L, object, key, &value)
+  if (perobject ? luaA_readobjectfield(L, object, key, &value)
                 : luaA_readtypefield(L, ttype(object), key, &value)) {
     luaR_setroot(L, result, &value);
     return;

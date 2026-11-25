@@ -459,6 +459,7 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   if (nuvalue != 0) u->sequence = 0;
   u->nuvalue = nuvalue;
   u->metatable = NULL;
+  u->metatable_version = 0;
   u->gclist = NULL;
   for (i = 0; i < nuvalue; i++)
     setnilvalue(&u->uv[i].uv);

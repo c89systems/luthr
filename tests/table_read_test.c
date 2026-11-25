@@ -310,13 +310,14 @@ static void *primitive_reader(void *argument) {
   return NULL;
 }
 
-static lua_State *metatable_subject(lua_State *state, int type) {
+static lua_State *metatable_subject(lua_State *state, int type,
+                                    int uservalues) {
   lua_State *child;
   lua_gc(state, LUA_GCSTOP);
   if (type == LUA_TTABLE)
     lua_newtable(state);
   else if (type == LUA_TUSERDATA)
-    lua_newuserdatauv(state, 1, 1);
+    lua_newuserdatauv(state, 1, uservalues);
   else
     lua_pushliteral(state, "subject");
   lua_newtable(state);
@@ -332,7 +333,7 @@ static lua_State *metatable_subject(lua_State *state, int type) {
 static void primitive(lua_State *state) {
   LuaObjectScope writer;
   pthread_t reader;
-  lua_State *child = metatable_subject(state, LUA_TSTRING);
+  lua_State *child = metatable_subject(state, LUA_TSTRING, 0);
   luaX_lockstate(state);
   luaA_beginlock(state, &G(state)->metatable_access[LUA_TSTRING], &writer);
   require(pthread_create(&reader, NULL, primitive_reader, child) == 0);
@@ -354,10 +355,10 @@ static void *read_reattached(void *argument) {
   return NULL;
 }
 
-static void metatable_reattach(lua_State *state, int type) {
+static void metatable_reattach(lua_State *state, int type, int uservalues) {
   struct metatable_fixture test;
   pthread_t reader;
-  test.child = metatable_subject(state, type);
+  test.child = metatable_subject(state, type, uservalues);
   require(lua_getmetatable(state, 1) == 1);
   require(pthread_barrier_init(&test.barrier, NULL, 2) == 0);
   require(pthread_create(&reader, NULL, read_reattached, &test) == 0);
@@ -376,6 +377,39 @@ static void metatable_reattach(lua_State *state, int type) {
   rendezvous(&test.barrier);
   require(pthread_join(reader, NULL) == 0);
   require(pthread_barrier_destroy(&test.barrier) == 0);
+}
+
+static int index_key(lua_State *state) {
+  require(lua_type(state, 1) == LUA_TUSERDATA);
+  lua_pushvalue(state, 2);
+  return 1;
+}
+
+static void userdata_index(lua_State *state) {
+  lua_State *child = metatable_subject(state, LUA_TUSERDATA, 0);
+  require(lua_getmetatable(state, 1));
+  lua_pushcfunction(state, index_key);
+  lua_setfield(state, -2, "__index");
+  lua_pop(state, 1);
+
+  access_calls = 0;
+  measuring = 1;
+  require(lua_getfield(child, 1, "native") == LUA_TSTRING);
+  measuring = 0;
+  require(access_calls == 0);
+  require(strcmp(lua_tostring(child, -1), "native") == 0);
+  lua_pop(child, 1);
+
+  require(luaL_loadstring(
+              child, "local u,k=...; k=u[k]; u=u.field; return u,k") == LUA_OK);
+  lua_pushvalue(child, 1);
+  lua_pushliteral(child, "dynamic");
+  measuring = 1;
+  require(lua_pcall(child, 2, 2, 0) == LUA_OK);
+  measuring = 0;
+  require(access_calls == 0);
+  require(strcmp(lua_tostring(child, -2), "field") == 0);
+  require(strcmp(lua_tostring(child, -1), "dynamic") == 0);
 }
 
 static Table *set_string_method(lua_State *state, const char *value) {
@@ -1896,11 +1930,15 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "primitive") == 0)
     primitive(state);
   else if (strcmp(argv[1], "primitive_reattach") == 0)
-    metatable_reattach(state, LUA_TSTRING);
+    metatable_reattach(state, LUA_TSTRING, 0);
   else if (strcmp(argv[1], "table_reattach") == 0)
-    metatable_reattach(state, LUA_TTABLE);
+    metatable_reattach(state, LUA_TTABLE, 0);
   else if (strcmp(argv[1], "userdata_reattach") == 0)
-    metatable_reattach(state, LUA_TUSERDATA);
+    metatable_reattach(state, LUA_TUSERDATA, 1);
+  else if (strcmp(argv[1], "userdata_empty_reattach") == 0)
+    metatable_reattach(state, LUA_TUSERDATA, 0);
+  else if (strcmp(argv[1], "userdata_index") == 0)
+    userdata_index(state);
   else if (strncmp(argv[1], "registry_", 9) == 0)
     registry_snapshots(state, strcmp(argv[1], "registry_generational") == 0);
   else if (strcmp(argv[1], "primitive_index") == 0)

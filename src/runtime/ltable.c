@@ -3367,18 +3367,49 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
   return 1;
 }
 
-static int __attribute__((noinline)) readshortfallback (
-    global_State *g, lua_State *L, Table *table, TString *key,
-    TValue *result, lu_byte *tag, uint64_t sequence) {
-  LuaTableSlot slot;
-  TValue index;
-  setsvalue(L, &index, key);
-  return locateslot(table, &index, ctb(LUA_VSHRSTR), sequence, &slot, 0) &&
-         readslot(g, L, table, &slot, sequence, result, tag);
+/* Interned keys can be compared without dereferencing candidate pointers.
+** Read the slot from the same retained image that located it. */
+l_sinline int readshorthash (global_State *g, Table *table, Node *nodes,
+    TString *key, TValue *result, lu_byte *tag, uint64_t layout,
+    const LuaHashPart *part, uint64_t revision) {
+  unsigned size = nodesteps(nodes);
+  unsigned index = lmod(key->hash, size);
+  unsigned steps;
+  for (steps = 0; steps < size; steps++) {
+    Node *node = nodes + index;
+    int next;
+    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
+        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
+      TValue value;
+      if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value,
+                         part != NULL ? 0 : layout) ||
+          !samepartversion(table, layout, part, revision)) return 0;
+      *tag = luaH_hashvalue(&value, result);
+      return 1;
+    }
+    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (!samepartversion(table, layout, part, revision)) return 0;
+    if (next == 0) {
+      *tag = LUA_VABSTKEY;
+      return 1;
+    }
+    index += cast_uint(next);
+    if (index >= size) return 0;
+  }
+  return 0;
 }
 
-/* Interned-key hits in a single image usually need only the first node.
-** Check the established layout version before interpreting the copied value. */
+static int __attribute__((noinline)) readshortpart (
+    global_State *g, Table *table, LuaHashDirectory *directory, TString *key,
+    TValue *result, lu_byte *tag, uint64_t layout) {
+  LuaHashPart *part = luaH_part(directory, distributedpart(key->hash));
+  uint64_t revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
+  Node *nodes;
+  if (revision & 1) return 0;
+  nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  return readshorthash(g, table, nodes, key, result, tag, layout, part, revision);
+}
+
 l_sinline int __attribute__((always_inline)) readshortslot (
     global_State *g, lua_State *L, Table *table, TString *key, TValue *result,
     lu_byte *tag, uint64_t *sequence) {
@@ -3421,18 +3452,12 @@ l_sinline int __attribute__((always_inline)) readshortslot (
     }
   }
   if (!availableread(L, table, *sequence)) return 0;
-  if (!(*sequence & LUA_TABLE_SPLIT_VALUES) && luaH_hashdir(nodes) == NULL) {
-    Node *node = luaH_shortposition(nodes, key);
-    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
-        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
-      TValue value;
-      luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value, 0);
-      if (!luaH_samelayout(table, *sequence)) return 0;
-      *tag = luaH_hashvalue(&value, result);
-      return 1;
-    }
+  {
+    LuaHashDirectory *directory = luaH_hashdir(nodes);
+    if (directory != NULL)
+      return readshortpart(g, table, directory, key, result, tag, *sequence);
   }
-  return readshortfallback(g, L, table, key, result, tag, *sequence);
+  return readshorthash(g, table, nodes, key, result, tag, *sequence, NULL, 0);
 }
 
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,

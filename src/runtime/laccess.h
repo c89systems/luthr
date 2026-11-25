@@ -119,6 +119,8 @@ LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
 /* Both objects stay rooted by the caller across promotion or a receiver wait. */
 LUAI_FUNC int luaA_bindprivateuserdata (lua_State *L, Udata *owner, Table *mt);
+/* Caller owns the userdata and has run the deletion barrier. */
+LUAI_FUNC void luaA_storeudatameta (Udata *owner, Table *mt);
 LUAI_FUNC void luaA_invalidatestringindex (lua_State *L, Table *mt);
 /* Admission retains the published index during a nonparking lookup. */
 l_sinline Table *luaA_stringindex (lua_State *L) {
@@ -130,6 +132,8 @@ LUAI_FUNC void luaA_metafield (lua_State *L, const TValue *object, TString *key,
 ** the result before use and roots it before any safepoint. */
 LUAI_FUNC int luaA_readtypefield (lua_State *L, int type, TString *key,
                                   TValue *result);
+LUAI_FUNC int luaA_readobjectfield (lua_State *L, const TValue *object,
+                                   TString *key, TValue *result);
 /* Complete a raw hit or resolve an owned receiver's __index without a wait.
 ** A known miss was observed under this same uninterrupted stack admission. */
 LUAI_FUNC int luaA_tryindex (lua_State *L, Table *table, const TValue *key,

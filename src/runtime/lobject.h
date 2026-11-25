@@ -509,6 +509,7 @@ typedef union UValue {
 typedef struct Udata {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
+  uint32_t metatable_version;  /* separate from the split user values */
   size_t len;  /* number of bytes */
   LuaObjectLock access;
   LuaObjectLock payload_access;  /* opaque native bytes, not collector edges */
@@ -531,6 +532,7 @@ typedef struct Udata {
 typedef struct Udata0 {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
+  uint32_t metatable_version;
   size_t len;  /* number of bytes */
   LuaObjectLock access;
   LuaObjectLock payload_access;

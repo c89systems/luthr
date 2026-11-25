@@ -225,7 +225,8 @@ foreach(case IN ITEMS fast length_incremental length_generational
     primitive batching stack_grace private_resize overlap retirement pressure native_retirement failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
-    table_reattach userdata_reattach registry_incremental registry_generational
+    table_reattach userdata_reattach userdata_empty_reattach userdata_index
+    registry_incremental registry_generational
     long_string_hash long_string_partition
     index_hit index_miss private_inherited_read index_metatable_change object_bindings_incremental object_bindings_generational
     record_iteration_incremental record_iteration_generational

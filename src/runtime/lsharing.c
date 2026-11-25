@@ -225,7 +225,7 @@ int luaA_bindprivateuserdata (lua_State *L, Udata *userdata, Table *mt) {
           (shared || ttisnil(&method));
   if (ready) {
     luaC_prewriteptr(L, __atomic_load_n(&userdata->metatable, __ATOMIC_ACQUIRE), mt);
-    __atomic_store_n(&userdata->metatable, mt, __ATOMIC_RELEASE);
+    luaA_storeudatameta(userdata, mt);
     luaC_objbarrier(L, userdata, mt);
     if (!ttisnil(&method)) luaC_registerfinalizer(L, owner);
   }
