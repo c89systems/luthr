@@ -62,6 +62,26 @@ static int rebox(lua_State *state) {
   return 1;
 }
 
+static int new_userdata(lua_State *state) {
+  luaL_checktype(state, 1, LUA_TTABLE);
+  lua_newuserdatauv(state, 1, 0);
+  lua_pushvalue(state, 1);
+  lua_setmetatable(state, -2);
+  return 1;
+}
+
+static int test_userdata(lua_State *state) {
+  const char *name = luaL_checkstring(state, 2);
+  int top = lua_gettop(state);
+  void *expected = lua_touserdata(state, 1);
+  void *value = lua_toboolean(state, 3) ? luaL_checkudata(state, 1, name)
+                                        : luaL_testudata(state, -top, name);
+  if (lua_gettop(state) != top || (value != NULL && value != expected))
+    return luaL_error(state, "invalid userdata check result");
+  lua_pushboolean(state, value != NULL);
+  return 1;
+}
+
 static int pump(lua_State *state) {
   lua_Integer capacity = luaL_checkinteger(state, 3);
   lua_Integer total = 0;
@@ -95,10 +115,16 @@ static int pump(lua_State *state) {
 
 int luaopen_compat_fixture(lua_State *state);
 int luaopen_compat_fixture(lua_State *state) {
-  static const luaL_Reg functions[] = {
-      {"callback", callback}, {"call", call}, {"reference", reference},
-      {"rebox", rebox},       {"pump", pump}, {"monotonic", monotonic},
-      {"frame", frame},       {NULL, NULL}};
+  static const luaL_Reg functions[] = {{"callback", callback},
+                                       {"call", call},
+                                       {"reference", reference},
+                                       {"rebox", rebox},
+                                       {"pump", pump},
+                                       {"monotonic", monotonic},
+                                       {"frame", frame},
+                                       {"new_userdata", new_userdata},
+                                       {"test_userdata", test_userdata},
+                                       {NULL, NULL}};
   luaL_newlib(state, functions);
   return 1;
 }

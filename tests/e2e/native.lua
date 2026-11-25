@@ -15,6 +15,51 @@ end
 assert(native.reference(nil)==nil)
 
 do
+  local name='compat_fixture.userdata'
+  local registry=debug.getregistry()
+  local function equal() error('userdata checks use raw equality') end
+  local mt={__eq=equal}
+  local value=native.new_userdata(mt)
+  registry[name]=mt
+  assert(native.test_userdata(value,name))
+  assert(native.test_userdata(value,name,true))
+  assert(not native.test_userdata({},name))
+  assert(not native.test_userdata(nil,name))
+  assert(not pcall(native.test_userdata,42,name,true))
+  debug.setmetatable(value,nil)
+  assert(not native.test_userdata(value,name))
+  debug.setmetatable(value,mt)
+  registry[name]={__eq=equal}
+  assert(not native.test_userdata(value,name))
+  local passed,message=pcall(native.test_userdata,value,name,true)
+  assert(not passed and message:find(name,1,true))
+
+  local capture={}
+  local function captured() return capture end
+  local light=debug.upvalueid(captured,1)
+  local oldlight=debug.getmetatable(light)
+  debug.setmetatable(light,mt)
+  registry[name]=mt
+  assert(native.test_userdata(light,name))
+  debug.setmetatable(light,oldlight)
+
+  registry[name]=nil
+  local oldregistry=debug.getmetatable(registry)
+  debug.setmetatable(registry,{__index=function(table,key)
+    assert(table==registry and key==name)
+    return native.frame(setmetatable({}, {__close=function() end}),function()
+      collectgarbage('collect')
+      return mt
+    end,8192)
+  end})
+  assert(native.test_userdata(value,name))
+  debug.setmetatable(registry,{__index=function() error(marker) end})
+  passed,message=pcall(native.test_userdata,value,name)
+  assert(not passed and message==marker)
+  debug.setmetatable(registry,oldregistry)
+end
+
+do
   local functions={assert,type,string.byte,string.sub,next,select,rawget,
                    rawequal,tonumber,math.abs}
   local encoded,original={},{}

@@ -30,6 +30,8 @@
 #include "lmem.h"
 #include "lexec.h"
 #include "lapi.h"
+#include "lapiowned.h"
+#include "lfunc.h"
 #include "lgc.h"
 #include "lauxowned.h"
 #include "lvm.h"
@@ -392,23 +394,45 @@ LUALIB_API void luaL_setmetatable (lua_State *L, const char *tname) {
 }
 
 
-LUALIB_API void *luaL_testudata (lua_State *L, int ud, const char *tname) {
-  void *p = lua_touserdata(L, ud);
-  if (p != NULL) {  /* value is a userdata? */
-    if (lua_getmetatable(L, ud)) {  /* does it have a metatable? */
-      luaL_getmetatable(L, tname);  /* get correct metatable */
-      if (!lua_rawequal(L, -1, -2))  /* not the same? */
-        p = NULL;  /* value is a userdata with wrong metatable */
-      lua_pop(L, 2);  /* remove both metatables */
-      return p;
+static void *testudata (lua_State *L, int ud, const char *tname) {
+  LuaNativeRoot indexed;
+  const TValue *object;
+  void *p;
+  lua_lock(L);
+  object = luaA_indexvalue(L, ud, &indexed);
+  p = luaA_udatapointer(object);
+  if (p != NULL && luaA_pushmetatable(L, object)) {
+    LuaNativeRoot registry;
+    StkId top;
+    luaR_pushroot(L, &registry);
+    luaA_getregistry(L, &registry);
+    /* A registry __index can call Lua or C and relocate the stack. */
+    luaA_pushfield(L, &registry.value, tname);
+    luaR_poproot(L, &registry);
+    if (!luaV_rawequalobj(s2v(L->top.p - 1), s2v(L->top.p - 2))) p = NULL;
+    top = L->top.p - 2;
+    if (L->tbclist.p >= top) {
+      lua_assert(L->ci->callstatus & CIST_TBC);
+      top = luaF_close(L, top, CLOSEKTOP, 0);
     }
+    L->top.p = top;
   }
-  return NULL;  /* value is not a userdata with a metatable */
+  else p = NULL;
+  luaR_poproot(L, &indexed);
+  lua_unlock(L);
+  return p;
+}
+
+
+LUALIB_API void *luaL_testudata (lua_State *L, int ud, const char *tname) {
+  /* A stack-only type probe avoids managed admission on ordinary misses. */
+  if (ud > LUA_REGISTRYINDEX && lua_touserdata(L, ud) == NULL) return NULL;
+  return testudata(L, ud, tname);
 }
 
 
 LUALIB_API void *luaL_checkudata (lua_State *L, int ud, const char *tname) {
-  void *p = luaL_testudata(L, ud, tname);
+  void *p = testudata(L, ud, tname);
   luaL_argexpected(L, p != NULL, ud, tname);
   return p;
 }
