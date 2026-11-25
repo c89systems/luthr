@@ -1524,6 +1524,50 @@ static void shared_record_numbers(lua_State *state, int generational) {
   require(lua_pcall(reader, 1, 0, 0) == LUA_OK);
 }
 
+static void shared_roundtrip(lua_State *state, int generational) {
+  luaL_openlibs(state);
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  require(luaL_dostring(
+              state,
+              "local function field(t,v,write)\n"
+              "  if write then t.x=v end\n"
+              "  return t.x\n"
+              "end\n"
+              "local function index(t,v) t[1]=v; return t[1] end\n"
+              "local function keyed(t,k,v) t[k]=v; return t[k] end\n"
+              "local function alias(t,v) t.x=v; t=t.x; return t end\n"
+              "local function captured(t,v)\n"
+              "  local function identity() return t end\n"
+              "  t.x=v; local got=t.x; return got,identity()\n"
+              "end\n"
+              "local ok,err=coroutine.resume(coroutine.create(function(t,a,h)\n"
+              "  assert(field(t,9,false)==1)\n"
+              "  assert(field(t,math.maxinteger,true)==math.maxinteger)\n"
+              "  assert(1 / field(t,-0.0,true)==-math.huge)\n"
+              "  assert(index(a,t)==t and keyed(h,t,a)==a)\n"
+              "  assert(alias(t,h)==h)\n"
+              "  local got,who=captured(t,a); assert(got==a and who==t)\n"
+              "  local read=debug.getinfo(field,'S').linedefined+2\n"
+              "  debug.sethook(function(_,line)\n"
+              "    if line==read and debug.getinfo(2,'f').func==field then\n"
+              "      t.x=48\n"
+              "    end\n"
+              "  end,'l')\n"
+              "  got=field(t,22,true); debug.sethook(); assert(got==48)\n"
+              "  local inserts=0\n"
+              "  setmetatable(t,{__index=function(_,k)\n"
+              "    assert(k=='x'); return 75\n"
+              "  end,__newindex=function(o,k,v)\n"
+              "    inserts=inserts+1; rawset(o,k,v+1)\n"
+              "  end})\n"
+              "  assert(field(t,nil,true)==75)\n"
+              "  assert(field(t,20,true)==21 and inserts==1)\n"
+              "  collectgarbage('collect')\n"
+              "  assert(a[1]==t and h[t]==a and t.x==21)\n"
+              "end),{x=1},{false},{})\n"
+              "assert(ok,err)") == LUA_OK);
+}
+
 static void shared_ordinary_iteration(lua_State *state, int generational) {
   static const int sizes[][2] = {{64, 0}, {0, 24}, {16, 600}};
   luaL_openlibs(state);
@@ -1615,6 +1659,8 @@ int main(int argc, char **argv) {
   else if (strncmp(argv[1], "record_numbers_", 15) == 0)
     shared_record_numbers(state,
                           strcmp(argv[1], "record_numbers_generational") == 0);
+  else if (strncmp(argv[1], "roundtrip_", 10) == 0)
+    shared_roundtrip(state, strcmp(argv[1], "roundtrip_generational") == 0);
   else if (strncmp(argv[1], "ordinary_iteration_", 19) == 0)
     shared_ordinary_iteration(
         state, strcmp(argv[1], "ordinary_iteration_generational") == 0);

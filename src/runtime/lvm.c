@@ -1849,6 +1849,41 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
   RECORDSTORE(2)
   RECORDSTORE(3)
 #undef RECORDSTORE
+/* A non-nil direct store gives the adjacent reload its value at the
+** store's publication point. Nil and unresolved writes can run methods.
+** Keep both original instructions at hooks and scheduling boundaries. */
+#define STORELOAD(op, store, write, index) \
+  vmcase(op) { \
+    TValue *receiver = s2v(RA(i)); \
+    TValue *value = RKC(i); \
+    if (l_unlikely(trap || L->poll_remaining == 1 || \
+        !ttistable(receiver) || ttisnil(value) || \
+        !write(L, hvalue(receiver), index, value, 0))) { \
+      directdispatch(store); \
+    } \
+    setobj2s(L, RA(*pc), value); \
+    L->poll_remaining--; \
+    pc++; \
+    vmbreak; \
+  }
+  STORELOAD(LUA_RELOAD_FIELD, OP_SETFIELD, luaH_trysetfield, KB(i))
+  STORELOAD(LUA_RELOAD_KEY, OP_SETTABLE, luaH_tryset, vRB(i))
+  vmcase(LUA_RELOAD_INDEX) {
+    TValue *receiver = s2v(RA(i));
+    TValue *value = RKC(i);
+    TValue key;
+    setivalue(&key, GETARG_B(i));
+    if (l_unlikely(trap || L->poll_remaining == 1 ||
+        !ttistable(receiver) || ttisnil(value) ||
+        !luaH_tryset(L, hvalue(receiver), &key, value, 0))) {
+      directdispatch(OP_SETI);
+    }
+    setobj2s(L, RA(*pc), value);
+    L->poll_remaining--;
+    pc++;
+    vmbreak;
+  }
+#undef STORELOAD
 /* The first operation cannot suspend. A hook or poll due at the second
 ** instruction uses the ordinary fetch so the VM observes the same boundary.
 ** Enter the second handler with its original PCs before it can raise or park. */

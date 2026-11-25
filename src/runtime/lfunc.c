@@ -900,6 +900,20 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       if (pair != 0) p->dispatch[pc].opcode = pair;
       else if (count == 0 && first == OP_SELF && stringrangecallsite(p, pc))
         p->dispatch[pc].opcode = LUA_STRING_RANGE_CALL;
+      else if ((first == OP_SETFIELD && second == OP_GETFIELD) ||
+               (first == OP_SETI && second == OP_GETI) ||
+               (first == OP_SETTABLE && second == OP_GETTABLE)) {
+        Instruction store = p->code[pc], load = p->code[pc + 1];
+        if (GETARG_A(store) == GETARG_B(load) &&
+            GETARG_B(store) == GETARG_C(load)) {
+          if (first == OP_SETFIELD)
+            p->dispatch[pc].opcode = LUA_RELOAD_FIELD;
+          else if (first == OP_SETI)
+            p->dispatch[pc].opcode = LUA_RELOAD_INDEX;
+          else
+            p->dispatch[pc].opcode = LUA_RELOAD_KEY;
+        }
+      }
     }
   }
   p->scalar_ticks = scalarticks(p, count != 0);
