@@ -24,6 +24,15 @@ static int after (uint64_t a, uint64_t b) {
   return cast(int64_t, a - b) > 0;
 }
 
+/* GCC emits the hardware fence under ThreadSanitizer but does not model
+** its ordering. Keep the diagnostic visible and the code instrumented. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic warning "-Wtsan"
+l_sinline void scanfence (void) {
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+#pragma GCC diagnostic pop
+
 void luaHS_scanbegin (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = L->admission;
@@ -35,6 +44,7 @@ void luaHS_scanbegin (lua_State *L) {
   ** epoch in the record as a conservative bound for later batches. */
   (void)luaW_control(world);
   __atomic_fetch_add(&world->storage_scanners, SCAN_READER, __ATOMIC_SEQ_CST);
+  scanfence();
 }
 
 void luaHS_scanend (lua_State *L) {
@@ -48,11 +58,14 @@ void luaHS_scanend (lua_State *L) {
 }
 
 int luaHS_scanning (lua_State *L) {
-  /* Pair with scanner entry on this word. Either the writer observes an
-  ** existing scanner, or a later scanner acquires the closed layout before
-  ** sampling any pointers. A load alone would not publish that closure. */
-  return __atomic_fetch_add(&G(L)->world.storage_scanners, 0,
-                            __ATOMIC_SEQ_CST) >= SCAN_READER;
+  /* The caller has closed its private layout. If this load precedes a
+  ** scanner's entry increment in the SC order, our fence precedes its
+  ** entry fence, so its layout read sees the close or a newer layout.
+  ** Every other scanner still borrowing storage contributes to the count.
+  ** Only scanners write the shared count. */
+  scanfence();
+  return __atomic_load_n(&G(L)->world.storage_scanners,
+                         __ATOMIC_SEQ_CST) >= SCAN_READER;
 }
 
 static void publish (LuaWorld *world, LuaTableRetirement *block) {
