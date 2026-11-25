@@ -382,9 +382,10 @@ struct lua_State {
   LuaSharingRoots *sharing_roots;  /* promotion can outlive a marking epoch */
   struct LuaCallback *callback_owner;
   unsigned callback_active;
-  struct LuaCoroutineScope *operation;  /* world mutex protects operation metadata */
+  struct LuaCoroutineScope *operation;  /* atomic claim on the target */
   struct LuaTaskRoot *task_owner;  /* persistent scheduled-task reservation */
-  unsigned owned_operations;
+  unsigned owned_operations;  /* atomic outgoing scopes */
+  unsigned operation_roots;  /* atomic incoming scopes, including recovery */
   unsigned resume_active;
   unsigned close_active;  /* nesting depth, including recursive self-close */
   LuaStackGate stack_gate;
@@ -568,7 +569,6 @@ typedef struct global_State {
   LuaObjectLock warning_access;
   LuaObjectLock panic_access;
   LuaObjectLock callbacks_access;
-  struct LuaCoroutineScope *coroutine_scopes;  /* temporary operation roots */
   struct LuaTaskRoot *tasks;  /* persistent scheduled-task roots */
   int task_admission_closed;  /* sticky, world-mutex-owned shutdown gate */
   unsigned task_stops;  /* atomic count of admitted/running tasks with a stop */

@@ -138,6 +138,8 @@ LUAI_FUNC int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted);
 LUAI_FUNC void luaD_callleaffallback (lua_State *L, StkId func, int wanted);
 LUAI_FUNC void luaD_call (lua_State *L, StkId func, int nResults);
 LUAI_FUNC void luaD_callnoyield (lua_State *L, StkId func, int nResults);
+LUAI_FUNC int luaD_resume (lua_State *L, l_uint32 calls, int nargs,
+                           int *nresults);
 LUAI_FUNC int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p,
                                  int nargs, int wanted,
                                  NativeStackContext *context);

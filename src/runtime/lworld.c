@@ -215,6 +215,9 @@ static void unlinkpublisher (lua_State *L) {
 void luaW_unregister (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   LuaParticipation *participant = &L->participation;
+  lua_assert(__atomic_load_n(&L->owned_operations, __ATOMIC_RELAXED) == 0 &&
+             __atomic_load_n(&L->operation_roots, __ATOMIC_RELAXED) == 0 &&
+             __atomic_load_n(&L->operation, __ATOMIC_RELAXED) == NULL);
   luaM_publishwithdrawn(L);
   unlinkpublisher(L);
   luaX_checksync(pthread_mutex_lock(&world->mutex));

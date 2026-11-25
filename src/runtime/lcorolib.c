@@ -40,44 +40,88 @@ static int otherstate (lua_State *L, lua_CFunction function) {
 }
 
 
+static void finishresume (lua_State *L, lua_State *co, LuaApiRegion *region,
+                          LuaWorldScope suspended) {
+  if (region != NULL) {
+    luaX_transferpair(co, L);
+    luaX_boundcontext(L)->api_region = region;
+  }
+  else {
+    luaX_unlockpair(L, co);
+    luaW_restoreapi(suspended);
+  }
+}
+
 /*
 ** Resumes a coroutine. Returns the number of results for non-error
-** cases or -1 for errors.
+** cases, -1 for errors, or -2 when another operation owns the target.
 */
-static int auxresume (lua_State *L, lua_State *co, int narg) {
+static int auxresume (lua_State *L, lua_State *co, int narg,
+                      LuaCoroutineScope *scope) {
+  NativeStackContext *context = luaE_getnativestackcontext();
+  LuaApiRegion *region = context->api_region;
+  LuaWorldScope suspended = {0};
   int status, nres;
-  if (l_unlikely(!lua_checkstack(co, narg))) {
+  l_uint32 calls;
+  if (L == co) return -2;
+  /* A local continuation can use the caller's slot. If its stack is being
+  ** borrowed, release the caller and take the gates in canonical order. */
+  if (region != NULL && region->state == L && L->stack_peer == NULL &&
+      !luaW_ownsheap(L) && luaX_joinpair(L, co))
+    context->api_region = NULL;
+  else {
+    suspended = luaW_suspendapi();
+    region = NULL;
+    luaX_lockpair(L, co);
+  }
+  if (!luaO_claim(L, co, scope)) {
+    finishresume(L, co, region, suspended);
+    return -2;
+  }
+  if (l_unlikely(!luaA_checkstack(co, narg))) {
+    finishresume(L, co, region, suspended);
     lua_pushliteral(L, "too many arguments to resume");
     return -1;  /* error flag */
   }
-  lua_xmove(L, co, narg);
-  status = lua_resume(co, L, narg, &nres);
+  luaA_move(L, co, narg);
+  calls = getCcalls(L);
+  luaX_transferpair(L, co);
+  status = luaD_resume(co, calls, narg, &nres);
+  if (!luaX_joinpair(co, L)) {
+    luaX_unlockstate(co);
+    luaX_lockpair(L, co);
+  }
   if (l_likely(status == LUA_OK || status == LUA_YIELD)) {
-    if (l_unlikely(!lua_checkstack(L, nres + 1))) {
+    if (l_unlikely(!luaA_checkstack(L, nres + 1))) {
+      LuaWorldScope depth;
+      finishresume(L, co, region, suspended);
+      depth = luaW_suspendapi();
       lua_pop(co, nres);  /* remove results anyway */
+      luaW_restoreapi(depth);
       lua_pushliteral(L, "too many results to resume");
       return -1;  /* error flag */
     }
-    lua_xmove(co, L, nres);  /* move yielded values */
+    luaA_move(co, L, nres);
+    finishresume(L, co, region, suspended);
     return nres;
   }
   else {
-    lua_xmove(co, L, 1);  /* move error message */
+    luaA_move(co, L, 1);  /* move error message */
+    finishresume(L, co, region, suspended);
     return -1;  /* error flag */
   }
 }
 
 
-static int coresume (lua_State *L) {
+int luaB_coresume (lua_State *L) {
   lua_State *co = getco(L);
   LuaCoroutineScope scope;
-  int r;
-  if (!luaO_begin(L, co, &scope)) {
+  int r = auxresume(L, co, lua_gettop(L) - 1, &scope);
+  if (r == -2) {
     lua_pushboolean(L, 0);
     lua_pushliteral(L, "cannot resume non-suspended coroutine");
     return 2;
   }
-  r = auxresume(L, co, lua_gettop(L) - 1);
   luaO_end(&scope);
   if (l_unlikely(r < 0)) {
     lua_pushboolean(L, 0);
@@ -92,25 +136,21 @@ static int coresume (lua_State *L) {
 }
 
 
-int luaB_coresume (lua_State *L) {
-  return otherstate(L, coresume);
-}
-
-
-static int wrapresume (lua_State *L, int narg) {
+int luaB_wrapresume (lua_State *L, int narg) {
   lua_State *co = getco(L);  /* stack argument retains the snapshot */
   LuaCoroutineScope scope;
-  int r;
-  if (!luaO_begin(L, co, &scope))
+  int r = auxresume(L, co, narg, &scope);
+  if (r == -2)
     return luaL_error(L, "cannot resume non-suspended coroutine");
-  r = auxresume(L, co, narg);
   if (l_unlikely(r < 0)) {  /* error? */
+    LuaWorldScope depth = luaW_suspendapi();
     int stat = lua_status(co);
     if (stat != LUA_OK && stat != LUA_YIELD) {  /* error in the coroutine? */
       stat = lua_closethread(co, L);  /* close its tbc variables */
       lua_assert(stat != LUA_OK);
       lua_xmove(co, L, 1);  /* move error message to the caller */
     }
+    luaW_restoreapi(depth);
     if (stat != LUA_ERRMEM &&  /* not a memory error and ... */
         lua_type(L, -1) == LUA_TSTRING) {  /* ... error object is a string? */
       luaL_where(L, 1);  /* add extra info, if available */
@@ -122,14 +162,6 @@ static int wrapresume (lua_State *L, int narg) {
   }
   luaO_end(&scope);
   return r;
-}
-
-
-int luaB_wrapresume (lua_State *L, int narg) {
-  LuaWorldScope scope = luaW_suspendapi();
-  int results = wrapresume(L, narg);
-  luaW_restoreapi(scope);
-  return results;
 }
 
 

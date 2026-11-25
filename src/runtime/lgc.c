@@ -17,7 +17,6 @@
 
 #include "laccess.h"
 #include "lcallback.h"
-#include "lcoroscope.h"
 #include "ltask.h"
 #include "ldebug.h"
 #include "ldo.h"
@@ -563,20 +562,19 @@ void luaC_finishstrong (LuaTraceWork *work, GCObject *object,
 */
 static void markmt (global_State *g) {
   int i;
-  LuaCoroutineScope *scope;
   LuaTaskRoot *task;
   LuaParticipation *participant;
   luaX_checksync(pthread_mutex_lock(&g->world.mutex));
   for (participant = g->world.participants; participant != NULL;
-       participant = participant->next)
-    if (participant->collector)
-      markobject(g, participant->thread);
+       participant = participant->next) {
+    lua_State *thread = participant->thread;
+    if (participant->collector ||
+        __atomic_load_n(&thread->owned_operations, __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&thread->operation_roots, __ATOMIC_ACQUIRE) != 0)
+      markobject(g, thread);
+  }
   for (task = g->tasks; task != NULL; task = task->next)
     markobject(g, task->thread);
-  for (scope = g->coroutine_scopes; scope != NULL; scope = scope->next) {
-    markobject(g, scope->source);
-    markobject(g, scope->target);
-  }
   luaX_checksync(pthread_mutex_unlock(&g->world.mutex));
   {
     Table *pipe = __atomic_load_n(&g->pipe_meta, __ATOMIC_ACQUIRE);

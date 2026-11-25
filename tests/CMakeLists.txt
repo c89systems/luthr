@@ -963,8 +963,8 @@ luthr_test_program(coroutine_operation_test coroutine_operation_test.c)
 set_target_properties(coroutine_operation_test PROPERTIES C_STANDARD 99)
 target_compile_options(coroutine_operation_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(coroutine_operation_test PRIVATE luthr_static)
-target_link_options(coroutine_operation_test PRIVATE -Wl,--wrap=lua_checkstack
-  -Wl,--wrap=lua_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore)
+target_link_options(coroutine_operation_test PRIVATE -Wl,--wrap=luaX_transferpair
+  -Wl,--wrap=luaD_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS resume_prepare resume_prepare_oom resume_result wrap_prepare wrap_result

@@ -437,7 +437,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->callback_active = 0;
   L->operation = NULL;
   L->task_owner = NULL;
-  L->owned_operations = L->resume_active = L->close_active = 0;
+  L->owned_operations = L->operation_roots = L->resume_active = L->close_active = 0;
   L->state_poll = NULL;
   L->state_poll_context = NULL;
   L->poll_remaining = 1024;
@@ -653,16 +653,13 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
     return LUA_ERRRUN;
   }
   crossing = L == from && !luaD_canselfclose(L);
-  luaX_checksync(pthread_mutex_lock(&G(L)->world.mutex));
-  if (L->owned_operations != 0 || (L->close_active != 0 && L != from) ||
-      crossing) {
-    luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
+  if (__atomic_load_n(&L->owned_operations, __ATOMIC_ACQUIRE) != 0 ||
+      (L->close_active != 0 && L != from) || crossing) {
     setsvalue2s(L, L->top.p++, G(L)->operation_error);
     if (L->ci->top.p < L->top.p) L->ci->top.p = L->top.p;
     lua_unlock(L);
     return LUA_ERRRUN;
   }
-  luaX_checksync(pthread_mutex_unlock(&G(L)->world.mutex));
   L->close_active++;
   L->nCcalls = calls;
   status = luaE_resetthread(L, L->status);
@@ -733,7 +730,6 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   luaA_initlock(&g->warning_access);
   luaA_initlock(&g->panic_access);
   luaA_initlock(&g->callbacks_access);
-  g->coroutine_scopes = NULL;
   g->tasks = NULL;
   g->task_admission_closed = 0;
   g->task_stops = 0;

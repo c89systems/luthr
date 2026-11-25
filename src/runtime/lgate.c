@@ -675,19 +675,54 @@ carrierentry void luaX_lockpair (lua_State *first, lua_State *second) {
 }
 
 void luaX_unlockpair (lua_State *first, lua_State *second) {
+  lua_State *active = first->admission->thread;
+  lua_State *other = active == first ? second : first;
   LuaExecution *execution = luaX_execution(first);
   void *token = luaQ_ownertoken();
-  if (cast(uintptr_t, first) > cast(uintptr_t, second)) {
-    lua_State *swap = first;
-    first = second;
-    second = swap;
-  }
-  luaM_publishdebt(first);
+  luaM_publishdebt(active);
   first->stack_peer = second->stack_peer = NULL;
-  second->admission = &second->participation;
-  if (second != first) release(second, token, 0);
-  release(first, token, LUA_GATE_MANAGED);
+  other->admission = &other->participation;
+  if (other != active) release(other, token, 0);
+  release(active, token, LUA_GATE_MANAGED);
   luaQ_leavemanaged(execution);
+}
+
+void luaX_transferpair (lua_State *caller, lua_State *callee) {
+  lua_State *active = caller->admission->thread;
+  NativeStackContext *context = luaX_boundcontext(active);
+  lua_assert(caller->stack_peer == callee && callee->stack_peer == caller);
+  luaM_publishdebt(active);
+  caller->stack_peer = callee->stack_peer = NULL;
+  caller->admission = &caller->participation;
+  callee->admission = &callee->participation;
+  if (active == callee)
+    release(caller, context, 0);
+  else {
+    /* Advertise the new mutator before withdrawing the old one. Entry
+    ** rechecks any collector request which raced this handoff. */
+    luaW_activate(callee);
+    release(caller, context, LUA_GATE_MANAGED);
+    luaW_enter(callee);
+  }
+}
+
+int luaX_joinpair (lua_State *owner, lua_State *other) {
+  NativeStackContext *context = luaX_boundcontext(owner);
+  uintptr_t expected = 0;
+  LuaStackGate *gate = &other->stack_gate;
+  lua_assert(owner != other && owner->admission == &owner->participation &&
+             owner->stack_peer == NULL);
+  /* The suspended caller is enrolled. Never wait in reverse gate order. */
+  if (!trygate(gate, &expected, cast(uintptr_t, context), __ATOMIC_SEQ_CST))
+    return 0;
+  luaX_joinvalues(gate);
+  lua_assert(other->admission == &other->participation && other->stack_peer == NULL);
+  owner->stack_peer = other;
+  other->stack_peer = owner;
+  other->admission = &owner->participation;
+  luaC_checksnapshot(other);
+  preparecall(other, context);
+  return 1;
 }
 
 l_uint32 luaX_parentcalls (lua_State *from) {

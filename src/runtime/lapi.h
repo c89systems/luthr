@@ -41,6 +41,9 @@ LUAI_FUNC void luaA_unref (lua_State *L, int idx, int ref);
 #define lua_lock(L) luaX_apienter(L)
 #define lua_unlock(L) luaX_apileave(L)
 
+LUAI_FUNC int luaA_checkstack (lua_State *L, int n);
+LUAI_FUNC void luaA_move (lua_State *from, lua_State *to, int n);
+
 
 
 /*

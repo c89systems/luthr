@@ -27,18 +27,25 @@ lua_State *__real_lua_tothread(lua_State *, int);
 lua_State *__wrap_lua_tothread(lua_State *state, int index) {
   struct fixture *test = active;
   lua_State *thread = __real_lua_tothread(state, index);
+  LuaWorldScope suspended = {0};
   require(pthread_mutex_lock(&test->mutex) == 0);
   if (test->armed && state == test->caller &&
       (index == 1 || index == lua_upvalueindex(1))) {
     test->armed = 0;
-    test->entered = 1;
     require(thread != NULL && thread->native_depth == 0);
     require(state->native_depth != 0 && state->world_depth == 0);
+    require(pthread_mutex_unlock(&test->mutex) == 0);
+    /* The production lookup does not block. The test pauses it across a
+       collection, so publish the source frame before waiting. */
+    suspended = luaW_suspendapi();
+    require(pthread_mutex_lock(&test->mutex) == 0);
+    test->entered = 1;
     require(pthread_cond_broadcast(&test->changed) == 0);
     while (!test->release)
       require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
   }
   require(pthread_mutex_unlock(&test->mutex) == 0);
+  luaW_restoreapi(suspended);
   return thread;
 }
 static int capture(void *context) {

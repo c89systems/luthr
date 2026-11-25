@@ -584,8 +584,7 @@ static void *run(void *context) {
     require(status == LUA_OK && results == 1 &&
             lua_tointeger(test->main, -1) == 42);
   }
-  require(G(test->main)->tasks == NULL &&
-          G(test->main)->coroutine_scopes == NULL);
+  require(G(test->main)->tasks == NULL);
   if (facade)
     luthr_lua_runtime_free(test->runtime);
   else

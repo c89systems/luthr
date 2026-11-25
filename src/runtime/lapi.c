@@ -238,11 +238,9 @@ static StkId index2stack (lua_State *L, int idx) {
 }
 
 
-LUA_API int lua_checkstack (lua_State *L, int n) {
+int luaA_checkstack (lua_State *L, int n) {
   int res;
-  CallInfo *ci;
-  lua_lock(L);
-  ci = L->ci;
+  CallInfo *ci = L->ci;
   api_check(L, n >= 0, "negative 'n'");
   if (L->stack_last.p - L->top.p > n)  /* stack large enough? */
     res = 1;  /* yes; check is OK */
@@ -250,16 +248,19 @@ LUA_API int lua_checkstack (lua_State *L, int n) {
     res = luaD_growstack(L, n, 0);
   if (res && ci->top.p < L->top.p + n)
     ci->top.p = L->top.p + n;  /* adjust frame top */
-  lua_unlock(L);
   return res;
 }
 
+LUA_API int lua_checkstack (lua_State *L, int n) {
+  int result;
+  lua_lock(L);
+  result = luaA_checkstack(L, n);
+  lua_unlock(L);
+  return result;
+}
 
-LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
+void luaA_move (lua_State *from, lua_State *to, int n) {
   int i;
-  if (from == to) return;
-  api_check(from, G(from) == G(to), "moving among independent states");
-  luaX_lockpair(from, to);
   api_checkpop(from, n);
   api_check(from, to->ci->top.p - to->top.p >= n, "stack overflow");
   for (i = 0; i < n; i++) {
@@ -271,6 +272,13 @@ LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
     to->top.p++;  /* stack already checked by previous 'api_check' */
   }
   from->top.p -= n;
+}
+
+LUA_API void lua_xmove (lua_State *from, lua_State *to, int n) {
+  if (from == to) return;
+  api_check(from, G(from) == G(to), "moving among independent states");
+  luaX_lockpair(from, to);
+  luaA_move(from, to, n);
   luaX_unlockpair(from, to);
 }
 

@@ -77,6 +77,10 @@ LUAI_FUNC int luaX_tryreserve (lua_State *target);
 LUAI_FUNC void luaX_endreserve (lua_State *target, int reservation);
 LUAI_FUNC void luaX_lockpair (lua_State *first, lua_State *second);
 LUAI_FUNC void luaX_unlockpair (lua_State *first, lua_State *second);
+/* Keep the execution slot when transferring from a pair to its callee.
+** Joining the suspended caller at return never waits on its gate. */
+LUAI_FUNC void luaX_transferpair (lua_State *caller, lua_State *callee);
+LUAI_FUNC int luaX_joinpair (lua_State *owner, lua_State *other);
 LUAI_FUNC l_uint32 luaX_parentcalls (lua_State *from);
 LUAI_FUNC void luaX_checksync (int status);
 LUAI_FUNC void luaX_poll (lua_State *L);

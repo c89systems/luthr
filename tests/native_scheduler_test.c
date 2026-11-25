@@ -2600,8 +2600,7 @@ static int exercise_task_wait(const char *name, const char *file_path) {
     }
     test_fiber_destroy(&task->fiber);
   }
-  require(G(pool->main)->tasks == NULL &&
-          G(pool->main)->coroutine_scopes == NULL);
+  require(G(pool->main)->tasks == NULL);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   (void)lua_gc(pool->main, LUA_GCCOLLECT);
   require(pool->finalized == 2);

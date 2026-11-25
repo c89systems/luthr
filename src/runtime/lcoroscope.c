@@ -5,15 +5,14 @@
 
 #include "lapi.h"
 #include "lcoroscope.h"
+#include "lgc.h"
 
-int luaO_begin (lua_State *L, lua_State *co, LuaCoroutineScope *scope) {
-  LuaWorld *world = &G(L)->world;
+int luaO_claim (lua_State *L, lua_State *co, LuaCoroutineScope *scope) {
   int available;
   lua_assert(G(L) == G(co));
-  luaX_lockpair(L, co);
   lua_assert(L->native_depth != 0);  /* caller's C activation */
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
-  available = co->task_owner == NULL && co->operation == NULL &&
+  available = co->task_owner == NULL &&
+              __atomic_load_n(&co->operation, __ATOMIC_ACQUIRE) == NULL &&
               co->resume_active == 0 && co->close_active == 0 &&
               co->callback_active == 0 &&
               !(co->status == LUA_OK && co->ci != &co->base_ci);
@@ -24,51 +23,51 @@ int luaO_begin (lua_State *L, lua_State *co, LuaCoroutineScope *scope) {
     scope->source = L;
     scope->target = co;
     scope->held = 1;
-    scope->next = G(L)->coroutine_scopes;
-    scope->link = &G(L)->coroutine_scopes;
-    if (scope->next != NULL) scope->next->link = &scope->next;
-    G(L)->coroutine_scopes = scope;
-    co->operation = scope;
-    L->owned_operations++;
+    /* Both stacks are enrolled and protected from collection here. A later
+    ** trace sees these roots in the participation directory. A trace that
+    ** already sampled the directory gets both through the producer barrier. */
+    __atomic_fetch_add(&L->owned_operations, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&co->operation_roots, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&co->operation, scope, __ATOMIC_RELEASE);
+    luaC_tracepointer(L, L);
+    luaC_tracepointer(L, co);
   }
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  luaX_unlockpair(L, co);
   return available;
 }
 
-/* The metadata mutex also protects the GC root list. Unwinding can retire
-** scopes from several Lua states without entering their stack gates. */
+int luaO_begin (lua_State *L, lua_State *co, LuaCoroutineScope *scope) {
+  int available;
+  luaX_lockpair(L, co);
+  available = luaO_claim(L, co, scope);
+  luaX_unlockpair(L, co);
+  return available;
+}
+/* Recovery can yield the claim to an error handler while keeping the target
+** rooted. Unwinding can retire scopes without borrowing either Lua stack. */
 static void release (LuaCoroutineScope *scope) {
   if (scope->held) {
-    lua_assert(scope->target->operation == scope);
-    scope->target->operation = NULL;
+    lua_assert(__atomic_load_n(&scope->target->operation, __ATOMIC_RELAXED) == scope);
+    __atomic_store_n(&scope->target->operation, NULL, __ATOMIC_RELEASE);
     scope->held = 0;
   }
 }
 
 void luaO_end (LuaCoroutineScope *scope) {
-  LuaWorld *world = &G(scope->source)->world;
   NativeStackContext *context = luaE_getnativestackcontext();
   lua_assert(context == scope->context && context->coroutine_scopes == scope);
-  luaX_checksync(pthread_mutex_lock(&world->mutex));
   release(scope);
-  lua_assert(scope->source->owned_operations != 0);
-  scope->source->owned_operations--;
-  *scope->link = scope->next;
-  if (scope->next != NULL) scope->next->link = scope->link;
-  luaX_checksync(pthread_mutex_unlock(&world->mutex));
   context->coroutine_scopes = scope->previous;
+  lua_assert(__atomic_load_n(&scope->source->owned_operations, __ATOMIC_RELAXED) != 0);
+  lua_assert(__atomic_load_n(&scope->target->operation_roots, __ATOMIC_RELAXED) != 0);
+  __atomic_fetch_sub(&scope->source->owned_operations, 1, __ATOMIC_RELEASE);
+  __atomic_fetch_sub(&scope->target->operation_roots, 1, __ATOMIC_RELEASE);
 }
 
 void luaO_release (LuaCoroutineScope *boundary) {
   LuaCoroutineScope *scope = luaE_getnativestackcontext()->coroutine_scopes;
   for (; scope != boundary; scope = scope->previous) {
-    LuaWorld *world;
     lua_assert(scope != NULL);
-    world = &G(scope->source)->world;
-    luaX_checksync(pthread_mutex_lock(&world->mutex));
     release(scope);
-    luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
 }
 
@@ -84,8 +83,8 @@ int luaO_status (lua_State *L, lua_State *co) {
   int status;
   if (L == co) return LUA_CO_RUNNING;
   lua_lock(co);
-  luaX_checksync(pthread_mutex_lock(&G(co)->world.mutex));
-  if (co->task_owner != NULL || co->operation != NULL || co->resume_active ||
+  if (co->task_owner != NULL ||
+      __atomic_load_n(&co->operation, __ATOMIC_ACQUIRE) != NULL || co->resume_active ||
       co->close_active || co->callback_active)
     status = LUA_CO_NORMAL;
   else if (co->status == LUA_YIELD)
@@ -96,7 +95,6 @@ int luaO_status (lua_State *L, lua_State *co) {
     status = LUA_CO_NORMAL;
   else
     status = co->top.p == co->ci->func.p + 1 ? LUA_CO_DEAD : LUA_CO_SUSPENDED;
-  luaX_checksync(pthread_mutex_unlock(&G(co)->world.mutex));
   lua_unlock(co);
   return status;
 }

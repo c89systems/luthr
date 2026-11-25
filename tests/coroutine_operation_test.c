@@ -34,26 +34,30 @@ static void hold(struct fixture *test) {
     require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
   require(pthread_mutex_unlock(&test->mutex) == 0);
 }
-int __real_lua_checkstack(lua_State *, int);
-int __wrap_lua_checkstack(lua_State *state, int count) {
-  int result = __real_lua_checkstack(state, count);
+static void suspend_owner(lua_State *state) {
+  LuaWorldScope suspended = luaW_detach(state);
+  hold(active);
+  luaW_attach(state, suspended);
+}
+void __real_luaX_transferpair(lua_State *, lua_State *);
+void __wrap_luaX_transferpair(lua_State *caller, lua_State *state) {
+  __real_luaX_transferpair(caller, state);
   if (active->armed && state == active->target &&
       strstr(active->mode, "prepare") != NULL &&
       strstr(active->mode, "close") == NULL) {
     active->armed = 0;
-    hold(active);
+    suspend_owner(state);
   }
-  return result;
 }
-int __real_lua_resume(lua_State *, lua_State *, int, int *);
-int __wrap_lua_resume(lua_State *state, lua_State *from, int count,
-                      int *results) {
-  int status = __real_lua_resume(state, from, count, results);
+int __real_luaD_resume(lua_State *, l_uint32, int, int *);
+int __wrap_luaD_resume(lua_State *state, l_uint32 calls, int count,
+                       int *results) {
+  int status = __real_luaD_resume(state, calls, count, results);
   if (active->armed && state == active->target &&
       strstr(active->mode, "result") != NULL &&
       strstr(active->mode, "close") == NULL) {
     active->armed = 0;
-    hold(active);
+    suspend_owner(state);
   }
   return status;
 }
@@ -80,12 +84,9 @@ void __wrap_luaW_restore(lua_State *state, LuaWorldScope scope,
   __real_luaW_restore(state, scope, depth);
   if (active->armed && state == active->target && state->status == LUA_YIELD &&
       strstr(active->mode, "active_yield") != NULL) {
-    LuaWorldScope suspended;
     active->armed = 0;
     require(state->resume_active != 0);
-    suspended = luaW_detach(state);
-    hold(active);
-    luaW_attach(state, suspended);
+    suspend_owner(state);
   }
 }
 static void *allocate(void *context, void *old, size_t old_size, size_t size) {
@@ -466,11 +467,11 @@ static void *run(void *context) {
     } else
       require(lua_tointeger(result, -1) == 11);
   }
-  require(G(state)->coroutine_scopes == NULL);
   require(test->caller->owned_operations == 0);
   if (!root && !bridge)
     require(test->target->operation == NULL &&
             test->target->owned_operations == 0 &&
+            test->target->operation_roots == 0 &&
             test->target->resume_active == 0 &&
             test->target->close_active == 0);
   if (!root && !bridge) {

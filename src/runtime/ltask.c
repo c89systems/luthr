@@ -193,8 +193,10 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   if (!G(L)->task_admission_closed &&
       L != mainthread(G(L)) && L->task_owner == NULL &&
-      L->callback_owner == NULL && L->operation == NULL &&
-      L->owned_operations == 0 && L->resume_active == 0 && L->close_active == 0 &&
+      L->callback_owner == NULL &&
+      __atomic_load_n(&L->operation, __ATOMIC_ACQUIRE) == NULL &&
+      __atomic_load_n(&L->owned_operations, __ATOMIC_ACQUIRE) == 0 &&
+      L->resume_active == 0 && L->close_active == 0 &&
       (L->status == LUA_YIELD ||
        (L->status == LUA_OK && L->ci == &L->base_ci &&
         L->top.p > L->ci->func.p + 1 &&
@@ -261,7 +263,7 @@ int luaTK_finish (LuaTaskRoot *task, int *status, int *results) {
           L->errorJmp == NULL && L->native_depth == 0 &&
           L->top.p - (L->ci->func.p + 1) >= *results;
   luaX_checksync(pthread_mutex_lock(&world->mutex));
-  valid = valid && L->owned_operations == 0;
+  valid = valid && __atomic_load_n(&L->owned_operations, __ATOMIC_ACQUIRE) == 0;
   if (valid) task->phase = LUA_TASK_FINISHING;
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
   if (valid && luaC_hastaskheap(L)) {

@@ -1184,7 +1184,6 @@ static int resume_error (lua_State *L, const char *msg, int narg) {
   L->top.p -= narg;  /* remove args from the stack */
   setsvalue2s(L, L->top.p, luaS_new(L, msg));  /* push error message */
   api_incr_top(L);
-  lua_unlock(L);
   return LUA_ERRRUN;
 }
 
@@ -1251,11 +1250,8 @@ static TStatus precover (lua_State *L, TStatus status) {
 }
 
 
-LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
-                                      int *nresults) {
+int luaD_resume (lua_State *L, l_uint32 calls, int nargs, int *nresults) {
   TStatus status;
-  l_uint32 calls = luaX_parentcalls(from);
-  lua_lock(L);
   if (L->status == LUA_OK) {  /* may be starting a coroutine */
     if (L->ci != &L->base_ci)  /* not in base level? */
       return resume_error(L, "cannot resume non-suspended coroutine", nargs);
@@ -1284,10 +1280,18 @@ LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
   *nresults = (status == LUA_YIELD) ? L->ci->u2.nyield
                                     : cast_int(L->top.p - (L->ci->func.p + 1));
   L->resume_active = 0;
-  lua_unlock(L);
   return APIstatus(status);
 }
 
+LUA_API int lua_resume (lua_State *L, lua_State *from, int nargs,
+                        int *nresults) {
+  l_uint32 calls = luaX_parentcalls(from);
+  int status;
+  lua_lock(L);
+  status = luaD_resume(L, calls, nargs, nresults);
+  lua_unlock(L);
+  return status;
+}
 
 LUA_API int lua_isyieldable (lua_State *L) {
   int result;

@@ -6,8 +6,6 @@
 
 typedef struct LuaCoroutineScope {
   struct LuaCoroutineScope *previous;
-  struct LuaCoroutineScope *next;
-  struct LuaCoroutineScope **link;
   NativeStackContext *context;
   lua_State *source;
   lua_State *target;
@@ -19,6 +17,7 @@ enum { LUA_CO_RUNNING, LUA_CO_DEAD, LUA_CO_SUSPENDED, LUA_CO_NORMAL };
 ** retained stack until end or protected unwinding; no physical mutex is held
 ** across user code. A failed claim does not change either Lua stack. */
 LUAI_FUNC int luaO_begin (lua_State *L, lua_State *co, LuaCoroutineScope *scope);
+LUAI_FUNC int luaO_claim (lua_State *L, lua_State *co, LuaCoroutineScope *scope);
 LUAI_FUNC void luaO_end (LuaCoroutineScope *scope);
 LUAI_FUNC void luaO_release (LuaCoroutineScope *boundary);
 LUAI_FUNC void luaO_unwind (LuaCoroutineScope *boundary);
