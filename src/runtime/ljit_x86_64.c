@@ -329,26 +329,15 @@ static void readtable (Emitter *e, const Proto *p, OpCode op,
   }
 }
 
-static int constructorfield (const Instruction *code, unsigned pc, unsigned a) {
-  if (pc >= 2 && GET_OPCODE(code[pc - 1]) == OP_EXTRAARG &&
-      GET_OPCODE(code[pc - 2]) == OP_NEWTABLE && cast_uint(GETARG_A(code[pc - 2])) == a)
-    return 0;
-  if (pc >= 3 && GET_OPCODE(code[pc - 1]) == OP_SETFIELD &&
-      GET_OPCODE(code[pc - 2]) == OP_EXTRAARG &&
-      GET_OPCODE(code[pc - 3]) == OP_NEWTABLE && cast_uint(GETARG_A(code[pc - 3])) == a)
-    return 1;
-  return -1;
-}
-
-static void writefield (Emitter *e, const Proto *p, const Instruction *code,
-                        unsigned pc, unsigned a, unsigned b, unsigned c) {
+static void writefield (Emitter *e, const Proto *p, int pc,
+                        unsigned a, unsigned b, unsigned c) {
   emit(e, 0x4c, 0x89, 0xf7);  /* rdi = thread */
   argument(e, 6, a);           /* rsi = receiver */
   immediate(e, 2, cast(uintptr_t, &p->k[b]));
-  if (TESTARG_k(code[pc])) immediate(e, 1, cast(uintptr_t, &p->k[c]));
+  if (TESTARG_k(p->code[pc])) immediate(e, 1, cast(uintptr_t, &p->k[c]));
   else argument(e, 1, c);
   emit(e, 0x41, 0xb8);  /* r8d = optional constructor field */
-  word(e, cast_uint(constructorfield(code, pc, a)));
+  word(e, cast_uint(luaV_recordfield(p, pc)));
   call(e, cast(uintptr_t, setfield), 1);
 }
 
@@ -447,7 +436,7 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         readtable(&e, p, op, a, b, c);
         break;
       case OP_SETFIELD:
-        writefield(&e, p, body, pc, a, b, c);
+        writefield(&e, p, site->pc + cast_int(pc), a, b, c);
         continue;  /* charge is part of the call */
       case OP_NEWTABLE:
         charge(&e);

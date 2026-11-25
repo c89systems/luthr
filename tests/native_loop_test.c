@@ -40,8 +40,9 @@ static const char program[] =
     "  for i = -n, n, step do\n"
     "    row.balance = row.balance + i % 9\n"
     "    row.timestamp = (i * 10007) // 31\n"
-    "    row.last = {value=i}\n"
+    "    row.last = {value=i, doubled=i*2, tripled=i*3}\n"
     "    sum = sum + row.balance + row.timestamp + row.last.value\n"
+    "    sum = sum + row.last.doubled + row.last.tripled\n"
     "  end\n"
     "  return sum\n"
     "end";
@@ -65,7 +66,7 @@ static lua_Integer expected(lua_Integer n) {
   for (lua_Integer i = -n; i <= n; i++) {
     lua_Integer mod = i % 9, stamp = i * 10007;
     balance += mod < 0 ? mod + 9 : mod;
-    sum += balance + stamp / 31 - (stamp % 31 < 0) + i;
+    sum += balance + stamp / 31 - (stamp % 31 < 0) + 6 * i;
   }
   return sum;
 }

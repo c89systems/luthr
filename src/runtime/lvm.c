@@ -1971,6 +1971,16 @@ void luaV_linkdispatch (Proto *p) {
   }
 }
 
+/* The native compiler runs after dispatch linking. Reuse the constructor
+** field already resolved by lowering, including nonadjacent stores. */
+int luaV_recordfield (const Proto *p, int pc) {
+  const int32_t *offsets = execute(NULL, NULL);
+  int op;
+  for (op = LUA_SETRECORD_0; op <= LUA_SETRECORD_3; ++op)
+    if (p->dispatch[pc].offset == offsets[op]) return op - LUA_SETRECORD_0;
+  return -1;
+}
+
 void luaV_execute (lua_State *L, CallInfo *ci) {
   execute(L, ci);
 }
