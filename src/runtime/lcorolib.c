@@ -17,11 +17,14 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lapi.h"
+#include "lapiowned.h"
+#include "lauxowned.h"
 #include "ldo.h"
 #include "llimits.h"
 #include "lexec.h"
 #include "lcontrol.h"
 #include "lcoroscope.h"
+#include "lroots.h"
 
 
 static lua_State *getco (lua_State *L) {
@@ -136,8 +139,7 @@ int luaB_coresume (lua_State *L) {
 }
 
 
-int luaB_wrapresume (lua_State *L, int narg) {
-  lua_State *co = getco(L);  /* stack argument retains the snapshot */
+static int wrapresume (lua_State *L, lua_State *co, int narg) {
   LuaCoroutineScope scope;
   int r = auxresume(L, co, narg, &scope);
   if (r == -2)
@@ -166,10 +168,26 @@ int luaB_wrapresume (lua_State *L, int narg) {
 
 
 int luaB_auxwrap (lua_State *L) {
-  int narg = lua_gettop(L);
-  lua_pushvalue(L, lua_upvalueindex(1));
-  lua_insert(L, 1);  /* stable root below arguments/results */
-  return luaB_wrapresume(L, narg);
+  LuaNativeRoot target;
+  const TValue *value;
+  lua_State *co;
+  int narg, nres;
+  lua_lock(L);
+  value = luaA_indexvalue(L, lua_upvalueindex(1), &target);
+  if (l_unlikely(!ttisthread(value))) {
+    /* Diagnose a capture changed with the debug library. */
+    setobj2s(L, L->top.p, value);
+    api_incr_top(L);
+    luaR_poproot(L, &target);
+    lua_unlock(L);
+    lua_insert(L, 1);
+    return luaL_typeerror(L, 1, "thread");
+  }
+  co = thvalue(value);
+  narg = cast_int(L->top.p - (L->ci->func.p + 1));
+  lua_unlock(L);
+  nres = wrapresume(L, co, narg);
+  return luaL_rootresult(L, &target, 1, nres);
 }
 
 
@@ -194,7 +212,7 @@ int luaB_cowrap (lua_State *L) {
 }
 
 
-static int luaB_yield (lua_State *L) {
+int luaB_yield (lua_State *L) {
   return lua_yield(L, lua_gettop(L));
 }
 

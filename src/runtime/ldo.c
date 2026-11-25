@@ -775,6 +775,27 @@ static int __attribute__((noinline)) callCwithscope (lua_State *L, StkId func,
   return n;
 }
 
+/* The builtin yield has no native body to unwind. Keep its CallInfo so
+** resumed arguments, debug inspection and close see the usual Lua frame. */
+#if !defined(HARDSTACKTESTS)
+static int trysuspend (lua_State *L, StkId func, unsigned status) {
+  CallInfo *ci = L->ci->next;
+  LuaExecution *execution;
+  if (ci == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK ||
+      !yieldable(L) || !L->resume_active || gethookmask(L) || luaW_ownsheap(L))
+    return 0;
+  /* A host-driven execution can observe the protected unwind on yield. */
+  execution = luaX_execution(L);
+  if (execution != NULL && execution->native_restore != NULL) return 0;
+  luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
+  ci->u.c.k = NULL;
+  ci->u2.nyield = cast_int(L->top.p - (func + 1));
+  luai_userstateyield(L, ci->u2.nyield);
+  L->status = LUA_YIELD;
+  return 1;
+}
+#endif
+
 /* Opaque and managed C frames share the same ABI and result completion. */
 int luaD_precallC (lua_State *L, StkId func,
                      unsigned status, lua_CFunction f, int managed) {
@@ -866,6 +887,8 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     if (!ttisinteger(first)) return -1;
     setivalue(value, luaB_absinteger(ivalue(first)));
     return 1;
+  case LUA_LEAF_YIELD:
+    return -1;  /* only a VM frame can suspend without a native call */
   default:
     lua_assert(0);
     return -1;
@@ -901,9 +924,15 @@ int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   return n;
 }
 
-void luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
+int luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
+  unsigned status = cast_uint(wanted + 1);
   lua_assert(checktag(s2v(func), LUA_VBCF));
-  luaD_precallC(L, func, cast_uint(wanted + 1), fvalue(s2v(func)), 1);
+#if !defined(HARDSTACKTESTS)
+  if (bcfindex(s2v(func)) == LUA_LEAF_YIELD && trysuspend(L, func, status))
+    return 1;
+#endif
+  luaD_precallC(L, func, status, fvalue(s2v(func)), 1);
+  return 0;
 }
 
 l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
@@ -1028,7 +1057,8 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
 ** check the stack before doing anything else. 'luaD_precall' already
 ** does that.
 */
-l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
+l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,
+                       int returnyield) {
   CallInfo *ci;
   luaD_checknativestack(L);
   L->nCcalls += inc;
@@ -1038,7 +1068,8 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc) {
   }
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
     ci->callstatus |= CIST_FRESH;  /* mark that it is a "fresh" execute */
-    luaV_execute(L, ci);  /* call it */
+    if (luaV_execute(L, ci) && !returnyield)
+      luaD_throw(L, LUA_YIELD);  /* unwind a caller using the C API */
   }
   L->nCcalls -= inc;
 }
@@ -1056,7 +1087,7 @@ void luaD_call (lua_State *L, StkId func, int nResults) {
     luaCP_checklimit(L);
     return;
   }
-  ccall(L, func, nResults, 1);
+  ccall(L, func, nResults, 1, 0);
 }
 
 
@@ -1064,7 +1095,7 @@ void luaD_call (lua_State *L, StkId func, int nResults) {
 ** Similar to 'luaD_call', but does not allow yields during the call.
 */
 void luaD_callnoyield (lua_State *L, StkId func, int nResults) {
-  ccall(L, func, nResults, nyci);
+  ccall(L, func, nResults, nyci, 0);
 }
 
 
@@ -1157,7 +1188,7 @@ static void unroll (lua_State *L, void *ud) {
       finishCcall(L, ci);  /* complete its execution */
     else {  /* Lua function */
       luaV_finishOp(L);  /* finish interrupted instruction */
-      luaV_execute(L, ci);  /* execute down to higher C 'boundary' */
+      if (luaV_execute(L, ci)) return;
     }
   }
 }
@@ -1204,7 +1235,7 @@ static void resume (lua_State *L, void *ud) {
   CallInfo *ci = L->ci;
   luaTK_checkstop(L);
   if (L->status == LUA_OK)  /* starting a coroutine? */
-    ccall(L, firstArg - 1, LUA_MULTRET, 0);  /* just call its body */
+    ccall(L, firstArg - 1, LUA_MULTRET, 0, 1);  /* just call its body */
   else {  /* resuming from previous yield */
     lua_assert(L->status == LUA_YIELD);
     L->status = LUA_OK;  /* mark that it is running (again) */
@@ -1215,7 +1246,7 @@ static void resume (lua_State *L, void *ud) {
       lua_assert(ci->callstatus & CIST_HOOKYIELD);
       ci->u.l.savedpc--;
       L->top.p = firstArg;  /* discard arguments */
-      luaV_execute(L, ci);  /* just continue running Lua code */
+      if (luaV_execute(L, ci)) return;
     }
     else {  /* 'common' yield */
       if (ci->u.c.k != NULL) {  /* does it have a continuation function? */
@@ -1234,6 +1265,13 @@ static void resume (lua_State *L, void *ud) {
 }
 
 
+/* A builtin yield can return through the VM to the resume boundary. */
+static TStatus resumewith (lua_State *L, Pfunc run, void *data) {
+  TStatus status = luaD_rawrunprotected(L, run, data);
+  return status == LUA_OK && L->status == LUA_YIELD ? LUA_YIELD : status;
+}
+
+
 /*
 ** Unrolls a coroutine in protected mode while there are recoverable
 ** errors, that is, errors inside a protected call. (Any error
@@ -1247,7 +1285,7 @@ static TStatus precover (lua_State *L, TStatus status) {
   while (errorstatus(status) && (ci = findpcall(L)) != NULL) {
     L->ci = ci;  /* go down to recovery functions */
     setcistrecst(ci, status);  /* status to finish 'pcall' */
-    status = luaD_rawrunprotected(L, unroll, NULL);
+    status = resumewith(L, unroll, NULL);
   }
   return status;
 }
@@ -1270,7 +1308,7 @@ int luaD_resume (lua_State *L, l_uint32 calls, int nargs, int *nresults) {
   L->resume_active = 1;
   luai_userstateresume(L, nargs);
   api_checkpop(L, (L->status == LUA_OK) ? nargs + 1 : nargs);
-  status = luaD_rawrunprotected(L, resume, &nargs);
+  status = resumewith(L, resume, &nargs);
    /* continue running after recoverable errors */
   status = precover(L, status);
   if (l_likely(!errorstatus(status)))

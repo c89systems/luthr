@@ -1680,7 +1680,8 @@ typedef struct LuaInstructionFrame {
   int trap;
 } LuaInstructionFrame;
 
-enum { VM_NEXT, VM_START, VM_RETURNING, VM_DONE };
+enum { VM_NEXT, VM_START, VM_RETURNING, VM_DONE, VM_SUSPENDED };
+static const int32_t suspended;
 
 /* A capture-aware instruction is generated from the same definitions as the
 ** register-only loop. Its single return boundary keeps ownership/cell paths
@@ -1699,6 +1700,7 @@ static unsigned executecaptured (lua_State *L, Instruction i,
 #define vmcase(op) case op:
 #define VM_CAPTURE 1
 #define vmreturn goto captured_done
+#define vmsuspend goto captured_suspended
 #define startfunc captured_start
 #define returning captured_returning
 #define ret captured_ret
@@ -1718,6 +1720,9 @@ static unsigned executecaptured (lua_State *L, Instruction i,
   goto complete;
  captured_done:
   result = VM_DONE;
+  goto complete;
+ captured_suspended:
+  result = VM_SUSPENDED;
  complete:
   frame->call = ci;
   frame->base = base;
@@ -1730,6 +1735,7 @@ static unsigned executecaptured (lua_State *L, Instruction i,
 #undef returning
 #undef startfunc
 #undef vmreturn
+#undef vmsuspend
 #undef VM_CAPTURE
 #undef vmcase
 #undef vmbreak
@@ -1793,6 +1799,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
       vmjump();
 #define VM_CAPTURE 0
 #define vmreturn return NULL
+#define vmsuspend return &suspended
 #define vmcase(op) L_fast_##op:
 #define directdispatch(op) goto L_fast_##op
 #define ret fast_ret
@@ -1939,6 +1946,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
 #undef ret
 #undef vmcase
 #undef vmreturn
+#undef vmsuspend
 #undef VM_CAPTURE
     }
     continue;
@@ -1955,6 +1963,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
       result = executecaptured(L, i, &frame);
       ci = frame.call;
       if (result == VM_DONE) return NULL;
+      if (result == VM_SUSPENDED) return &suspended;
       if (result == VM_START) goto startfunc;
       if (result == VM_RETURNING) {
         trap = frame.trap;
@@ -1987,8 +1996,8 @@ int luaV_recordfield (const Proto *p, int pc) {
   return -1;
 }
 
-void luaV_execute (lua_State *L, CallInfo *ci) {
-  execute(L, ci);
+int luaV_execute (lua_State *L, CallInfo *ci) {
+  return execute(L, ci) == &suspended;
 }
 
 /* }================================================================== */

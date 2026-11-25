@@ -964,11 +964,12 @@ set_target_properties(coroutine_operation_test PROPERTIES C_STANDARD 99)
 target_compile_options(coroutine_operation_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(coroutine_operation_test PRIVATE luthr_static)
 target_link_options(coroutine_operation_test PRIVATE -Wl,--wrap=luaX_transferpair
-  -Wl,--wrap=luaD_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore)
+  -Wl,--wrap=luaD_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore
+  -Wl,--wrap=luaV_execute)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS resume_prepare resume_prepare_oom resume_result wrap_prepare wrap_result
-        close_prepare close_result close_cleanup close_reentrant active_yield root_normal root_recover
+        close_prepare close_result close_cleanup close_reentrant active_yield active_yield_host root_normal root_recover
         root_error root_handler_error root_oom root_selfclose root_construction bridge_close)
       add_test(NAME coroutine_operation_${backend}_${case}_${gc}
         COMMAND coroutine_operation_test ${backend}_${case}_${gc})
@@ -981,7 +982,7 @@ luthr_test_program(control_snapshot_test control_snapshot_test.c)
 set_target_properties(control_snapshot_test PROPERTIES C_STANDARD 99)
 target_compile_options(control_snapshot_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(control_snapshot_test PRIVATE luthr_static)
-target_link_options(control_snapshot_test PRIVATE -Wl,--wrap=lua_tothread)
+target_link_options(control_snapshot_test PRIVATE -Wl,--wrap=luaX_joinpair)
 foreach(case IN ITEMS raw_incremental raw_generational facade_incremental facade_generational)
   add_test(NAME control_snapshot_${case} COMMAND control_snapshot_test ${case})
   set_tests_properties(control_snapshot_${case} PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)

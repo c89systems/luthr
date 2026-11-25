@@ -23,20 +23,18 @@ static struct fixture *active;
       abort();                                                                 \
     }                                                                          \
   } while (0)
-lua_State *__real_lua_tothread(lua_State *, int);
-lua_State *__wrap_lua_tothread(lua_State *state, int index) {
+int __real_luaX_joinpair(lua_State *, lua_State *);
+int __wrap_luaX_joinpair(lua_State *state, lua_State *thread) {
   struct fixture *test = active;
-  lua_State *thread = __real_lua_tothread(state, index);
   LuaWorldScope suspended = {0};
   require(pthread_mutex_lock(&test->mutex) == 0);
-  if (test->armed && state == test->caller &&
-      (index == 1 || index == lua_upvalueindex(1))) {
+  if (test->armed && state == test->caller) {
     test->armed = 0;
     require(thread != NULL && thread->native_depth == 0);
     require(state->native_depth != 0 && state->world_depth == 0);
     require(pthread_mutex_unlock(&test->mutex) == 0);
-    /* The production lookup does not block. The test pauses it across a
-       collection, so publish the source frame before waiting. */
+    /* The wrapper has rooted its snapshot. Pause before entering that
+     * target so the peer can replace the capture and collect. */
     suspended = luaW_suspendapi();
     require(pthread_mutex_lock(&test->mutex) == 0);
     test->entered = 1;
@@ -46,7 +44,7 @@ lua_State *__wrap_lua_tothread(lua_State *state, int index) {
   }
   require(pthread_mutex_unlock(&test->mutex) == 0);
   luaW_restoreapi(suspended);
-  return thread;
+  return __real_luaX_joinpair(state, thread);
 }
 static int capture(void *context) {
   active->main = context;

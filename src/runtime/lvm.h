@@ -112,7 +112,8 @@ LUAI_FUNC lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
 LUAI_FUNC void luaV_settable (lua_State *L, const TValue *t, TValue *key,
                              TValue *val);
 LUAI_FUNC void luaV_finishOp (lua_State *L);
-LUAI_FUNC void luaV_execute (lua_State *L, CallInfo *ci);
+/* Returns nonzero when a builtin yield suspends execution. */
+LUAI_FUNC int luaV_execute (lua_State *L, CallInfo *ci);
 LUAI_FUNC void luaV_linkdispatch (Proto *p);
 LUAI_FUNC int luaV_recordfield (const Proto *p, int pc);
 LUAI_FUNC int luaV_shadowroot (CallInfo **frame, StkId slot, StkId stacktop);

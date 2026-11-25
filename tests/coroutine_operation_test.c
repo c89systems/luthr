@@ -3,6 +3,7 @@
 #include <ldo.h>
 #include <lualib.h>
 #include <luthr/lua_runtime.h>
+#include <lvm.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,16 +79,26 @@ int __wrap_lua_closethread(lua_State *state, lua_State *from) {
   }
   return status;
 }
-void __real_luaW_restore(lua_State *, LuaWorldScope, unsigned);
-void __wrap_luaW_restore(lua_State *state, LuaWorldScope scope,
-                         unsigned depth) {
-  __real_luaW_restore(state, scope, depth);
+static void observe_active_yield(lua_State *state) {
   if (active->armed && state == active->target && state->status == LUA_YIELD &&
       strstr(active->mode, "active_yield") != NULL) {
     active->armed = 0;
     require(state->resume_active != 0);
     suspend_owner(state);
   }
+}
+void __real_luaW_restore(lua_State *, LuaWorldScope, unsigned);
+void __wrap_luaW_restore(lua_State *state, LuaWorldScope scope,
+                         unsigned depth) {
+  __real_luaW_restore(state, scope, depth);
+  observe_active_yield(state);
+}
+int __real_luaV_execute(lua_State *, CallInfo *);
+int __wrap_luaV_execute(lua_State *state, CallInfo *ci) {
+  int suspended = __real_luaV_execute(state, ci);
+  if (suspended)
+    observe_active_yield(state);
+  return suspended;
 }
 static void *allocate(void *context, void *old, size_t old_size, size_t size) {
   struct fixture *test = context;
@@ -265,12 +276,30 @@ static int rooted_operation(lua_State *state) {
   luaW_restoreapi(world);
   return results;
 }
+static void count_yield_restore(LuaExecution *execution, lua_State *state,
+                                unsigned previous_depth) {
+  unsigned *calls = execution->context;
+  require(previous_depth == 0 && state->status == LUA_YIELD);
+  (*calls)++;
+}
 static void *invoke(void *context) {
   struct fixture *test = context;
   int raw = strstr(test->mode, "active_yield") != NULL;
   if (raw) {
     lua_pushinteger(test->target, 11);
-    test->status = lua_resume(test->target, NULL, 1, &test->results);
+    if (strstr(test->mode, "active_yield_host") != NULL) {
+      NativeStackContext *carrier = luaE_getnativestackcontext();
+      unsigned restores = 0;
+      LuaExecution driver = {0};
+      driver.context = &restores;
+      driver.native_restore = count_yield_restore;
+      require(carrier->execution == NULL);
+      carrier->execution = &driver;
+      test->status = lua_resume(test->target, NULL, 1, &test->results);
+      carrier->execution = NULL;
+      require(restores == 1);
+    } else
+      test->status = lua_resume(test->target, NULL, 1, &test->results);
   } else
     test->status = lua_resume(test->caller, NULL, 0, &test->results);
   return NULL;

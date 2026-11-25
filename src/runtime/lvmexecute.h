@@ -448,7 +448,8 @@
           if (luaD_tryleaf(L, ra, b - 1, nresults) < 0) {
             L->top.p = ra + b;
             savepc(ci);
-            luaD_callleaffallback(L, ra, nresults);
+            if (luaD_callleaffallback(L, ra, nresults))
+              vmsuspend;
           }
           else if (l_unlikely(luaTK_pendingstop(L) != NULL ||
                               (L->policy != NULL && luaCP_exhausted(L)))) {
