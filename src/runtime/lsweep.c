@@ -13,22 +13,21 @@
 #include "lscheduler.h"
 #include "ltable.h"
 
-/* A page remains in the allocator directory until backing storage returns.
-** The pool mutex protects both cursor advancement and the claim against that
-** return. Limits bound skipped descriptors as well as ordinary list claims. */
+/* The collector visits pages that have held collectable objects. The pool
+** mutex serializes cursor advancement against return of the backing page. */
 static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
   LuaSweepPlan *plan = &g->sweep_plan;
   unsigned inspected = 0;
-  while (plan->page_pool <= plan->page_limit && inspected < limit) {
+  while (plan->page_pool < LUA_ALLOC_BINS && inspected < limit) {
     unsigned pool = plan->page_pool;
     luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
     while (plan->pages[pool] != NULL && inspected < limit) {
       LuaAllocPage *page = plan->pages[pool];
-      uint64_t tables = __atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED);
-      plan->pages[pool] = page->next;
+      uint64_t epoch = __atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED);
+      plan->pages[pool] = page->sweep_next;
       inspected++;
-      if (page->state == LUA_PAGE_OPEN && tables != 0 &&
-          (plan->kind != SWEEP_YOUNG || tables >= plan->epoch)) {
+      if (page->state == LUA_PAGE_OPEN && epoch != 0 &&
+          (plan->kind != SWEEP_YOUNG || epoch >= plan->epoch)) {
         page->state = LUA_PAGE_SWEEPING;
         work->page = page;
         work->full_page = page->owner == NULL &&
@@ -47,7 +46,7 @@ static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
 int luaC_sweepready (global_State *g) {
   LuaSweepPlan *plan = &g->sweep_plan;
   return plan->phase == SWEEP_OBJECTS &&
-    (plan->next != plan->limit || plan->page_pool <= plan->page_limit);
+    (plan->next != plan->limit || plan->page_pool < LUA_ALLOC_BINS);
 }
 
 void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
@@ -62,10 +61,8 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   __atomic_store_n(&g->young_work, LUA_YOUNG_SURVIVOR, __ATOMIC_RELEASE);
   plan->epoch = epoch;
   plan->kind = kind;
-  plan->page_pool = luaMP_sizeclass(sizeof(Table));
-  plan->page_limit = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
-  for (unsigned pool = plan->page_pool; pool <= plan->page_limit; pool++)
-    plan->pages[pool] = g->allocation_pages[pool];
+  for (unsigned pool = 0; pool < LUA_ALLOC_BINS; pool++)
+    plan->pages[pool] = g->sweep_pages[pool];
   __atomic_fetch_and(&g->world.control, ~cast(uint64_t, AGEBITS),
                    __ATOMIC_RELAXED);
   plan->base_marked = marked;
@@ -126,9 +123,9 @@ static void claim (lua_State *L, LuaSweepWork *work, unsigned limit) {
   if (!luaC_sweeping(L)) return;
   if (plan->phase == SWEEP_OBJECTS && plan->next == plan->limit) {
     takepage(g, work, limit);
-    if (work->count == 0 && plan->table_retry != NULL)
-      take(work, &plan->table_retry, NULL, NULL, limit, 0);
-    work->tables = work->count != 0;
+    if (work->count == 0 && plan->page_retry != NULL)
+      take(work, &plan->page_retry, NULL, NULL, limit, 0);
+    work->paged = work->count != 0;
   }
   if (work->count == 0 && plan->next == plan->limit && plan->retry[0] == NULL &&
       plan->retry[1] == NULL && plan->busy == 0 &&
@@ -183,7 +180,7 @@ static void publish (lua_State *L, LuaSweepWork *work) {
     plan->live[region] = work->live;
   }
   if (work->retry != NULL) {
-    GCObject **retry = work->tables ? &plan->table_retry : &plan->retry[region];
+    GCObject **retry = work->paged ? &plan->page_retry : &plan->retry[region];
     *work->retry_tail = *retry;
     *retry = work->retry;
   }

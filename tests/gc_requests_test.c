@@ -4,6 +4,7 @@
 #include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <lstring.h>
 #include <ltable.h>
 #include <ltask.h>
 #include <lualib.h>
@@ -874,6 +875,7 @@ static void empty_minor(lua_State *L) {
 static void minor_sweep_birth(lua_State *L) {
   uint64_t epoch;
   Table *child;
+  Udata *during;
   lua_newtable(L);
   lua_newtable(L);
   lua_pushliteral(L, "v");
@@ -882,6 +884,7 @@ static void minor_sweep_birth(lua_State *L) {
   lua_gc(L, LUA_GCGEN);
   lua_lock(L);
   (void)luaH_new(L, 0, 0); /* Dead at the initial snapshot. */
+  (void)luaS_newudata(L, sizeof(int), 0);
   G(L)->pacer.goal = MAX_LMEM;
   luaE_setdebt(G(L), 0);
   luaC_step(L);
@@ -890,10 +893,21 @@ static void minor_sweep_birth(lua_State *L) {
   child = luaH_new(L, 0, 0);
   sethvalue2s(L, L->top.p, child);
   api_incr_top(L);
+  during = luaS_newudata(L, sizeof(int), 0);
+  uintptr_t header = luaMP_header((LuaAllocBlock *)during - 1);
+  require((header & LUA_BLOCK_COLLECTABLE) &&
+          (header & LUA_BLOCK_BIRTH) == luaMP_birth(G(L)->sweep_plan.epoch));
+  *(int *)getudatamem(during) = 42;
+  setuvalue(L, s2v(L->top.p), during);
+  api_incr_top(L);
   luaC_waitsweep(L);
   require(!luaC_sweeping(L));
   epoch = luaC_traceepoch(G(L));
   lua_unlock(L);
+
+  require(lua_touserdata(L, -1) == getudatamem(during));
+  require(*(int *)lua_touserdata(L, -1) == 42);
+  lua_pop(L, 1);
 
   lua_gc(L, LUA_GCSTOP);
   require(lua_gc(L, LUA_GCSTEP, (size_t)0) == 0);

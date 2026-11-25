@@ -503,10 +503,10 @@ typedef struct LuaTracePlan {
 typedef struct LuaSweepPlan {
   GCObject *next, *middle, *limit;
   struct LuaAllocPage *pages[LUA_ALLOC_BINS];
-  unsigned page_pool, page_limit;
+  unsigned page_pool;
   GCObject *live[2], **tail[2];
   GCObject *retry[2];
-  GCObject *table_retry;
+  GCObject *page_retry;
   GCObject *threads;
   GCObject *gray[4];
   LuaTraceList watch;  /* remembered work for the next trace */
@@ -664,6 +664,7 @@ typedef struct global_State {
   size_t allocation_spare_bytes;
   struct LuaAllocPage *trace_page_incoming;  /* atomic producer stack */
   struct LuaAllocPage *trace_pages;  /* imported under trace_mutex */
+  struct LuaAllocPage *sweep_pages[LUA_ALLOC_BINS];  /* pool mutex */
 } global_State;
 
 

@@ -138,7 +138,7 @@ typedef struct LuaSweepWork {
   GCObject *retry, **retry_tail, *threads, **threads_tail;
   LuaTraceList watch;
   l_mem addedold, freed;
-  unsigned count, kind, phase, region, tables, minor_work;
+  unsigned count, kind, phase, region, paged, minor_work;
   int full_page;
 } LuaSweepWork;
 

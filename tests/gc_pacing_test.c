@@ -39,7 +39,7 @@ void __wrap_luaM_free_(lua_State *L, void *block, size_t size) {
   if (nursery_backing != NULL && block == nursery_backing) {
     LuaWorldScope scope;
     nursery_backing = NULL;
-    require(!(luaMP_header(nursery_slot) & LUA_BLOCK_TABLE));
+    require(!(luaMP_header(nursery_slot) & LUA_BLOCK_COLLECTABLE));
     /* Run a collector with the nursery owner withdrawn, as an allocator
      * wait can do while its dead tables still have backing to return. */
     scope = luaW_detach(L);

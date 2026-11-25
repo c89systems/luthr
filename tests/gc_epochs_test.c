@@ -37,7 +37,7 @@ static void check_page_marks(lua_State *state, LuaAllocPage *page,
       marks[i].header = header;
     else
       require(marks[i].header == header);
-    if (header & LUA_BLOCK_TABLE) {
+    if (header & LUA_BLOCK_COLLECTABLE) {
       GCObject *object = (GCObject *)(cell + 1);
       require(!isdead(G(state), object));
       if (save)
@@ -175,10 +175,48 @@ static void mature_page(lua_State *state) {
   require(luaMP_page(young) == watched_page);
   lua_pop(state, 1);
   minor(state);
-  require(page_visits == 1 && !(luaMP_header(young) & LUA_BLOCK_TABLE));
+  require(page_visits == 1 && !(luaMP_header(young) & LUA_BLOCK_COLLECTABLE));
   watched_page = NULL;
   require(lua_rawgeti(state, -1, 1) == LUA_TNUMBER);
   require(lua_tointeger(state, -1) == 43);
+}
+
+static void mature_userdata_page(lua_State *state) {
+  lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  int *payload = lua_newuserdatauv(state, sizeof(*payload), 1);
+  *payload = 43;
+  GCObject *object = (GCObject *)((char *)payload - udatamemoffset(1));
+  LuaAllocBlock *old = (LuaAllocBlock *)object - 1;
+  watched_page = luaMP_page(old);
+  require(watched_page != NULL);
+  require(luaMP_header(old) & LUA_BLOCK_COLLECTABLE);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(getage(object) == G_OLD);
+  page_visits = 0;
+  minor(state);
+  minor(state);
+  require(page_visits == 0);
+
+  void *temporary = lua_newuserdatauv(state, sizeof(*payload), 1);
+  LuaAllocBlock *young =
+      (LuaAllocBlock *)((char *)temporary - udatamemoffset(1)) - 1;
+  require(luaMP_page(young) == watched_page);
+  lua_pop(state, 1);
+  minor(state);
+  require(page_visits == 1 && !(luaMP_header(young) & LUA_BLOCK_COLLECTABLE));
+  watched_page = NULL;
+  require(lua_topointer(state, -1) == payload);
+  require(lua_touserdata(state, -1) == payload && *payload == 43);
+
+  /* An old userdata's uservalue can keep a new paged object alive. */
+  lua_newuserdatauv(state, sizeof(*payload), 1);
+  void *child = lua_touserdata(state, -1);
+  require(lua_setiuservalue(state, -2, 1));
+  minor(state);
+  minor(state);
+  require(lua_getiuservalue(state, -1, 1) == LUA_TUSERDATA);
+  require(lua_touserdata(state, -1) == child);
 }
 
 static void *release_string(void *context, void *pointer, size_t old,
@@ -251,12 +289,10 @@ static void weak_age(lua_State *state) {
 
 int main(int argc, char **argv) {
   lua_State *state = luaL_newstate();
-  int watch_page;
   require(state != NULL && argc == 2);
-  watch_page = strcmp(argv[1], "mature_page") == 0;
-  /* Keep the small-table page available for the next allocation. Library
+  /* Keep the small-object page available for the next allocation. Library
    * registration can fill that size class before this test starts. */
-  if (!watch_page)
+  if (strncmp(argv[1], "mature_", 7) != 0)
     luaL_openlibs(state);
   lua_gc(state, LUA_GCINC);
   lua_gc(state, LUA_GCCOLLECT);
@@ -265,8 +301,10 @@ int main(int argc, char **argv) {
     live(state, strcmp(argv[1], "live_generational") == 0);
   else if (strcmp(argv[1], "modes") == 0)
     modes(state);
-  else if (watch_page)
+  else if (strcmp(argv[1], "mature_page") == 0)
     mature_page(state);
+  else if (strcmp(argv[1], "mature_userdata_page") == 0)
+    mature_userdata_page(state);
   else if (strcmp(argv[1], "rotations") == 0) {
     rotations(state);
     return 0;

@@ -60,8 +60,8 @@ static unsigned capture(GCObject **out, unsigned count, GCObject *object,
   return count;
 }
 
-static unsigned capture_tables(lua_State *state, GCObject **out,
-                               unsigned count) {
+static unsigned capture_pages(lua_State *state, GCObject **out,
+                              unsigned count) {
   for (unsigned pool = 0; pool < LUA_ALLOC_BINS; pool++) {
     size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
     for (LuaAllocPage *page = G(state)->allocation_pages[pool]; page != NULL;
@@ -69,7 +69,7 @@ static unsigned capture_tables(lua_State *state, GCObject **out,
       for (size_t offset = LUA_ALLOC_PAGE_HEADER;
            offset + stride <= luaMP_slotend(page); offset += stride) {
         LuaAllocBlock *cell = (LuaAllocBlock *)((char *)page + offset);
-        if (luaMP_header(cell) & LUA_BLOCK_TABLE) {
+        if (luaMP_header(cell) & LUA_BLOCK_COLLECTABLE) {
           require(count < CAPACITY);
           out[count++] = (GCObject *)(cell + 1);
         }
@@ -101,7 +101,7 @@ static void membership(lua_State *state, int snapshot) {
     index = capture(out, index, plan->retry[1], NULL);
     index = capture(out, index, plan->threads, NULL);
   }
-  index = capture_tables(state, out, index);
+  index = capture_pages(state, out, index);
   qsort(out, index, sizeof(*out), address_order);
   for (i = 1; i < index; i++)
     require(out[i] != out[i - 1]);

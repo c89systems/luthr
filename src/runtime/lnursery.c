@@ -242,7 +242,7 @@ static void sealtaskpages (lua_State *L, lua_State *thread, lu_byte mark,
 ** operation. Publish the outgoing roots before making the cohort black. */
 static void sealtask (lua_State *L, lua_State *thread) {
   global_State *g = G(L);
-  uintptr_t flags = LUA_BLOCK_TABLE;
+  uintptr_t flags = LUA_BLOCK_COLLECTABLE;
   uint64_t epoch;
   GCObject *o, *next, *strings = NULL, *tail = NULL;
   lu_byte mark;
@@ -282,7 +282,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
       luaC_settablestate(gco2t(o), 0);
       __atomic_store_n(&block->block.page, cast(uintptr_t, page) | flags,
                        __ATOMIC_RELEASE);
-      luaMP_young(page, epoch + 1);
+      luaMP_publishslot(L, page, epoch + 1);
     }
     else {
       TString *s = gco2ts(o);

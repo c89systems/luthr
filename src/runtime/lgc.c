@@ -306,6 +306,16 @@ void luaC_publishobjects (lua_State *L, GCObject *head, GCObject *tail) {
   publishobjects(L, head, tail, luaC_alloclink(tail), luaW_iscollector(L));
 }
 
+static void publishslot (lua_State *L, LuaAllocBlock *block, LuaAllocPage *page) {
+  uint64_t epoch = G(L)->sweep_plan.epoch;
+  uintptr_t flags = LUA_BLOCK_COLLECTABLE;
+  luaC_noteyoung(G(L));
+  if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
+  __atomic_store_n(&block->block.page, cast(uintptr_t, page) | flags,
+                   __ATOMIC_RELEASE);
+  luaMP_publishslot(L, page, epoch + 1);
+}
+
 static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
                            int tasklocal) {
   global_State *g = G(L);
@@ -327,14 +337,10 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
   if (tt == LUA_VTABLE) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
     LuaAllocPage *page = luaMP_page(block);
-    uint64_t epoch = g->sweep_plan.epoch;
-    uintptr_t flags = LUA_BLOCK_TABLE;
     lua_assert(page != NULL && offset == 0);
     if (tasklocal && !collector && L->task_owner != NULL &&
         luaC_taskallocate(L, o, sz))
       return o;
-    luaC_noteyoung(g);
-    if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
     gco2t(o)->gcstate = collector ? 0 : L->nursery_epoch;
     if (!collector) {
       if (L->new_tables == NULL) luaW_trackpublisher(L);
@@ -342,10 +348,17 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
       L->new_tables = o;
       L->nursery_tables++;
     }
-    __atomic_store_n(&block->block.page, cast(uintptr_t, page) | flags,
-                     __ATOMIC_RELEASE);
-    luaMP_young(page, epoch + 1);
+    publishslot(L, block, page);
     return o;
+  }
+  if (tt == LUA_VUSERDATA) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
+    LuaAllocPage *page = luaMP_page(block);
+    if (page != NULL) {
+      lua_assert(offset == 0);
+      publishslot(L, block, page);
+      return o;
+    }
   }
   if (tasklocal && !collector && L->task_owner != NULL &&
       luaC_taskallocate(L, o, sz)) return o;
@@ -586,14 +599,15 @@ static void resetweakstamps (global_State *g) {
   for (pool = luaMP_sizeclass(sizeof(Table)); pool <= last; pool++) {
     LuaAllocPage *page;
     size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
-    for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
+    for (page = g->sweep_pages[pool]; page != NULL; page = page->sweep_next) {
       size_t offset, limit = luaMP_slotend(page);
-      if (page->state != LUA_PAGE_OPEN || page->table_epoch == 0) continue;
+      if (page->state != LUA_PAGE_OPEN || page->sweep_epoch == 0) continue;
       for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         Table *table = cast(Table *, block + 1);
-        if ((luaMP_header(block) & LUA_BLOCK_TABLE) &&
+        if ((luaMP_header(block) & LUA_BLOCK_COLLECTABLE) &&
+            table->tt == LUA_VTABLE &&
             !(luaC_tablestate(table) & NURSERY_TAG))
           luaC_settablestate(table, 0);
       }
@@ -2064,8 +2078,8 @@ int luaC_sweepgray (GCObject *o) {
   return keep;
 }
 
-static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
-                        uintptr_t header) {
+static void sweepslot (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
+                       uintptr_t header) {
   GCObject *object = cast(GCObject *, block + 1);
   int result = luaC_sweepobject(L, object, work->kind, work);
   if (result == SWEEP_RETRY) {
@@ -2083,7 +2097,7 @@ static void sweeptable (lua_State *L, LuaSweepWork *work, LuaAllocBlock *block,
   }
 }
 
-/* A full, unowned page of dead tables can be discarded in one operation.
+/* A full, unowned page of dead objects can be discarded in one operation.
 ** Validate every slot and backing buffer before releasing any of them.
 ** Any backing requiring the host allocator uses ordinary deferred sweep. */
 static int release_dead_page (lua_State *L, LuaSweepWork *work,
@@ -2097,15 +2111,24 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
        offset += stride) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
     uintptr_t header = luaMP_header(block);
-    Table *table = cast(Table *, block + 1);
+    GCObject *object = cast(GCObject *, block + 1);
     size_t size;
-    if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth ||
-        (work->kind == SWEEP_YOUNG && isold(obj2gco(table))) ||
-        !iswhite(g, obj2gco(table))) return 0;
-    size = luaH_pooledsize(table);
-    if (size == 0) return 0;
+    if (!(header & LUA_BLOCK_COLLECTABLE) || (header & LUA_BLOCK_BIRTH) == birth ||
+        (work->kind == SWEEP_YOUNG && isold(object)) ||
+        !iswhite(g, object)) return 0;
+    if (object->tt == LUA_VTABLE) {
+      Table *table = gco2t(object);
+      size = luaH_pooledsize(table);
+      if (size == 0) return 0;
+      headers += cast(l_mem, sizeof(*table) + table->inline_bytes);
+    }
+    else {
+      Udata *u = gco2u(object);
+      lua_assert(!tofinalize(object));
+      size = sizeudata(u->nuvalue, u->len);
+      headers += cast(l_mem, size);
+    }
     bytes += cast(l_mem, size);
-    headers += cast(l_mem, sizeof(*table) + table->inline_bytes);
     count++;
   }
   lua_assert(count != 0 && count == page->used);
@@ -2113,7 +2136,8 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
     for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
          offset += stride) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-      luaH_freeparts(L, cast(Table *, block + 1), 0);
+      GCObject *object = cast(GCObject *, block + 1);
+      if (object->tt == LUA_VTABLE) luaH_freeparts(L, gco2t(object), 0);
     }
   }
   work->page = NULL;
@@ -2123,25 +2147,43 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
   return 1;
 }
 
-static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
+static void sweep_page_batch (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   if (work->page != NULL) {
     LuaAllocPage *page = work->page;
     size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
     uintptr_t birth = luaMP_birth(g->sweep_plan.epoch);
-    unsigned count = 0;
+    unsigned count = 0, returned = 0;
+    LuaAllocBlock *first = NULL, *last = NULL;
+    l_mem bytes = 0;
     size_t offset, limit = luaMP_slotend(page);
     if (!work->full_page || !release_dead_page(L, work, stride, birth)) {
       for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
         uintptr_t header = luaMP_header(block);
-        if (!(header & LUA_BLOCK_TABLE) || (header & LUA_BLOCK_BIRTH) == birth)
+        GCObject *object = cast(GCObject *, block + 1);
+        if (!(header & LUA_BLOCK_COLLECTABLE) || (header & LUA_BLOCK_BIRTH) == birth)
           continue;
-        if (work->kind == SWEEP_YOUNG && isold(cast(GCObject *, block + 1)))
+        if (work->kind == SWEEP_YOUNG && isold(object))
           continue;
-        sweeptable(L, work, block, header);
+        if (object->tt == LUA_VUSERDATA && isdead(g, object)) {
+          Udata *u = gco2u(object);
+          lua_assert(!tofinalize(object));
+          bytes += cast(l_mem, sizeudata(u->nuvalue, u->len));
+          __atomic_store_n(&block->block.page, cast(uintptr_t, page),
+                           __ATOMIC_RELAXED);
+          block->block.link.next = first;
+          first = block;
+          if (last == NULL) last = block;
+          returned++;
+        }
+        else sweepslot(L, work, block, header);
         count++;
+      }
+      if (returned != 0) {
+        luaM_freeobjectbatch(L, page, first, last, returned, bytes, 0);
+        work->freed += bytes;
       }
       work->count = count;
     }
@@ -2151,7 +2193,7 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
     while (object != NULL) {
       GCObject *next = luaC_allocnext(object);
       LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
-      sweeptable(L, work, block, luaMP_header(block));
+      sweepslot(L, work, block, luaMP_header(block));
       object = next;
     }
     if (work->next == NULL) work->count = 0;
@@ -2168,8 +2210,8 @@ static void sweep_table_batch (lua_State *L, LuaSweepWork *work) {
 void luaC_scansweep (lua_State *L, LuaSweepWork *work) {
   global_State *g = G(L);
   GCObject *object = work->next;
-  if (work->tables) {
-    sweep_table_batch(L, work);
+  if (work->paged) {
+    sweep_page_batch(L, work);
     return;
   }
   if (work->phase == SWEEP_GRAY) {
@@ -2380,20 +2422,19 @@ static void deletelist (lua_State *L, GCObject *p, GCObject *limit, int fixed) {
   }
 }
 
-static void retire_table_pages (lua_State *L) {
+static void retire_pages (lua_State *L) {
   global_State *g = G(L);
-  unsigned last = luaMP_sizeclass(LUA_TABLE_INLINE_LIMIT);
   unsigned pool;
-  for (pool = luaMP_sizeclass(sizeof(Table)); pool <= last; pool++) {
+  for (pool = 0; pool < LUA_ALLOC_BINS; pool++) {
     LuaAllocPage *page;
     size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
-    for (page = g->allocation_pages[pool]; page != NULL; page = page->next) {
+    for (page = g->sweep_pages[pool]; page != NULL; page = page->sweep_next) {
       size_t offset, limit = luaMP_slotend(page);
-      if (__atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED) == 0) continue;
+      if (__atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED) == 0) continue;
       for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;
            offset += stride) {
         LuaAllocBlock *block = cast(LuaAllocBlock *, cast_charp(page) + offset);
-        if (luaMP_header(block) & LUA_BLOCK_TABLE)
+        if (luaMP_header(block) & LUA_BLOCK_COLLECTABLE)
           luaC_retireobject(L, cast(GCObject *, block + 1));
       }
     }
@@ -2423,7 +2464,7 @@ void luaC_freeallobjects (lua_State *L) {
   separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
   luaC_runfinalizers(L);
-  retire_table_pages(L);
+  retire_pages(L);
   deletelist(L, g->allgc, obj2gco(mainthread(g)), 0);
   lua_assert(g->finobj == NULL);  /* no new finalizers */
   luaC_reclaim(L);  /* external callbacks precede fixed DLL handle destruction */

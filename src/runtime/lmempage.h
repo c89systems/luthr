@@ -37,7 +37,7 @@ struct LuaAllocPage {
   uintptr_t remote;  /* atomic returned blocks, with notification ownership bit */
   LuaAllocBlock *notified;  /* first return stays allocated until its notice is claimed */
   size_t bytes;
-  uint64_t table_epoch;  /* zero until first table, then last eligible sweep */
+  uint64_t sweep_epoch;  /* zero until first collectable object */
   unsigned used;  /* owner allocations, less returns collected in batches */
   unsigned blockbytes;  /* payload capacity, excluding the block header */
   unsigned pool;
@@ -53,6 +53,8 @@ struct LuaAllocPage {
   unsigned task_top;  /* first virgin slot, before any free-list reuse */
   unsigned task_capacity;  /* nonzero through the lifetime of a task page */
   lu_byte task_mark;  /* inherited by task tables when the page is published */
+  LuaAllocPage *sweep_next;
+  LuaAllocPage **sweep_previous;  /* pool-mutex collector directory */
 };
 
 /* Task pages reserve this storage after their slots. Keep the same slot
@@ -145,9 +147,9 @@ l_sinline unsigned luaMP_sizeclass (size_t bytes) {
   return bins[(bytes + 15) / 16];
 }
 enum { LUA_PAGE_OPEN, LUA_PAGE_RETURNING, LUA_PAGE_SWEEPING, LUA_PAGE_SWEPT };
-enum { LUA_BLOCK_RETIRED = 1, LUA_BLOCK_TABLE = 2, LUA_BLOCK_NEW = 4,
+enum { LUA_BLOCK_RETIRED = 1, LUA_BLOCK_COLLECTABLE = 2, LUA_BLOCK_NEW = 4,
        LUA_BLOCK_PARITY = 8, LUA_BLOCK_BIRTH = LUA_BLOCK_NEW | LUA_BLOCK_PARITY,
-       LUA_BLOCK_FLAGS = LUA_BLOCK_RETIRED | LUA_BLOCK_TABLE | LUA_BLOCK_BIRTH };
+       LUA_BLOCK_FLAGS = LUA_BLOCK_RETIRED | LUA_BLOCK_COLLECTABLE | LUA_BLOCK_BIRTH };
 #define luaMP_header(b) __atomic_load_n(&(b)->block.page, __ATOMIC_ACQUIRE)
 #define luaMP_retired(b) ((luaMP_header(b) & LUA_BLOCK_RETIRED) != 0)
 #define luaMP_pageof(header) cast(LuaAllocPage *, (header) & ~cast(uintptr_t, LUA_BLOCK_FLAGS))
@@ -159,8 +161,20 @@ l_sinline uintptr_t luaMP_birth (uint64_t epoch) {
 }
 
 l_sinline void luaMP_young (LuaAllocPage *page, uint64_t epoch) {
-  if (__atomic_load_n(&page->table_epoch, __ATOMIC_RELAXED) != epoch)
-    __atomic_store_n(&page->table_epoch, epoch, __ATOMIC_RELAXED);
+  if (__atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED) != epoch)
+    __atomic_store_n(&page->sweep_epoch, epoch, __ATOMIC_RELAXED);
+}
+
+/* The first collectable allocation enrols the page before the next sweep. */
+LUAI_FUNC void luaM_enrollsweep (lua_State *L, LuaAllocPage *page,
+                                 uint64_t epoch);
+l_sinline void luaMP_publishslot (lua_State *L, LuaAllocPage *page,
+                                   uint64_t epoch) {
+  uint64_t previous = __atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED);
+  if (l_unlikely(previous == 0))
+    luaM_enrollsweep(L, page, epoch);
+  else if (previous != epoch)
+    __atomic_store_n(&page->sweep_epoch, epoch, __ATOMIC_RELAXED);
 }
 
 /* No allocation or safepoint. Keep the page private and remain admitted until

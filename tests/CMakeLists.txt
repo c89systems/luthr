@@ -619,7 +619,8 @@ set_target_properties(gc_epochs_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_epochs_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_epochs_test PRIVATE luthr_static)
 target_link_options(gc_epochs_test PRIVATE -Wl,--wrap=luaC_scansweep)
-foreach(case IN ITEMS live live_generational modes rotations weak_age mature_page)
+foreach(case IN ITEMS live live_generational modes rotations weak_age mature_page
+    mature_userdata_page)
   add_test(NAME gc_epochs_${case} COMMAND gc_epochs_test ${case})
   set_tests_properties(gc_epochs_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

@@ -225,6 +225,7 @@ l_sinline LuaAllocPage **cachepage (LuaAllocationCache *cache, unsigned pool) {
 int luaM_initpools (lua_State *L) {
   global_State *g = G(L);
   int i, status;
+  memset(g->sweep_pages, 0, sizeof(g->sweep_pages));
   g->allocation_dirty = g->allocation_pending = NULL;
   g->allocation_retired = g->allocation_returning = NULL;
   memset(g->allocation_spare, 0, sizeof(g->allocation_spare));
@@ -257,6 +258,7 @@ void luaM_destroypools (lua_State *L) {
   for (i = 0; i < LUA_ALLOC_TOTAL_POOLS; i++) {
     lua_assert(*poolavailable(G(L), i) == NULL);
     lua_assert(*poolpages(G(L), i) == NULL);
+    lua_assert(i >= LUA_ALLOC_BINS || G(L)->sweep_pages[i] == NULL);
     luaX_checksync(pthread_mutex_destroy(poolmutex(G(L), i)));
   }
 }
@@ -300,6 +302,27 @@ static LuaAllocationCache *allocationcache (lua_State *L) {
 
 static void offerpage (global_State *g, LuaAllocPage *page);
 
+/* Caller owns the allocation pool mutex. Newly enrolled pages are ahead
+** of the frozen sweep cursor and enter the next cohort. */
+static void tracksweep (global_State *g, LuaAllocPage *page) {
+  unsigned pool = page->pool;
+  lua_assert(pool < LUA_ALLOC_BINS && page->sweep_previous == NULL);
+  page->sweep_next = g->sweep_pages[pool];
+  page->sweep_previous = &g->sweep_pages[pool];
+  if (page->sweep_next != NULL)
+    page->sweep_next->sweep_previous = &page->sweep_next;
+  g->sweep_pages[pool] = page;
+}
+
+void luaM_enrollsweep (lua_State *L, LuaAllocPage *page, uint64_t epoch) {
+  global_State *g = G(L);
+  pthread_mutex_t *mutex = poolmutex(g, page->pool);
+  luaX_checksync(pthread_mutex_lock(mutex));
+  tracksweep(g, page);
+  luaMP_young(page, epoch);
+  luaX_checksync(pthread_mutex_unlock(mutex));
+}
+
 static void queuereturn (global_State *g, LuaAllocPage *page) {
   LuaAllocPage *head = __atomic_load_n(&g->allocation_retired, __ATOMIC_RELAXED);
   do { page->dirty_next = head; }
@@ -315,8 +338,8 @@ void luaM_releasepage (lua_State *L, LuaAllocPage *page, l_mem bytes) {
              page->available_previous == NULL &&
              __atomic_load_n(&page->remote, __ATOMIC_RELAXED) == 0);
   page->used = 0;
-  /* Drop table membership until the backing-return queue unlinks the page. */
-  __atomic_store_n(&page->table_epoch, 0, __ATOMIC_RELAXED);
+  /* Drop sweep membership until the backing-return queue unlinks the page. */
+  __atomic_store_n(&page->sweep_epoch, 0, __ATOMIC_RELAXED);
   page->state = LUA_PAGE_SWEPT;
   luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
   account(L, bytes);
@@ -519,8 +542,13 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
     int swept;
     luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
     swept = page->state == LUA_PAGE_SWEPT;
-    if (pool < LUA_ALLOC_BINS && g->sweep_plan.pages[pool] == page)
-      g->sweep_plan.pages[pool] = page->next;
+    if (page->sweep_previous != NULL) {
+      if (g->sweep_plan.pages[pool] == page)
+        g->sweep_plan.pages[pool] = page->sweep_next;
+      *page->sweep_previous = page->sweep_next;
+      if (page->sweep_next != NULL)
+        page->sweep_next->sweep_previous = page->sweep_previous;
+    }
     *page->previous = page->next;
     if (page->next != NULL) page->next->previous = page->previous;
     luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
@@ -724,7 +752,7 @@ l_sinline void freememory (lua_State *L, void *block, size_t osize, int shared) 
   lua_assert(!retired || shared);
   page = luaMP_pageof(header);
   if (page != NULL) {
-    if (header & LUA_BLOCK_TABLE)
+    if (header & LUA_BLOCK_COLLECTABLE)
       __atomic_store_n(&allocation->block.page, cast(uintptr_t, page),
                        __ATOMIC_RELAXED);
     returnpooled(L, page, allocation, allocation, 1);
@@ -856,7 +884,9 @@ static void preparepage (LuaAllocPage *page,
   page->owner = NULL;
   page->used = 0;
   page->bytes = bytes;
-  page->table_epoch = 0;
+  page->sweep_epoch = 0;
+  page->sweep_next = NULL;
+  page->sweep_previous = NULL;
   page->trace_next = NULL;
   memset(page->trace_slots, 0, sizeof(page->trace_slots));
   page->trace_pending = 0;
@@ -916,7 +946,7 @@ void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch,
     block->block.link.next = page->local;
     page->local = block;
   }
-  page->table_epoch = page->used != 0 ? epoch + 1 : 0;
+  page->sweep_epoch = page->used != 0 ? epoch + 1 : 0;
   page->task_mark = mark;
   __atomic_store_n(&page->task_private, 0, __ATOMIC_RELEASE);
   luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
@@ -925,7 +955,10 @@ void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page, uint64_t epoch,
   if (page->next != NULL) page->next->previous = &page->next;
   *poolpages(g, pool) = page;
   if (page->used == 0) luaMP_notify(g, page);
-  else if (page->local != NULL) offerpage(g, page);
+  else {
+    tracksweep(g, page);
+    if (page->local != NULL) offerpage(g, page);
+  }
   luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
 }
 
@@ -1008,7 +1041,7 @@ void *luaM_trytasktable (lua_State *L, size_t size) {
     block = luaMP_slotblock(page, slot);
   }
   page->used++;
-  __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_TABLE,
+  __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_COLLECTABLE,
                     __ATOMIC_RELAXED);
   bit = UINT64_C(1) << (slot % 64);
   lua_assert(!(page->trace_slots[slot / 64] & bit));
