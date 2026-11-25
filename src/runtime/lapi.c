@@ -74,9 +74,8 @@ static TValue *index2addr (lua_State *L, int idx) {
                  "invalid index");
     return s2v(L->top.p + idx);
   }
-  else if (idx == LUA_REGISTRYINDEX)
-    return &G(L)->l_registry;
   else {  /* upvalues */
+    api_check(L, idx != LUA_REGISTRYINDEX, "registry needs a snapshot");
     idx = LUA_REGISTRYINDEX - idx;
     api_check(L, idx <= MAXUPVAL + 1, "upvalue index too large");
     if (ttisCclosure(s2v(ci->func.p))) {  /* C closure? */
@@ -98,6 +97,10 @@ static TValue *index2value (lua_State *L, int idx, LuaNativeRoot *snapshot) {
   TValue *source;
   int valid;
   luaR_pushroot(L, snapshot);
+  if (idx == LUA_REGISTRYINDEX) {
+    luaA_getregistry(L, snapshot);
+    return &snapshot->value;
+  }
   if (isupvalue(idx) && ttisCclosure(s2v(L->ci->func.p))) {
     LuaObjectScope scope;
     luaA_begin(L, gcvalue(s2v(L->ci->func.p)), &scope);
@@ -107,13 +110,9 @@ static TValue *index2value (lua_State *L, int idx, LuaNativeRoot *snapshot) {
     luaA_end(L, &scope);
   }
   else {
-    LuaObjectScope access;
-    if (idx == LUA_REGISTRYINDEX)
-      luaA_beginlock(L, &G(L)->registry_access, &access);
     source = index2addr(L, idx);
     valid = isvalid(L, source);
     luaR_setroot(L, snapshot, source);
-    if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
   }
   return valid ? &snapshot->value : &G(L)->nilvalue;
 }
@@ -158,19 +157,16 @@ static void writeindex (lua_State *L, int idx, const TValue *value) {
     luaC_barrier(L, closure, value);
     luaA_end(L, &scope);
   }
-  else {
+  else if (idx == LUA_REGISTRYINDEX) {
     LuaObjectScope access;
-    if (idx == LUA_REGISTRYINDEX)
-      luaA_beginlock(L, &G(L)->registry_access, &access);
+    luaA_beginlock(L, &G(L)->registry_access, &access);
+    luaA_storeregistry(L, value);
+    luaA_end(L, &access);
+  }
+  else {
     target = index2addr(L, idx);
     api_check(L, isvalid(L, target), "invalid index");
-    if (idx == LUA_REGISTRYINDEX) {
-      luaA_sharevalue(L, value);
-      luaC_prewrite(L, target, value);
-    }
     setobj(L, target, value);
-    /* The collector revisits the registry before completing collection. */
-    if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);
   }
 }
 
@@ -203,7 +199,9 @@ static int stringindex (lua_State *L, int idx, LuaNativeRoot *value) {
     }
     if (cvt2str(&value->value)) {
       luaO_tostring(L, &value->value);
-      writeindex(L, idx, &value->value);
+      if (idx == LUA_REGISTRYINDEX)
+        luaA_storeregistry(L, &value->value);
+      else writeindex(L, idx, &value->value);
       converted = 1;
     }
     if (idx == LUA_REGISTRYINDEX) luaA_end(L, &access);

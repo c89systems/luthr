@@ -2449,13 +2449,9 @@ void luaC_initialtrace (lua_State *L) {
     markvalue(g, &g->l_registry);
   }
   else {
-    /* The registry slot is replaceable. Its owner may be waiting for
-    ** startup; a busy slot is covered by the stopped root closure. */
-    int reservation = luaA_trylock(L, &g->registry_access);
-    if (reservation != 0) {
-      markvalue(g, &g->l_registry);
-      luaA_endlock(L, &g->registry_access, reservation);
-    }
+    /* A concurrent replacement is covered by the stopped root closure. */
+    TValue registry;
+    if (luaA_tryregistry(g, &registry)) markvalue(g, &registry);
   }
   markmt(g);  /* mark global metatables */
 }

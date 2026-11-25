@@ -53,9 +53,7 @@ static void *allocate(void *unused, void *memory, size_t old, size_t size) {
   return replacement;
 }
 
-void __real_luaA_end(lua_State *, LuaObjectScope *);
-void __wrap_luaA_end(lua_State *L, LuaObjectScope *scope) {
-  __real_luaA_end(L, scope);
+static void relocate_after_snapshot(lua_State *L) {
   if (L == probe.worker && probe.relocate) {
     uintptr_t before = (uintptr_t)L->stack.p;
     probe.relocate = 0;
@@ -63,6 +61,18 @@ void __wrap_luaA_end(lua_State *L, LuaObjectScope *scope) {
     require((uintptr_t)L->stack.p != before);
     probe.moved++;
   }
+}
+
+void __real_luaA_end(lua_State *, LuaObjectScope *);
+void __wrap_luaA_end(lua_State *L, LuaObjectScope *scope) {
+  __real_luaA_end(L, scope);
+  relocate_after_snapshot(L);
+}
+
+void __real_luaA_getregistry(lua_State *, LuaNativeRoot *);
+void __wrap_luaA_getregistry(lua_State *L, LuaNativeRoot *result) {
+  __real_luaA_getregistry(L, result);
+  relocate_after_snapshot(L);
 }
 
 static int noop(lua_State *L) {

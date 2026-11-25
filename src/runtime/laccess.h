@@ -88,6 +88,9 @@ LUAI_FUNC void luaA_end (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_endrooted (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_unwind (lua_State *L, LuaObjectScope *target);
 LUAI_FUNC void luaA_release (lua_State *L);
+LUAI_FUNC int luaA_tryregistry (global_State *g, TValue *value);
+LUAI_FUNC void luaA_getregistry (lua_State *L, LuaNativeRoot *result);
+LUAI_FUNC void luaA_storeregistry (lua_State *L, const TValue *value);
 LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
                                  LuaNativeRoot *result);
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);

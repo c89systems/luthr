@@ -369,7 +369,8 @@ static void minor_arm(lua_State *L, int busy_registry) {
     require(pthread_cond_wait(&fixture.changed, &fixture.mutex) == 0);
   require(luaW_active(mutator->admission) && !luaW_stopped(world));
   if (busy_registry) {
-    require(iswhite(G(L), hvalue(&G(L)->l_registry)));
+    /* A reserved writer does not hide the last published root. */
+    require(!iswhite(G(L), hvalue(&G(L)->l_registry)));
     luaA_end(mutator, &registry);
   }
   require(mutator->trace_snapshot != luaC_traceepoch(G(L)));

@@ -227,6 +227,42 @@ void luaA_release (lua_State *L) {
     releasescope(L, scope);
 }
 
+/* Managed admission and the replacement barrier retain the old registry
+** until a successful snapshot has been shaded or rooted. */
+int luaA_tryregistry (global_State *g, TValue *value) {
+  uint64_t before = __atomic_load_n(&g->registry_sequence, __ATOMIC_ACQUIRE);
+  if (before & 1) return 0;
+  __atomic_load(&g->l_registry.value_, &value->value_, __ATOMIC_ACQUIRE);
+  value->tt_ = __atomic_load_n(&g->l_registry.tt_, __ATOMIC_ACQUIRE);
+  return before == __atomic_load_n(&g->registry_sequence, __ATOMIC_ACQUIRE);
+}
+
+void luaA_getregistry (lua_State *L, LuaNativeRoot *result) {
+  global_State *g = G(L);
+  TValue value;
+  if (luaA_tryregistry(g, &value))
+    luaR_setroot(L, result, &value);
+  else {
+    LuaObjectScope access;
+    luaA_beginlock(L, &g->registry_access, &access);
+    luaR_setroot(L, result, &g->l_registry);
+    luaA_end(L, &access);
+  }
+}
+
+void luaA_storeregistry (lua_State *L, const TValue *value) {
+  global_State *g = G(L);
+  uint64_t before;
+  lua_assert(luaW_iscollector(L) ||
+             luaA_lockowner(&g->registry_access) == luaX_token(L));
+  luaA_sharevalue(L, value);
+  luaC_prewrite(L, &g->l_registry, value);
+  before = __atomic_load_n(&g->registry_sequence, __ATOMIC_RELAXED);
+  __atomic_store_n(&g->registry_sequence, before + 1, __ATOMIC_RELEASE);
+  setobj2t(L, &g->l_registry, value);
+  __atomic_store_n(&g->registry_sequence, before + 2, __ATOMIC_RELEASE);
+}
+
 static Table *objectmeta (const TValue *object) {
   Table **binding = ttistable(object) ? &hvalue(object)->metatable
                                     : &uvalue(object)->metatable;
@@ -405,17 +441,34 @@ int luaA_readtypefield (lua_State *L, int type, TString *key, TValue *result) {
   return 1;
 }
 
+/* The receiver version covers the entire method lookup, including a
+** detach/reattach of the same metatable. The table reader covers its fields
+** and falls back if weak cutoffs or layout changes need ownership. */
+static int readobjectfield (lua_State *L, const TValue *object, TString *key,
+                            TValue *result) {
+  uint64_t *binding = luaA_sequence(gcvalue(object));
+  uint64_t before = binding ? __atomic_load_n(binding, __ATOMIC_ACQUIRE) : 0;
+  Table *mt;
+  if (before & 1) return 0;
+  mt = objectmeta(object);
+  if (mt == NULL) {
+    setnilvalue(result);
+    return 1;
+  }
+  if (binding == NULL || !luaH_readshortstr(G(L), L, mt, key, result)) return 0;
+  return before == __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+}
+
 void luaA_metafield (lua_State *L, const TValue *object, TString *key,
                      LuaNativeRoot *result, int event) {
   LuaNativeRoot owner, metatable, rooted_key;
   LuaObjectScope first, second;
+  TValue value;
   int perobject = ttistable(object) || ttisfulluserdata(object);
-  if (!perobject) {
-    TValue value;
-    if (luaA_readtypefield(L, ttype(object), key, &value)) {
-      luaR_setroot(L, result, &value);
-      return;
-    }
+  if (perobject ? readobjectfield(L, object, key, &value)
+                : luaA_readtypefield(L, ttype(object), key, &value)) {
+    luaR_setroot(L, result, &value);
+    return;
   }
   luaR_pushroot(L, &owner);
   luaR_setroot(L, &owner, object);

@@ -724,6 +724,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     luaA_initlock(&g->strt[i].access);
   }
   setnilvalue(&g->l_registry);
+  g->registry_sequence = 0;
   g->panic = NULL;
   g->managed_hook = NULL;
   g->callbacks = NULL;

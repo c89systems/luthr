@@ -195,7 +195,8 @@ luthr_test_program(value_api_test value_api_test.c)
 set_target_properties(value_api_test PROPERTIES C_STANDARD 99)
 target_compile_options(value_api_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(value_api_test PRIVATE luthr_static Threads::Threads)
-target_link_options(value_api_test PRIVATE -Wl,--wrap=luaA_end)
+target_link_options(value_api_test PRIVATE -Wl,--wrap=luaA_end
+  -Wl,--wrap=luaA_getregistry)
 foreach(collector IN ITEMS incremental generational)
   foreach(case IN ITEMS values denied relocate parallel close close_error number_string)
     add_test(NAME value_api_${case}_${collector}
@@ -217,6 +218,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
 foreach(case IN ITEMS fast primitive batching stack_grace private_resize overlap retirement pressure failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
+    table_reattach userdata_reattach registry_incremental registry_generational
     long_string_hash long_string_partition
     index_hit index_miss index_metatable_change object_bindings_incremental object_bindings_generational
     record_iteration_incremental record_iteration_generational

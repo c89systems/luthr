@@ -242,10 +242,15 @@ static void *primitive_reader(void *argument) {
   return NULL;
 }
 
-static lua_State *primitive_subject(lua_State *state) {
+static lua_State *metatable_subject(lua_State *state, int type) {
   lua_State *child;
   lua_gc(state, LUA_GCSTOP);
-  lua_pushliteral(state, "subject");
+  if (type == LUA_TTABLE)
+    lua_newtable(state);
+  else if (type == LUA_TUSERDATA)
+    lua_newuserdatauv(state, 1, 1);
+  else
+    lua_pushliteral(state, "subject");
   lua_newtable(state);
   lua_pushinteger(state, 42);
   lua_setfield(state, -2, "__index");
@@ -259,7 +264,7 @@ static lua_State *primitive_subject(lua_State *state) {
 static void primitive(lua_State *state) {
   LuaObjectScope writer;
   pthread_t reader;
-  lua_State *child = primitive_subject(state);
+  lua_State *child = metatable_subject(state, LUA_TSTRING);
   luaX_lockstate(state);
   luaA_beginlock(state, &G(state)->metatable_access[LUA_TSTRING], &writer);
   require(pthread_create(&reader, NULL, primitive_reader, child) == 0);
@@ -281,10 +286,10 @@ static void *read_reattached(void *argument) {
   return NULL;
 }
 
-static void primitive_reattach(lua_State *state) {
+static void metatable_reattach(lua_State *state, int type) {
   struct metatable_fixture test;
   pthread_t reader;
-  test.child = primitive_subject(state);
+  test.child = metatable_subject(state, type);
   require(lua_getmetatable(state, 1) == 1);
   require(pthread_barrier_init(&test.barrier, NULL, 2) == 0);
   require(pthread_create(&reader, NULL, read_reattached, &test) == 0);
@@ -782,6 +787,60 @@ static void object_bindings(lua_State *state, int generational) {
   require(pthread_barrier_destroy(&reader.admitted) == 0);
   require(!lua_getmetatable(reader.child, 1));
   require(!lua_getmetatable(reader.child, 2));
+}
+
+static const char registry_text[] =
+    "Native readers must retain a replaced registry string through collection.";
+
+static void *read_registry(void *context) {
+  struct stack_reader *reader = context;
+  lua_State *state = reader->child;
+  rendezvous(&reader->admitted);
+  for (unsigned i = 0; i < 6000; i++) {
+    lua_pushvalue(state, LUA_REGISTRYINDEX);
+    switch (lua_type(state, -1)) {
+    case LUA_TTABLE:
+      require(lua_rawgeti(state, -1, 1) == LUA_TNUMBER);
+      require(lua_tointeger(state, -1) == 417);
+      lua_pop(state, 1);
+      break;
+    case LUA_TSTRING:
+      require(strcmp(lua_tostring(state, -1), registry_text) == 0);
+      break;
+    default:
+      require(lua_isinteger(state, -1) && lua_tointeger(state, -1) == 73);
+    }
+    lua_pop(state, 1);
+  }
+  return NULL;
+}
+
+static void registry_snapshots(lua_State *state, int generational) {
+  struct stack_reader reader;
+  pthread_t thread;
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_pushvalue(state, LUA_REGISTRYINDEX);
+  reader.child = lua_newthread(state);
+  lua_pushinteger(state, 73);
+  lua_replace(state, LUA_REGISTRYINDEX);
+  require(pthread_barrier_init(&reader.admitted, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, read_registry, &reader) == 0);
+  rendezvous(&reader.admitted);
+  for (unsigned i = 0; i < 1200; i++) {
+    lua_pushstring(state, registry_text);
+    lua_replace(state, LUA_REGISTRYINDEX);
+    lua_newtable(state);
+    lua_pushinteger(state, 417);
+    lua_rawseti(state, -2, 1);
+    lua_replace(state, LUA_REGISTRYINDEX);
+    lua_pushinteger(state, 73);
+    lua_replace(state, LUA_REGISTRYINDEX);
+    if (i % 79 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+  }
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&reader.admitted) == 0);
+  lua_copy(state, 1, LUA_REGISTRYINDEX);
 }
 
 static void *writer(void *argument) {
@@ -1674,7 +1733,13 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "primitive") == 0)
     primitive(state);
   else if (strcmp(argv[1], "primitive_reattach") == 0)
-    primitive_reattach(state);
+    metatable_reattach(state, LUA_TSTRING);
+  else if (strcmp(argv[1], "table_reattach") == 0)
+    metatable_reattach(state, LUA_TTABLE);
+  else if (strcmp(argv[1], "userdata_reattach") == 0)
+    metatable_reattach(state, LUA_TUSERDATA);
+  else if (strncmp(argv[1], "registry_", 9) == 0)
+    registry_snapshots(state, strcmp(argv[1], "registry_generational") == 0);
   else if (strcmp(argv[1], "primitive_index") == 0)
     primitive_index(state);
   else if (strcmp(argv[1], "string_publication") == 0)

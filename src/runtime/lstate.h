@@ -604,6 +604,7 @@ typedef struct global_State {
   unsigned shrink_strings;  /* atomic request from a retiring intern shard */
   unsigned seals_pending;  /* world.mutex, acknowledgements before full GC */
   TValue l_registry;
+  uint64_t registry_sequence;
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
   lu_byte gcparams[LUA_GCPN];
