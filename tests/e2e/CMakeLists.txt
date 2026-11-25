@@ -78,7 +78,7 @@ endforeach()
 set(callback_workloads lua_callback native_callbacks native_callbacks_local native_direct
   native_direct_local native_leaf native_stack native_identity
   native_scalar native_scalar_direct native_protected native_records native_streaming)
-set(scheduled_workloads integers independent_tables shared_table shared_hash
+set(scheduled_workloads integers independent_tables mixed_records shared_table shared_hash
   shared_growth shared_array_growth shared_sparse_growth shared_reads closures
   allocation_gc ${callback_workloads})
 foreach(runtime IN ITEMS upstream luthr embedded)
@@ -103,7 +103,7 @@ foreach(runtime IN ITEMS upstream luthr embedded)
   endif()
   set(workloads "${scheduled_workloads}")
   if(runtime STREQUAL "embedded")
-    set(workloads ${callback_workloads})
+    set(workloads mixed_records ${callback_workloads})
   endif()
   foreach(workload IN LISTS workloads)
     foreach(collector IN ITEMS incremental generational)

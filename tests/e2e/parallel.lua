@@ -3,6 +3,7 @@ local kind,n,tasks=...
 assert(type(kind)=='string' and n>=1 and tasks>=1)
 local total=n*(n+1)//2
 local shared={}
+local initial_timestamp=1700000000000000000
 local array_growth=kind=='shared_array_growth'
 local sparse_growth=kind=='shared_sparse_growth'
 local grows=array_growth or sparse_growth or kind=='shared_growth'
@@ -31,6 +32,18 @@ local workloads={
     for i=1,n do rows[i]={key=i,value=i*2} end
     local sum=0
     for i=1,n do sum=sum+rows[i].key+rows[i].value end
+    return sum
+  end,
+  mixed_records=function(id)
+    local row=shared[id]
+    local sum=0
+    for i=1,n do
+      local units=(i%16)*0.25
+      row.balance=row.balance+units
+      row.timestamp=initial_timestamp+i*1000
+      row.last={sequence=i,units=units}
+      sum=sum+(row.timestamp-initial_timestamp)//1000+row.last.sequence
+    end
     return sum
   end,
   array_records=function()
@@ -189,11 +202,17 @@ elseif native_add or native_identity or native_scalar then
 end
 local work=assert(workloads[kind],'unknown workload')
 if kind=='independent_tables' or kind=='array_records' then total=total*3 end
+if kind=='mixed_records' then total=total*2 end
 if kind=='shared_reads' then total=n end
 if kind=='allocation_gc' or kind=='allocation_only' then total=total+n end
 local function prepare()
   if kind=='shared_reads' then
     shared.value=1
+  elseif kind=='mixed_records' then
+    shared={}
+    for id=1,tasks do
+      shared[id]={balance=0.0,timestamp=0,last=false}
+    end
   elseif kind=='shared_table' then
     for i=1,n*tasks do shared[i]=0 end
   elseif kind=='shared_hash' then
@@ -207,6 +226,14 @@ local function verify()
   if kind=='shared_table' then
     for id=1,tasks do
       for i=1,n do assert(shared[(id-1)*n+i]==i) end
+    end
+  elseif kind=='mixed_records' then
+    local remainder=n%16
+    local balance=(n//16)*30+remainder*(remainder+1)/8
+    for id=1,tasks do
+      local row=shared[id]
+      assert(row.balance==balance and row.timestamp==initial_timestamp+n*1000)
+      assert(row.last.sequence==n and row.last.units==remainder*0.25)
     end
   elseif kind=='shared_hash' or grows then
     local offset=grows and growth_offset or 0

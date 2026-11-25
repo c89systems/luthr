@@ -223,6 +223,7 @@ endfunction()
 
 set(integers_iterations 500000)
 set(independent_tables_iterations 5000)
+set(mixed_records_iterations 25000)
 set(shared_table_iterations 10000)
 set(shared_hash_iterations 10000)
 set(shared_growth_iterations 2500)
@@ -234,12 +235,13 @@ set(allocation_gc_iterations 5000)
 set(callback_workloads lua_callback native_callbacks native_callbacks_local native_direct
   native_direct_local native_leaf native_stack native_identity
   native_scalar native_scalar_direct native_protected native_records native_streaming)
+set(embedded_workloads mixed_records ${callback_workloads})
 foreach(workload IN LISTS callback_workloads)
   set(${workload}_iterations 18000)
 endforeach()
 set(native_streaming_iterations 6000)
 set(native_records_iterations 6000)
-foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
+foreach(workload IN ITEMS integers independent_tables mixed_records shared_table shared_hash
     shared_growth shared_array_growth shared_sparse_growth shared_reads closures
     allocation_gc ${callback_workloads})
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")
@@ -253,7 +255,7 @@ foreach(workload IN ITEMS integers independent_tables shared_table shared_hash
       set(reference_wall "${median_wall_ns}")
       file(APPEND "${output_dir}/summary.csv"
         "upstream,${workload},${collector},1,0,${tasks},${iterations},${delay},${samples},${medians},${reference_wall},1.000,1.000\n")
-      if(workload IN_LIST callback_workloads)
+      if(workload IN_LIST embedded_workloads)
         scheduled_measure(embedded 1 0 "${delay}")
         benchmark_ratio("${median_wall_ns}" "${reference_wall}" ratio)
         file(APPEND "${output_dir}/summary.csv"
