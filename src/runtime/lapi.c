@@ -865,8 +865,21 @@ LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
 */
 LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
   TString *ts;
+  if (len <= LUAI_MAXSHORTLEN &&
+      !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+        ~LUA_GATE_OFFER_MASK) && luaX_trybounded(L)) {
+    ts = luaS_trycachedshort(L, s, len);
+    if (ts != NULL) {
+      setsvalue2s(L, L->top.p, ts);
+      api_incr_top(L);
+      s = getshrstr(ts);
+      luaX_leavebounded(L);
+      return s;
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
-  ts = luaS_newlstr(L, s, len);
+  ts = luaS_cachelstr(L, s, len);
   setsvalue2s(L, L->top.p, ts);
   api_incr_top(L);
   luaC_checkGC(L);

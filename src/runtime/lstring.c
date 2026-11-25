@@ -349,44 +349,90 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
 }
 
 
-/*
-** Create or reuse a zero-terminated string, first checking in the
-** cache (using the string address as a key). The cache can contain
-** only zero-terminated strings, so it is safe to use 'strcmp' to
-** check hits.
-*/
-TString *luaS_new (lua_State *L, const char *str) {
+/* An address selects the set but never establishes equality. The bit lets
+** a C-string lookup use strcmp without accepting a cached binary prefix. */
+enum { CACHE_BINARY = 1 };
+_Static_assert(_Alignof(TString) > CACHE_BINARY, "string cache tag alignment");
+
+static uintptr_t *stringcacherow (lua_State *L, const char *str) {
   LuaStringCache *cache = L->strcache;
-  uint64_t epoch;
-  TString **p;
-  int j;
-  TString *result;
   if (l_unlikely(cache == NULL)) {
     cache = cast(LuaStringCache *, luaM_tryalloc(L, sizeof(*cache)));
-    if (cache == NULL) return luaS_newlstr(L, str, strlen(str));
+    if (cache == NULL) return NULL;
     cache->epoch = 0;
     L->strcache = cache;
   }
-  /* Cache allocation can park. Use the epoch after resuming. */
-  epoch = G(L)->strcache_epoch;
-  if (l_unlikely(cache->epoch != epoch)) {
+  if (l_unlikely(cache->epoch != G(L)->strcache_epoch)) {
     memset(cache->entries, 0, sizeof(cache->entries));
-    cache->epoch = epoch;
+    cache->epoch = G(L)->strcache_epoch;
   }
-  p = cache->entries[point2uint(str) % STRCACHE_N];
+  return cache->entries[point2uint(str) % STRCACHE_N];
+}
+
+l_sinline void remembersource (uintptr_t *row, TString *str, int binary) {
+  int j;
+  /* An interning miss may have crossed a collection. The current epoch
+  ** remains invalid until the next row lookup clears the old entries. */
+  if (row != NULL) {
+    for (j = STRCACHE_M - 1; j > 0; j--)
+      row[j] = row[j - 1];
+    row[0] = cast(uintptr_t, str) | cast_uint(binary);
+  }
+}
+
+l_sinline TString *cachedbytes (const uintptr_t *row, const char *str,
+                                size_t len) {
+  int j;
   for (j = 0; j < STRCACHE_M; j++) {
-    if (p[j] != NULL && strcmp(str, getstr(p[j])) == 0) { /* hit? */
-      result = p[j];
-      luaC_tracepointer(L, result);
-      return result;  /* that is it */
-    }
+    TString *ts = cast(TString *, row[j] & ~cast(uintptr_t, CACHE_BINARY));
+    if (ts != NULL && tsslen(ts) == len && memcmp(getstr(ts), str, len) == 0)
+      return ts;
   }
-  /* normal route */
-  for (j = STRCACHE_M - 1; j > 0; j--)
-    p[j] = p[j - 1];  /* move out last element */
-  /* new element is first in the list */
+  return NULL;
+}
+
+/* A bounded stack claim joins the cutoff that invalidates weak entries
+** before sweep. The caller only uses this path outside concurrent marking. */
+TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len) {
+  const LuaStringCache *cache = L->strcache;
+  global_State *g = G(L);
+  lua_assert(len <= LUAI_MAXSHORTLEN);
+  if (len == 0) return &g->empty_string;
+  if (len == 1) return &g->byte_strings[cast_byte(*str)];
+  if (cache == NULL || cache->epoch != g->strcache_epoch) return NULL;
+  return cachedbytes(cache->entries[point2uint(str) % STRCACHE_N], str, len);
+}
+
+TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
+  uintptr_t *row;
+  TString *result;
+  if (len <= 1 || len > LUAI_MAXSHORTLEN) return luaS_newlstr(L, str, len);
+  row = stringcacherow(L, str);
+  if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
+    luaC_tracepointer(L, result);
+    return result;
+  }
+  result = luaS_newlstr(L, str, len);
+  remembersource(row, result, memchr(getshrstr(result), '\0', len) != NULL);
+  return result;
+}
+
+TString *luaS_new (lua_State *L, const char *str) {
+  uintptr_t *row = stringcacherow(L, str);
+  TString *result;
+  int j;
+  if (row != NULL)
+    for (j = 0; j < STRCACHE_M; j++) {
+      uintptr_t entry = row[j];
+      if (entry != 0 && !(entry & CACHE_BINARY) &&
+          strcmp(str, getstr(cast(TString *, entry))) == 0) {
+        result = cast(TString *, entry);
+        luaC_tracepointer(L, result);
+        return result;
+      }
+    }
   result = luaS_newlstr(L, str, strlen(str));
-  p[0] = result;
+  remembersource(row, result, 0);
   return result;
 }
 

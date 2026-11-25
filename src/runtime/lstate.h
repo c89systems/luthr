@@ -149,7 +149,7 @@ struct lua_longjmp;  /* defined in ldo.c */
 
 typedef struct LuaStringCache {
   uint64_t epoch;
-  TString *entries[STRCACHE_N][STRCACHE_M];
+  uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
 } LuaStringCache;
 
 

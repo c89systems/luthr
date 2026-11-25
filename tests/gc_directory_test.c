@@ -130,6 +130,38 @@ static void *startup_alloc(void *argument, void *old, size_t old_size,
   return memory;
 }
 
+static void check_cached_spans(lua_State *L, lua_State *owner) {
+  char source[] = {'k', 'e', 'y', '\0', 'x', '?'};
+  char copy[sizeof(source)];
+  const size_t width = sizeof(source) - 1;
+  size_t len;
+  const char *first = lua_pushlstring(owner, source, width);
+  require(first[width] == '\0' && memcmp(first, source, width) == 0);
+  reject_string_locks = 1;
+  require(lua_pushlstring(owner, source, width) == first);
+  lua_pop(owner, 1);
+  reject_string_locks = 0;
+
+  memcpy(copy, source, sizeof(copy));
+  require(lua_pushlstring(owner, copy, width) == first);
+  lua_pop(owner, 1);
+  /* A cache entry containing an embedded zero cannot answer a C-string
+   * lookup, even when both use the same address as their set hint. */
+  require(strcmp(lua_pushstring(owner, source), "key") == 0);
+  lua_tolstring(owner, -1, &len);
+  require(len == 3);
+  lua_pop(owner, 1);
+
+  source[4] = 'y';
+  require(memcmp(lua_pushlstring(owner, source, width), source, width) == 0);
+  require(!lua_rawequal(owner, -1, -2));
+  lua_pop(owner, 2);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(memcmp(lua_pushlstring(owner, copy, width), copy, width) == 0);
+  lua_pop(owner, 1);
+}
+
 static void invalidate_string_cache(int generational) {
   struct startup_allocator test = {.fail_at = SIZE_MAX};
   lua_State *L = lua_newstate(startup_alloc, &test, 42);
@@ -177,6 +209,8 @@ static void invalidate_string_cache(int generational) {
   luaW_start(L);
   lua_unlock(L);
   require(strcmp(lua_pushstring(owner, source), source) == 0);
+  lua_pop(owner, 1);
+  check_cached_spans(L, owner);
   lua_pop(L, 1);
   lua_gc(L, LUA_GCCOLLECT);
   lua_close(L);
