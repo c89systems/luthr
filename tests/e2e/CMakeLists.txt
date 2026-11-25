@@ -230,6 +230,12 @@ add_test(NAME gc_allocation_bound_extended COMMAND "${CMAKE_COMMAND}"
   -P "${CMAKE_CURRENT_SOURCE_DIR}/GcAllocationBound.cmake")
 set_tests_properties(gc_allocation_bound_extended PROPERTIES
   LABELS "runtime;parallel;benchmark" TIMEOUT 120)
+add_test(NAME gc_serial_mixed_records_pacing COMMAND "${CMAKE_COMMAND}"
+  "-Dprogram=$<TARGET_FILE:scheduled_gc_profile>"
+  "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"
+  -P "${CMAKE_CURRENT_SOURCE_DIR}/GcSerialPacing.cmake")
+set_tests_properties(gc_serial_mixed_records_pacing PROPERTIES
+  LABELS "runtime;parallel;benchmark" TIMEOUT 120)
 add_custom_target(benchmark_scheduler
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
     "${CMAKE_COMMAND}" ${scheduled_arguments}

@@ -1,0 +1,18 @@
+foreach(collector IN ITEMS incremental generational)
+  execute_process(COMMAND "${program}" "${script}" mixed_records
+    "${collector}" 1 1 8 60000 1 1 0 hash-seed=32702
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Serial mixed records failed (${collector}): ${result}: ${error}")
+  endif()
+  string(STRIP "${output}" output)
+  string(JSON cycles GET "${output}" gc_trace_cycles)
+  string(JSON peak GET "${output}" lua_peak_bytes)
+  string(JSON retained GET "${output}" lua_retained_bytes)
+  if(cycles LESS 1 OR cycles GREATER 512)
+    message(FATAL_ERROR "Serial GC cycle count (${collector}): ${cycles}, expected 1..512")
+  endif()
+  if(peak GREATER 2097152 OR retained GREATER 1048576)
+    message(FATAL_ERROR "Serial GC exceeded its memory bound (${collector}): peak=${peak}, retained=${retained}")
+  endif()
+endforeach()

@@ -33,15 +33,19 @@ static l_mem runway (global_State *g, lu_mem work) {
 void luaP_idle (global_State *g) {
   LuaGCPacer *p = &g->pacer;
   l_mem bytes = getgcbytes(g);
-  /* Fixed handshake costs need an amortization window on a parallel heap.
-  ** Keep the single-mutator footprint and zero parameters unchanged. Each
-  ** additional simultaneously admitted mutator contributes a bounded 512-KiB
-  ** window; this is independent of task count and total allocation volume. */
-  if (p->parallelism > 1 && g->gcparams[luaC_kind(g) == KGC_GENMINOR
-                                      ? LUA_GCPMINORMUL : LUA_GCPPAUSE] != 0) {
+  l_mem window = 0;
+  if (p->parallelism > 1) {
     lu_mem workers = p->parallelism - 1;
-    l_mem window = workers > cast(lu_mem, MAX_LMEM) / (8 * LUA_GC_ASSIST_BYTES)
+    window = workers > cast(lu_mem, MAX_LMEM) / (8 * LUA_GC_ASSIST_BYTES)
       ? MAX_LMEM : cast(l_mem, workers * (8 * LUA_GC_ASSIST_BYTES));
+  }
+  /* A serial scheduler still pays the fixed cost of each cycle. Reserve
+  ** two assist batches without extending the window for queued tasks. */
+  else if (p->parallelism == 1 &&
+           __atomic_load_n(&g->scheduler, __ATOMIC_ACQUIRE) != NULL)
+    window = 2 * LUA_GC_ASSIST_BYTES;
+  if (window != 0 && g->gcparams[luaC_kind(g) == KGC_GENMINOR
+                                ? LUA_GCPMINORMUL : LUA_GCPPAUSE] != 0) {
     l_mem minimum = add(g->GCcyclelive, window);
     if (p->goal < minimum)
       __atomic_store_n(&p->goal, minimum, __ATOMIC_RELAXED);
