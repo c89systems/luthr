@@ -1537,41 +1537,6 @@ static void __attribute__((noinline)) projecttable (
   L->poll_remaining -= site->projection;
 }
 
-/* A short constructor followed by a store into an already shared receiver
-** can allocate in the shared heap immediately. The table's ownership stays
-** private until the ordinary store publishes it. The hint borrows no state
-** across the allocation and changes neither the store nor its metamethods. */
-static int constructorstoreshared (const Proto *proto, const Instruction *at,
-                                    StkId base, int reg) {
-  const Instruction *end = proto->code + proto->sizecode;
-  unsigned remaining = 8;
-  for (at += 2; at < end && remaining-- != 0; ++at) {
-    Instruction ins = *at;
-    int dest = GETARG_A(ins);
-    switch (GET_OPCODE(ins)) {
-      case OP_SETFIELD: case OP_SETI: case OP_SETTABLE:
-        if (dest != reg) {
-          const TValue *receiver;
-          if (dest >= reg || TESTARG_k(ins) || GETARG_C(ins) != reg) return 0;
-          receiver = s2v(base + dest);
-          return ttistable(receiver) &&
-            (__atomic_load_n(&hvalue(receiver)->sharing, __ATOMIC_ACQUIRE) &
-             LUA_OBJECT_SHARED);
-        }
-        break;
-      case OP_SETLIST:
-        if (dest != reg || TESTARG_k(ins)) return 0;
-        break;
-      case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
-      case OP_LOADFALSE: case OP_LOADTRUE: case OP_LOADNIL:
-        if (dest <= reg) return 0;
-        break;
-      default: return 0;
-    }
-  }
-  return 0;
-}
-
 /* Allocation can park and relocate registers. Keep this operation out of
 ** both dispatch loops, with the destination recoverable from the saved top. */
 static void __attribute__((noinline)) createtable (
@@ -1583,19 +1548,28 @@ static void __attribute__((noinline)) createtable (
   int reg = GETARG_A(i);
   Table *keys = NULL;
   Table *table;
-  int tasklocal;
+  int tasklocal = 1;
   if (hash != 0) hash = 1u << (hash - 1);  /* log2(hash size) + 1 */
   if (TESTARG_k(i)) {
     lua_assert(GETARG_Ax(extra) != 0);
     array += cast_uint(GETARG_Ax(extra)) * (MAXARG_vC + 1);
   }
-  if (hash != 0 && array == 0 && proto->sizerecords != 0) {
+  if (proto->sizerecords != 0) {
     const LuaRecordSite *site = constructorsite(proto, at);
-    if (site != NULL) keys = site->keys;
+    if (site != NULL) {
+      keys = site->keys;
+      /* Placement only. Ownership and metamethods still follow the store. */
+      if (site->projection == 0 && site->operand != NO_REG &&
+          L->task_owner != NULL && !L->task_nursery_closed &&
+          ci->u.l.captures == 0) {
+        const TValue *receiver = s2v(ci->func.p + 1 + site->operand);
+        if (ttistable(receiver) &&
+            (__atomic_load_n(&hvalue(receiver)->sharing, __ATOMIC_ACQUIRE) &
+             LUA_OBJECT_SHARED))
+          tasklocal = 0;
+      }
+    }
   }
-  tasklocal = L->task_owner == NULL || L->task_nursery_closed ||
-    ci->u.l.captures != 0 || hash > 4 || array > 4 ||
-    !constructorstoreshared(proto, at, ci->func.p + 1, reg);
   L->top.p = ci->func.p + 2 + reg;
   table = keys != NULL ? luaH_newrecord(L, keys, tasklocal)
                       : luaH_newtable(L, array, hash, tasklocal);

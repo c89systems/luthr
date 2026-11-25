@@ -815,6 +815,37 @@ static LuaRecordSite projectconstructor (const Proto *p, int pc) {
   return plan;
 }
 
+/* A short constructor that feeds a store into an earlier register can
+** bypass the task nursery if that receiver is shared at execution time. */
+static lu_byte constructorreceiver (const Proto *p, int pc) {
+  Instruction allocation = p->code[pc];
+  int reg = GETARG_A(allocation);
+  int distance;
+  if (GETARG_vB(allocation) > 3 || GETARG_vC(allocation) > 4 ||
+      TESTARG_k(allocation) || p->sizecode - pc <= 2)
+    return NO_REG;
+  for (distance = 2; distance < p->sizecode - pc && distance < 10; distance++) {
+    Instruction ins = p->code[pc + distance];
+    int dest = GETARG_A(ins);
+    switch (GET_OPCODE(ins)) {
+      case OP_SETFIELD: case OP_SETI: case OP_SETTABLE:
+        if (dest != reg)
+          return dest < reg && !TESTARG_k(ins) && GETARG_C(ins) == reg
+            ? cast_byte(dest) : NO_REG;
+        break;
+      case OP_SETLIST:
+        if (dest != reg || TESTARG_k(ins)) return NO_REG;
+        break;
+      case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
+      case OP_LOADFALSE: case OP_LOADTRUE: case OP_LOADNIL:
+        if (dest <= reg) return NO_REG;
+        break;
+      default: return NO_REG;
+    }
+  }
+  return NO_REG;
+}
+
 static void lowerrecords (lua_State *L, Proto *p) {
   lu_byte fields[LUA_RECORD_MAX_FIELDS], stores[LUA_RECORD_MAX_FIELDS];
   int pc, sites = 0;
@@ -823,7 +854,8 @@ static void lowerrecords (lua_State *L, Proto *p) {
   for (pc = 0; pc < p->sizecode; pc++) {
     if (GET_OPCODE(p->code[pc]) == OP_NEWTABLE &&
         (recordfields(p, pc, fields, stores) != 0 ||
-         projectconstructor(p, pc).projection != 0))
+         projectconstructor(p, pc).projection != 0 ||
+         constructorreceiver(p, pc) != NO_REG))
       sites++;
   }
   if (sites == 0) return;
@@ -838,7 +870,10 @@ static void lowerrecords (lua_State *L, Proto *p) {
     if (GET_OPCODE(p->code[pc]) != OP_NEWTABLE) continue;
     count = recordfields(p, pc, fields, stores);
     plan = projectconstructor(p, pc);
-    if (count == 0 && plan.projection == 0) continue;
+    if (plan.projection == 0) {
+      plan.operand = constructorreceiver(p, pc);
+      if (count == 0 && plan.operand == NO_REG) continue;
+    }
     plan.pc = pc;
     p->records[sites++] = plan;
     if (plan.projection != 0 && p->dispatch[pc].opcode == OP_NEWTABLE)

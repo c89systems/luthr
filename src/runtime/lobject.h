@@ -626,7 +626,7 @@ typedef struct LuaRecordSite {
   struct Table *keys;  /* immutable array of interned field names */
   int pc;             /* constructor instruction in the portable code */
   lu_byte projection;  /* instructions through a consuming field read */
-  lu_byte operand;  /* source register or constant index */
+  lu_byte operand;  /* projected source, or publication receiver (NO_REG if none) */
   lu_byte source;  /* register, constant or implicit nil */
   lu_byte moves;  /* array constructor register writes to preserve */
 } LuaRecordSite;
