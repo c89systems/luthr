@@ -1763,7 +1763,6 @@ typedef struct LuaTableSlot {
   union {
     uint64_t revision;  /* hash part read */
     unsigned *occupied;  /* array part write */
-    unsigned field;  /* compact record write */
   };
 } LuaTableSlot;
 
@@ -1827,21 +1826,7 @@ l_sinline int __attribute__((always_inline)) findhashslot (
   LuaHashDirectory *directory = luaH_hashdir(base);
   Table *keys = luaH_recordkeys(base);
   uint64_t revision = 0;
-  if (keys != NULL) {
-    /* Optimistic record reads sample a complete value. Only writers need
-    ** a borrowed payload address. External names use the owned search. */
-    if (writing && ttisshrstring(key)) {
-      unsigned field = luaH_recordindex(keys, tsvalue(key));
-      if (field < keys->asize) {
-        uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-        if (!(image & LUA_RECORD_TAGS)) return 0;
-        slot->payload = luaH_recordvalues(table, image) + field;
-        slot->tag = NULL;
-        slot->field = field;
-      }
-    }
-    return writing || !ttisstring(key);
-  }
+  if (keys != NULL) return writing || !ttisstring(key);
   if (directory != NULL) {
     unsigned index = scalar == LUA_VNUMINT ? integerpart(ivalue(key)) :
       scalar == ctb(LUA_VSHRSTR) ? distributedpart(tsvalue(key)->hash) :
@@ -2426,13 +2411,17 @@ static int __attribute__((noinline)) sharedpartset (
   return result;
 }
 
+l_sinline int sharedwriteallowed (lua_State *L, Table *table,
+                                   const TValue *value) {
+  return !luaW_stopped(&G(L)->world) &&
+    !(gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) &&
+    published(value) && luaH_strongaccess(L, table);
+}
+
 l_sinline uint64_t sharedlayout (lua_State *L, Table *table,
                                  const TValue *key, const TValue *value) {
-  if (luaW_stopped(&G(L)->world) ||
-      (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) ||
-      !published(key) || !published(value) || !luaH_strongaccess(L, table))
-    return 1;
-  return __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  return sharedwriteallowed(L, table, value) && published(key)
+    ? __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) : 1;
 }
 
 typedef struct LuaTableWriteRetry {
@@ -2453,25 +2442,34 @@ l_sinline LuaTableWriter *claimslot (lua_State *L, Table *table, Value *payload,
 }
 
 static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table,
-    const LuaTableSlot *slot, const TValue *key, const TValue *value, int raw,
-    uint64_t layout, LuaTableWriteRetry *retry) {
-  LuaTableWriter *writer;
+    TString *name, unsigned field, const TValue *value, int raw,
+    LuaTableWriteRetry *retry) {
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-  lu_byte oldtag, newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
+  LuaTableWriter *writer;
+  LuaRecordStorage *backing;
+  uintptr_t *tags;
+  Value *payload;
+  lu_byte oldtag, newtag;
   int assigned = 0;
   if (!(image & LUA_RECORD_TAGS)) return 0;
-  if (luaH_recordtag(luaH_recordtags(image), slot->field) == LUA_RECORD_PACKED)
-    return 0;
-  writer = claimslot(L, table, slot->payload, layout, retry);
+  backing = luaH_recordbacking(image);
+  payload = (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) +
+            field;
+  if ((layout & 1) || !sharedwriteallowed(L, table, value)) return 0;
+  writer = claimslot(L, table, payload, layout, retry);
   if (writer == NULL) return 0;
-  image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-  oldtag = luaH_recordtag(luaH_recordtags(image), slot->field);
-  if (!tagisempty(oldtag) || raw || table->metatable == NULL) {
+  /* A successful claim pins the sampled address. Other fields can still
+  ** change their tag bytes through the same word. */
+  tags = backing != NULL ? &backing->tags : &table->arraydata;
+  oldtag = luaH_recordtag(__atomic_load_n(tags, __ATOMIC_ACQUIRE), field);
+  newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
+  if (oldtag != LUA_RECORD_PACKED &&
+      (!tagisempty(oldtag) || raw || table->metatable == NULL)) {
     if (tagisempty(oldtag) && ttisnil(value)) assigned = 1;
-    else if (oldtag == newtag || luaH_beginsplit(table, writer, slot->payload,
-                                               layout)) {
-      luaH_recordstore(L, table, slot->field, oldtag, value);
-      invalidatemethod(L, table, tsvalue(key));
+    else if (oldtag == newtag || luaH_beginsplit(table, writer, payload, layout)) {
+      luaH_recordstore(L, table, payload, tags, field, oldtag, value);
+      invalidatemethod(L, table, name);
       assigned = 1;
     }
   }
@@ -2518,7 +2516,7 @@ l_sinline int setflatint (lua_State *L, Table *table, const LuaTableSlot *slot,
 }
 
 /* Keep the shared snapshot's frame out of ordinary private assignments. */
-static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
+static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *table,
                        const TValue *key, TValue *value, int raw,
                        LuaTableWriteRetry *retry) {
   LuaTableSlot slot;
@@ -2526,32 +2524,6 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   Node *node;
   lu_byte oldtag;
   uint64_t layout;
-  /* The field identity is fixed until the inline word freezes. A hit
-  ** changes neither membership nor GC edges. Its CAS and layout retirement
-  ** are ordered by that word, without the general table admission. */
-  if (ttisshrstring(key)) {
-    uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-    if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS) {
-      Table *keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
-      if (keys != NULL) {
-        TString *name = tsvalue(key);
-        unsigned index = luaH_recordindex(keys, name);
-        if (index < keys->asize && luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
-          uint64_t next = luaH_packrecord(value);
-          Value *payload = luaH_inlinerecordvalues(table) + index;
-          uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
-          if (next == LUA_RECORD_FROZEN || tagisempty(cast_byte(next)) ||
-              old == LUA_RECORD_FROZEN || tagisempty(cast_byte(old)) ||
-              (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) ||
-              !__atomic_compare_exchange_n(&payload->bits, &old, next, 0,
-                                           __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-            return 0;
-          invalidatemethod(L, table, name);
-          return 1;
-        }
-      }
-    }
-  }
   layout = sharedlayout(L, table, key, value);
   if (layout & 1) return 0;
   if (ttisinteger(key)) {
@@ -2576,8 +2548,6 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
       return sharedintset(L, table, &slot, value, raw, layout, retry);
   }
   if (slot.payload == NULL) return 0;
-  if (slot.tag == NULL)
-    return sharedrecordset(L, table, &slot, key, value, raw, layout, retry);
   node = slot.node;
   writer = claimslot(L, table, slot.payload, layout, retry);
   if (writer == NULL) return 0;
@@ -2609,6 +2579,39 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
     invalidatemethod(L, table, keystrval(node));
   luaH_releasewriter(L, table, writer);
   return 1;
+}
+
+static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
+                       const TValue *key, TValue *value, int raw,
+                       LuaTableWriteRetry *retry) {
+  if (ttisshrstring(key)) {
+    Table *keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
+    if (keys != NULL) {
+      TString *name = tsvalue(key);
+      unsigned field = luaH_recordindex(keys, name);
+      uintptr_t image;
+      if (field >= keys->asize) return 0;
+      image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+      /* A packed field's CAS orders it against the freeze of its inline
+      ** word. Updating a present scalar changes neither membership nor edges. */
+      if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS &&
+          luaH_recordtag(image, field) == LUA_RECORD_PACKED) {
+        Value *payload = luaH_inlinerecordvalues(table) + field;
+        uint64_t next = luaH_packrecord(value);
+        uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+        if (next == LUA_RECORD_FROZEN || tagisempty(cast_byte(next)) ||
+            old == LUA_RECORD_FROZEN || tagisempty(cast_byte(old)) ||
+            (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) ||
+            !__atomic_compare_exchange_n(&payload->bits, &old, next, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+          return 0;
+        invalidatemethod(L, table, name);
+        return 1;
+      }
+      return sharedrecordset(L, table, name, field, value, raw, retry);
+    }
+  }
+  return sharedarrayhashset(L, table, key, value, raw, retry);
 }
 
 static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
@@ -2644,43 +2647,67 @@ static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
   return 1;
 }
 
-/* Under the private table's mutation boundary, shade the displaced edge
+/* Under the table's mutation boundary, shade the displaced edge
 ** here. The common assignment barrier shades the incoming value before
 ** reopening the layout to the concurrent marker. */
-l_sinline int privaterecordslot (lua_State *L, Table *table, unsigned index,
-                                 TValue *value, int raw, int tracing) {
-  uintptr_t image = table->arraydata;
-  Value *payload = luaH_recordvalues(table, image) + index;
-  lu_byte tag = luaH_recordtag(luaH_recordtags(image), index);
-  if (tag == LUA_RECORD_PACKED)
-    return assignpackedrecord(L, table, index, value, raw);
+l_sinline int storeownedrecord (lua_State *L, Table *table, Value *payload,
+                                 uintptr_t *tags, unsigned index, TValue *value,
+                                 int raw, int tracing) {
+  lu_byte tag = luaH_recordtag(*tags, index);
   if (tagisempty(tag) && !raw && table->metatable != NULL) return 0;
   if (tracing && (tag & BIT_ISCOLLECTABLE))
     luaC_traceobject(L, payload->gc);
   if (ttisnil(value)) {
-    if (tag != LUA_VABSTKEY) luaH_setrecordtag(table, index, LUA_VEMPTY);
+    if (tag != LUA_VABSTKEY) luaH_setrecordtag(tags, index, LUA_VEMPTY);
   }
   else {
     __atomic_store(payload, &val_(value), __ATOMIC_RELEASE);
-    luaH_setrecordtag(table, index, rawtt(value));
+    luaH_setrecordtag(tags, index, rawtt(value));
   }
   return 1;
+}
+
+l_sinline unsigned recordwriteindex (Table *keys, const TValue *key) {
+  if (ttisshrstring(key)) return luaH_recordindex(keys, tsvalue(key));
+  if (ttislngstring(key)) return recordlongindex(keys, tsvalue(key));
+  return keys->asize;
+}
+
+l_sinline int ignorerecordmiss (Table *table, const TValue *key,
+                                 const TValue *value, int raw) {
+  return ttisnil(value) && (raw || table->metatable == NULL) &&
+         !ttisnil(key) && !(ttisfloat(key) && luai_numisnan(fltvalue(key)));
+}
+
+l_sinline int assignrecord (lua_State *L, Table *table, Table *keys,
+                             const TValue *key, TValue *value, int raw) {
+  unsigned index = recordwriteindex(keys, key);
+  uintptr_t image;
+  LuaRecordStorage *backing;
+  if (index == keys->asize) return ignorerecordmiss(table, key, value, raw);
+  image = table->arraydata;
+  backing = luaH_recordbacking(image);
+  if (backing != NULL)
+    return storeownedrecord(L, table, backing->values + index, &backing->tags,
+                            index, value, raw, luaC_tracing(L));
+  if (luaH_recordtag(image, index) == LUA_RECORD_PACKED)
+    return assignpackedrecord(L, table, index, value, raw);
+  return storeownedrecord(L, table, luaH_inlinerecordvalues(table) + index,
+                          &table->arraydata, index, value, raw, luaC_tracing(L));
 }
 
 l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
                                TValue *value, int raw, int tracing) {
   Table *keys = luaH_recordkeys(table->node);
-  unsigned index = keyinarray(table, key);
+  unsigned index;
   int result;
   if (keys != NULL) {
-    if (ttisshrstring(key)) index = luaH_recordindex(keys, tsvalue(key));
-    else if (ttislngstring(key)) index = recordlongindex(keys, tsvalue(key));
-    else index = keys->asize;
-    if (index == keys->asize)
-      return ttisnil(value) && (raw || table->metatable == NULL) &&
-             !ttisnil(key) && !(ttisfloat(key) && luai_numisnan(fltvalue(key)));
-    return privaterecordslot(L, table, index, value, raw, tracing);
+    index = recordwriteindex(keys, key);
+    if (index == keys->asize) return ignorerecordmiss(table, key, value, raw);
+    return storeownedrecord(L, table, luaH_inlinerecordvalues(table) + index,
+                            &table->arraydata, index, value, raw, tracing);
   }
+  index = keyinarray(table, key);
   if (index != 0) {
     lu_byte *tag = getArrTag(table, index - 1);
     if (tagisempty(*tag) && !raw && table->metatable != NULL) return 0;
@@ -2742,8 +2769,10 @@ l_sinline __attribute__((always_inline)) int tryprivatewrite (
     if (!luaH_strongaccess(L, t)) return 0;
     __atomic_store_n(&t->sequence, sequence + 1, __ATOMIC_RELEASE);
   }
-  done = key == NULL ? privaterecordslot(L, t, index, value, raw, tracing)
-                     : privatestoreslot(L, t, key, value, raw, tracing);
+  done = key == NULL
+    ? storeownedrecord(L, t, luaH_inlinerecordvalues(t) + index,
+                       &t->arraydata, index, value, raw, tracing)
+    : privatestoreslot(L, t, key, value, raw, tracing);
   if (done) {
     settableflags(t, gettableflags(t) &
                      cast_byte(~(maskflags | LUA_TABLE_STRING_RANGES)));
@@ -2816,6 +2845,7 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
                        int raw) {
   int hres;
   LuaHashPart *part;
+  Table *keys;
   if (gettableflags(t) & LUA_TABLE_STRING_INDEX)
     luaA_invalidatestringindex(L, t);
   if (gettableflags(t) & LUA_TABLE_STRING_RANGES)
@@ -2825,8 +2855,9 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
     luaA_sharevalue(L, key);
     luaA_sharevalue(L, value);
   }
-  if (luaH_recordkeys(t->node) != NULL) {
-    if (privatestoreslot(L, t, key, value, raw, luaC_tracing(L))) {
+  keys = luaH_recordkeys(t->node);
+  if (keys != NULL) {
+    if (assignrecord(L, t, keys, key, value, raw)) {
       invalidateTMcache(t);
       luaC_barrierback(L, obj2gco(t), value);
       return 1;
@@ -3102,7 +3133,7 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
           }
         }
         if (!availableread(L, table, *sequence)) return 0;
-        if (!luaH_readrecord(g, table, index, &value, *sequence)) return 0;
+        if (!luaH_readrecord(g, table, image, index, &value, *sequence)) return 0;
       }
       else {
         if (!availableread(L, table, *sequence)) return 0;

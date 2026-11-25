@@ -150,17 +150,18 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
 /* Packed slots are complete atomic values. For a split slot, sample the tag
 ** after entering the writer row's version. The caller validates the layout,
 ** including the shape it used to select this field. */
-l_sinline int luaH_readrecord (global_State *g, Table *table, unsigned index,
-                               TValue *value, uint64_t layout) {
-  uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+l_sinline int luaH_readrecord (global_State *g, Table *table, uintptr_t image,
+                               unsigned index, TValue *value, uint64_t layout) {
+  LuaRecordStorage *backing;
   const Value *payload;
   LuaTableWriter *writer = NULL;
   uint64_t before = 0;
   lu_byte tag;
   if (!(image & LUA_RECORD_TAGS)) return 0;
-  payload = luaH_recordvalues(table, image) + index;
-  tag = luaH_recordtag(luaH_recordtags(image), index);
-  if (tag == LUA_RECORD_PACKED) {
+  backing = luaH_recordbacking(image);
+  payload = (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) +
+            index;
+  if (backing == NULL && luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
     uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
     if (bits == LUA_RECORD_FROZEN) return 0;
     luaH_unpackrecord(bits, value);
@@ -169,12 +170,16 @@ l_sinline int luaH_readrecord (global_State *g, Table *table, unsigned index,
   if (layout & LUA_TABLE_SPLIT_VALUES) {
     writer = luaH_writer(g, payload);
     if (!luaH_readrow(writer, payload, &before)) return 0;
-    uintptr_t current = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-    if (!(current & LUA_RECORD_TAGS) ||
-        luaH_recordbacking(current) != luaH_recordbacking(image)) return 0;
-    tag = luaH_recordtag(luaH_recordtags(current), index);
-    if (tag == LUA_RECORD_PACKED) return 0;  /* layout changed during entry */
+    if (backing == NULL) {
+      image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+      if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) != LUA_RECORD_TAGS ||
+          luaH_recordtag(image, index) == LUA_RECORD_PACKED) return 0;
+    }
   }
+  /* The storage epoch retains the backing through layout validation. */
+  tag = luaH_recordtag(backing != NULL
+                       ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE)
+                       : image, index);
   settt_(value, tag);
   if (!isempty(value)) __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
   return luaH_samerow(writer, before);
@@ -221,6 +226,6 @@ LUAI_FUNC void luaH_waitwriters (lua_State *, Table *, LuaTableWriter *);
 LUAI_FUNC int luaH_waitlayout (lua_State *, Table *);
 LUAI_FUNC void luaH_elementstore (lua_State *, Table *, Value *, lu_byte *,
                                  const TValue *);
-LUAI_FUNC void luaH_recordstore (lua_State *, Table *, unsigned, lu_byte,
-                                const TValue *);
+LUAI_FUNC void luaH_recordstore (lua_State *, Table *, Value *, uintptr_t *,
+                                unsigned, lu_byte, const TValue *);
 #endif

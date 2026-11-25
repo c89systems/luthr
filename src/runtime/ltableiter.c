@@ -18,20 +18,23 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
   uint64_t version = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   Table *keys;
   unsigned index = 0;
+  uintptr_t image;
   TValue value;
   if ((version & 1) || !luaH_strongaccess(L, table)) return -1;
   keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
   if (keys == NULL) return -1;
+  image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
   if (!ttisnil(key)) {
     if (!ttisshrstring(key)) return -1;
     index = luaH_recordindex(keys, tsvalue(key));
     if (index == keys->asize ||
-        !luaH_readrecord(G(L), table, index, &value, version) || isabstkey(&value))
+        !luaH_readrecord(G(L), table, image, index, &value, version) ||
+        isabstkey(&value))
       return -1;
     index++;
   }
   for (; index < keys->asize; index++) {
-    if (!luaH_readrecord(G(L), table, index, &value, version)) return -1;
+    if (!luaH_readrecord(G(L), table, image, index, &value, version)) return -1;
     if (isempty(&value)) continue;
     if (!luaH_samelayout(table, version)) return -1;
     arr2obj(keys, index, key);

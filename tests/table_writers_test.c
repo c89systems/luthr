@@ -56,13 +56,14 @@ void __wrap_luaH_elementstore(lua_State *L, Table *table, Value *payload,
   __real_luaH_elementstore(L, table, payload, tag, value);
 }
 
-void __real_luaH_recordstore(lua_State *, Table *, unsigned, lu_byte,
-                             const TValue *);
-void __wrap_luaH_recordstore(lua_State *L, Table *table, unsigned index,
-                             lu_byte oldtag, const TValue *value) {
+void __real_luaH_recordstore(lua_State *, Table *, Value *, uintptr_t *,
+                             unsigned, lu_byte, const TValue *);
+void __wrap_luaH_recordstore(lua_State *L, Table *table, Value *payload,
+                             uintptr_t *tags, unsigned index, lu_byte oldtag,
+                             const TValue *value) {
   if (L == probe.first && table == probe.table && !probe.entered)
     hold();
-  __real_luaH_recordstore(L, table, index, oldtag, value);
+  __real_luaH_recordstore(L, table, payload, tags, index, oldtag, value);
 }
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
@@ -275,10 +276,12 @@ int main(int argc, char **argv) {
   pthread_t a, b, c;
   struct timespec deadline;
   unsigned i;
+  int backed;
   require(argc == 3 && L != NULL);
   probe.record = strstr(argv[2], "record") != NULL;
   probe.hash = probe.record || strstr(argv[2], "hash") != NULL;
   probe.graph = strstr(argv[2], "graph") != NULL;
+  backed = strstr(argv[2], "backed") != NULL;
   probe.collision = strcmp(argv[2], "collision") == 0;
   probe.length = strcmp(argv[2], "length") == 0;
   probe.second_key = 2;
@@ -293,9 +296,10 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (probe.record) {
-    require(luaL_loadstring(
-                L, "local n=...; return {['field-1']=n, ['field-2']=n}") ==
-            LUA_OK);
+    require(
+        luaL_loadstring(
+            L, "local n=...; return {['field-1']=n, ['field-2']=n, spare=0}") ==
+        LUA_OK);
     lua_pushinteger(L, LUA_MININTEGER);
     require(lua_pcall(L, 1, 1, 0) == LUA_OK);
     require(luaH_recordkeys(((Table *)lua_topointer(L, 1))->node) != NULL);
@@ -369,6 +373,11 @@ int main(int argc, char **argv) {
     lua_pushvalue(L, i == 1 ? probe.second_parent : 1);
     lua_xmove(L, state, 1);
   }
+  if (backed) {
+    lua_pushinteger(L, LUA_MININTEGER);
+    lua_setfield(L, 1, "spare"); /* force the published record to expand */
+    require(luaH_recordbacking(probe.table->arraydata) != NULL);
+  }
   require(!(probe.table->sequence & LUA_TABLE_WRITER_FLAGS));
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
   deadline.tv_sec += 10;
@@ -411,13 +420,14 @@ int main(int argc, char **argv) {
     require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == probe.graph);
     if (probe.record) {
       TValue value;
-      int read =
-          luaH_readrecord(G(L), probe.table, 0, &value, probe.table->sequence);
+      uintptr_t image = probe.table->arraydata;
+      int read = luaH_readrecord(G(L), probe.table, image, 0, &value,
+                                 probe.table->sequence);
       require(read == !probe.graph);
       if (read)
         require(ttisinteger(&value) && ivalue(&value) == LUA_MININTEGER);
-      require(
-          luaH_readrecord(G(L), probe.table, 1, &value, probe.table->sequence));
+      require(luaH_readrecord(G(L), probe.table, image, 1, &value,
+                              probe.table->sequence));
       require(probe.graph ? ttistable(&value) : ttisinteger(&value));
     } else {
       found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,

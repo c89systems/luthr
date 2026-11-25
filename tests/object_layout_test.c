@@ -294,32 +294,36 @@ static void record_table(lua_State *L, lua_State *other) {
       "assert(t[field].value == 42 and t[100] == 100)",
       0);
 
-  run_chunk(L,
-            "local function make(mode) "
-            "  local key, value = {}, 'weak-'..mode; "
-            "  local record = {key=key, value=value}; "
-            "  return setmetatable(record, {__mode=mode, sentinel=true}) "
-            "end; return make('k'), make('v'), make('kv')",
-            3);
-  for (int i = 2; i <= 4; i++) {
-    const Table *weak = lua_topointer(L, i);
-    require(luaH_recordkeys(weak->node) != NULL);
+  for (int backed = 0; backed <= 1; backed++) {
+    run_chunk(L,
+              "local function make(mode) "
+              "  local key, value = {}, 'weak-'..mode; "
+              "  local record = {key=key, value=value, spare=0}; "
+              "  return setmetatable(record, {__mode=mode, sentinel=true}) "
+              "end; return make('k'), make('v'), make('kv')",
+              3);
+    lua_xmove(L, other, 3);
+    for (int i = 1; backed && i <= 3; i++) {
+      lua_pushinteger(other, LUA_MININTEGER);
+      lua_setfield(other, i, "spare");
+    }
+    lua_gc(L, LUA_GCCOLLECT);
+    lua_gc(L, LUA_GCCOLLECT);
+    for (int i = 1; i <= 3; i++) {
+      const Table *weak = lua_topointer(other, i);
+      require(luaH_recordkeys(weak->node) != NULL);
+      require((luaH_recordbacking(weak->arraydata) != NULL) == backed);
+      require(lua_getfield(other, i, "key") ==
+              (i == 1 ? LUA_TTABLE : LUA_TNIL));
+      lua_pop(other, 1);
+      require(lua_getfield(other, i, "value") == LUA_TSTRING);
+      require(strcmp(lua_tostring(other, -1), i == 1   ? "weak-k"
+                                              : i == 2 ? "weak-v"
+                                                       : "weak-kv") == 0);
+      lua_pop(other, 1);
+    }
+    lua_pop(other, 3);
   }
-  lua_xmove(L, other, 3);
-  lua_gc(L, LUA_GCCOLLECT);
-  lua_gc(L, LUA_GCCOLLECT);
-  for (int i = 1; i <= 3; i++) {
-    const Table *weak = lua_topointer(other, i);
-    require(luaH_recordkeys(weak->node) != NULL);
-    require(lua_getfield(other, i, "key") == (i == 1 ? LUA_TTABLE : LUA_TNIL));
-    lua_pop(other, 1);
-    require(lua_getfield(other, i, "value") == LUA_TSTRING);
-    require(strcmp(lua_tostring(other, -1), i == 1   ? "weak-k"
-                                            : i == 2 ? "weak-v"
-                                                     : "weak-kv") == 0);
-    lua_pop(other, 1);
-  }
-  lua_pop(other, 3);
   record_constructor_hooks(L);
 
   run_chunk(

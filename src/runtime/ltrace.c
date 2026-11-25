@@ -330,13 +330,14 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   keys = luaH_recordkeys(table->node);
   if (keys != NULL) {
     /* The descriptor owns interned names and has no weak key edges. */
-    Value *values = luaH_recordvalues(table, table->arraydata);
-    uintptr_t tags = luaH_recordtags(table->arraydata);
+    LuaRecordStorage *backing = luaH_recordbacking(table->arraydata);
+    Value *values = backing != NULL ? backing->values : luaH_inlinerecordvalues(table);
+    uintptr_t *tags = backing != NULL ? &backing->tags : &table->arraydata;
     if (pending & 1) {
       for (i = 0; i < keys->asize; i++)
-        if ((luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) &&
+        if ((luaH_recordtag(*tags, i) & BIT_ISCOLLECTABLE) &&
             weakdead(L, values[i].gc))
-          luaH_setrecordtag(table, i, LUA_VEMPTY);
+          luaH_setrecordtag(tags, i, LUA_VEMPTY);
     }
   }
   parts = luaH_hashparts(table);

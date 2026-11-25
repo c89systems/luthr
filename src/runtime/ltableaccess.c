@@ -298,11 +298,9 @@ void luaH_elementstore (lua_State *L, Table *table, Value *payload, lu_byte *tag
   luaC_barrierback(L, obj2gco(table), value);
 }
 
-void luaH_recordstore (lua_State *L, Table *table, unsigned index, lu_byte oldtag,
+void luaH_recordstore (lua_State *L, Table *table, Value *payload,
+                       uintptr_t *word, unsigned index, lu_byte oldtag,
                        const TValue *value) {
-  uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-  LuaRecordStorage *backing = luaH_recordbacking(image);
-  Value *payload = luaH_recordvalues(table, image) + index;
   lu_byte newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
   if (oldtag == newtag && !iscollectable(value)) {
     __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
@@ -311,7 +309,6 @@ void luaH_recordstore (lua_State *L, Table *table, unsigned index, lu_byte oldta
   tracewrite(L, payload, oldtag, value);
   if (!ttisnil(value)) __atomic_store(payload, &value->value_, __ATOMIC_RELEASE);
   if (oldtag != newtag) {
-    uintptr_t *word = backing != NULL ? &backing->tags : &table->arraydata;
     unsigned shift = (index + 1) * 8;
     uintptr_t mask = cast(uintptr_t, 255) << shift;
     uintptr_t tags = __atomic_load_n(word, __ATOMIC_RELAXED);
@@ -361,7 +358,7 @@ l_sinline int replacelocalscalar (lua_State *L, Table *table, TString *name,
   __atomic_store(payload, &val_(value), __ATOMIC_RELEASE);
   if (tag != oldtag) {
     if (node_tag != NULL) __atomic_store_n(node_tag, tag, __ATOMIC_RELEASE);
-    else luaH_setrecordtag(table, field, tag);
+    else luaH_setrecordtag(&table->arraydata, field, tag);
   }
   return 1;
 }

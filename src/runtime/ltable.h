@@ -84,9 +84,7 @@ l_sinline lu_byte luaH_recordtag (uintptr_t tags, unsigned index) {
   return cast_byte(tags >> ((index + 1) * 8));
 }
 
-l_sinline void luaH_setrecordtag (Table *table, unsigned index, lu_byte tag) {
-  LuaRecordStorage *backing = luaH_recordbacking(table->arraydata);
-  uintptr_t *word = backing != NULL ? &backing->tags : &table->arraydata;
+l_sinline void luaH_setrecordtag (uintptr_t *word, unsigned index, lu_byte tag) {
   unsigned shift = (index + 1) * 8;
   uintptr_t tags = (*word & ~(cast(uintptr_t, 255) << shift)) |
                    (cast(uintptr_t, tag) << shift);

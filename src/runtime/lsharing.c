@@ -84,7 +84,7 @@ void luaA_share (lua_State *L, GCObject *object) {
                 packed = luaH_packrecord(&value);
                 if (packed != LUA_RECORD_FROZEN) {
                   __atomic_store_n(&values[i].bits, packed, __ATOMIC_RELEASE);
-                  luaH_setrecordtag(table, i, LUA_RECORD_PACKED);
+                  luaH_setrecordtag(&table->arraydata, i, LUA_RECORD_PACKED);
                 }
               }
             }

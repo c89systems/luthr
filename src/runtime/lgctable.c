@@ -163,7 +163,8 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     for (i = 0; i < keys->asize; i++) {
       if (sequence & LUA_TABLE_SPLIT_VALUES) {
         TValue value = {0};
-        if (!luaH_readrecord(G(L), table, i, &value, sequence)) return 0;
+        if (!luaH_readrecord(G(L), table, view.arraydata, i, &value, sequence))
+          return 0;
         if (iscollectable(&value)) edges[count++] = val_(&value).gc;
       }
       else if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE)
