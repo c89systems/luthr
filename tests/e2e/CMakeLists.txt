@@ -329,7 +329,31 @@ foreach(runtime IN ITEMS upstream luthr)
   set_tests_properties(lua_official_${runtime} PROPERTIES LABELS "runtime;compatibility" TIMEOUT 900)
 endforeach()
 
-include(ExternalLua.cmake)
+include(LuaApplications.cmake)
+foreach(application IN LISTS lua_applications)
+  foreach(runtime IN ITEMS upstream luthr)
+    set(widths 1)
+    set(labels "runtime;compatibility;application;memcheck")
+    if(runtime STREQUAL "luthr")
+      list(APPEND widths 4)
+      list(APPEND labels parallel)
+    endif()
+    foreach(width IN LISTS widths)
+      set(native 0)
+      if(runtime STREQUAL "luthr")
+        set(native "${width}")
+      endif()
+      foreach(collector IN ITEMS incremental generational)
+        set(test "lua_app_${application}_${runtime}_${width}_${collector}")
+        add_test(NAME "${test}" COMMAND scheduled_${runtime}
+          "${CMAKE_CURRENT_SOURCE_DIR}/apps/${application}.lua" "${application}"
+          "${collector}" "${width}" "${native}" 8 256 2 1 0
+          default-allocator hash-seed=21)
+        set_tests_properties("${test}" PROPERTIES LABELS "${labels}" TIMEOUT 60)
+      endforeach()
+    endforeach()
+  endforeach()
+endforeach()
 
 set(benchmark_arguments
   "-Dupstream=$<TARGET_FILE:benchmark_upstream>" "-Dluthr=$<TARGET_FILE:benchmark_luthr>"

@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/BenchmarkStats.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/LuaApplications.cmake")
 foreach(setting IN ITEMS samples warmups tasks work_divisor delay_us)
   if(NOT DEFINED ${setting})
     if(setting STREQUAL "samples")
@@ -114,6 +115,10 @@ foreach(input IN ITEMS upstream luthr embedded library script)
   file(SHA256 "${${input}}" digest)
   string(JSON metadata SET "${metadata}" "${input}_sha256" "\"${digest}\"")
 endforeach()
+foreach(application IN LISTS lua_applications)
+  file(SHA256 "${CMAKE_CURRENT_LIST_DIR}/apps/${application}.lua" digest)
+  string(JSON metadata SET "${metadata}" "${application}_sha256" "\"${digest}\"")
+endforeach()
 execute_process(COMMAND git -C "${source_dir}" rev-parse HEAD
   RESULT_VARIABLE result OUTPUT_VARIABLE head OUTPUT_STRIP_TRAILING_WHITESPACE)
 if(NOT result STREQUAL "0")
@@ -133,7 +138,7 @@ endif()
 file(WRITE "${output_dir}/metadata.json" "${metadata}\n")
 
 function(scheduled_measure runtime slots native delay)
-  execute_process(COMMAND "${${runtime}}" "${script}" "${workload}" "${collector}"
+  execute_process(COMMAND "${${runtime}}" "${work_script}" "${workload}" "${collector}"
     "${slots}" "${native}" "${tasks}" "${iterations}" "${samples}" "${warmups}" "${delay}"
     default-allocator "hash-seed=${hash_seed}"
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
@@ -235,7 +240,7 @@ set(allocation_gc_iterations 5000)
 set(callback_workloads lua_callback native_callbacks native_callbacks_local native_direct
   native_direct_local native_leaf native_stack native_identity
   native_scalar native_scalar_direct native_protected native_records native_streaming)
-set(embedded_workloads mixed_records ${callback_workloads})
+set(embedded_workloads mixed_records ${callback_workloads} ${lua_applications})
 foreach(workload IN LISTS callback_workloads)
   set(${workload}_iterations 18000)
 endforeach()
@@ -243,14 +248,20 @@ set(native_streaming_iterations 6000)
 set(native_records_iterations 6000)
 foreach(workload IN ITEMS integers independent_tables mixed_records shared_table shared_hash
     shared_growth shared_array_growth shared_sparse_growth shared_reads closures
-    allocation_gc ${callback_workloads})
+    allocation_gc ${callback_workloads} ${lua_applications})
+  set(work_script "${script}")
+  set(delays 0 "${delay_us}")
+  if(workload IN_LIST lua_applications)
+    set(work_script "${CMAKE_CURRENT_LIST_DIR}/apps/${workload}.lua")
+    set(delays 0)
+  endif()
   math(EXPR iterations "${${workload}_iterations} / ${work_divisor}")
   if(iterations LESS 1)
     set(iterations 1)
   endif()
   set(reference_checksum "")
   foreach(collector IN ITEMS incremental generational)
-    foreach(delay IN ITEMS 0 "${delay_us}")
+    foreach(delay IN LISTS delays)
       scheduled_measure(upstream 1 0 "${delay}")
       set(reference_wall "${median_wall_ns}")
       file(APPEND "${output_dir}/summary.csv"
