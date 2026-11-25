@@ -1190,12 +1190,47 @@ LUA_API int lua_rawget (lua_State *L, int idx) {
   return result;
 }
 
+/* A bounded claim protects this scheduled stack and its unpublished nursery
+** even when another execution has recalled its managed slot. Readers, sealing
+** and trace arming join the claim before borrowing the stack. */
+l_sinline int localheap (lua_State *L, int idx) {
+  uintptr_t gate = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+  return !ispseudo(idx) && (gate & ~LUA_GATE_OFFER_MASK) == 0 &&
+    (gate != 0 || __atomic_load_n(&L->task_owner, __ATOMIC_RELAXED) != NULL) &&
+    luaX_tryboundedscope(L, LUA_MARK_ARMING | LUA_WORLD_ARM_TRACE);
+}
+
+l_sinline Table *localarray (lua_State *L, int idx, lua_Integer key,
+                              uint64_t *state) {
+  const TValue *v = index2addr(L, idx);
+  Table *t;
+  if (!ttistable(v) || isLua(L->ci)) return NULL;
+  t = hvalue(v);
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) != cast(uintptr_t, L))
+    return NULL;
+  *state = luaC_tablestate(t);
+  return luaC_tasktablestate(t, *state) && l_castS2U(key) - 1 < t->asize ? t : NULL;
+}
+
 
 LUA_API int lua_rawgeti (lua_State *L, int idx, lua_Integer n) {
   LuaNativeRoot indexed;
   Table *t;
   lu_byte tag;
   int result;
+  if (localheap(L, idx)) {
+    uint64_t state;
+    t = localarray(L, idx, n, &state);
+    if (t != NULL) {
+      unsigned i = cast_uint(n - 1);
+      tag = *getArrTag(t, i);
+      if (!tagisempty(tag)) farr2val(t, i, tag, s2v(L->top.p));
+      result = finishrawget(L, tag);
+      luaX_leavebounded(L);
+      return result;
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   t = gettable(L, idx, &indexed);
   luaH_fastgeti(t, n, s2v(L->top.p), tag);
@@ -1398,6 +1433,21 @@ LUA_API void lua_rawsetp (lua_State *L, int idx, const void *p) {
 LUA_API void lua_rawseti (lua_State *L, int idx, lua_Integer n) {
   LuaNativeRoot indexed;
   Table *t;
+  if (localheap(L, idx)) {
+    uint64_t state;
+    api_checkpop(L, 1);
+    t = localarray(L, idx, n, &state);
+    if (t != NULL) {
+      TValue *value = s2v(L->top.p - 1);
+      if (!iscollectable(value) || luaC_trytaskedge(L, t, state, gcvalue(value))) {
+        obj2arr(t, cast_uint(n - 1), value);
+        L->top.p--;
+        luaX_leavebounded(L);
+        return;
+      }
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   api_checkpop(L, 1);
   t = gettable(L, idx, &indexed);

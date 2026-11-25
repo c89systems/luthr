@@ -422,7 +422,7 @@ static void remembertarget (lua_State *L, GCObject *value) {
   L->task_remembered = value;
 }
 
-l_sinline int retaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
+l_sinline int tryretaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
   uintptr_t root = cast(uintptr_t, value);
   uint16_t *slot = rootslot(L, root);
   lua_assert(!(root & LUA_TASK_ROOT_FLAGS));
@@ -444,7 +444,6 @@ l_sinline int retaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
     luaC_traceobject(L, value);
     return 1;
   }
-  luaC_sealtask(L);
   return 0;
 }
 
@@ -453,7 +452,24 @@ l_sinline int retaintaskroot (lua_State *L, GCObject *value, uintptr_t flags) {
 int luaC_tasklayout (lua_State *L, Table *table, Table *keys) {
   if (!luaC_tasktable(table)) return 0;
   lua_assert(!luaC_tasktable(keys));
-  return retaintaskroot(L, obj2gco(keys), LUA_TASK_ROOT_LAYOUT);
+  if (tryretaintaskroot(L, obj2gco(keys), LUA_TASK_ROOT_LAYOUT)) return 1;
+  luaC_sealtask(L);
+  return 0;
+}
+
+int luaC_trytaskedge (lua_State *L, Table *table, uint64_t state,
+                     GCObject *value) {
+  /* Set the edge flag before visiting a possible self-reference. Visiting
+  ** can add another bit to this same nursery header. */
+  if (value->tt != LUA_VSHRSTR && !(state & NURSERY_TASK_EDGES))
+    luaC_settablestate(table, state | NURSERY_TASK_EDGES);
+  if (luaC_taskobject(value)) {
+    if (l_unlikely(L->task_mark_scan != 0))
+      visitnursery(L, value, &L->task_trace.gray, cast(NurseryScan, L->task_mark_scan));
+    else if (state & NURSERY_TASKOLD) remembertarget(L, value);
+  }
+  else if (!tryretaintaskroot(L, value, 0)) return 0;
+  return 1;
 }
 
 int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
@@ -461,18 +477,8 @@ int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value) {
   uint64_t state = table != NULL ? luaC_tablestate(table) : 0;
   lua_assert(luaC_hastaskheap(L));
   if (luaC_tasktablestate(table, state)) {
-    /* Interned strings are shared and the root directory already retains
-    ** them. Everything else may need tracing even in a regular full pass. */
-    if (value->tt != LUA_VSHRSTR && !(state & NURSERY_TASK_EDGES))
-      luaC_settablestate(table, state | NURSERY_TASK_EDGES);
-    if (luaC_taskobject(value)) {
-      if (l_unlikely(L->task_mark_scan != 0))
-        visitnursery(L, value, &L->task_trace.gray,
-                     cast(NurseryScan, L->task_mark_scan));
-      else if (state & NURSERY_TASKOLD) remembertarget(L, value);
-      return 1;
-    }
-    return retaintaskroot(L, value, 0);
+    if (luaC_trytaskedge(L, table, state, value)) return 1;
+    luaC_sealtask(L);
   }
   else if (luaC_taskobject(value)) luaC_sealtask(L);
   return 0;

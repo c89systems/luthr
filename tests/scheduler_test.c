@@ -1312,28 +1312,37 @@ static void native_recall_during_stack_borrow(struct fixture *f, int root_offer,
   finish(f);
 }
 
-static int read_native_metadata(lua_State *L) {
+static void native_operation_done(void) {
   struct fixture *f = fixture;
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered++;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+}
+
+static int read_native_metadata(lua_State *L) {
   blocked_leaf(L);
   require(lua_getmetatable(L, 1) && lua_rawequal(L, -1, 2));
   lua_pop(L, 1);
   require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
   require(lua_getiuservalue(L, 1, 2) == LUA_TNONE && lua_isnil(L, -1));
   lua_pop(L, 1);
-  require(pthread_mutex_lock(&f->mutex) == 0);
-  f->native_entered++;
-  require(pthread_cond_broadcast(&f->changed) == 0);
-  require(pthread_mutex_unlock(&f->mutex) == 0);
+  native_operation_done();
   return 1;
 }
 
-static int wait_for_metadata_read(lua_State *L) {
+static int wait_for_native_operation(lua_State *L) {
   struct fixture *f = fixture;
   mark_running(L);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (f->native_entered < 2)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 0;
+}
+
+static int wait_for_metadata_read(lua_State *L) {
+  wait_for_native_operation(L);
   /* The native stack is now the only root of the result table. */
   lua_pushnil(L);
   require(lua_setiuservalue(L, 1, 1));
@@ -1366,6 +1375,44 @@ static void native_metadata_without_slot(struct fixture *f) {
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
   submit(f, 1, "wait_for_metadata_read(metadata_owner); return 52", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  require(collect(f, 1, LUA_OK) == 52);
+  finish(f);
+}
+
+static int edit_native_array(lua_State *L) {
+  blocked_leaf(L);
+  const Table *table = lua_topointer(L, 1);
+  require(table != NULL && luaC_tasktable(table));
+  lua_pushvalue(L, 2);
+  lua_rawseti(L, 1, 1);
+  require(lua_rawgeti(L, 1, 1) == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
+  native_operation_done();
+  return 1;
+}
+
+static void native_array_without_slot(struct fixture *f) {
+  init(f, 1);
+  lua_pushcfunction(f->main, edit_native_array);
+  lua_setglobal(f->main, "edit_native_array");
+  managed(f->main, "wait_for_native_operation", wait_for_native_operation);
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  submit(f, 0, "return edit_native_array({0}, {51})", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(lua_gc(f->main, LUA_GCSTOP) == 0);
+  /* The peer takes the only managed slot and holds it until the native
+   * task finishes its array operations. The nursery is already populated. */
+  submit(f, 1, "wait_for_native_operation(); return 52", 0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->waiting)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -2229,8 +2276,25 @@ static int native_array(lua_State *L) {
     else
       lua_pushinteger(L, first + i - 1);
     lua_rawseti(L, -2, i);
-    if (nested)
+    if (nested) {
       require(lua_rawlen(L, -1) == (lua_Unsigned)i);
+      if (i == 1) {
+        require(lua_rawgeti(L, -1, i) == LUA_TTABLE);
+        require(lua_rawequal(L, -1, 2));
+      } else {
+        require(lua_rawgeti(L, -1, i) == LUA_TNUMBER);
+        require(lua_tointeger(L, -1) == first + i - 1);
+      }
+      lua_pop(L, 1);
+    }
+  }
+  if (nested) {
+    lua_pushnil(L);
+    lua_rawseti(L, -2, 3);
+    require(lua_rawgeti(L, -1, 3) == LUA_TNIL);
+    lua_pop(L, 1);
+    lua_pushinteger(L, first + 2);
+    lua_rawseti(L, -2, 3);
   }
   return 1;
 }
@@ -3003,6 +3067,8 @@ int main(int argc, char **argv) {
     native_recall_during_stack_borrow(f, 1, 1);
   else if (strcmp(argv[1], "native_metadata_without_slot") == 0)
     native_metadata_without_slot(f);
+  else if (strcmp(argv[1], "native_array_without_slot") == 0)
+    native_array_without_slot(f);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

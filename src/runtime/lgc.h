@@ -470,6 +470,9 @@ enum {
 #define luaC_settablestate(t,v) __atomic_store_n(&(t)->gcstate, (v), __ATOMIC_RELEASE)
 
 LUAI_FUNC int luaC_taskedge (lua_State *L, GCObject *owner, GCObject *value);
+/* Record an edge from a proven private table without having to seal its heap. */
+LUAI_FUNC int luaC_trytaskedge (lua_State *L, Table *table, uint64_t state,
+                                GCObject *value);
 LUAI_FUNC int luaC_tasklayout (lua_State *L, Table *table, Table *keys);
 LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
 LUAI_FUNC int luaC_tasktableeligible (lua_State *L, size_t bytes);

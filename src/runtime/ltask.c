@@ -211,7 +211,7 @@ int luaTK_admit (lua_State *L, LuaTaskRoot *task, LuaExecution *execution) {
     ** stack reference as soon as this root is published. */
     luaC_traceobject(L, obj2gco(L));
     registertask(L, task, execution, LUA_TASK_ADMITTED);
-    L->task_owner = task;
+    __atomic_store_n(&L->task_owner, task, __ATOMIC_RELAXED);
     L->task_nursery_closed = 0;
     status = LUA_OK;
   }
@@ -311,7 +311,7 @@ static int collect (lua_State *L, LuaTaskRoot *task, int *status, int *results) 
   lua_xmove(task->thread, L, count);
   luaX_checksync(pthread_mutex_lock(&world->mutex));
   luaC_retireseal(task->thread);
-  task->thread->task_owner = NULL;
+  __atomic_store_n(&task->thread->task_owner, NULL, __ATOMIC_RELAXED);
   unregistertask(task);
   luaQ_wake(&world->changed, &task->waiters);
   luaX_checksync(pthread_mutex_unlock(&world->mutex));
