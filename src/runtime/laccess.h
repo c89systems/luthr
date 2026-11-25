@@ -102,8 +102,6 @@ LUAI_FUNC void luaA_metafield (lua_State *L, const TValue *object, TString *key,
 ** the result before use and roots it before any safepoint. */
 LUAI_FUNC int luaA_readtypefield (lua_State *L, int type, TString *key,
                                   TValue *result);
-LUAI_FUNC void luaA_tabletm (lua_State *L, Table *mt, TMS event,
-                            LuaNativeRoot *result);
 /* Keys and assigned values must remain rooted across ownership waits. */
 LUAI_FUNC lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
                              TValue *result, LuaNativeRoot *method);

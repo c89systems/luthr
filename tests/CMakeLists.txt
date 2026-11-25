@@ -637,7 +637,8 @@ target_link_options(finalizer_work_test PRIVATE -Wl,--wrap=luaC_claimtrace
   -Wl,--wrap=luaC_tracebatch)
 foreach(case IN ITEMS discovery_incremental discovery_generational
     pending_incremental pending_generational promote_incremental promote_generational
-    overlap_incremental overlap_pending_incremental order_incremental order_generational)
+    overlap_incremental overlap_pending_incremental order_incremental order_generational
+    register_incremental register_generational)
   add_test(NAME finalizer_work_${case} COMMAND finalizer_work_test ${case})
   set_tests_properties(finalizer_work_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)

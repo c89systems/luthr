@@ -1833,17 +1833,17 @@ static void registerfinalizer (lua_State *L, GCObject *o) {
     resetfinalizercursor(L);
   }
   else {
-    pthread_mutex_t *mutex = &g->publishers[0].mutex;
-    luaX_checksync(pthread_mutex_lock(mutex));
-    o->next = g->new_finalizers;
-    if (g->new_finalizers == NULL) g->new_finalizers_tail = o;
-    g->new_finalizers = o;
-    luaX_checksync(pthread_mutex_unlock(mutex));
+    /* An exchange orders concurrent registrations. Producers initialize
+    ** only their own link, and publication joins all admitted producers
+    ** before reading either the links or the first producer's tail. */
+    o->next = __atomic_exchange_n(&g->new_finalizers, o, __ATOMIC_RELAXED);
+    if (o->next == NULL) g->new_finalizers_tail = o;
   }
 }
 
 void luaC_publish (lua_State *L) {
   global_State *g = G(L);
+  GCObject *finalizers;
   int shard;
   lua_assert(!completestate(g) || luaW_iscollector(L));
   luaM_publishdebt(L);
@@ -1873,10 +1873,11 @@ void luaC_publish (lua_State *L) {
       thread = next;
     }
   }
-  if (g->new_finalizers != NULL) {
+  finalizers = __atomic_exchange_n(&g->new_finalizers, NULL, __ATOMIC_RELAXED);
+  if (finalizers != NULL) {
     g->new_finalizers_tail->next = g->finobj;
-    g->finobj = g->new_finalizers;
-    g->new_finalizers = g->new_finalizers_tail = NULL;
+    g->finobj = finalizers;
+    g->new_finalizers_tail = NULL;
     resetfinalizercursor(L);
   }
 #if defined(LUAI_ASSERT)
@@ -1896,23 +1897,20 @@ void luaC_publish (lua_State *L) {
 
 void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
   global_State *g = G(L);
-  LuaNativeRoot object_root, metatable_root, method;
-  luaR_pushroot(L, &object_root);
-  setgcovalue(L, &object_root.value, o);
-  luaR_pushroot(L, &metatable_root);
-  sethvalue(L, &metatable_root.value, mt);
-  luaR_pushroot(L, &method);
-  luaA_tabletm(L, mt, TM_GC, &method);
-  if (tofinalize(o) ||                 /* obj. is already marked... */
-      ttisnil(&method.value) ||         /* or has no finalizer... */
-      (g->gcstp & GCSTPCLS))                   /* or closing state? */
-    goto done;  /* nothing to be done */
+  TValue method;
+  /* Binding the metatable already roots both objects and owns their layout. */
+  lua_assert(luaW_iscollector(L) ||
+             luaA_lockowner(&mt->access) == luaX_token(L));
+  if (tofinalize(o) || (g->gcstp & GCSTPCLS) ||
+      (gettableflags(mt) & (1u << TM_GC))) return;
+  /* Promotion may have crossed a weak cutoff since the layout was acquired. */
+  if (luaC_tracing(L) && !luaW_iscollector(L)) luaC_prepareweak(L, mt);
+  if (tagisempty(luaH_getshortowned(mt, g->tmname[TM_GC], &method))) {
+    __atomic_fetch_or(&mt->flags, cast_byte(1u << TM_GC), __ATOMIC_RELAXED);
+    return;
+  }
   luaA_share(L, o);
   registerfinalizer(L, o);
- done:
-  luaR_poproot(L, &method);
-  luaR_poproot(L, &metatable_root);
-  luaR_poproot(L, &object_root);
 }
 
 /* }====================================================== */

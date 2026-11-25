@@ -379,13 +379,6 @@ static void metafield (lua_State *L, Table *mt, TString *key,
     luaR_setroot(L, result, &value);
 }
 
-void luaA_tabletm (lua_State *L, Table *mt, TMS event, LuaNativeRoot *result) {
-  LuaObjectScope scope;
-  luaA_begin(L, obj2gco(mt), &scope);
-  metafield(L, mt, G(L)->tmname[event], result, event);
-  luaA_end(L, &scope);
-}
-
 /* Managed admission retains the metatable and its buffers through this
 ** nonparking lookup. Validate the type slot as well as the table snapshot:
 ** a detached metatable can be modified before it is installed again. */

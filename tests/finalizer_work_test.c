@@ -171,6 +171,109 @@ static void finalize_across_coroutines(lua_State *L, int generational) {
   lua_close(L);
 }
 
+enum { PRODUCERS = 4, REGISTRATIONS = 512 };
+
+struct finalizer_registrations {
+  pthread_barrier_t start;
+  lua_State *collector;
+  unsigned remaining;
+};
+
+struct finalizer_producer {
+  lua_State *L;
+  struct finalizer_registrations *registrations;
+  unsigned index;
+};
+
+static unsigned finalizer_remaining[PRODUCERS];
+
+static int registered_finalizer(lua_State *L) {
+  lua_Integer id;
+  unsigned producer, index;
+  require(lua_getfield(L, 1, "id") == LUA_TNUMBER);
+  id = lua_tointeger(L, -1);
+  require(id >= 0 && id < PRODUCERS * REGISTRATIONS);
+  producer = (unsigned)id / REGISTRATIONS;
+  index = (unsigned)id % REGISTRATIONS;
+  require(finalizer_remaining[producer] == index + 1);
+  finalizer_remaining[producer]--;
+  return 0;
+}
+
+static void *register_objects(void *argument) {
+  struct finalizer_producer *producer = argument;
+  struct finalizer_registrations *registrations = producer->registrations;
+  lua_State *L = producer->L;
+  unsigned index;
+  int ready;
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushvalue(L, 1);
+  lua_setmetatable(L, 2);
+  lua_pop(L, 1);
+  /* The previous binding had no finalizer. Adding the field only affects
+   * objects bound from this point on. */
+  lua_pushcfunction(L, registered_finalizer);
+  lua_setfield(L, 1, "__gc");
+  lua_newtable(L); /* keep registrations live until all producers finish */
+  ready = pthread_barrier_wait(&registrations->start);
+  require(ready == 0 || ready == PTHREAD_BARRIER_SERIAL_THREAD);
+  for (index = 0; index < REGISTRATIONS; index++) {
+    lua_newtable(L);
+    lua_pushinteger(L, producer->index * REGISTRATIONS + index);
+    lua_setfield(L, 3, "id");
+    lua_pushvalue(L, 1);
+    lua_setmetatable(L, 3);
+    lua_rawseti(L, 2, (lua_Integer)index + 1);
+  }
+  __atomic_fetch_sub(&registrations->remaining, 1, __ATOMIC_RELAXED);
+  return NULL;
+}
+
+static void *collect_registrations(void *argument) {
+  struct finalizer_registrations *registrations = argument;
+  int ready = pthread_barrier_wait(&registrations->start);
+  require(ready == 0 || ready == PTHREAD_BARRIER_SERIAL_THREAD);
+  do {
+    lua_gc(registrations->collector, LUA_GCCOLLECT);
+  } while (__atomic_load_n(&registrations->remaining, __ATOMIC_RELAXED) != 0);
+  return NULL;
+}
+
+static void finalize_concurrent_registrations(lua_State *L, int generational) {
+  struct finalizer_registrations registrations;
+  struct finalizer_producer producers[PRODUCERS];
+  pthread_t threads[PRODUCERS], collector;
+  unsigned i, round;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  registrations.collector = lua_newthread(L);
+  require(pthread_barrier_init(&registrations.start, NULL, PRODUCERS + 1) == 0);
+  for (i = 0; i < PRODUCERS; i++)
+    producers[i] =
+        (struct finalizer_producer){lua_newthread(L), &registrations, i};
+  for (round = 0; round < 2; round++) {
+    __atomic_store_n(&registrations.remaining, PRODUCERS, __ATOMIC_RELAXED);
+    for (i = 0; i < PRODUCERS; i++) {
+      finalizer_remaining[i] = REGISTRATIONS;
+      require(pthread_create(&threads[i], NULL, register_objects,
+                             &producers[i]) == 0);
+    }
+    require(pthread_create(&collector, NULL, collect_registrations,
+                           &registrations) == 0);
+    for (i = 0; i < PRODUCERS; i++)
+      require(pthread_join(threads[i], NULL) == 0);
+    require(pthread_join(collector, NULL) == 0);
+    for (i = 0; i < PRODUCERS; i++)
+      lua_settop(producers[i].L, 0);
+    lua_gc(L, LUA_GCCOLLECT);
+    for (i = 0; i < PRODUCERS; i++)
+      require(finalizer_remaining[i] == 0);
+  }
+  require(pthread_barrier_destroy(&registrations.start) == 0);
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   struct fixture test = {0};
   lua_State *state = luaL_newstate(), *worker;
@@ -180,6 +283,11 @@ int main(int argc, char **argv) {
   if (strncmp(argv[1], "order_", 6) == 0) {
     finalize_across_coroutines(state,
                                strcmp(argv[1], "order_generational") == 0);
+    return 0;
+  }
+  if (strncmp(argv[1], "register_", 9) == 0) {
+    finalize_concurrent_registrations(
+        state, strcmp(argv[1], "register_generational") == 0);
     return 0;
   }
   test.phase = strstr(argv[1], "pending") ? TRACE_PENDING : TRACE_FINALIZERS;
