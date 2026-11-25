@@ -683,11 +683,15 @@ static void pair_poll(lua_State *state, void *context) {
 
 static void pair_boundaries(lua_State *state) {
   unsigned polls = 0;
+  const Proto *proto;
   require(luaL_dostring(state, "return function(a,b) local x,y=a,b; "
                                "return x,y end") == LUA_OK);
   luaX_lockstate(state);
-  require(getproto(s2v(state->top.p - 1))->dispatch[0] ==
-          LUA_PAIR_OP_MOVE_OP_MOVE);
+  proto = getproto(s2v(state->top.p - 1));
+  require(proto->sizecode >= 5 && GET_OPCODE(proto->code[0]) == OP_MOVE &&
+          GET_OPCODE(proto->code[3]) == OP_MOVE);
+  /* The first move enters a pair. The last move has no adjacent move. */
+  require(proto->dispatch[0].offset != proto->dispatch[3].offset);
   luaX_unlockstate(state);
   for (int pass = 0; pass < 3; ++pass) {
     lua_pushvalue(state, 1);

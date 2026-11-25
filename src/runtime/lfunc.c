@@ -28,6 +28,7 @@
 #include "lstate.h"
 #include "lroots.h"
 #include "ltable.h"
+#include "lvm.h"
 
 
 
@@ -826,11 +827,6 @@ static void lowerrecords (lua_State *L, Proto *p) {
       sites++;
   }
   if (sites == 0) return;
-  if (p->dispatch == NULL) {
-    p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
-    for (pc = 0; pc < p->sizecode; pc++)
-      p->dispatch[pc] = cast_byte(GET_OPCODE(p->code[pc]));
-  }
   p->records = luaM_newvectorchecked(L, sites, LuaRecordSite);
   p->sizerecords = sites;
   for (pc = 0; pc < sites; pc++) p->records[pc].keys = NULL;
@@ -845,8 +841,8 @@ static void lowerrecords (lua_State *L, Proto *p) {
     if (count == 0 && plan.projection == 0) continue;
     plan.pc = pc;
     p->records[sites++] = plan;
-    if (plan.projection != 0 && p->dispatch[pc] == OP_NEWTABLE)
-      p->dispatch[pc] = LUA_PROJECT_TABLE;
+    if (plan.projection != 0 && p->dispatch[pc].opcode == OP_NEWTABLE)
+      p->dispatch[pc].opcode = LUA_PROJECT_TABLE;
     if (count == 0) continue;
     keys = luaH_new(L, count, 0);
     p->records[sites - 1].keys = keys;
@@ -856,8 +852,8 @@ static void lowerrecords (lua_State *L, Proto *p) {
       int store = pc + stores[i];
       obj2arr(keys, i, key);
       luaC_barrierback(L, obj2gco(keys), key);
-      if (p->dispatch[store] == OP_SETFIELD)
-        p->dispatch[store] = cast_byte(LUA_SETRECORD_0 + i);
+      if (p->dispatch[store].opcode == OP_SETFIELD)
+        p->dispatch[store].opcode = LUA_SETRECORD_0 + i;
     }
     luaA_share(L, obj2gco(keys));
   }
@@ -878,15 +874,13 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       }
     }
   }
-  if (count == 0)
-    for (pc = 0; pc + 1 < p->sizecode; pc++) {
-      unsigned op = GET_OPCODE(p->code[pc]);
-      if (dispatchpair(op, GET_OPCODE(p->code[pc + 1])) ||
-          (op == OP_SELF && stringrangecallsite(p, pc)))
-        break;
-    }
-  if (count != 0 || pc + 1 < p->sizecode)
-    p->dispatch = luaM_newvectorchecked(L, p->sizecode, lu_byte);
+  if (p->sizecode != 0) {
+    /* Prototype metadata can outlive the parser's pooled storage. */
+    luaM_checksize(L, p->sizecode, sizeof(*p->dispatch));
+    p->dispatch = luaM_alloccontrol(L, cast_sizet(p->sizecode) *
+                                      sizeof(*p->dispatch));
+    if (p->dispatch == NULL) luaM_error(L);
+  }
   for (pc = 0; pc < p->sizecode; pc++) {
     unsigned op = GET_OPCODE(p->code[pc]);
     if (op >= NUM_OPCODES) luaG_runerror(L, "invalid opcode");
@@ -896,23 +890,22 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
         break;
       }
     }
-    if (p->dispatch != NULL) p->dispatch[pc] = cast_byte(op);
+    p->dispatch[pc].opcode = op;
   }
-  if (p->dispatch != NULL) {
-    _Static_assert(LUA_DISPATCH_COUNT <= UCHAR_MAX + 1, "byte dispatch map");
-    for (pc = 0; pc + 1 < p->sizecode; pc++) {
-      unsigned first = p->dispatch[pc], second = p->dispatch[pc + 1];
-      if (first < NUM_OPCODES && second < NUM_OPCODES) {
-        unsigned pair = dispatchpair(first, second);
-        if (pair != 0) p->dispatch[pc] = cast_byte(pair);
-        else if (count == 0 && first == OP_SELF && stringrangecallsite(p, pc))
-          p->dispatch[pc] = LUA_STRING_RANGE_CALL;
-      }
+  for (pc = 0; pc + 1 < p->sizecode; pc++) {
+    unsigned first = p->dispatch[pc].opcode;
+    unsigned second = p->dispatch[pc + 1].opcode;
+    if (first < NUM_OPCODES && second < NUM_OPCODES) {
+      unsigned pair = dispatchpair(first, second);
+      if (pair != 0) p->dispatch[pc].opcode = pair;
+      else if (count == 0 && first == OP_SELF && stringrangecallsite(p, pc))
+        p->dispatch[pc].opcode = LUA_STRING_RANGE_CALL;
     }
   }
   p->scalar_ticks = scalarticks(p, count != 0);
   scalaraffine(p);
   lowerrecords(L, p);
+  luaV_linkdispatch(p);
 }
 
 
@@ -963,7 +956,7 @@ lu_mem luaF_protosize (Proto *p) {
             + cast_uint(p->sizelocvars) * sizeof(LocVar)
             + cast_uint(p->sizeupvalues) * sizeof(Upvaldesc);
   if (p->dispatch != NULL)
-    sz += cast_uint(p->sizecode) * sizeof(lu_byte);
+    sz += cast_uint(p->sizecode) * sizeof(*p->dispatch);
   sz += cast_uint(p->sizerecords) * sizeof(LuaRecordSite);
   if (!(p->flag & PF_FIXED)) {
     sz += cast_uint(p->sizecode) * sizeof(Instruction);

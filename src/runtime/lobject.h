@@ -634,6 +634,13 @@ typedef struct LuaRecordSite {
 enum { LUA_PROJECT_NIL, LUA_PROJECT_REGISTER, LUA_PROJECT_CONSTANT,
        LUA_PROJECT_FIELD, LUA_PROJECT_INDEX };
 
+/* Lowering writes opcode indices. Linking replaces them with jump targets
+** relative to the interpreter before the prototype can be executed or shared. */
+typedef union LuaDispatchSlot {
+  unsigned opcode;
+  int32_t offset;
+} LuaDispatchSlot;
+
 /*
 ** Function Prototypes
 */
@@ -656,7 +663,7 @@ typedef struct Proto {
   int32_t scalar_bias;
   TValue *k;  /* constants used by the function */
   Instruction *code;  /* opcodes */
-  lu_byte *dispatch;  /* immutable instruction dispatch overrides */
+  LuaDispatchSlot *dispatch;  /* immutable jump targets after linking */
   LuaRecordSite *records;  /* sorted by constructor instruction */
   int sizerecords;
   struct Proto **p;  /* functions defined inside the function */

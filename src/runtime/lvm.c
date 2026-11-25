@@ -38,19 +38,6 @@
 #include "lvm.h"
 
 
-/*
-** By default, use jump tables in the main interpreter loop on gcc
-** and compatible compilers.
-*/
-#if !defined(LUA_USE_JUMPTABLE)
-#if defined(__GNUC__)
-#define LUA_USE_JUMPTABLE	1
-#else
-#define LUA_USE_JUMPTABLE	0
-#endif
-#endif
-
-
 
 /* limit for table tag-method chains (to avoid infinite loops) */
 #define MAXTAGLOOP	2000
@@ -1681,7 +1668,6 @@ static int __attribute__((noinline)) trystringrangecall (
   } \
   ip = pc; \
   i = *pc; \
-  dispatch = dispatchmap == NULL ? GET_OPCODE(i) : dispatchmap[pc - code]; \
   pc++; \
 }
 
@@ -1690,10 +1676,6 @@ static int __attribute__((noinline)) trystringrangecall (
     savepc(ci); storeinstruction(L, ci, i, pc); updatebase(ci); \
   } \
 }
-
-#define vmdispatch(o)	switch(o)
-#define vmbreak         storeinstructionresults(); break
-
 
 typedef struct LuaInstructionFrame {
   LClosure *closure;
@@ -1757,26 +1739,26 @@ static unsigned executecaptured (lua_State *L, Instruction i,
 #undef VM_CAPTURE
 #undef vmcase
 #undef vmbreak
-#define vmbreak storeinstructionresults(); break
 }
 
 
-#if LUA_USE_JUMPTABLE && defined(__GNUC__) && !defined(__clang__)
-/* Keep the computed-goto dispatch sites distinct under GCC. */
-__attribute__((optimize("no-gcse", "no-crossjumping")))
+/* The linker and VM must see the same labels. GCC also needs distinct
+** dispatch sites to preserve the branch history of each opcode. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone, optimize("no-gcse", "no-crossjumping")))
+#else
+__attribute__((noinline))
 #endif
-void luaV_execute (lua_State *L, CallInfo *ci) {
+static const int32_t *execute (lua_State *L, CallInfo *ci) {
   LClosure *cl;
   const Proto *p;
   TValue *k;
   StkId base;
   const Instruction *code, *pc, *ip;
-  const lu_byte *dispatchmap;
-  unsigned dispatch;
+  const LuaDispatchSlot *dispatch;
   int trap;
-#if LUA_USE_JUMPTABLE
 #include "ljumptab.h"
-#endif
+  if (ci == NULL) return disptab;
  startfunc:
   cl = ci_func(ci);
   p = cl->p;
@@ -1792,7 +1774,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
  loadframe:
   k = p->k;
   code = p->code;
-  dispatchmap = p->dispatch;
+  dispatch = p->dispatch;
   pc = ci->u.l.savedpc;
   if (l_unlikely(trap))
     trap = luaG_tracecall(L);
@@ -1813,20 +1795,12 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
     lua_assert(base <= L->top.p && L->top.p <= L->stack_last.p);
     /* for tests, invalidate top for instructions not expecting it */
     lua_assert(luaP_isIT(i) || (cast_void(L->top.p = base), 1));
-    #if !LUA_USE_JUMPTABLE
-    if (dispatch >= NUM_OPCODES && dispatch < 2 * NUM_OPCODES) goto L_cells;
-   L_dispatch:
-    #endif
-    vmdispatch (dispatch) {
+    {
+      vmjump();
 #define VM_CAPTURE 0
-#define vmreturn return
-#if LUA_USE_JUMPTABLE
+#define vmreturn return NULL
 #define vmcase(op) L_fast_##op:
 #define directdispatch(op) goto L_fast_##op
-#else
-#define vmcase(op) case op:
-#define directdispatch(op) { dispatch = op; goto L_dispatch; }
-#endif
 #define ret fast_ret
 #define l_tforcall fast_tforcall
 #define l_tforloop fast_tforloop
@@ -1861,18 +1835,20 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
     updatetrap(ci);
     vmbreak;
   }
-  vmcase(LUA_SETRECORD_0)
-  vmcase(LUA_SETRECORD_1)
-  vmcase(LUA_SETRECORD_2)
-  vmcase(LUA_SETRECORD_3) {
-    TValue *receiver = s2v(RA(i));
-    if (l_unlikely(!ttistable(receiver) ||
-        !luaH_trysetrecord(L, hvalue(receiver), tsvalue(KB(i)),
-                           dispatch - LUA_SETRECORD_0, RKC(i)))) {
-      directdispatch(OP_SETFIELD);
-    }
-    vmbreak;
+#define RECORDSTORE(field) \
+  vmcase(LUA_SETRECORD_##field) { \
+    TValue *receiver = s2v(RA(i)); \
+    if (l_unlikely(!ttistable(receiver) || \
+        !luaH_trysetrecord(L, hvalue(receiver), tsvalue(KB(i)), field, RKC(i)))) { \
+      directdispatch(OP_SETFIELD); \
+    } \
+    vmbreak; \
   }
+  RECORDSTORE(0)
+  RECORDSTORE(1)
+  RECORDSTORE(2)
+  RECORDSTORE(3)
+#undef RECORDSTORE
 /* The first operation cannot suspend. A hook or poll due at the second
 ** instruction uses the ordinary fetch so the VM observes the same boundary.
 ** Enter the second handler with its original PCs before it can raise or park. */
@@ -1909,7 +1885,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       frame.trap = trap;
       result = executecaptured(L, i, &frame);
       ci = frame.call;
-      if (result == VM_DONE) return;
+      if (result == VM_DONE) return NULL;
       if (result == VM_START) goto startfunc;
       if (result == VM_RETURNING) {
         trap = frame.trap;
@@ -1920,6 +1896,20 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
       trap = frame.trap;
     }
   }
+}
+
+void luaV_linkdispatch (Proto *p) {
+  const int32_t *offsets = execute(NULL, NULL);
+  int pc;
+  for (pc = 0; pc < p->sizecode; pc++) {
+    unsigned op = p->dispatch[pc].opcode;
+    lua_assert(op < LUA_DISPATCH_COUNT);
+    p->dispatch[pc].offset = offsets[op];
+  }
+}
+
+void luaV_execute (lua_State *L, CallInfo *ci) {
+  execute(L, ci);
 }
 
 /* }================================================================== */

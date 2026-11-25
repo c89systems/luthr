@@ -47,11 +47,10 @@ operations and debug local access use the same cell representation. Closing
 unlinks a binding; it does not copy an obsolete register shadow over a foreign
 writer's value.
 Bytecode remains portable; the interpreter lowers its register accesses.
-Prototypes with captured locals carry one immutable dispatch byte per instruction;
-other prototypes need no dispatch metadata. Only instructions that can access
-captured registers enter the cell-aware helper; ordinary dispatch uses registers
-directly. Both use one set of instruction definitions and execute the original
-bytecode, keeping program locations, dumping and fixed-buffer loading unchanged.
+Prototypes carry one immutable jump target per instruction. Only instructions
+that can access captured registers enter the cell-aware helper. Both paths use
+one set of instruction definitions and execute the portable bytecode used for
+program locations, dumping and fixed-buffer loading.
 Root publication traces cells as bindings and uses the suspended instruction to
 retain only register shadows still needed as operands or partial results. An
 obsolete shadow cannot keep a replaced value alive while its owner is parked.
