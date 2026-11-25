@@ -25,6 +25,7 @@
 #include "ldo.h"
 #include "lfunc.h"
 #include "lgc.h"
+#include "ljit.h"
 #include "lobject.h"
 #include "lopcodes.h"
 #include "lpolicy.h"
@@ -1580,6 +1581,19 @@ static void __attribute__((noinline)) createtable (
   luaX_pollrequests(L);
 }
 
+/* Allocation has the same saved instruction and stack roots as NEWTABLE.
+** Return to the interpreter if the operation enabled a hook or a trap. */
+int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset) {
+  lua_State *L = frame->thread;
+  CallInfo *ci = frame->call;
+  const Instruction *at = frame->entry + offset;
+  ci->u.l.rootpc = at;
+  ci->u.l.savedpc = at + 2;
+  createtable(L, ci, at, at[0], at[1]);
+  frame->base = ci->func.p + 1;
+  return !gethookmask(L) && !ci->u.l.trap;
+}
+
 /* No register changes until the binding and argument support a bounded call. */
 static int __attribute__((noinline)) trystringrangecall (
     lua_State *L, const TValue *receiver, TString *key, const TValue *index,
@@ -1873,6 +1887,46 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
   }
 #include "loppairs.h"
 #undef VM_PAIR
+  vmcase(LUA_NATIVE_LOOP) {
+    LuaLoopSite *site;
+    LuaLoopCode native;
+    uintptr_t address;
+    unsigned resume, control;
+    if (l_unlikely(trap || gethookmask(L) || ci->u.l.captures != 0))
+      goto ordinaryloop;
+    site = luaJ_loopat(p, cast_int(ip - code));
+    control = GETARG_A(ip[site->words - 1]);
+    if (!ttisinteger(s2v(base + control + 1))) goto ordinaryloop;
+    address = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
+    if (l_likely(address > LUA_LOOP_UNAVAILABLE)) native = cast(LuaLoopCode, address);
+    else if (address == LUA_LOOP_COLD) {
+      ptrdiff_t top = savestack(L, L->top.p);
+      ci->u.l.rootpc = NULL;
+      ci->u.l.savedpc = ip;
+      if (L->top.p < ci->top.p) L->top.p = ci->top.p;
+      native = luaJ_prepare(L, cl->p, site);
+      updatebase(ci);
+      L->top.p = restorestack(L, top);
+      updatetrap(ci);
+      if (native == NULL || trap || gethookmask(L)) goto ordinaryloop;
+    }
+    else goto ordinaryloop;
+    {
+      LuaLoopFrame frame = {L, ci, base, cl, ip};
+      ++L->poll_remaining;  /* native code charges the already fetched word */
+      resume = native(&frame);
+      base = frame.base;
+    }
+    updatetrap(ci);
+    if (resume == 0 && L->poll_remaining > 1 && !trap && !gethookmask(L)) {
+      --L->poll_remaining;
+      goto ordinaryloop;
+    }
+    pc = ip + resume;
+    vmbreak;
+   ordinaryloop:
+    goto *(&&L_cells + disptab[GET_OPCODE(i)]);
+  }
 #undef directdispatch
 #undef l_tforloop
 #undef l_tforcall

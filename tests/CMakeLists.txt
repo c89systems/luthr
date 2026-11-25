@@ -62,6 +62,17 @@ foreach(case IN ITEMS results callback_budget pin_cancel independent_native_limi
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
 endforeach()
 
+luthr_test_program(native_loop_test native_loop_test.c)
+set_target_properties(native_loop_test PROPERTIES C_STANDARD 99)
+target_compile_options(native_loop_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(native_loop_test PRIVATE luthr_static)
+target_link_options(native_loop_test PRIVATE -Wl,--wrap=mprotect)
+foreach(case IN ITEMS serial denied incremental generational cancel)
+  add_test(NAME native_loop_${case} COMMAND native_loop_test ${case})
+  set_tests_properties(native_loop_${case}
+    PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
+endforeach()
+
 luthr_test_program(scheduler_test scheduler_test.c)
 set_target_properties(scheduler_test PROPERTIES C_STANDARD 99)
 target_compile_options(scheduler_test PRIVATE -Wall -Wextra -Werror -mtls-dialect=gnu2)
@@ -1289,7 +1300,7 @@ add_custom_target(unit_build DEPENDS luthr luthrc luthr_static luthr_shared
   gc_membership_test gc_table_scan_test gc_object_scan_test table_writers_test table_contention_test table_layout_wait_test table_partitions_test object_sharing_test object_layout_test sharing_roots_test pipe_publication_test
   gc_sweeping_test
   gc_epochs_test
-  scheduler_test native_lifecycle_test
+  scheduler_test native_lifecycle_test native_loop_test
   public_tasks_test public_tasks_shared sdk_consumer_smoke native_sdk_test)
 if(TARGET race_detector_test)
   add_dependencies(unit_build race_detector_test)

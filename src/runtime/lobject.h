@@ -666,6 +666,9 @@ typedef struct Proto {
   LuaDispatchSlot *dispatch;  /* immutable jump targets after linking */
   LuaRecordSite *records;  /* sorted by constructor instruction */
   int sizerecords;
+  struct LuaLoopSite *loops;  /* native sites sorted by loop entry */
+  int sizeloops;
+  size_t loopbytes;  /* atomic, backing bytes retained by the native sites */
   struct Proto **p;  /* functions defined inside the function */
   Upvaldesc *upvalues;  /* upvalue information */
   ls_byte *lineinfo;  /* information about source lines (debug information) */

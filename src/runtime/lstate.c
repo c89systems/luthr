@@ -690,6 +690,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   g->strcache_epoch = 1;
   g->shrink_strings = 0;
   g->young_work = LUA_YOUNG_SURVIVOR;
+  g->native_loop_bytes = 0;
   preinit_thread(L, g, 0);
   if (luaW_init(g) != 0) {
     luaX_destroygate(&L->stack_gate);

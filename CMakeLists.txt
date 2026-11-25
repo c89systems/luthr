@@ -70,7 +70,7 @@ add_custom_target(luthr_facade_header DEPENDS "${facade_header}")
 # Keep dispatch and native paths together ahead of collector and scheduler policy.
 set(lua_sources
   laccess lallocator lapi lbarrier lcallback lcode lcontext lcoroscope lctype ldebug ldo ldump lexec lfunc lgate lvm lgc lgcobject lgctable llex lmem lmemcache lmempage lobject lopcodes
-  lpacer lparser lpipe lpolicy lreclaim lschedulergc lsharing lstate lsweep ltable ltableaccess ltablestorage ltask ltm ltrace lcollector lundump ltablelist lstring lworld lzio lauxlib lbaselib lcorolib
+  ljit ljit_x86_64 lpacer lparser lpipe lpolicy lreclaim lschedulergc lsharing lstate lsweep ltable ltableaccess ltablestorage ltask ltm ltrace lcollector lundump ltablelist lstring lworld lzio lauxlib lbaselib lcorolib
   ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit ltracepage lnursery lscheduler ltableiter)
 list(TRANSFORM lua_sources PREPEND "src/runtime/")
 list(TRANSFORM lua_sources APPEND ".c")

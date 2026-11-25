@@ -557,6 +557,7 @@ typedef struct global_State {
   struct LuaAllocPage *allocation_available[LUA_ALLOC_POOLS];
   LuaAllocationCache *slot_caches;
   LuaAllocator allocator;
+  size_t native_loop_bytes;  /* atomic budget for generated code and alignment */
   lua_Hook managed_hook;  /* runtime-owned accounting dispatcher, if any */
   struct LuaCallback *callbacks;  /* registered native roots, metadata-owned */
   struct Table *pipe_meta;  /* immutable shared chunk-pipe metatable */

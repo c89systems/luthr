@@ -22,6 +22,7 @@
 #include "ldo.h"
 #include "lfunc.h"
 #include "lgc.h"
+#include "ljit.h"
 #include "lmem.h"
 #include "lobject.h"
 #include "lopcodes.h"
@@ -954,6 +955,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
   p->scalar_ticks = scalarticks(p, count != 0);
   scalaraffine(p);
   lowerrecords(L, p);
+  luaJ_lower(L, p);
   luaV_linkdispatch(p);
 }
 
@@ -969,6 +971,9 @@ Proto *luaF_newproto (lua_State *L) {
   f->dispatch = NULL;
   f->records = NULL;
   f->sizerecords = 0;
+  f->loops = NULL;
+  f->sizeloops = 0;
+  f->loopbytes = 0;
   f->sizecode = 0;
   f->lineinfo = NULL;
   f->sizelineinfo = 0;
@@ -1007,6 +1012,8 @@ lu_mem luaF_protosize (Proto *p) {
   if (p->dispatch != NULL)
     sz += cast_uint(p->sizecode) * sizeof(*p->dispatch);
   sz += cast_uint(p->sizerecords) * sizeof(LuaRecordSite);
+  sz += cast_uint(p->sizeloops) * sizeof(LuaLoopSite) +
+        __atomic_load_n(&p->loopbytes, __ATOMIC_RELAXED);
   if (!(p->flag & PF_FIXED)) {
     sz += cast_uint(p->sizecode) * sizeof(Instruction);
     sz += cast_uint(p->sizelineinfo) * sizeof(lu_byte);
@@ -1017,6 +1024,7 @@ lu_mem luaF_protosize (Proto *p) {
 
 
 void luaF_retireproto (lua_State *L, Proto *f) {
+  luaJ_freeloops(L, f, 1);
   luaM_retirearray(L, f->records, cast_sizet(f->sizerecords));
   if (f->dispatch != NULL)
     luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
@@ -1033,6 +1041,7 @@ void luaF_retireproto (lua_State *L, Proto *f) {
 }
 
 void luaF_freeproto (lua_State *L, Proto *f) {
+  luaJ_freeloops(L, f, 0);
   luaM_freearray(L, f->records, cast_sizet(f->sizerecords));
   if (f->dispatch != NULL)
     luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
