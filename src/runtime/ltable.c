@@ -1071,8 +1071,8 @@ _Static_assert(sizeof(Table) % _Alignof(Value) == 0 &&
                sizeof(Table) % _Alignof(Node) == 0 &&
                sizeof(Value) % _Alignof(Node) == 0, "inline table alignment");
 
-static Table *newtable (lua_State *L, size_t bytes) {
-  GCObject *o = luaC_newobj(L, LUA_VTABLE, sizeof(Table) + bytes);
+static Table *newtable (lua_State *L, size_t bytes, int tasklocal) {
+  GCObject *o = luaC_newtable(L, sizeof(Table) + bytes, tasklocal);
   Table *t = gco2t(o);
   luaA_initlock(&t->access);
   luaA_initsharing(L, t);
@@ -1085,10 +1085,10 @@ static Table *newtable (lua_State *L, size_t bytes) {
   return t;
 }
 
-Table *luaH_newrecord (lua_State *L, Table *keys) {
+Table *luaH_newrecord (lua_State *L, Table *keys, int tasklocal) {
   unsigned i;
   uintptr_t tags = LUA_RECORD_TAGS;
-  Table *t = newtable(L, keys->asize * sizeof(Value));
+  Table *t = newtable(L, keys->asize * sizeof(Value), tasklocal);
   lua_assert(keys->asize <= LUA_RECORD_MAX_FIELDS);
   t->node = cast(Node *, cast(uintptr_t, keys) | LUA_RECORD_TAG);
   for (i = 0; i < keys->asize; i++)
@@ -1098,7 +1098,8 @@ Table *luaH_newrecord (lua_State *L, Table *keys) {
   return t;
 }
 
-Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
+Table *luaH_newtable (lua_State *L, unsigned asize, unsigned hsize,
+                      int tasklocal) {
   const size_t limit = LUA_TABLE_INLINE_LIMIT - sizeof(Table);
   size_t bytes = 0, arraybytes = 0;
   int lsize = -1;
@@ -1114,7 +1115,7 @@ Table *luaH_new (lua_State *L, unsigned asize, unsigned hsize) {
       arraybytes = (arraybytes + sizeof(Value) - 1) & ~(sizeof(Value) - 1);
     if (arraybytes + hashbytes <= limit) bytes = arraybytes + hashbytes;
   }
-  t = newtable(L, bytes);
+  t = newtable(L, bytes, tasklocal);
   if (bytes != 0) {
     char *storage = cast_charp(t + 1);
     if (asize != 0) {

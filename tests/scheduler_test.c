@@ -2451,6 +2451,40 @@ static void nursery_parked_roots(struct fixture *f, int generational) {
   finish(f);
 }
 
+static void nursery_shared_store(struct fixture *f, int generational) {
+  lua_State *L;
+  init(f, 2);
+  L = f->main;
+  luaL_openlibs(L);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(L, "nursery_inspect", nursery_inspect);
+  require(luaL_dostring(L, "sink={}; redirects={}; "
+                           "proxy=setmetatable({}, {__newindex=redirects})") ==
+          LUA_OK);
+  submit(f, 0,
+         "local receiver, target = sink, proxy; "
+         "local keep = {answer=42}; assert(nursery_inspect(keep)); "
+         "for i=1,8 do "
+         "  receiver.named={number=i}; "
+         "  receiver[1]={i}; "
+         "  receiver[i+1]={number=i, spare=false}; "
+         "  keep.child={number=i}; assert(nursery_inspect(keep.child)); "
+         "end; "
+         "local answer=keep.answer; target.changed={answer=answer}; "
+         "assert(target.changed==nil and nursery_inspect(keep)); "
+         "return keep.child.number",
+         0);
+  require(collect(f, 0, LUA_OK) == 8);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(luaL_dostring(L,
+                        "assert(sink.named.number==8 and sink[1][1]==8); "
+                        "for i=1,8 do "
+                        "  assert(sink[i+1].number==i and "
+                        "         sink[i+1].spare==false) "
+                        "end; assert(redirects.changed.answer==42)") == LUA_OK);
+  finish(f);
+}
+
 static void nursery_layout_roots(struct fixture *f, int generational) {
   lua_State *L;
   int status, results;
@@ -2928,6 +2962,10 @@ int main(int argc, char **argv) {
     nursery_layout_roots(f, 0);
   else if (strcmp(argv[1], "nursery_layout_roots_generational") == 0)
     nursery_layout_roots(f, 1);
+  else if (strcmp(argv[1], "nursery_shared_store_incremental") == 0)
+    nursery_shared_store(f, 0);
+  else if (strcmp(argv[1], "nursery_shared_store_generational") == 0)
+    nursery_shared_store(f, 1);
   else if (strcmp(argv[1], "nursery_native_incremental") == 0)
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)

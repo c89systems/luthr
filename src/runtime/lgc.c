@@ -307,13 +307,13 @@ void luaC_publishobjects (lua_State *L, GCObject *head, GCObject *tail) {
 }
 
 static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
-                           int taskstring) {
+                           int tasklocal) {
   global_State *g = G(L);
   char *p;
   GCObject *o;
   int collector, taskpage;
   p = NULL;
-  if (tt == LUA_VTABLE && L->task_owner != NULL &&
+  if (tt == LUA_VTABLE && tasklocal && L->task_owner != NULL &&
       luaC_tasktableeligible(L, sz) && !luaW_iscollector(L))
     p = cast_charp(luaM_trytasktable(L, sz));
   taskpage = p != NULL;
@@ -330,7 +330,8 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
     uint64_t epoch = g->sweep_plan.epoch;
     uintptr_t flags = LUA_BLOCK_TABLE;
     lua_assert(page != NULL && offset == 0);
-    if (!collector && L->task_owner != NULL && luaC_taskallocate(L, o, sz))
+    if (tasklocal && !collector && L->task_owner != NULL &&
+        luaC_taskallocate(L, o, sz))
       return o;
     luaC_noteyoung(g);
     if (luaC_sweeping(L)) flags |= luaMP_birth(epoch);
@@ -346,7 +347,7 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
     luaMP_young(page, epoch + 1);
     return o;
   }
-  if (taskstring && !collector && L->task_owner != NULL &&
+  if (tasklocal && !collector && L->task_owner != NULL &&
       luaC_taskallocate(L, o, sz)) return o;
   publishobjects(L, o, o, &(cast(LuaAllocBlock *, p) - 1)->block.link.object,
                  collector);
@@ -355,6 +356,10 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
 
 GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset) {
   return newobjdt(L, tt, sz, offset, 0);
+}
+
+GCObject *luaC_newtable (lua_State *L, size_t size, int tasklocal) {
+  return newobjdt(L, LUA_VTABLE, size, 0, tasklocal);
 }
 
 GCObject *luaC_newresultstring (lua_State *L, size_t size) {

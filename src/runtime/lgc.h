@@ -605,6 +605,7 @@ LUAI_FUNC int luaC_sweepgray (GCObject *object);
 LUAI_FUNC GCObject *luaC_newobj (lua_State *L, lu_byte tt, size_t sz);
 LUAI_FUNC GCObject *luaC_newobjdt (lua_State *L, lu_byte tt, size_t sz,
                                                  size_t offset);
+LUAI_FUNC GCObject *luaC_newtable (lua_State *L, size_t size, int tasklocal);
 LUAI_FUNC GCObject *luaC_newresultstring (lua_State *L, size_t size);
 LUAI_FUNC void luaC_publishobjects (lua_State *L, GCObject *head, GCObject *tail);
 LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
