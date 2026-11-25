@@ -328,6 +328,8 @@ foreach(runtime IN ITEMS upstream luthr)
   set_tests_properties(lua_official_${runtime} PROPERTIES LABELS "runtime;compatibility" TIMEOUT 900)
 endforeach()
 
+include(ExternalLua.cmake)
+
 set(benchmark_arguments
   "-Dupstream=$<TARGET_FILE:benchmark_upstream>" "-Dluthr=$<TARGET_FILE:benchmark_luthr>"
   "-Dscript=${CMAKE_CURRENT_SOURCE_DIR}/benchmark.lua"
