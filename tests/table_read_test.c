@@ -497,6 +497,57 @@ static void index_miss(lua_State *state) {
   finished_index = NULL;
 }
 
+static void private_inherited_read(lua_State *state) {
+  lua_State *writer;
+  Table *receiver, *metatable;
+  uint64_t receiver_version, metatable_version;
+  lua_gc(state, LUA_GCSTOP);
+  lua_newtable(state);
+  lua_newtable(state);
+  lua_newtable(state);
+  lua_pushinteger(state, 42);
+  lua_setfield(state, 3, "answer");
+  lua_pushvalue(state, 3);
+  lua_setfield(state, 2, "__index");
+  lua_pushvalue(state, 2);
+  lua_setmetatable(state, 1);
+  writer = lua_newthread(state);
+  lua_pushvalue(state, 2);
+  lua_xmove(state, writer, 1);
+  receiver = (Table *)lua_topointer(state, 1);
+  metatable = (Table *)lua_topointer(state, 2);
+  receiver_version = __atomic_load_n(&receiver->sequence, __ATOMIC_ACQUIRE);
+  metatable_version = __atomic_load_n(&metatable->sequence, __ATOMIC_ACQUIRE);
+
+  require(lua_getfield(state, 1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 42);
+  lua_pop(state, 1);
+  require(luaL_loadstring(state, "local t=...; local k='answer'; k=t[k]; "
+                                 "t=t.answer; return k,t") == LUA_OK);
+  lua_pushvalue(state, 1);
+  require(lua_pcall(state, 1, 2, 0) == LUA_OK);
+  require(lua_tointeger(state, -2) == 42 && lua_tointeger(state, -1) == 42);
+  lua_pop(state, 2);
+  require(__atomic_load_n(&metatable->sequence, __ATOMIC_ACQUIRE) ==
+          metatable_version);
+  require(__atomic_load_n(&receiver->sequence, __ATOMIC_ACQUIRE) ==
+          receiver_version);
+
+  require(luaL_loadstring(writer, "return function(self,k) "
+                                  "self.called=k; return 43 end") == LUA_OK);
+  require(lua_pcall(writer, 0, 1, 0) == LUA_OK);
+  lua_setfield(writer, 1, "__index");
+  require(lua_getfield(state, 1, "answer") == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 43);
+  lua_pop(state, 1);
+  require(lua_getfield(state, 1, "called") == LUA_TSTRING);
+  require(strcmp(lua_tostring(state, -1), "answer") == 0);
+  lua_pop(state, 1);
+  lua_pushnil(writer);
+  lua_setfield(writer, 1, "__index");
+  require(lua_getfield(state, 1, "answer") == LUA_TNIL);
+}
+
 static void resume_epoch(lua_State *state) {
   LuaWorld *world = &G(state)->world;
   const unsigned requests = LUA_WORLD_STOPPED | LUA_WORLD_STORAGE_WAIT;
@@ -1752,6 +1803,8 @@ int main(int argc, char **argv) {
     index_hit(state);
   else if (strcmp(argv[1], "index_miss") == 0)
     index_miss(state);
+  else if (strcmp(argv[1], "private_inherited_read") == 0)
+    private_inherited_read(state);
   else if (strcmp(argv[1], "index_metatable_change") == 0)
     index_metatable_change(state);
   else if (strncmp(argv[1], "object_bindings_", 16) == 0)

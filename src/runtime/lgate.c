@@ -177,8 +177,15 @@ static void preparecall (lua_State *L, NativeStackContext *context) {
   if (policy != NULL || L->policy != NULL) luaCP_apply(L, policy);
 }
 
+l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
+                             uintptr_t reservation);
+
 static void lockstate (lua_State *L, NativeStackContext *context) {
   LuaExecution *execution = context->execution;
+  /* A native activation can reacquire its offered stack and slot together.
+  ** If the offer was recalled or the stack is borrowed, take the ordinary
+  ** admission path before accessing either resource. */
+  if (execution != NULL && reclaimstack(L, context, 0)) return;
   if (execution != NULL) luaQ_entermanaged(L, execution);
   reserve(L, context, LUA_GATE_MANAGED);
   luaW_enter(L);
@@ -305,7 +312,7 @@ l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
 }
 
 l_sinline void attachstack (lua_State *L, NativeStackContext *context) {
-  if (!reclaimstack(L, context, 0)) lockstate(L, context);
+  lockstate(L, context);
   preparecall(L, context);
 }
 

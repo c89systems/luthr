@@ -88,9 +88,32 @@ LUAI_FUNC void luaA_end (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_endrooted (lua_State *L, LuaObjectScope *scope);
 LUAI_FUNC void luaA_unwind (lua_State *L, LuaObjectScope *target);
 LUAI_FUNC void luaA_release (lua_State *L);
+/* Read an inline split value. Validate before interpreting any pointer or
+** tag. The caller must retain the result before releasing stack admission. */
+l_sinline int luaA_readslot (const uint64_t *sequence, const TValue *slot,
+                            TValue *value) {
+  uint64_t before = __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+  if (before & 1) return 0;
+  __atomic_load(&slot->value_, &value->value_, __ATOMIC_ACQUIRE);
+  value->tt_ = __atomic_load_n(&slot->tt_, __ATOMIC_ACQUIRE);
+  return before == __atomic_load_n(sequence, __ATOMIC_ACQUIRE);
+}
+
 LUAI_FUNC int luaA_tryregistry (global_State *g, TValue *value);
 LUAI_FUNC void luaA_getregistry (lua_State *L, LuaNativeRoot *result);
 LUAI_FUNC void luaA_storeregistry (lua_State *L, const TValue *value);
+
+l_sinline Table *luaA_objectmeta (const TValue *object) {
+  Table **binding = ttistable(object) ? &hvalue(object)->metatable
+                                    : &uvalue(object)->metatable;
+  return __atomic_load_n(binding, __ATOMIC_ACQUIRE);
+}
+
+l_sinline Table *luaA_readmetatable (global_State *g, const TValue *object) {
+  return ttistable(object) || ttisfulluserdata(object) ? luaA_objectmeta(object)
+    : __atomic_load_n(&g->mt[ttype(object)], __ATOMIC_ACQUIRE);
+}
+
 LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
                                  LuaNativeRoot *result);
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
@@ -107,6 +130,11 @@ LUAI_FUNC void luaA_metafield (lua_State *L, const TValue *object, TString *key,
 ** the result before use and roots it before any safepoint. */
 LUAI_FUNC int luaA_readtypefield (lua_State *L, int type, TString *key,
                                   TValue *result);
+/* Complete a raw hit or resolve an owned receiver's __index without a wait.
+** A known miss was observed under this same uninterrupted stack admission. */
+LUAI_FUNC int luaA_tryindex (lua_State *L, Table *table, const TValue *key,
+                             TValue *result, TValue *method, lu_byte *tag,
+                             int miss);
 /* Keys and assigned values must remain rooted across ownership waits. */
 LUAI_FUNC lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
                              TValue *result, LuaNativeRoot *method);

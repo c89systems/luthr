@@ -47,9 +47,9 @@ LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
 LUAI_FUNC uintptr_t luaX_reservevalues (lua_State *L);
 LUAI_FUNC void luaX_releasevalues (lua_State *L, uintptr_t owner);
 
-/* Stack-only scopes can borrow stack slots and immutable payloads. Heap
-** mutation, allocation, parking, and other stack reservations require
-** managed admission. */
+/* Stack-only scopes can borrow stack slots, immutable payloads, and atomic
+** snapshots from inline heap fields. Retired storage, heap mutation,
+** allocation, parking, and other stack reservations require managed admission. */
 l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
   if (stackonly) {
     uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);

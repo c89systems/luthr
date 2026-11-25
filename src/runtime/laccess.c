@@ -230,11 +230,7 @@ void luaA_release (lua_State *L) {
 /* Managed admission and the replacement barrier retain the old registry
 ** until a successful snapshot has been shaded or rooted. */
 int luaA_tryregistry (global_State *g, TValue *value) {
-  uint64_t before = __atomic_load_n(&g->registry_sequence, __ATOMIC_ACQUIRE);
-  if (before & 1) return 0;
-  __atomic_load(&g->l_registry.value_, &value->value_, __ATOMIC_ACQUIRE);
-  value->tt_ = __atomic_load_n(&g->l_registry.tt_, __ATOMIC_ACQUIRE);
-  return before == __atomic_load_n(&g->registry_sequence, __ATOMIC_ACQUIRE);
+  return luaA_readslot(&g->registry_sequence, &g->l_registry, value);
 }
 
 void luaA_getregistry (lua_State *L, LuaNativeRoot *result) {
@@ -263,17 +259,10 @@ void luaA_storeregistry (lua_State *L, const TValue *value) {
   __atomic_store_n(&g->registry_sequence, before + 2, __ATOMIC_RELEASE);
 }
 
-static Table *objectmeta (const TValue *object) {
-  Table **binding = ttistable(object) ? &hvalue(object)->metatable
-                                    : &uvalue(object)->metatable;
-  return __atomic_load_n(binding, __ATOMIC_ACQUIRE);
-}
-
 void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *result) {
   /* A binding is a single pointer. Managed admission and the writer's
   ** deletion barrier keep a detached metatable alive until we root it. */
-  Table *mt = ttistable(object) || ttisfulluserdata(object) ? objectmeta(object)
-    : __atomic_load_n(&G(L)->mt[ttype(object)], __ATOMIC_ACQUIRE);
+  Table *mt = luaA_readmetatable(G(L), object);
   if (mt != NULL) {
     sethvalue(L, &result->value, mt);
     luaC_tracepointer(L, mt);
@@ -309,7 +298,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
     if (mt != NULL) luaA_publish(L, owner, &rooted_mt.value);
-    luaC_prewriteptr(L, objectmeta(object), mt);
+    luaC_prewriteptr(L, luaA_objectmeta(object), mt);
     if (ttistable(object)) {
       Table *table = hvalue(object);
       if (gettableflags(table) & LUA_TABLE_STRING_INDEX)
@@ -370,7 +359,7 @@ static int objectandmeta (lua_State *L, const TValue *object,
   for (;;) {
     Table *mt;
     luaA_begin(L, owner, first);
-    mt = objectmeta(object);
+    mt = luaA_objectmeta(object);
     if (mt) { sethvalue(L, &metatable->value, mt); }
     else setnilvalue(&metatable->value);
     if (mt == NULL || obj2gco(mt) == owner) {
@@ -386,7 +375,7 @@ static int objectandmeta (lua_State *L, const TValue *object,
         luaA_begin(L, other, first);
         luaA_begin(L, owner, second);
       }
-      if (objectmeta(object) == mt)
+      if (luaA_objectmeta(object) == mt)
         return 2;
       luaA_end(L, second);
       luaA_end(L, first);
@@ -450,7 +439,7 @@ static int readobjectfield (lua_State *L, const TValue *object, TString *key,
   uint64_t before = binding ? __atomic_load_n(binding, __ATOMIC_ACQUIRE) : 0;
   Table *mt;
   if (before & 1) return 0;
-  mt = objectmeta(object);
+  mt = luaA_objectmeta(object);
   if (mt == NULL) {
     setnilvalue(result);
     return 1;
@@ -501,16 +490,40 @@ void luaA_metafield (lua_State *L, const TValue *object, TString *key,
   luaR_poproot(L, &owner);
 }
 
+int luaA_tryindex (lua_State *L, Table *table, const TValue *key,
+                    TValue *result, TValue *method, lu_byte *tag, int miss) {
+  Table *mt;
+  if (!miss) {
+    if (!luaH_tryget(L, table, key, result, tag)) return 0;
+    if (*tag != LUA_VABSTKEY) {
+      setnilvalue(method);
+      return 1;
+    }
+  }
+  /* The receiver cannot gain this key or switch metatables while the
+  ** current execution owns its stack. Only the method needs validation. */
+  if (!luaA_localtable(L, table) ||
+      (__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1)) return 0;
+  mt = table->metatable;
+  if (mt == NULL) setnilvalue(method);
+  else if (!luaH_readshortstr(G(L), L, mt, G(L)->tmname[TM_INDEX], method))
+    return 0;
+  if (ttisnil(method)) {
+    setnilvalue(result);
+    *tag = LUA_VNIL;
+  }
+  else *tag = LUA_VABSTKEY;
+  return 1;
+}
+
 lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
                     TValue *result, LuaNativeRoot *method) {
   LuaNativeRoot owner, metatable;
   LuaObjectScope first, second;
   lu_byte tag;
   int count;
-  /* A hit or a miss with no metatable completes indexing from one view. */
-  if (luaH_tryget(L, table, key, result, &tag) &&
-      tag != LUA_VABSTKEY) {
-    setnilvalue(&method->value);
+  if (luaA_tryindex(L, table, key, result, &method->value, &tag, 0)) {
+    luaC_tracevalue(L, &method->value);
     return tag;
   }
   luaR_pushroot(L, &owner);

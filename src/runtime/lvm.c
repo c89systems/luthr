@@ -284,14 +284,21 @@ static int floatforloop (lua_State *L, StkId ra) {
 ** 'upvalue' is the captured receiver's slot plus one, or zero for other sources.
 */
 static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
-                          StkId val, unsigned upvalue) {
+                          StkId val, unsigned upvalue, int miss) {
   LuaNativeRoot object, rooted_key, method;
   TValue firstmethod;
   lu_byte tag;
-  int loop, knownmethod = !ttistable(t) && !ttisfulluserdata(t) &&
+  int loop, knownmethod;
+  if (ttistable(t)) {
+    knownmethod = luaA_tryindex(L, hvalue(t), key, s2v(val), &firstmethod,
+                                &tag, miss);
+    if (knownmethod && ttisnil(&firstmethod)) return tag;
+  }
+  else
+    knownmethod = !ttisfulluserdata(t) &&
       luaA_readtypefield(L, ttype(t), G(L)->tmname[TM_INDEX], &firstmethod);
-  /* A primitive's table-valued __index often resolves without a safepoint.
-  ** Keep its validated snapshot for the rooted path if lookup must continue. */
+  /* Resolve an inherited hit with both objects retained by managed
+  ** admission. If lookup must continue, keep the validated method. */
   if (knownmethod && ttistable(&firstmethod)) {
     luaC_tracevalue(L, &firstmethod);
     if (luaH_tryget(L, hvalue(&firstmethod), key, s2v(val), &tag) &&
@@ -304,26 +311,24 @@ static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
   luaR_setroot(L, &rooted_key, key);
   luaR_pushroot(L, &method);
   for (loop = 0; loop < MAXTAGLOOP; loop++) {
-    if (ttistable(&object.value)) {
+    if (knownmethod) {
+      luaR_setroot(L, &method, &firstmethod);
+      knownmethod = 0;
+    }
+    else if (ttistable(&object.value)) {
       tag = luaA_index(L, hvalue(&object.value), &rooted_key.value,
                        s2v(val), &method);
       if (ttisnil(&method.value))
         goto done;
     }
-    else {
-      if (knownmethod) {
-        luaR_setroot(L, &method, &firstmethod);
-        knownmethod = 0;
-      }
-      else
-        luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
-      if (ttisnil(&method.value)) {
-        if (loop == 0 && upvalue != 0)
-          luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");
-        /* The first receiver still names its live register/upvalue. Later
-        ** receivers are metamethod snapshots, with no such source identity. */
-        luaG_typeerror(L, loop == 0 ? t : &object.value, "index");
-      }
+    else
+      luaT_gettmbyobj(L, &object.value, TM_INDEX, &method);
+    if (ttisnil(&method.value)) {
+      if (loop == 0 && upvalue != 0)
+        luaG_upvaltypeerror(L, &object.value, upvalue - 1, "index");
+      /* The first receiver still names its live register/upvalue. Later
+      ** receivers are metamethod snapshots, with no such source identity. */
+      luaG_typeerror(L, loop == 0 ? t : &object.value, "index");
     }
     if (ttisfunction(&method.value)) {
       tag = luaT_callTMres(L, &method.value, &object.value,
@@ -342,7 +347,7 @@ static lu_byte finishget (lua_State *L, const TValue *t, TValue *key,
 
 lu_byte luaV_finishget (lua_State *L, const TValue *t, TValue *key,
                         StkId val) {
-  return finishget(L, t, key, val, 0);
+  return finishget(L, t, key, val, 0, 0);
 }
 
 static void __attribute__((noinline)) finishvmget (lua_State *L,
@@ -358,12 +363,13 @@ static void __attribute__((noinline)) finishvmget (lua_State *L,
     luaR_pushroot(L, &index);
     luaR_setroot(L, &index, key);
     if (luaV_needsindex(luaH_get(L, hvalue(&object.value), &index.value, s2v(result))))
-      finishget(L, &object.value, &index.value, restorestack(L, offset), upvalue);
+      finishget(L, &object.value, &index.value, restorestack(L, offset), upvalue,
+                0);
     luaR_poproot(L, &index);
     luaR_poproot(L, &object);
   }
   else
-    finishget(L, receiver, key, result, upvalue);
+    finishget(L, receiver, key, result, upvalue, 1);
 }
 
 

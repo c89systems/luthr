@@ -1215,22 +1215,26 @@ LUA_API void lua_createtable (lua_State *L, int narray, int nrec) {
 
 
 LUA_API int lua_getmetatable (lua_State *L, int objindex) {
-  LuaNativeRoot indexed;
-  int res;
-  lua_lock(L);
-  res = luaA_pushmetatable(L, luaA_indexvalue(L, objindex, &indexed));
-  luaR_poproot(L, &indexed);
-  lua_unlock(L);
-  return res;
+  TValue indexed;
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(objindex));
+  const TValue *object = index2read(L, objindex, &indexed, owner);
+  Table *mt = luaA_readmetatable(G(L), object);
+  if (mt != NULL) {
+    if (owner != LUA_VALUE_BOUNDED) luaC_tracepointer(L, mt);
+    sethvalue2s(L, L->top.p, mt);
+    api_incr_top(L);
+  }
+  luaX_leaveboundedvalue(L, owner);
+  return mt != NULL;
 }
 
 
-LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
+static int __attribute__((noinline)) readlockeduservalue (lua_State *L, int idx,
+                                                          int n) {
   LuaNativeRoot indexed;
   TValue *o;
   LuaObjectScope scope;
   int t;
-  lua_lock(L);
   o = luaA_indexvalue(L, idx, &indexed);
   api_check(L, ttisfulluserdata(o), "full userdata expected");
   luaA_begin(L, gcvalue(o), &scope);
@@ -1245,7 +1249,35 @@ LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
   luaA_end(L, &scope);
   api_incr_top(L);
   luaR_poproot(L, &indexed);
-  lua_unlock(L);
+  return t;
+}
+
+
+LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
+  TValue indexed, value;
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
+  const TValue *object = index2read(L, idx, &indexed, owner);
+  Udata *u;
+  int t = LUA_TNONE;
+  api_check(L, ttisfulluserdata(object), "full userdata expected");
+  u = uvalue(object);
+  if (n <= 0 || n > u->nuvalue)
+    setnilvalue2s(L->top.p);
+  else {
+    /* Inline slots cannot be retired independently of the userdata. A
+    ** bounded stack claim keeps the snapshot visible to any new root scan. */
+    if (!luaA_readslot(&u->sequence, &u->uv[n - 1].uv, &value)) {
+      if (!luaX_valuecall(L, owner)) lua_lock(L);
+      t = readlockeduservalue(L, idx, n);
+      lua_unlock(L);
+      return t;
+    }
+    if (owner != LUA_VALUE_BOUNDED) luaC_tracevalue(L, &value);
+    setobj2s(L, L->top.p, &value);
+    t = ttype(&value);
+  }
+  api_incr_top(L);
+  luaX_leaveboundedvalue(L, owner);
   return t;
 }
 

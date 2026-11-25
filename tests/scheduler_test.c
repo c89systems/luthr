@@ -1312,6 +1312,71 @@ static void native_recall_during_stack_borrow(struct fixture *f, int root_offer,
   finish(f);
 }
 
+static int read_native_metadata(lua_State *L) {
+  struct fixture *f = fixture;
+  blocked_leaf(L);
+  require(lua_getmetatable(L, 1) && lua_rawequal(L, -1, 2));
+  lua_pop(L, 1);
+  require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
+  require(lua_getiuservalue(L, 1, 2) == LUA_TNONE && lua_isnil(L, -1));
+  lua_pop(L, 1);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_entered++;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  return 1;
+}
+
+static int wait_for_metadata_read(lua_State *L) {
+  struct fixture *f = fixture;
+  mark_running(L);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (f->native_entered < 2)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  /* The native stack is now the only root of the result table. */
+  lua_pushnil(L);
+  require(lua_setiuservalue(L, 1, 1));
+  require(lua_gc(L, LUA_GCCOLLECT) == 0);
+  require(lua_getiuservalue(L, 1, 1) == LUA_TNIL);
+  lua_pop(L, 1);
+  return 0;
+}
+
+static void native_metadata_without_slot(struct fixture *f) {
+  init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  lua_newuserdatauv(f->main, 1, 1);
+  lua_newtable(f->main);
+  lua_setmetatable(f->main, -2);
+  lua_newtable(f->main);
+  lua_pushinteger(f->main, 51);
+  lua_setfield(f->main, -2, "answer");
+  require(lua_setiuservalue(f->main, -2, 1));
+  lua_setglobal(f->main, "metadata_owner");
+  lua_pushcfunction(f->main, read_native_metadata);
+  lua_setglobal(f->main, "read_native_metadata");
+  managed(f->main, "wait_for_metadata_read", wait_for_metadata_read);
+  submit(f, 0,
+         "return read_native_metadata(metadata_owner, "
+         "getmetatable(metadata_owner)).answer",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "wait_for_metadata_read(metadata_owner); return 52", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  require(collect(f, 1, LUA_OK) == 52);
+  finish(f);
+}
+
 static void voluntary(struct fixture *f) {
   init(f, 1);
   submit(f, 0, "for i=1,5 do coroutine.yield(i) end; return 42", 0);
@@ -2882,6 +2947,8 @@ int main(int argc, char **argv) {
     native_recall_during_stack_borrow(f, 0, 0);
   else if (strcmp(argv[1], "native_recall_with_retirement") == 0)
     native_recall_during_stack_borrow(f, 1, 1);
+  else if (strcmp(argv[1], "native_metadata_without_slot") == 0)
+    native_metadata_without_slot(f);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
