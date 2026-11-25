@@ -181,8 +181,9 @@ static void callback_snapshot(struct fixture *test) {
 static void snapshot_poll(lua_State *state, void *context) {
   struct fixture *test = context;
   unsigned index;
+  int promote = strstr(test->mode, "promote") != NULL;
   int iterator = strstr(test->mode, "iterator") != NULL;
-  int values = strstr(test->mode, "values") != NULL;
+  int values = strstr(test->mode, "values") != NULL || promote;
   if (test->armed) {
     lua_Debug frame;
     LuaWorldScope scope;
@@ -191,6 +192,14 @@ static void snapshot_poll(lua_State *state, void *context) {
     require(lua_getstack(state, 0, &frame));
     if (iterator || values) {
       require(lua_getinfo(state, "f", &frame));
+      if (promote) {
+        lua_pushvalue(state, -1);
+        lua_setglobal(state, "shared_iterator");
+        for (index = 1; index <= 2; ++index) {
+          lua_pushnil(state);
+          require(lua_setupvalue(state, -2, (int)index) != NULL);
+        }
+      }
       if (values) {
         require(lua_getupvalue(state, -1, 3) != NULL);
         for (index = 1; index <= 2; ++index) {
@@ -223,7 +232,8 @@ static void snapshot(struct fixture *test) {
   int find = strstr(test->mode, "find") != NULL;
   int gsub = strstr(test->mode, "gsub") != NULL;
   int byteclass = strstr(test->mode, "class") != NULL;
-  int values = strstr(test->mode, "values") != NULL;
+  int promote = strstr(test->mode, "promote") != NULL;
+  int values = strstr(test->mode, "values") != NULL || promote;
   int iterator = strstr(test->mode, "iterator") != NULL || values;
   int args = gsub ? 3 : find ? 4 : iterator ? 0 : 2;
   int status;
@@ -244,14 +254,16 @@ static void snapshot(struct fixture *test) {
   }
   if (iterator) {
     require(lua_pcall(state, 2, 1, 0) == LUA_OK);
-    require(lua_getupvalue(state, -1, 3) != NULL);
-    test->old_userdata = lua_touserdata(state, -1);
-    require(test->old_userdata != NULL);
-    lua_newtable(state);
-    lua_pushcfunction(state, finalize);
-    lua_setfield(state, -2, "__gc");
-    lua_setmetatable(state, -2);
-    lua_pop(state, 1);
+    if (!promote) {
+      require(lua_getupvalue(state, -1, 3) != NULL);
+      test->old_userdata = lua_touserdata(state, -1);
+      require(test->old_userdata != NULL);
+      lua_newtable(state);
+      lua_pushcfunction(state, finalize);
+      lua_setfield(state, -2, "__gc");
+      lua_setmetatable(state, -2);
+      lua_pop(state, 1);
+    }
   }
   test->armed = 1;
   state->state_poll = snapshot_poll;
@@ -276,12 +288,20 @@ static void snapshot(struct fixture *test) {
     require(lua_gettop(state) == 1 && lua_tointeger(state, 1) == 2049);
   require(state->native_roots == NULL && state->object_scopes == NULL);
   lua_settop(state, 0);
+  if (promote) {
+    lua_getglobal(state, "shared_iterator");
+    require(lua_type(state, -1) == LUA_TFUNCTION);
+    require(lua_pcall(state, 0, 1, 0) == LUA_ERRRUN);
+    lua_pop(state, 1);
+    lua_pushnil(state);
+    lua_setglobal(state, "shared_iterator");
+  }
   (void)lua_gc(state, LUA_GCCOLLECT);
   (void)lua_gc(state,
                LUA_GCCOLLECT); /* Retire finalized iterator and its values. */
   for (unsigned index = 0; index < (gsub ? 3u : 2u); ++index)
     require(test->inputs[index].released == 1);
-  require(test->finalized == (iterator ? 1u : 0u));
+  require(test->finalized == (iterator && !promote ? 1u : 0u));
 }
 static void overlap_poll(lua_State *state, void *context) {
   struct actor *actor = context;
@@ -529,6 +549,13 @@ static void *run(void *context) {
         "assert(s.match('(a(b)c)','%b()')=='(a(b)c)'); "
         "assert(s.match('a-b9','[%a%d%-]+')=='a-b9'); "
         "assert(s.match(']]','[%]]+')==']]'); "
+        "assert(s.match('ab'..z..'c','^[^c]+')=='ab'..z); "
+        "assert(s.match('ac'..z..'b','^[^'..z..']+')=='ac'); "
+        "assert(s.match('azzz]','^([^]]+)]')=='azzz'); "
+        "assert(s.match('baac','^([^c]+)a')=='ba'); "
+        "assert(s.match('baa','^([^b]*)b')==''); "
+        "local run=s.rep('a'..z,2049); "
+        "assert(s.match(run..'c','^[^c]+')==run); "
         "assert(s.match('ABc','%u+%l?')=='ABc' and s.match('a','[^x]')=='a'); "
         "assert(s.match(z,'%z')==z and s.match('q','%q')=='q'); "
         "local out={}; for n in s.gmatch('ab','()') do out[#out+1]=n end; "
@@ -538,6 +565,8 @@ static void *run(void *context) {
         "out={}; for v in s.gmatch('^a^a','^a') do out[#out+1]=v end; "
         "assert(#out==2 and out[1]=='^a' and out[2]=='^a'); "
         "assert(s.gmatch('abc','.',99)()==nil); "
+        "local captures=table.pack(s.gmatch('a',s.rep('()',24)..'a')()); "
+        "assert(captures.n==24 and captures[1]==1 and captures[24]==1); "
         "local v,n=s.gsub('abc','(.)','%1%1'); assert(v=='aabbcc' and n==3); "
         "v,n=s.gsub('a12 b34','(%d+)',function(x) return tonumber(x)*2 end); "
         "assert(v=='a24 b68' and n==2); "

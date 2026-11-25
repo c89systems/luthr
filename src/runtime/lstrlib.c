@@ -722,11 +722,31 @@ static const char *matchbalance (MatchState *ms, const char *s,
 }
 
 
-/* Consume the greedy prefix in bounded runs. Bracket expressions retain
-** their byte-by-byte charging because a single test can scan many items. */
+/* A one-byte exclusion can use a bounded byte search instead of walking
+** the bracket expression for every subject byte. */
+static const char *greedyexcluding (MatchState *ms, const char *s, int byte) {
+  while (s < ms->src_end) {
+    size_t left = ct_diff2sz(ms->src_end - s);
+    size_t budget = (LUA_NATIVE_WORK_SLICE - ms->work + 1u) / 2u;
+    size_t chunk = left < budget ? left : budget;
+    const char *stop = cast(const char *, memchr(s, byte, chunk));
+    if (stop != NULL) {
+      luaQ_workn(ms->L, &ms->work, 2u * ct_diff2sz(stop - s) + 1u);
+      return stop;
+    }
+    s += chunk;
+    luaQ_workn(ms->L, &ms->work, 2u * chunk);
+  }
+  return s;
+}
+
+/* Consume the greedy prefix in bounded runs. A general bracket expression
+** charges both the subject byte and the bracket entries it examines. */
 static const char *greedyprefix (MatchState *ms, const char *s,
                                  const char *p, const char *ep) {
   if (*p == '[') {
+    if (ep - p == 4 && p[1] == '^' && p[2] != L_ESC)
+      return greedyexcluding(ms, s, cast_uchar(p[2]));
     while (singlematch(ms, s, p, ep)) {
       s++;
       luaQ_work(ms->L, &ms->work);
@@ -1190,11 +1210,30 @@ static int badgmatch (lua_State *L, LuaObjectScope *scope) {
 }
 
 
+static int gmatchresults (MatchState *ms, LuaNativeRoot *roots,
+                          const char *start, const char *end) {
+  lua_State *L = ms->L;
+  int count = countcaptures(ms, start);
+  /* The caller owns the stack. Most captures fit its C frame as is. */
+  if (L->ci->top.p - L->top.p < count) {
+    lua_unlock(L);
+    luaL_checkstack(L, count, "too many captures");
+    lua_lock(L);
+  }
+  pushownedcaptures(ms, start, end, count);
+  for (unsigned index = 3; index != 0;)
+    luaR_poproot(L, &roots[--index]);
+  lua_unlock(L);
+  return count;
+}
+
+
 static int gmatch_aux (lua_State *L) {
   LuaNativeRoot roots[3];  /* selected userdata, subject and pattern */
   LuaObjectScope scope;
   CClosure *function;
   Udata *owner;
+  int local;
   unsigned index, work = 0;
   MatchState ms;
   lua_lock(L);
@@ -1204,30 +1243,30 @@ static int gmatch_aux (lua_State *L) {
   for (index = 0; index < 3; ++index)
     luaR_pushroot(L, &roots[index]);
   function = clCvalue(s2v(L->ci->func.p));
-  luaA_begin(L, obj2gco(function), &scope);
+  local = luaA_local(L, obj2gco(function));
+  if (!local) luaA_begin(L, obj2gco(function), &scope);
   luaR_setroot(L, &roots[0], &function->upvalue[2]);
-  luaA_end(L, &scope);
+  if (!local) luaA_end(L, &scope);
   if (!ttisfulluserdata(&roots[0].value))
     return badgmatch(L, NULL);
   owner = uvalue(&roots[0].value);
-  lua_unlock(L);
   for (;;) {
     GMatchState *gm;
     lua_Unsigned version;
     size_t ls, lp, next, last;
     int matched, committed;
     const char *s, *p, *src, *end = NULL;
-    lua_lock(L);
-    luaA_begin(L, obj2gco(owner), &scope);
+    local = luaA_local(L, obj2gco(owner));
+    if (!local) luaA_begin(L, obj2gco(owner), &scope);
     gm = gmatch_state(owner);
-    if (gm == NULL) return badgmatch(L, &scope);
+    if (gm == NULL) return badgmatch(L, local ? NULL : &scope);
     luaR_setroot(L, &roots[1], &owner->uv[0].uv);
     luaR_setroot(L, &roots[2], &owner->uv[1].uv);
     s = getlstr(tsvalue(&roots[1].value), ls);
     p = getlstr(tsvalue(&roots[2].value), lp);
     next = gm->next; last = gm->last; matched = gm->matched;
     version = gm->version;
-    luaA_end(L, &scope);
+    if (!local) luaA_end(L, &scope);
     lua_unlock(L);
     prepstate(&ms, L, s, ls, p, lp);
     ms.work = work;
@@ -1241,19 +1280,20 @@ static int gmatch_aux (lua_State *L) {
       return luaL_rootresult(L, roots, 3, 0);
     work = ms.work;
     lua_lock(L);
-    luaA_begin(L, obj2gco(owner), &scope);
+    /* Matching can poll. A private iterator can become shared during it. */
+    local = luaA_local(L, obj2gco(owner));
+    if (!local) luaA_begin(L, obj2gco(owner), &scope);
     gm = gmatch_state(owner);
-    if (gm == NULL) return badgmatch(L, &scope);
+    if (gm == NULL) return badgmatch(L, local ? NULL : &scope);
     committed = gm->version == version;
     if (committed) {
       gm->next = gm->last = ct_diff2sz(end - s);
       gm->matched = 1;
       gm->version++;
     }
-    luaA_end(L, &scope);
-    lua_unlock(L);
+    if (!local) luaA_end(L, &scope);
     if (committed)
-      return luaL_rootresult(L, roots, 3, push_captures(&ms, src, end));
+      return gmatchresults(&ms, roots, src, end);
     /* A peer consumed this position while matching ran outside ownership. */
   }
 }

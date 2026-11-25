@@ -903,7 +903,7 @@ foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
     foreach(case IN ITEMS semantics errors bindings oom stack snapshot_find
         snapshot_match snapshot_gsub snapshot_gsub_class snapshot_iterator
-        snapshot_values callback_snapshot parallel stress)
+        snapshot_values snapshot_promote callback_snapshot parallel stress)
       add_test(NAME pattern_library_${backend}_${case}_${gc}
         COMMAND pattern_library_test ${backend}_${case}_${gc})
       set_tests_properties(pattern_library_${backend}_${case}_${gc}
