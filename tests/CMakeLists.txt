@@ -251,6 +251,7 @@ target_link_options(gc_pacing_test PRIVATE -Wl,--wrap=luaC_tracebatch
 foreach(case IN ITEMS overdue explicit overflow fast persistent_incremental
     persistent_generational refresh_incremental refresh_generational
     managed_function_incremental managed_function_generational
+    leaf_publication_incremental leaf_publication_generational
     sweep_pressure sweep_poll_pressure sweep_credit cohort_promotion marking_edges born_black_incremental born_black_generational
     borrowed_incremental borrowed_generational bounded_incremental
     bounded_generational idle_incremental idle_generational

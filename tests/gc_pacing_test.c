@@ -1,3 +1,4 @@
+#include <laccess.h>
 #include <lapi.h>
 #include <lauxlib.h>
 #include <ldo.h>
@@ -932,6 +933,66 @@ static void managed_function(int generational) {
   lua_close(L);
 }
 
+static void leaf_publication(int generational) {
+  lua_State *L = luaL_newstate();
+  lua_State *peer;
+  TValue index;
+  Table *array, *hash, *first, *second, *graph;
+  require(L != NULL);
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_dostring(
+              L, "local keep; for i=1,6000 do keep={keep} end\n"
+                 "return {false}, {last=false}, {number=42,ratio=1.25},\n"
+                 "       {number=-7,ratio=2.5}, {child={},number=3}, keep") ==
+          LUA_OK);
+  lua_pushliteral(L, "last");
+  lua_lock(L);
+  luaA_share(L, gcvalue(s2v(L->stack.p + 1)));
+  luaA_share(L, gcvalue(s2v(L->stack.p + 2)));
+  start_stopped_trace(L);
+  require(luaC_tracing(L) && !luaW_stopped(&G(L)->world));
+  array = hvalue(s2v(L->stack.p + 1));
+  hash = hvalue(s2v(L->stack.p + 2));
+  first = hvalue(s2v(L->stack.p + 3));
+  second = hvalue(s2v(L->stack.p + 4));
+  graph = hvalue(s2v(L->stack.p + 5));
+  setivalue(&index, 1);
+  require(!luaH_tryset(L, array, &index, s2v(L->stack.p + 5), 1));
+  require(luaA_localtable(L, graph));
+  require(luaH_tryset(L, array, &index, s2v(L->stack.p + 3), 1));
+  require(luaH_tryset(L, hash, s2v(L->stack.p + 7), s2v(L->stack.p + 4), 0));
+  require(first->sharing == LUA_OBJECT_SHARED &&
+          second->sharing == LUA_OBJECT_SHARED);
+  lua_unlock(L);
+  lua_settop(L, 2); /* Only the published slots retain these children. */
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(L, 1, 1) == LUA_TTABLE);
+  require(lua_getfield(L, -1, "number") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 42);
+  lua_pop(L, 1);
+  require(lua_getfield(L, -1, "ratio") == LUA_TNUMBER);
+  require(lua_tonumber(L, -1) == 1.25);
+  lua_pop(L, 2);
+  require(lua_getfield(L, 2, "last") == LUA_TTABLE);
+  require(lua_getfield(L, -1, "number") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == -7);
+  lua_pop(L, 1);
+  require(lua_getfield(L, -1, "ratio") == LUA_TNUMBER);
+  require(lua_tonumber(L, -1) == 2.5);
+  lua_pop(L, 1);
+  peer = lua_newthread(L);
+  lua_pushvalue(L, 3);
+  lua_xmove(L, peer, 1);
+  lua_pushliteral(peer, "changed");
+  lua_setfield(peer, 1, "ratio");
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getfield(L, 3, "ratio") == LUA_TSTRING);
+  require(strcmp(lua_tostring(L, -1), "changed") == 0);
+  lua_close(L);
+}
+
 int main(int argc, char **argv) {
   l_mem basic, overdue;
   require(argc == 2);
@@ -942,6 +1003,10 @@ int main(int argc, char **argv) {
   }
   if (strncmp(argv[1], "managed_function_", 17) == 0) {
     managed_function(strcmp(argv[1], "managed_function_generational") == 0);
+    return 0;
+  }
+  if (strncmp(argv[1], "leaf_publication_", 17) == 0) {
+    leaf_publication(strstr(argv[1], "generational") != NULL);
     return 0;
   }
   if (strcmp(argv[1], "marking_edges") == 0) {

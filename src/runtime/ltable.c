@@ -2427,8 +2427,8 @@ l_sinline int sharedwriteallowed (lua_State *L, Table *table) {
 }
 
 l_sinline uint64_t sharedlayout (lua_State *L, Table *table,
-                                 const TValue *key, const TValue *value) {
-  return sharedwriteallowed(L, table) && published(key) && published(value)
+                                 const TValue *key) {
+  return sharedwriteallowed(L, table) && published(key)
     ? __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) : 1;
 }
 
@@ -2545,9 +2545,11 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   LuaTableWriter *writer;
   Node *node;
   lu_byte oldtag;
-  uint64_t layout;
-  layout = sharedlayout(L, table, key, value);
+  uint64_t layout = sharedlayout(L, table, key);
+  int publish;
   if (layout & 1) return 0;
+  publish = !published(value);
+  if (publish && !ttistable(value)) return 0;
   if (ttisinteger(key)) {
     slot.payload = NULL;
     slot.node = NULL;
@@ -2562,10 +2564,12 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   }
   else if (!locateslot(table, key, rawtt(key), layout, &slot, 1)) return 0;
   if (slot.part != NULL) {
-    if (slot.payload == NULL)
+    if (slot.payload == NULL) {
+      if (publish) return 0;  /* growth may need transitive promotion */
       return sharedpartset(L, table, slot.part, key, value, raw, layout,
                          retry != NULL ? &retry->part : NULL, NULL,
                          retry != NULL ? &retry->needed : NULL);
+    }
     if (slot.tag == NULL)
       return sharedintset(L, table, &slot, value, raw, layout, retry);
   }
@@ -2578,6 +2582,7 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   oldtag = *slot.tag;
   if ((!raw && tagisempty(oldtag) && table->metatable != NULL) ||
       (node != NULL && ttisnil(value) && keyiscollectable(node)) ||
+      (publish && !luaA_tryshareleaf(L, hvalue(value))) ||
       (oldtag != rawtt(value) && (slot.part == NULL || !tagisempty(oldtag)) &&
        !luaH_beginsplit(table, writer, slot.payload, layout))) {
     luaH_releasewriter(L, table, writer);
@@ -2920,7 +2925,7 @@ int luaH_setshared (lua_State *L, Table *table, const TValue *key,
       retry.part = NULL;
       preparegrowth(L, part, &growth, retry.needed);
       result = sharedpartset(L, table, part, key, value, raw,
-                             sharedlayout(L, table, key, value), &retry.part,
+                             sharedlayout(L, table, key), &retry.part,
                              &growth, &retry.needed);
       finishgrowth(L, &growth);
       if (result > 0) return 1;
@@ -3154,7 +3159,8 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
 
 
 
-static int availableread (lua_State *L, Table *table, uint64_t sequence) {
+l_sinline int __attribute__((always_inline)) availableread (
+    lua_State *L, Table *table, uint64_t sequence) {
   return !(sequence & 1) &&
     !(L != NULL && luaC_tracing(L) &&
       luaC_weakmode(luaC_tablestate(table)));
@@ -3206,9 +3212,9 @@ static int __attribute__((noinline)) readshortfallback (
 
 /* Interned-key hits in a single image usually need only the first node.
 ** Check the established layout version before interpreting the copied value. */
-l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
-                             TString *key, TValue *result, lu_byte *tag,
-                             uint64_t *sequence) {
+l_sinline int __attribute__((always_inline)) readshortslot (
+    global_State *g, lua_State *L, Table *table, TString *key, TValue *result,
+    lu_byte *tag, uint64_t *sequence) {
   Node *nodes;
   *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);

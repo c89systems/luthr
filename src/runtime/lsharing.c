@@ -25,26 +25,29 @@ l_sinline void packrecordfield (Table *table, Value *payload, unsigned index,
   }
 }
 
-/* The owner is still the only mutator. With no tracing, the representation
-** can change before publishing ownership, without an object scope. A trace
-** cannot start scanning the new epoch before this admission acknowledges it. */
+/* The owner is still the only mutator. During tracing leave the field image
+** intact for any scanner that sampled it, and retain the leaf before making
+** it reachable from another execution. */
 static int shareleaf (lua_State *L, Table *table) {
   enum { LEAF_SLOTS = 4 };
   Node *nodes = table->node;
   Table *keys = luaH_recordkeys(nodes);
   unsigned i, size;
+  int tracing = luaC_tracing(L);
   if (table->metatable != NULL ||
       (__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1) ||
-      luaC_tracing(L) || luaC_tasktable(table))
+      luaC_tasktable(table) || (tracing && !luaC_strongtable(G(L), table)))
     return 0;
   if (keys != NULL) {
     uintptr_t tags = table->arraydata;
     lua_assert((tags & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS);
     for (i = 0; i < keys->asize; i++)
       if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) return 0;
-    for (i = 0; i < keys->asize; i++)
-      packrecordfield(table, luaH_inlinerecordvalues(table) + i, i,
-                       luaH_recordtag(tags, i));
+    if (!tracing) {
+      for (i = 0; i < keys->asize; i++)
+        packrecordfield(table, luaH_inlinerecordvalues(table) + i, i,
+                         luaH_recordtag(tags, i));
+    }
   }
   else {
     if (table->asize > LEAF_SLOTS || luaH_hashdir(nodes) != NULL) return 0;
@@ -57,6 +60,7 @@ static int shareleaf (lua_State *L, Table *table) {
           (keyiscollectable(nodes + i) && !keyisshrstr(nodes + i))))
         return 0;
   }
+  if (tracing) luaC_traceobject(L, obj2gco(table));
   __atomic_store_n(&table->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
   return 1;
 }
