@@ -724,8 +724,8 @@ static int drainnursery (lua_State *L, LuaNurseryTrace *trace, NurseryScan scan,
       if (t->metatable != NULL)
         visitnursery(L, obj2gco(t->metatable), &gray, scan);
       if (keys != NULL) {
-        Value *values = luaH_recordvalues(t);
-        uintptr_t tags = t->arraydata;
+        Value *values = luaH_recordvalues(t, t->arraydata);
+        uintptr_t tags = luaH_recordtags(t->arraydata);
         unsigned i;
         if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS)
           visitnursery(L, obj2gco(keys), &gray, scan);

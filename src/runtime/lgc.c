@@ -824,8 +824,9 @@ static int traversearray (LuaTraceWork *work, Table *h) {
 }
 
 static int traverserecord (LuaTraceWork *work, Table *h, Table *keys) {
-  Value *values = luaH_recordvalues(h);
-  uintptr_t tags = h->arraydata;
+  uintptr_t image = h->arraydata;
+  Value *values = luaH_recordvalues(h, image);
+  uintptr_t tags = luaH_recordtags(image);
   unsigned i;
   int marked = 0;
   for (i = 0; i < keys->asize; i++) {

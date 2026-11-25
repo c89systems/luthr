@@ -1148,6 +1148,8 @@ lu_mem luaH_size (const Table *owner, const Table *layout) {
   lu_mem sz = cast(lu_mem, sizeof(Table) + owner->inline_bytes);
   Node *image = layout->node;
   LuaHashDirectory *directory = luaH_hashdir(image);
+  if (luaH_recordbacking(layout->arraydata) != NULL)
+    return sz + sizeof(LuaRecordStorage);
   if (layout->asize != 0 && separate(owner, luaH_array(layout) - layout->asize))
     sz += concretesize(layout->asize);
   if (directory == NULL) sz += hashbytes(owner, image);
@@ -1192,6 +1194,8 @@ l_mem luaH_arrayslots (const Table *table) {
 ** never enters the host allocator while a collector could wait on it. */
 size_t luaH_pooledsize (Table *t) {
   size_t size = sizeof(*t) + t->inline_bytes;
+  if (luaH_recordbacking(t->arraydata) != NULL)
+    return size + sizeof(LuaRecordStorage);
   if (luaH_hashdir(t->node) != NULL) return 0;
   if (t->asize != 0 && separate(t, luaH_array(t) - t->asize)) {
     size_t bytes = concretesize(t->asize);
@@ -1219,6 +1223,8 @@ l_mem luaH_freepooled (lua_State *L, Table *t) {
 
 void luaH_retire (lua_State *L, Table *t) {
   unsigned i, parts = luaH_hashparts(t);
+  LuaRecordStorage *backing = luaH_recordbacking(t->arraydata);
+  if (backing != NULL) luaM_retire_(L, backing, sizeof(*backing));
   for (i = 0; i < parts; ++i) {
     Node *nodes = luaH_hashnodes(t, i);
     const LuaPartArray *array = i != 0 ? luaH_partarray(t, i) : NULL;
@@ -1246,6 +1252,8 @@ void luaH_retire (lua_State *L, Table *t) {
 
 void luaH_freeparts (lua_State *L, Table *t, int private) {
   unsigned i, parts = luaH_hashparts(t);
+  LuaRecordStorage *backing = luaH_recordbacking(t->arraydata);
+  if (backing != NULL) freepart(L, backing, sizeof(*backing), private);
   for (i = 0; i < parts; ++i) {
     const LuaPartArray *array = i != 0 ? luaH_partarray(t, i) : NULL;
     freehash(L, t, luaH_hashnodes(t, i), private);
@@ -1358,8 +1366,25 @@ static int insertkey (lua_State *L, Node *nodes, const TValue *key, TValue *valu
   return insertat(L, nodes, key, value, mainpositionTV(nodes, key));
 }
 
+/* Stop stale atomic writers at the old address. Any writer winning before
+** the exchange contributes its value to the replacement. All allocation
+** must be complete before the first exchange. */
+static lu_byte freezerecordslot (Table *table, uintptr_t image, uintptr_t tags,
+                                  unsigned index, TValue *value) {
+  Value *payload = luaH_recordvalues(table, image) + index;
+  lu_byte tag = luaH_recordtag(tags, index);
+  if (tag == LUA_RECORD_PACKED)
+    return luaH_unpackrecord(__atomic_exchange_n(&payload->bits, LUA_RECORD_FROZEN,
+                                                __ATOMIC_ACQ_REL), value);
+  return luaH_recordlocalvalue(payload, tag, value);
+}
+
 static void materializerecord (lua_State *L, Table *t) {
   Table image, *keys = luaH_recordkeys(t->node);
+  uintptr_t previous = t->arraydata;
+  LuaRecordStorage *backing = luaH_recordbacking(previous);
+  LuaTableRetirement *retirement = NULL;
+  uintptr_t tags;
   unsigned i;
   int logsize;
   size_t bytes;
@@ -1367,12 +1392,19 @@ static void materializerecord (lua_State *L, Table *t) {
   logsize = luaO_ceillog2(keys->asize);
   bytes = nodebytes(logsize);
   luaC_taskbacking(L, t, bytes);
-  if (!setnodevector(L, &image, logsize)) luaM_error(L);
+  if (backing != NULL) retirement = luaM_new(L, LuaTableRetirement);
+  if (!setnodevector(L, &image, logsize)) {
+    if (retirement != NULL) luaM_free(L, retirement);
+    luaM_error(L);
+  }
   /* Keep the installed image visible throughout the allocation. */
   luaC_traceview(L, t);
+  previous = t->arraydata;  /* an allocation retry may have cleared weak values */
+  lua_assert(luaH_recordbacking(previous) == backing);
+  tags = luaH_recordtags(previous);
   for (i = 0; i < keys->asize; i++) {
     TValue value;
-    if (!tagisempty(luaH_recordvalue(t, i, &value))) {
+    if (!tagisempty(freezerecordslot(t, previous, tags, i, &value))) {
       TValue key;
       int inserted;
       arr2obj(keys, i, &key);
@@ -1385,6 +1417,13 @@ static void materializerecord (lua_State *L, Table *t) {
   __atomic_store_n(&t->arraydata, 0, __ATOMIC_RELEASE);
   __atomic_store_n(&t->node, image.node, __ATOMIC_RELEASE);
   if (luaC_tasktable(t)) luaC_taskresize(L, t, cast(l_mem, bytes));
+  if (retirement != NULL) {
+    retirement->array = backing;
+    retirement->array_bytes = sizeof(*backing);
+    retirement->nodes = NULL;
+    retirement->node_bytes = 0;
+    luaHS_publish(L, retirement, 0);
+  }
 }
 
 /*
@@ -1794,7 +1833,9 @@ l_sinline int __attribute__((always_inline)) findhashslot (
     if (writing && ttisshrstring(key)) {
       unsigned field = luaH_recordindex(keys, tsvalue(key));
       if (field < keys->asize) {
-        slot->payload = luaH_recordvalues(table) + field;
+        uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+        if (!(image & LUA_RECORD_TAGS)) return 0;
+        slot->payload = luaH_recordvalues(table, image) + field;
         slot->tag = NULL;
         slot->field = field;
       }
@@ -2414,12 +2455,17 @@ l_sinline LuaTableWriter *claimslot (lua_State *L, Table *table, Value *payload,
 static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table,
     const LuaTableSlot *slot, const TValue *key, const TValue *value, int raw,
     uint64_t layout, LuaTableWriteRetry *retry) {
-  LuaTableWriter *writer = claimslot(L, table, slot->payload, layout, retry);
+  LuaTableWriter *writer;
+  uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
   lu_byte oldtag, newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
   int assigned = 0;
+  if (!(image & LUA_RECORD_TAGS)) return 0;
+  if (luaH_recordtag(luaH_recordtags(image), slot->field) == LUA_RECORD_PACKED)
+    return 0;
+  writer = claimslot(L, table, slot->payload, layout, retry);
   if (writer == NULL) return 0;
-  oldtag = luaH_recordtag(__atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE),
-                        slot->field);
+  image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+  oldtag = luaH_recordtag(luaH_recordtags(image), slot->field);
   if (!tagisempty(oldtag) || raw || table->metatable == NULL) {
     if (tagisempty(oldtag) && ttisnil(value)) assigned = 1;
     else if (oldtag == newtag || luaH_beginsplit(table, writer, slot->payload,
@@ -2479,7 +2525,34 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   LuaTableWriter *writer;
   Node *node;
   lu_byte oldtag;
-  uint64_t layout = sharedlayout(L, table, key, value);
+  uint64_t layout;
+  /* The field identity is fixed until the inline word freezes. A hit
+  ** changes neither membership nor GC edges. Its CAS and layout retirement
+  ** are ordered by that word, without the general table admission. */
+  if (ttisshrstring(key)) {
+    uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+    if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS) {
+      Table *keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
+      if (keys != NULL) {
+        TString *name = tsvalue(key);
+        unsigned index = luaH_recordindex(keys, name);
+        if (index < keys->asize && luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
+          uint64_t next = luaH_packrecord(value);
+          Value *payload = luaH_inlinerecordvalues(table) + index;
+          uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+          if (next == LUA_RECORD_FROZEN || tagisempty(cast_byte(next)) ||
+              old == LUA_RECORD_FROZEN || tagisempty(cast_byte(old)) ||
+              (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) ||
+              !__atomic_compare_exchange_n(&payload->bits, &old, next, 0,
+                                           __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return 0;
+          invalidatemethod(L, table, name);
+          return 1;
+        }
+      }
+    }
+  }
+  layout = sharedlayout(L, table, key, value);
   if (layout & 1) return 0;
   if (ttisinteger(key)) {
     slot.payload = NULL;
@@ -2538,20 +2611,57 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   return 1;
 }
 
+static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
+    Table *table, unsigned index, const TValue *value, int raw) {
+  uintptr_t image = table->arraydata;
+  Value *payload = luaH_recordvalues(table, image) + index;
+  uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+  uint64_t next;
+  lua_assert(old != LUA_RECORD_FROZEN);
+  if (tagisempty(cast_byte(old))) {
+    if (!raw && table->metatable != NULL) return 0;
+    if (ttisnil(value)) return 1;  /* preserve a never-present field */
+  }
+  next = luaH_packrecord(value);
+  if (next != LUA_RECORD_FROZEN) {
+    __atomic_store_n(&payload->bits, next, __ATOMIC_RELEASE);
+  }
+  else {
+    unsigned i, fields = luaH_recordkeys(table->node)->asize;
+    LuaRecordStorage *backing = luaM_new(L, LuaRecordStorage);
+    image = table->arraydata;
+    backing->tags = LUA_RECORD_TAGS;
+    for (i = 0; i < fields; i++) {
+      TValue saved = {0};
+      lu_byte tag = freezerecordslot(table, image, image, i, &saved);
+      backing->values[i] = i == index ? val_(value) : val_(&saved);
+      if (i == index) tag = rawtt(value);
+      backing->tags |= cast(uintptr_t, tag) << ((i + 1) * 8);
+    }
+    __atomic_store_n(&table->arraydata, cast(uintptr_t, backing) |
+                     LUA_RECORD_TAGS | LUA_RECORD_BACKING, __ATOMIC_RELEASE);
+  }
+  return 1;
+}
+
 /* Under the private table's mutation boundary, shade the displaced edge
 ** here. The common assignment barrier shades the incoming value before
 ** reopening the layout to the concurrent marker. */
 l_sinline int privaterecordslot (lua_State *L, Table *table, unsigned index,
                                  TValue *value, int raw, int tracing) {
-  lu_byte tag = luaH_recordtag(table->arraydata, index);
+  uintptr_t image = table->arraydata;
+  Value *payload = luaH_recordvalues(table, image) + index;
+  lu_byte tag = luaH_recordtag(luaH_recordtags(image), index);
+  if (tag == LUA_RECORD_PACKED)
+    return assignpackedrecord(L, table, index, value, raw);
   if (tagisempty(tag) && !raw && table->metatable != NULL) return 0;
   if (tracing && (tag & BIT_ISCOLLECTABLE))
-    luaC_traceobject(L, luaH_recordvalues(table)[index].gc);
+    luaC_traceobject(L, payload->gc);
   if (ttisnil(value)) {
     if (tag != LUA_VABSTKEY) luaH_setrecordtag(table, index, LUA_VEMPTY);
   }
   else {
-    __atomic_store(luaH_recordvalues(table) + index, &val_(value), __ATOMIC_RELEASE);
+    __atomic_store(payload, &val_(value), __ATOMIC_RELEASE);
     luaH_setrecordtag(table, index, rawtt(value));
   }
   return 1;
@@ -2917,11 +3027,15 @@ static lua_Unsigned rawgetn (lua_State *L, Table *t) {
 
 
 
-static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
-  *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
-  return !(*sequence & 1) &&
+static int availableread (lua_State *L, Table *table, uint64_t sequence) {
+  return !(sequence & 1) &&
     !(L != NULL && luaC_tracing(L) &&
       luaC_weakmode(luaC_tablestate(table)));
+}
+
+static int readsequence (lua_State *L, Table *table, uint64_t *sequence) {
+  *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  return availableread(L, table, *sequence);
 }
 
 l_sinline int readslot (global_State *g, lua_State *L, Table *table,
@@ -2969,22 +3083,37 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
                              TString *key, TValue *result, lu_byte *tag,
                              uint64_t *sequence) {
   Node *nodes;
-  if (!readsequence(L, table, sequence)) return 0;
+  *sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
   {
     Table *keys = luaH_recordkeys(nodes);
     if (keys != NULL) {
       unsigned index = luaH_recordindex(keys, key);
-      TValue value;
+      TValue value = {0};
       if (index < keys->asize) {
+        uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+        if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS &&
+            luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
+          const Value *payload = luaH_inlinerecordvalues(table) + index;
+          uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+          if (bits != LUA_RECORD_FROZEN && !tagisempty(cast_byte(bits))) {
+            *tag = luaH_unpackrecord(bits, result);
+            return 1;
+          }
+        }
+        if (!availableread(L, table, *sequence)) return 0;
         if (!luaH_readrecord(g, table, index, &value, *sequence)) return 0;
       }
-      else settt_(&value, LUA_VABSTKEY);
+      else {
+        if (!availableread(L, table, *sequence)) return 0;
+        settt_(&value, LUA_VABSTKEY);
+      }
       if (!luaH_samelayout(table, *sequence)) return 0;
       *tag = luaH_hashvalue(&value, result);
       return 1;
     }
   }
+  if (!availableread(L, table, *sequence)) return 0;
   if (!(*sequence & LUA_TABLE_SPLIT_VALUES) && luaH_hashdir(nodes) == NULL) {
     Node *node = luaH_shortposition(nodes, key);
     if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
@@ -3308,22 +3437,19 @@ void luaH_resizearray (lua_State *L, Table *t, unsigned asize) {
 }
 
 static int nextrecord (lua_State *L, Table *t, Table *keys, StkId key) {
-  uintptr_t tags = t->arraydata;
   unsigned i = 0;
+  TValue value;
   if (!ttisnil(s2v(key))) {
     const TValue *previous = s2v(key);
     if (ttisshrstring(previous)) i = luaH_recordindex(keys, tsvalue(previous));
     else if (ttislngstring(previous)) i = recordlongindex(keys, tsvalue(previous));
     else i = keys->asize;
-    if (i == keys->asize || luaH_recordtag(tags, i) == LUA_VABSTKEY)
+    if (i == keys->asize || luaH_recordvalue(t, i, &value) == LUA_VABSTKEY)
       luaG_runerror(L, "invalid key to 'next'");
     i++;
   }
-  i = luaH_nextrecordslot(keys, tags, i);
-  if (i < keys->asize) {
-    TValue value;
-    val_(&value) = luaH_recordvalues(t)[i];
-    settt_(&value, luaH_recordtag(tags, i));
+  for (; i < keys->asize; i++) {
+    if (tagisempty(luaH_recordvalue(t, i, &value))) continue;
     arr2obj(keys, i, s2v(key));
     setobj2s(L, key + 1, &value);
     return 1;

@@ -89,8 +89,10 @@ l_sinline int luaH_trygetshortstr (lua_State *L, Table *table, TString *key,
   keys = luaH_recordkeys(nodes);
   if (keys != NULL) {
     unsigned index = luaH_recordindex(keys, key);
-    found = index < keys->asize ? luaH_recordvalue(table, index, result)
-                               : LUA_VABSTKEY;
+    found = index < keys->asize
+      ? luaH_recordlocalvalue(luaH_inlinerecordvalues(table) + index,
+                              luaH_recordtag(table->arraydata, index), result)
+      : LUA_VABSTKEY;
   }
   else
     found = luaH_hashvalue(luaH_shortslot(luaH_shortposition(nodes, key), key),
@@ -145,22 +147,35 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
   return luaH_samerow(writer, before);
 }
 
-/* The record's tags share a word, but each payload has its own writer row.
-** Sample the tag after entering that row's version and leave the layout
-** check to the caller, which also validates the shape and any earlier reads. */
+/* Packed slots are complete atomic values. For a split slot, sample the tag
+** after entering the writer row's version. The caller validates the layout,
+** including the shape it used to select this field. */
 l_sinline int luaH_readrecord (global_State *g, Table *table, unsigned index,
                                TValue *value, uint64_t layout) {
-  const Value *payload = luaH_recordvalues(table) + index;
+  uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+  const Value *payload;
   LuaTableWriter *writer = NULL;
   uint64_t before = 0;
-  uintptr_t tags;
+  lu_byte tag;
+  if (!(image & LUA_RECORD_TAGS)) return 0;
+  payload = luaH_recordvalues(table, image) + index;
+  tag = luaH_recordtag(luaH_recordtags(image), index);
+  if (tag == LUA_RECORD_PACKED) {
+    uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+    if (bits == LUA_RECORD_FROZEN) return 0;
+    luaH_unpackrecord(bits, value);
+    return 1;
+  }
   if (layout & LUA_TABLE_SPLIT_VALUES) {
     writer = luaH_writer(g, payload);
     if (!luaH_readrow(writer, payload, &before)) return 0;
+    uintptr_t current = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+    if (!(current & LUA_RECORD_TAGS) ||
+        luaH_recordbacking(current) != luaH_recordbacking(image)) return 0;
+    tag = luaH_recordtag(luaH_recordtags(current), index);
+    if (tag == LUA_RECORD_PACKED) return 0;  /* layout changed during entry */
   }
-  tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-  if (!(tags & LUA_RECORD_TAGS)) return 0;
-  settt_(value, luaH_recordtag(tags, index));
+  settt_(value, tag);
   if (!isempty(value)) __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
   return luaH_samerow(writer, before);
 }

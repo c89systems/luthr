@@ -69,11 +69,25 @@ void luaA_share (lua_State *L, GCObject *object) {
           unsigned p, parts = luaH_hashparts(table);
           enqueue(L, cast(GCObject *, table->metatable), &roots.pending);
           if (keys != NULL) {
-            Value *values = luaH_recordvalues(table);
             uintptr_t tags = table->arraydata;
-            for (i = 0; i < keys->asize; i++)
-              if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE)
+            Value *values = luaH_recordvalues(table, tags);
+            lua_assert(luaH_recordbacking(tags) == NULL);
+            for (i = 0; i < keys->asize; i++) {
+              lu_byte tag = luaH_recordtag(tags, i);
+              if (tag & BIT_ISCOLLECTABLE)
                 enqueue(L, values[i].gc, &roots.pending);
+              else {
+                TValue value = {0};
+                uint64_t packed;
+                settt_(&value, tag);
+                if (tag == LUA_VNUMINT) val_(&value) = values[i];
+                packed = luaH_packrecord(&value);
+                if (packed != LUA_RECORD_FROZEN) {
+                  __atomic_store_n(&values[i].bits, packed, __ATOMIC_RELEASE);
+                  luaH_setrecordtag(table, i, LUA_RECORD_PACKED);
+                }
+              }
+            }
             break;
           }
           for (i = 0; i < table->asize; i++)

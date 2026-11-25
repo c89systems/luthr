@@ -262,6 +262,38 @@ static void record_table(lua_State *L, lua_State *other) {
           strcmp(lua_tostring(other, -1), "record") == 0);
   lua_pop(other, 2);
 
+  run_chunk(L, "return {first=1, second=2, vacant=nil}", 1);
+  record = lua_topointer(L, 2);
+  lua_setglobal(L, "record_fixture");
+  {
+    uint64_t sequence = record->sequence;
+    lua_gc(L, LUA_GCSTOP);
+    run_chunk(L,
+              "local t = record_fixture; "
+              "t.first = -(1 << 55); assert(t.first == -(1 << 55)); "
+              "t.first = (1 << 55)-1; assert(t.first == (1 << 55)-1); "
+              "t.first = false; assert(t.first == false); "
+              "t.first = true; assert(t.first == true)",
+              0);
+    require(record->sequence == sequence);
+    lua_gc(L, LUA_GCRESTART);
+  }
+  run_chunk(
+      L,
+      "local t = record_fixture; record_fixture = nil; "
+      "assert(not pcall(next, t, 'vacant')); "
+      "local cursor = next(t); t[cursor] = nil; "
+      "local field = next(t, cursor); assert(field ~= nil); "
+      "setmetatable(t, {__newindex=function() error('unexpected write') end}); "
+      "t[field] = math.maxinteger; assert(t[field] == math.maxinteger); "
+      "assert(next(t, cursor) == field); "
+      "t[field] = -0.0; assert(1/t[field] == -math.huge); "
+      "t[field] = {value=42}; collectgarbage('collect'); "
+      "assert(t[field].value == 42); "
+      "for i=1,100 do rawset(t,i,i) end; collectgarbage('collect'); "
+      "assert(t[field].value == 42 and t[100] == 100)",
+      0);
+
   run_chunk(L,
             "local function make(mode) "
             "  local key, value = {}, 'weak-'..mode; "

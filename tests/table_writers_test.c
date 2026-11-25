@@ -227,6 +227,49 @@ static void check_writer_groups(lua_State *L) {
   lua_pop(L, 1);
 }
 
+static void check_packed_transition(lua_State *L) {
+  struct timespec deadline;
+  pthread_t owner;
+  require(luaL_dostring(L, "return {['field-1']=1, ['field-2']=2}") == LUA_OK);
+  probe.table = (Table *)lua_topointer(L, 1);
+  probe.hash = probe.graph = 1;
+  probe.first = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, probe.first, 1);
+  require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+  deadline.tv_sec += 10;
+  require(pthread_create(&owner, NULL, first, NULL) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!probe.entered)
+    require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
+            0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+
+  /* The first writer holds the layout to insert a GC reference. The scalar
+   * write can still finish, and the conversion must copy its new value. */
+  lua_pushinteger(L, 42);
+  lua_setfield(L, 1, "field-2");
+  require(lua_getfield(L, 1, "field-2") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 42);
+  lua_pop(L, 1);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  probe.release = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_join(owner, NULL) == 0);
+
+  require(luaH_recordbacking(probe.table->arraydata) != NULL);
+  require(luaH_inlinerecordvalues(probe.table)[1].bits == LUA_RECORD_FROZEN);
+  lua_pushinteger(L, 33);
+  lua_rawseti(L, 1, 1); /* retire the general record as it grows */
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getfield(L, 1, "field-1") == LUA_TTABLE);
+  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 11);
+  lua_pop(L, 2);
+  require(lua_getfield(L, 1, "field-2") == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 42);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   pthread_t a, b, c;
@@ -242,9 +285,19 @@ int main(int argc, char **argv) {
   probe.second_parent = 1;
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
+  if (strcmp(argv[2], "record_packed") == 0) {
+    check_packed_transition(L);
+    lua_close(L);
+    require(pthread_cond_destroy(&probe.changed) == 0);
+    require(pthread_mutex_destroy(&probe.mutex) == 0);
+    return 0;
+  }
   if (probe.record) {
-    require(luaL_dostring(L, "return {['field-1']=0, ['field-2']=0}") ==
+    require(luaL_loadstring(
+                L, "local n=...; return {['field-1']=n, ['field-2']=n}") ==
             LUA_OK);
+    lua_pushinteger(L, LUA_MININTEGER);
+    require(lua_pcall(L, 1, 1, 0) == LUA_OK);
     require(luaH_recordkeys(((Table *)lua_topointer(L, 1))->node) != NULL);
     snprintf(probe.hash_second, sizeof(probe.hash_second), "field-2");
   } else
@@ -342,7 +395,7 @@ int main(int argc, char **argv) {
     /* A paused same-type store leaves the previous atomic payload readable. */
     require((probe.hash ? lua_getfield(L, 1, "field-1")
                         : lua_rawgeti(L, 1, 1)) == LUA_TNUMBER);
-    require(lua_tointeger(L, -1) == 0);
+    require(lua_tointeger(L, -1) == (probe.record ? LUA_MININTEGER : 0));
     lua_pop(L, 1);
   }
   /* A collector must defer rather than park, and must preserve the activity
@@ -362,7 +415,7 @@ int main(int argc, char **argv) {
           luaH_readrecord(G(L), probe.table, 0, &value, probe.table->sequence);
       require(read == !probe.graph);
       if (read)
-        require(ttisinteger(&value) && ivalue(&value) == 0);
+        require(ttisinteger(&value) && ivalue(&value) == LUA_MININTEGER);
       require(
           luaH_readrecord(G(L), probe.table, 1, &value, probe.table->sequence));
       require(probe.graph ? ttistable(&value) : ttisinteger(&value));

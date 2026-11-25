@@ -39,13 +39,31 @@ l_sinline int luaH_samelayout (const Table *table, uint64_t layout) {
   return ((current ^ layout) & ~cast(uint64_t, LUA_TABLE_WRITER_GROUP_MASK)) == 0;
 }
 
-/* A record keeps its payloads inline and uses the unused array pointer word
-** for tags. The low bit distinguishes tags from an aligned array pointer.
-** The node field points to the constructor's shared immutable key array. */
+/* The node field points to the constructor's immutable key array. The array
+** word holds either inline tags or a pointer to complete replacement slots.
+** Both forms keep the low bit set, unlike an ordinary array pointer. */
 #define LUA_RECORD_TAG cast(uintptr_t, 2)
 #define LUA_RECORD_TAGS cast(uintptr_t, 1)
-enum { LUA_RECORD_MAX_FIELDS = 4 };
+#define LUA_RECORD_BACKING cast(uintptr_t, 2)
+/* The packed marker is outside the Lua tag range and carries no GC edge. */
+enum { LUA_RECORD_MAX_FIELDS = 4, LUA_RECORD_PACKED = 0x3f };
+#define LUA_RECORD_FROZEN UINT64_MAX
 _Static_assert(sizeof(uintptr_t) > LUA_RECORD_MAX_FIELDS, "record tag word");
+
+typedef struct LuaRecordStorage {
+  uintptr_t tags;
+  Value values[LUA_RECORD_MAX_FIELDS];
+} LuaRecordStorage;
+
+l_sinline LuaRecordStorage *luaH_recordbacking (uintptr_t image) {
+  uintptr_t flags = LUA_RECORD_TAGS | LUA_RECORD_BACKING;
+  return (image & flags) == flags ? cast(LuaRecordStorage *, image & ~flags) : NULL;
+}
+
+l_sinline uintptr_t luaH_recordtags (uintptr_t image) {
+  LuaRecordStorage *backing = luaH_recordbacking(image);
+  return backing != NULL ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE) : image;
+}
 
 l_sinline Table *luaH_recordkeys (const Node *image) {
   uintptr_t address = cast(uintptr_t, image);
@@ -53,8 +71,13 @@ l_sinline Table *luaH_recordkeys (const Node *image) {
     ? cast(Table *, address & ~LUA_RECORD_TAG) : NULL;
 }
 
-l_sinline Value *luaH_recordvalues (const Table *table) {
+l_sinline Value *luaH_inlinerecordvalues (const Table *table) {
   return cast(Value *, table + 1);
+}
+
+l_sinline Value *luaH_recordvalues (const Table *table, uintptr_t image) {
+  LuaRecordStorage *backing = luaH_recordbacking(image);
+  return backing != NULL ? backing->values : luaH_inlinerecordvalues(table);
 }
 
 l_sinline lu_byte luaH_recordtag (uintptr_t tags, unsigned index) {
@@ -62,10 +85,36 @@ l_sinline lu_byte luaH_recordtag (uintptr_t tags, unsigned index) {
 }
 
 l_sinline void luaH_setrecordtag (Table *table, unsigned index, lu_byte tag) {
+  LuaRecordStorage *backing = luaH_recordbacking(table->arraydata);
+  uintptr_t *word = backing != NULL ? &backing->tags : &table->arraydata;
   unsigned shift = (index + 1) * 8;
-  uintptr_t tags = (table->arraydata & ~(cast(uintptr_t, 255) << shift)) |
+  uintptr_t tags = (*word & ~(cast(uintptr_t, 255) << shift)) |
                    (cast(uintptr_t, tag) << shift);
-  __atomic_store_n(&table->arraydata, tags, __ATOMIC_RELEASE);
+  __atomic_store_n(word, tags, __ATOMIC_RELEASE);
+}
+
+/* The low byte holds the Lua tag. The high 56 bits hold a signed integer
+** or zero for values whose tag fully describes them. Packed slots never
+** contain GC references, and their inline storage cannot be reused after
+** materialization because a reader or writer may retain its address. */
+l_sinline uint64_t luaH_packrecord (const TValue *value) {
+  lu_byte tag = rawtt(value);
+  if (tag == LUA_VNUMINT) {
+    uint64_t shifted = l_castS2U(ivalue(value)) + (UINT64_C(1) << 55);
+    if (shifted < (UINT64_C(1) << 56))
+      return (shifted << 8) | LUA_VNUMINT;
+  }
+  else if (tag == LUA_VTRUE || tag == LUA_VFALSE || tagisempty(tag))
+    return tag == LUA_VNIL ? LUA_VEMPTY : tag;
+  return LUA_RECORD_FROZEN;
+}
+
+l_sinline lu_byte luaH_unpackrecord (uint64_t bits, TValue *result) {
+  lu_byte tag = cast_byte(bits);
+  lua_assert(bits != LUA_RECORD_FROZEN);
+  val_(result).i = l_castU2S((bits >> 8) - (UINT64_C(1) << 55));
+  settt_(result, tag);
+  return tag;
 }
 
 /* The logical array is empty throughout the compact layout's lifetime. */
@@ -79,15 +128,26 @@ l_sinline Value *luaH_array (const Table *table) {
   return cast(Value *, table->arraydata);
 }
 
-/* Ownership or exclusive collector access protects the record image. */
-l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
-                                    TValue *result) {
-  lu_byte tag = luaH_recordtag(table->arraydata, index);
+l_sinline lu_byte luaH_recordlocalvalue (const Value *payload, lu_byte tag,
+                                         TValue *result) {
   if (!tagisempty(tag)) {
-    val_(result) = luaH_recordvalues(table)[index];
+    val_(result) = *payload;
     settt_(result, tag);
   }
   return tag;
+}
+
+/* Ownership protects the image. Published scalar slots remain atomic even
+** under ownership because an earlier writer may still be finishing. */
+l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
+                                    TValue *result) {
+  uintptr_t image = table->arraydata;
+  const Value *payload = luaH_recordvalues(table, image) + index;
+  lu_byte tag = luaH_recordtag(luaH_recordtags(image), index);
+  if (tag == LUA_RECORD_PACKED)
+    return luaH_unpackrecord(__atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE),
+                             result);
+  return luaH_recordlocalvalue(payload, tag, result);
 }
 
 #define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))
@@ -346,13 +406,6 @@ l_sinline unsigned luaH_recordindex (const Table *keys, const TString *key) {
   for (i = 0; i < keys->asize; i++)
     if (cast(const void *, getArrVal(keys, i)->gc) == key) return i;
   return keys->asize;
-}
-
-l_sinline unsigned luaH_nextrecordslot (const Table *keys, uintptr_t tags,
-                                         unsigned index) {
-  while (index < keys->asize && tagisempty(luaH_recordtag(tags, index)))
-    index++;
-  return index;
 }
 
 /* Large arrays carry one stamp per group of slots. Scalar cards have

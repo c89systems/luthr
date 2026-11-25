@@ -1441,6 +1441,8 @@ static void shared_record_iteration(lua_State *state, int generational) {
   require(luaL_loadstring(test.reader,
                           "local row = ...; local sum = 0; "
                           "for i=1,2000 do "
+                          "  row.b = -11; assert(row.b == -11); "
+                          "  row.b = 11; assert(row.b == 11); "
                           "  local count = 0; "
                           "  for k,v in pairs(row) do "
                           "    assert(k == 'a' or k == 'b'); "
@@ -1472,6 +1474,9 @@ static void shared_record_iteration(lua_State *state, int generational) {
   }
   require(pthread_join(thread, NULL) == 0);
   require(pthread_barrier_destroy(&test.ready) == 0);
+  require(lua_getfield(state, 1, "b") == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 11);
+  lua_pop(state, 1);
 }
 
 static void shared_ordinary_iteration(lua_State *state, int generational) {

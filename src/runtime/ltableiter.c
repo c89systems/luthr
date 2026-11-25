@@ -17,28 +17,27 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
                            TValue *result) {
   uint64_t version = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   Table *keys;
-  uintptr_t tags;
   unsigned index = 0;
   TValue value;
   if ((version & 1) || !luaH_strongaccess(L, table)) return -1;
   keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
   if (keys == NULL) return -1;
-  tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-  if (!(tags & LUA_RECORD_TAGS)) return -1;
   if (!ttisnil(key)) {
     if (!ttisshrstring(key)) return -1;
     index = luaH_recordindex(keys, tsvalue(key));
-    if (index == keys->asize || luaH_recordtag(tags, index) == LUA_VABSTKEY)
+    if (index == keys->asize ||
+        !luaH_readrecord(G(L), table, index, &value, version) || isabstkey(&value))
       return -1;
     index++;
   }
-  index = luaH_nextrecordslot(keys, tags, index);
-  if (index == keys->asize)
-    return luaH_samelayout(table, version) ? 0 : -1;
-  if (!luaH_readrecord(G(L), table, index, &value, version) ||
-      !luaH_samelayout(table, version) || isempty(&value)) return -1;
-  arr2obj(keys, index, key);
-  return emitnext(L, key, result, &value);
+  for (; index < keys->asize; index++) {
+    if (!luaH_readrecord(G(L), table, index, &value, version)) return -1;
+    if (isempty(&value)) continue;
+    if (!luaH_samelayout(table, version)) return -1;
+    arr2obj(keys, index, key);
+    return emitnext(L, key, result, &value);
+  }
+  return luaH_samelayout(table, version) ? 0 : -1;
 }
 
 static int cursorvalid (const LuaHashCursor *cursor) {

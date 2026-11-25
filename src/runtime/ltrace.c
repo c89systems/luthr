@@ -75,8 +75,8 @@ void luaC_traceview (lua_State *L, const Table *view) {
   if (!luaC_tracing(L)) return;
   keys = luaH_recordkeys(view->node);
   if (keys != NULL) {
-    const Value *values = luaH_recordvalues(view);
-    uintptr_t tags = view->arraydata;
+    const Value *values = luaH_recordvalues(view, view->arraydata);
+    uintptr_t tags = luaH_recordtags(view->arraydata);
     luaC_traceobject(L, cast(GCObject *, keys));
     for (p = 0; p < keys->asize; p++)
       if (luaH_recordtag(tags, p) & BIT_ISCOLLECTABLE)
@@ -330,8 +330,8 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   keys = luaH_recordkeys(table->node);
   if (keys != NULL) {
     /* The descriptor owns interned names and has no weak key edges. */
-    Value *values = luaH_recordvalues(table);
-    uintptr_t tags = table->arraydata;
+    Value *values = luaH_recordvalues(table, table->arraydata);
+    uintptr_t tags = luaH_recordtags(table->arraydata);
     if (pending & 1) {
       for (i = 0; i < keys->asize; i++)
         if ((luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) &&

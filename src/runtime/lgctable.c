@@ -155,7 +155,8 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   keys = luaH_recordkeys(view.node);
   if (keys != NULL) {
     GCObject *edges[LUA_RECORD_MAX_FIELDS + 2];
-    Value *values = luaH_recordvalues(table);
+    Value *values = luaH_recordvalues(table, view.arraydata);
+    uintptr_t tags = luaH_recordtags(view.arraydata);
     unsigned count = 1;
     edges[0] = obj2gco(keys);
     if (metatable != NULL) edges[count++] = obj2gco(metatable);
@@ -165,13 +166,13 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
         if (!luaH_readrecord(G(L), table, i, &value, sequence)) return 0;
         if (iscollectable(&value)) edges[count++] = val_(&value).gc;
       }
-      else if (luaH_recordtag(view.arraydata, i) & BIT_ISCOLLECTABLE)
+      else if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE)
         __atomic_load(&values[i].gc, &edges[count++], __ATOMIC_ACQUIRE);
     }
     if (!luaH_samelayout(table, sequence))
       return 0;
     luaC_traceedges(work, edges, count);
-    work->marked += sizeof(*table) + table->inline_bytes;
+    work->marked += luaH_size(table, &view);
     luaC_finishstrong(work, obj2gco(table), 0);
     return 1;
   }

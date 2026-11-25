@@ -64,6 +64,7 @@ typedef union Value {
   void *p;         /* light userdata */
   lua_CFunction f; /* light C functions */
   lua_Integer i;   /* integer numbers */
+  uint64_t bits;   /* single-word storage for packed record values */
   lua_Number n;    /* float numbers */
   /* not used, but may avoid warnings for uninitialized value */
   lu_byte ub;
@@ -869,7 +870,7 @@ typedef struct Table {
   uintptr_t sharing;
   uint64_t sequence;
   LuaObjectLock access;
-  uintptr_t arraydata;  /* array pointer or tagged compact-record tags */
+  uintptr_t arraydata;  /* array pointer, inline record tags, or record backing */
   Node *node;
   struct Table *metatable;
   GCObject *gclist;
