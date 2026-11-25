@@ -26,6 +26,15 @@ static unsigned published, unrelated;
 static unsigned trim_calls;
 static int count_trims;
 static __thread int reject_string_locks;
+static global_State *notice_vm;
+static unsigned notices;
+
+void __real_luaSC_notifygc(global_State *);
+void __wrap_luaSC_notifygc(global_State *g) {
+  if (g == notice_vm)
+    ++notices;
+  __real_luaSC_notifygc(g);
+}
 
 void __real_luaA_beginlock(lua_State *, LuaObjectLock *, LuaObjectScope *);
 void __wrap_luaA_beginlock(lua_State *L, LuaObjectLock *lock,
@@ -317,6 +326,47 @@ static void trim_idle_stacks(lua_State *L, int generational) {
 }
 
 enum { ACTORS = LUA_BARRIER_SHARDS * 2, ROWS = 32, OBJECTS = ACTORS * ROWS };
+
+static void barrier_notices(lua_State *L) {
+  global_State *g = G(L);
+  GCObject *objects[3];
+  lua_gc(L, LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 3, 0);
+  for (unsigned i = 0; i < 3; ++i) {
+    lua_newtable(L);
+    objects[i] = (GCObject *)lua_topointer(L, -1);
+    lua_rawseti(L, 1, i + 1);
+  }
+  lua_lock(L);
+  luaW_stop(L);
+  luaC_runtilstate(L, GCSpropagate, 1);
+  luaW_start(L);
+  notice_vm = g;
+  require(iswhite(g, objects[0]) && iswhite(g, objects[1]) &&
+          iswhite(g, objects[2]));
+  luaC_traceobject(L, objects[0]);
+  require(luaC_barriernotice(g));
+  luaC_notifybarriers(g);
+  require(notices == 1 && !luaC_barriernotice(g) && g->barrier_ready != 0);
+  luaC_traceobject(L, objects[1]);
+  luaC_notifybarriers(g);
+  require(notices == 1 && isgray(objects[0]) && isgray(objects[1]));
+  luaC_drainbarriers(L);
+  require(g->barrier_ready == 0);
+
+  luaC_traceobject(L, objects[2]);
+  require(luaC_barriernotice(g));
+  lua_unlock(L);
+  require(notices == 2 && !luaC_barriernotice(g) && g->barrier_ready != 0);
+  notice_vm = NULL;
+  lua_gc(L, LUA_GCCOLLECT);
+  for (unsigned i = 1; i <= 3; ++i) {
+    require(lua_rawgeti(L, 1, i) == LUA_TTABLE);
+    lua_pop(L, 1);
+  }
+  lua_close(L);
+}
 struct producer {
   lua_State *state;
   GCObject **objects;
@@ -358,6 +408,11 @@ int main(int argc, char **argv) {
   Table *child = NULL;
   int back;
   require(argc == 2 && L != NULL && objects != NULL);
+  if (strcmp(argv[1], "notice") == 0) {
+    free(objects);
+    barrier_notices(L);
+    return 0;
+  }
   if (strncmp(argv[1], "publish_", 8) == 0) {
     free(objects);
     publish_batches(L, strcmp(argv[1], "publish_generational") == 0);

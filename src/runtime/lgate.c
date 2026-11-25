@@ -246,9 +246,8 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values,
     if (native) luaM_withdrawdebt(L);
     else luaM_publishdebt(L);
   }
-  if (L->object_scopes == NULL &&
-      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
-    luaSC_notifygc(G(L));
+  if (L->object_scopes == NULL && luaC_barriernotice(G(L)))
+    luaC_notifybarriers(G(L));
   lua_assert(L->admission == &L->participation);
   if (offer && offerstack(L, context, execution)) return;
   /* Keep participation until all physical gate accesses have finished. A
@@ -384,11 +383,12 @@ NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
   if (L->storage_retired != NULL || luaC_retired(L) != NULL ||
       L->reclaim_pages ||
       L->reclaim_credit != 0 || L->stack_peer != NULL ||
-      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0 ||
       __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context ||
       (gethookmask(L) & LUA_MASKCALL))
     return NULL;
   lua_assert(context == luaQ_ownertoken());
+  if (l_unlikely(luaC_barriernotice(G(L))))
+    luaC_notifybarriers(G(L));
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
   L->native_depth = 1;
   if (task != NULL) {
@@ -452,7 +452,7 @@ l_sinline void pollattached (lua_State *L, NativeStackContext *context) {
   control = luaW_control(&g->world);
   if (l_unlikely((gate & LUA_GATE_WAITING) ||
                  (control & (LUA_WORLD_REQUESTS | LUA_MARK_ACTIVE)) ||
-                 __atomic_load_n(&g->barrier_ready, __ATOMIC_ACQUIRE))) {
+                 luaC_barriernotice(g))) {
     luaX_pollrequests(L);
     if (luaW_control(&g->world) & LUA_WORLD_SEAL_NURSERIES)
       luaC_pollseal(L);
@@ -490,8 +490,8 @@ carrierentry void luaX_apienter (lua_State *L) {
 }
 
 static void releaseaftertrace (lua_State *L, uintptr_t reservation) {
-  if (__atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
-    luaSC_notifygc(G(L));
+  if (luaC_barriernotice(G(L)))
+    luaC_notifybarriers(G(L));
   luaX_releasegate(L, reservation);
 }
 
@@ -702,9 +702,8 @@ l_uint32 luaX_parentcalls (lua_State *from) {
 
 void luaX_pollrequests (lua_State *L) {
   uint64_t control;
-  if (L->object_scopes == NULL &&
-      __atomic_load_n(&G(L)->barrier_ready, __ATOMIC_ACQUIRE) != 0)
-    luaSC_notifygc(G(L));
+  if (L->object_scopes == NULL && luaC_barriernotice(G(L)))
+    luaC_notifybarriers(G(L));
   control = luaW_control(&G(L)->world);
   if ((control & LUA_WORLD_STOPPED) ||
       (__atomic_load_n(&L->stack_gate.word, __ATOMIC_ACQUIRE) &

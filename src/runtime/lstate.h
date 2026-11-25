@@ -520,6 +520,7 @@ typedef struct LuaSweepPlan {
 } LuaSweepPlan;
 
 #define LUA_BARRIER_SHARDS 16
+enum { LUA_BARRIER_NOTICE = 1u << LUA_BARRIER_SHARDS };
 typedef struct LuaBarrierQueue {
   GCObject *forward, *back;  /* atomic MPSC heads; claims own intrusive links */
   char padding[64 - 2 * sizeof(GCObject *)];
@@ -590,7 +591,7 @@ typedef struct global_State {
   unsigned trace_busy;  /* atomic number of unpublished scanning batches */
   unsigned trace_advance;  /* one complete assist seeking a phase transition */
   unsigned trace_ready;  /* atomic queued-work hint, independent of busy claims */
-  unsigned barrier_ready;  /* atomic directory of nonempty barrier shards */
+  unsigned barrier_ready;  /* atomic nonempty shards and pending notice */
   LuaBarrierQueue barriers[LUA_BARRIER_SHARDS];
   unsigned trace_workers;  /* atomic: payloads excluding failed reservations */
   unsigned sweep_workers;  /* atomic: ordinary ranges in an admitted sweep */

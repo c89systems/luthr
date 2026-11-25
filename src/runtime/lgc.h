@@ -68,6 +68,11 @@ enum { TRACE_MAJOR = 1, TRACE_YOUNG, TRACE_GENERATIONAL };
    __atomic_load_n(&(g)->barrier_ready, __ATOMIC_ACQUIRE))
 #define luaC_tracepending(g) (luaC_tracerunnable(g) || luaC_waitingstacks(g))
 
+l_sinline int luaC_barriernotice (global_State *g) {
+  return (__atomic_load_n(&g->barrier_ready, __ATOMIC_ACQUIRE) &
+          LUA_BARRIER_NOTICE) != 0;
+}
+
 l_sinline int luaC_traceblocked (global_State *g) {
   return __atomic_load_n(&g->trace_advance, __ATOMIC_ACQUIRE) ||
          __atomic_load_n(&g->trace_busy, __ATOMIC_ACQUIRE) ||
@@ -616,6 +621,7 @@ LUAI_FUNC void luaC_syncbarrier (lua_State *L, GCObject *o, GCObject *v);
 /* Collector-only: participants have finished all claimed publications. */
 LUAI_FUNC void luaC_drainbarriers (lua_State *L);
 LUAI_FUNC void luaC_publishbarrier (lua_State *, GCObject *, int back);
+LUAI_FUNC void luaC_notifybarriers (global_State *);
 /* Shared list publication owns the active collector's queue or quiescence. */
 LUAI_FUNC void luaC_linktrace (global_State *, GCObject *);
 /* Private work-list inspection; caller owns quiescent collection. */

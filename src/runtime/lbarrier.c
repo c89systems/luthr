@@ -2,6 +2,7 @@
 #define LUA_CORE
 #include "lprefix.h"
 #include "lgc.h"
+#include "lscheduler.h"
 
 static GCObject **barrierlink (GCObject *o) {
   if (novariant(o->tt) == LUA_TSTRING) return &o->next;
@@ -30,7 +31,17 @@ void luaC_publishbarrier (lua_State *L, GCObject *o, int back) {
   ** A delayed advertisement can cause an empty visit, never lost work. No
   ** scheduler, ownership wait, allocator or safepoint belongs to this path. */
   if (head == NULL)
-    __atomic_fetch_or(&g->barrier_ready, 1u << shard, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&g->barrier_ready, (1u << shard) | LUA_BARRIER_NOTICE,
+                      __ATOMIC_RELEASE);
+}
+
+void luaC_notifybarriers (global_State *g) {
+  /* A safe boundary claims only the notice. Published heads remain ready
+  ** until drained. A later empty-to-nonempty publication can ask again.
+  ** Slot return, trace arming and world resume have their own wakeups. */
+  if (__atomic_fetch_and(&g->barrier_ready, ~cast_uint(LUA_BARRIER_NOTICE),
+                         __ATOMIC_ACQ_REL) & LUA_BARRIER_NOTICE)
+    luaSC_notifygc(g);
 }
 
 void luaC_drainbarriers (lua_State *L) {
@@ -40,7 +51,8 @@ void luaC_drainbarriers (lua_State *L) {
   /* Clear BEFORE consuming heads: either a consumer sees a producer's link,
   ** or that producer's later directory publication remains for the next pass.
   ** The fixed queues outlive producers; no coroutine walk or borrow is needed. */
-  ready = __atomic_exchange_n(&g->barrier_ready, 0, __ATOMIC_ACQ_REL);
+  ready = __atomic_exchange_n(&g->barrier_ready, 0, __ATOMIC_ACQ_REL) &
+          ~cast_uint(LUA_BARRIER_NOTICE);
   for (shard = 0; ready != 0; shard++, ready >>= 1) {
     LuaBarrierQueue *producer;
     GCObject *object;
