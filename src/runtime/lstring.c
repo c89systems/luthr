@@ -349,12 +349,19 @@ TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
 }
 
 
-/* An address selects the set but never establishes equality. The bit lets
+/* A set may contain results from either string constructor. The tag lets
 ** a C-string lookup use strcmp without accepting a cached binary prefix. */
 enum { CACHE_BINARY = 1 };
 _Static_assert(_Alignof(TString) > CACHE_BINARY, "string cache tag alignment");
 
-static uintptr_t *stringcacherow (lua_State *L, const char *str) {
+/* Sample the bytes to match short results from different source buffers.
+** The lookup always checks the complete length and contents. */
+l_sinline unsigned shortstringset (const char *str, size_t len) {
+  return (cast_uint(len) * 23u + cast_byte(str[0]) * 19u +
+          cast_byte(str[len / 2]) * 7u + cast_byte(str[len - 1])) % STRCACHE_N;
+}
+
+static uintptr_t *stringcacherow (lua_State *L, unsigned set) {
   LuaStringCache *cache = L->strcache;
   if (l_unlikely(cache == NULL)) {
     cache = cast(LuaStringCache *, luaM_tryalloc(L, sizeof(*cache)));
@@ -366,10 +373,10 @@ static uintptr_t *stringcacherow (lua_State *L, const char *str) {
     memset(cache->entries, 0, sizeof(cache->entries));
     cache->epoch = G(L)->strcache_epoch;
   }
-  return cache->entries[point2uint(str) % STRCACHE_N];
+  return cache->entries[set];
 }
 
-l_sinline void remembersource (uintptr_t *row, TString *str, int binary) {
+l_sinline void rememberstring (uintptr_t *row, TString *str, int binary) {
   int j;
   /* An interning miss may have crossed a collection. The current epoch
   ** remains invalid until the next row lookup clears the old entries. */
@@ -400,25 +407,25 @@ TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len) {
   if (len == 0) return &g->empty_string;
   if (len == 1) return &g->byte_strings[cast_byte(*str)];
   if (cache == NULL || cache->epoch != g->strcache_epoch) return NULL;
-  return cachedbytes(cache->entries[point2uint(str) % STRCACHE_N], str, len);
+  return cachedbytes(cache->entries[shortstringset(str, len)], str, len);
 }
 
 TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   uintptr_t *row;
   TString *result;
   if (len <= 1 || len > LUAI_MAXSHORTLEN) return luaS_newlstr(L, str, len);
-  row = stringcacherow(L, str);
+  row = stringcacherow(L, shortstringset(str, len));
   if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
     luaC_tracepointer(L, result);
     return result;
   }
   result = luaS_newlstr(L, str, len);
-  remembersource(row, result, memchr(getshrstr(result), '\0', len) != NULL);
+  rememberstring(row, result, memchr(getshrstr(result), '\0', len) != NULL);
   return result;
 }
 
 TString *luaS_new (lua_State *L, const char *str) {
-  uintptr_t *row = stringcacherow(L, str);
+  uintptr_t *row = stringcacherow(L, point2uint(str) % STRCACHE_N);
   TString *result;
   int j;
   if (row != NULL)
@@ -432,7 +439,7 @@ TString *luaS_new (lua_State *L, const char *str) {
       }
     }
   result = luaS_newlstr(L, str, strlen(str));
-  remembersource(row, result, 0);
+  rememberstring(row, result, 0);
   return result;
 }
 

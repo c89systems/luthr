@@ -71,7 +71,7 @@ static void addstring (lua_State *L, unsigned *work, luaL_Buffer *b,
 
 /* The caller owns the stack and checks collection after publishing results. */
 static void pushownedshortstring (lua_State *L, const char *src, size_t len) {
-  TString *ts = luaS_newlstr(L, src, len);
+  TString *ts = luaS_cachelstr(L, src, len);
   setsvalue2s(L, L->top.p, ts);
   api_incr_top(L);
 }
@@ -217,7 +217,7 @@ static void pushresult (lua_State *L, StringResult *result, size_t len,
     luaS_buildlongstr(L, string, NULL, work);
   }
   lua_lock(L);
-  if (string == NULL) string = luaS_newlstr(L, result->small, len);
+  if (string == NULL) string = luaS_cachelstr(L, result->small, len);
   setsvalue2s(L, L->top.p, string);
   api_incr_top(L);
   luaC_checkGC(L);

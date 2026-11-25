@@ -7,6 +7,7 @@
 #include <lstate.h>
 #include <lstring.h>
 #include <ltable.h>
+#include <lualib.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
@@ -154,8 +155,7 @@ static void check_cached_spans(lua_State *L, lua_State *owner) {
   memcpy(copy, source, sizeof(copy));
   require(lua_pushlstring(owner, copy, width) == first);
   lua_pop(owner, 1);
-  /* A cache entry containing an embedded zero cannot answer a C-string
-   * lookup, even when both use the same address as their set hint. */
+  /* A zero-terminated lookup must stop at the embedded zero. */
   require(strcmp(lua_pushstring(owner, source), "key") == 0);
   lua_tolstring(owner, -1, &len);
   require(len == 3);
@@ -169,6 +169,48 @@ static void check_cached_spans(lua_State *L, lua_State *owner) {
   lua_gc(L, LUA_GCCOLLECT);
   require(memcmp(lua_pushlstring(owner, copy, width), copy, width) == 0);
   lua_pop(owner, 1);
+}
+
+static void check_cached_results(lua_State *L, lua_State *owner) {
+  static const char sources[][8] = {"0aQ\0xd1", "0aR\0xd1", "2aQ\0xd3"};
+  static const char reversed[] = "dx\0Qa";
+  luaL_requiref(owner, LUA_STRLIBNAME, luaopen_string, 0);
+  lua_getfield(owner, 1, "match");
+  lua_getfield(owner, 1, "reverse");
+  for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); i++)
+    lua_pushexternalstring(owner, sources[i], sizeof(sources[i]) - 1, NULL,
+                           NULL);
+  lua_pushliteral(owner, "^.(.....).$");
+  lua_pushexternalstring(owner, reversed, sizeof(reversed) - 1, NULL, NULL);
+
+  for (int cycle = 0; cycle < 3; cycle++) {
+    for (int i = 0; i < 3; i++) {
+      size_t len;
+      const char *value;
+      lua_pushvalue(owner, 2);
+      lua_pushvalue(owner, 4 + i);
+      lua_pushvalue(owner, 7);
+      /* The middle source collides with the first. The last must still hit. */
+      reject_string_locks = i == 2;
+      lua_call(owner, 2, 1);
+      reject_string_locks = 0;
+      value = lua_tolstring(owner, -1, &len);
+      require(value != NULL && len == 5 &&
+              memcmp(value, sources[i] + 1, 5) == 0);
+    }
+    require(lua_rawequal(owner, 9, 11) && !lua_rawequal(owner, 9, 10));
+    lua_pushvalue(owner, 3);
+    lua_pushvalue(owner, 8);
+    reject_string_locks = 1;
+    lua_call(owner, 1, 1);
+    reject_string_locks = 0;
+    require(lua_rawequal(owner, 9, -1));
+
+    lua_settop(owner, 8);
+    lua_gc(L, LUA_GCCOLLECT);
+    lua_gc(L, LUA_GCCOLLECT);
+  }
+  lua_settop(owner, 0);
 }
 
 static void invalidate_string_cache(int generational) {
@@ -220,6 +262,7 @@ static void invalidate_string_cache(int generational) {
   require(strcmp(lua_pushstring(owner, source), source) == 0);
   lua_pop(owner, 1);
   check_cached_spans(L, owner);
+  check_cached_results(L, owner);
   lua_pop(L, 1);
   lua_gc(L, LUA_GCCOLLECT);
   lua_close(L);
