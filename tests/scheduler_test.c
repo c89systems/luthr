@@ -1892,10 +1892,14 @@ static int inspect_waiting_callback(lua_State *L) {
 
 static void synchronous_callback(struct fixture *f) {
   init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
   managed(f->main, "inspect_waiting_callback", inspect_waiting_callback);
   lua_pushcfunction(f->main, invoke_callback);
   lua_setglobal(f->main, "invoke_callback");
-  const char *source = "return invoke_callback(function() "
+  const char *source = "local function scalar() return 4 end; "
+                       "for i = 1, 8 do "
+                       "  assert(invoke_callback(scalar, false) == 4) "
+                       "end; return invoke_callback(function() "
                        "  local t = {}; for i = 1, 40 do t[i] = {i} end; "
                        "  collectgarbage('collect'); return t[40][1] + #t "
                        "end, ... ~= 0)";

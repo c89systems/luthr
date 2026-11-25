@@ -538,7 +538,24 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
     return 0;
   }
   if (execution == NULL || execution->native_depth != 0) {
+    int probed = 0;
     uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+    /* Use the cheaper reservation for repeated scalar reentry. Calls that
+    ** normally need managed admission avoid a speculative reservation. */
+    if (context->scalar_reentry) {
+      if ((expected & ~LUA_GATE_OFFER_MASK) == 0 && luaX_trybounded(L)) {
+        StkId func;
+        const Proto *p = scalarcallee(L, nargs, nresults, &func);
+        int complete = p != NULL &&
+                       luaD_tryscalarcall(L, func, p, nargs, nresults, context);
+        if (complete) adjustresults(L, nresults);
+        luaX_leavebounded(L);
+        if (complete) return 1;
+        expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+        probed = 1;
+      }
+      context->scalar_reentry = 0;
+    }
     /* Stack-only reservations do not delay trace arming. Promote before
     ** executing anything that needs a managed slot or table storage. */
     if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {
@@ -546,12 +563,13 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
       luaX_joinvalues(&L->stack_gate);
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         StkId func;
-        const Proto *p = scalarcallee(L, nargs, nresults, &func);
+        const Proto *p = probed ? NULL : scalarcallee(L, nargs, nresults, &func);
         if (p != NULL) {
           traced = luaC_tracing(L);
           if (l_unlikely(traced)) luaC_checksnapshot(L);
           if (luaD_tryscalarcall(L, func, p, nargs, nresults, context)) {
             adjustresults(L, nresults);
+            context->scalar_reentry = 1;
             if (l_unlikely(traced)) releaseaftertrace(L, LUA_GATE_STACK);
             else luaX_releasegate(L, LUA_GATE_STACK);
             return 1;

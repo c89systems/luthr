@@ -289,6 +289,7 @@ struct CallInfo {
 typedef struct NativeStackContext {
   uintptr_t limit;
   lu_byte overflow;
+  lu_byte scalar_reentry;  /* the last detached call completed on the stack */
   LuaExecution *execution;
   struct LuaCoroutineScope *coroutine_scopes;
   LuaApiRegion *api_region;

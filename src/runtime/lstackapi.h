@@ -75,24 +75,26 @@ l_sinline void luaX_leavebounded (lua_State *L) {
 ** Either the full owner or collector sees this scope, or this scope sees
 ** its request and withdraws before reading the stack. Its release has no
 ** waiters to notify and never changes the scheduler's slot offer. */
-l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
-  if (stackonly) {
-    LuaStackGate *gate = &L->stack_gate;
-    if (l_unlikely(__atomic_load_n(&gate->word, __ATOMIC_RELAXED) &
-                   ~LUA_GATE_OFFER_MASK))
-      return luaX_valueenterslow(L, 0);
-    if (l_likely(__atomic_exchange_n(&gate->values, 1, __ATOMIC_SEQ_CST) == 0)) {
-      if (l_likely((__atomic_load_n(&gate->word, __ATOMIC_SEQ_CST) &
-                    ~LUA_GATE_OFFER_MASK) == 0 &&
-                   !(luaW_control(&G(L)->world) &
-                     (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE | LUA_WORLD_STACK_ROOTS |
-                      LUA_WORLD_SEAL_NURSERIES))))
-        return LUA_VALUE_BOUNDED;
-      luaX_leavebounded(L);
-    }
-    return luaX_reservevalues(L);
+l_sinline int luaX_trybounded (lua_State *L) {
+  LuaStackGate *gate = &L->stack_gate;
+  if (l_likely(__atomic_exchange_n(&gate->values, 1, __ATOMIC_SEQ_CST) == 0)) {
+    if (l_likely((__atomic_load_n(&gate->word, __ATOMIC_SEQ_CST) &
+                  ~LUA_GATE_OFFER_MASK) == 0 &&
+                 !(luaW_control(&G(L)->world) &
+                   (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE | LUA_WORLD_STACK_ROOTS |
+                    LUA_WORLD_SEAL_NURSERIES))))
+      return 1;
+    luaX_leavebounded(L);
   }
-  return luaX_valueenterslow(L, 0);
+  return 0;
+}
+
+l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
+  if (!stackonly || l_unlikely(__atomic_load_n(&L->stack_gate.word,
+                           __ATOMIC_RELAXED) & ~LUA_GATE_OFFER_MASK))
+    return luaX_valueenterslow(L, 0);
+  if (luaX_trybounded(L)) return LUA_VALUE_BOUNDED;
+  return luaX_reservevalues(L);
 }
 
 l_sinline void luaX_valueleave (lua_State *L, uintptr_t owner) {
