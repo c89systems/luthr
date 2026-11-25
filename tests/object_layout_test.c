@@ -141,6 +141,20 @@ static void record_table(lua_State *L, lua_State *other) {
   const Table *record, *second, *keys, *metatable;
   luaL_openlibs(L);
   run_chunk(L,
+            "local function check(t) "
+            "  for i=1,64 do "
+            "    t.key=i; assert(t.key==i and math.type(t.key)=='integer'); "
+            "    t.key=false; assert(t.key==false); "
+            "    t.key=1.25; assert(t.key==1.25); "
+            "    collectgarbage('step',0) "
+            "  end; "
+            "  t.key={answer=42}; collectgarbage('collect'); "
+            "  assert(t.key.answer==42); t.key=nil; "
+            "  local redirects={}; setmetatable(t,{__newindex=redirects}); "
+            "  t.key=7; assert(rawget(t,'key')==nil and redirects.key==7) "
+            "end; check({key=1,value=2}); check({0,key=1})",
+            0);
+  run_chunk(L,
             "local function make(n) return {key=n, value=n+1} end; "
             "make = assert(load(string.dump(make), 'record', 'b')); "
             "return make(10), make(20)",

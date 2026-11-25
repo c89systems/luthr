@@ -106,14 +106,14 @@
         TValue *rc = RKC(i);
         unsigned upvalue = GETARG_A(i);
         luaF_loadupval(L, luaF_capturecell(cl, upvalue), &receiver);
-        vmtableset(&receiver, rb, rc, upvalue + 1u);
+        vmtableset(&receiver, rb, rc, upvalue + 1u, luaH_tryset);
         vmbreak;
       }
       vmcase(OP_SETTABLE) {
         StkId ra = readRA(i);
         TValue *rb = vRB(i);  /* key (table is in 'ra') */
         TValue *rc = RKC(i);  /* value */
-        vmtableset(s2v(ra), rb, rc, 0);
+        vmtableset(s2v(ra), rb, rc, 0, luaH_tryset);
         vmbreak;
       }
       vmcase(OP_SETI) {
@@ -122,14 +122,14 @@
         int b = GETARG_B(i);
         TValue *rc = RKC(i);
         setivalue(&key, b);
-        vmtableset(s2v(ra), &key, rc, 0);
+        vmtableset(s2v(ra), &key, rc, 0, luaH_tryset);
         vmbreak;
       }
       vmcase(OP_SETFIELD) {
         StkId ra = readRA(i);
         TValue *rb = KB(i);
         TValue *rc = RKC(i);
-        vmtableset(s2v(ra), rb, rc, 0);
+        vmtableset(s2v(ra), rb, rc, 0, luaH_trysetfield);
         vmbreak;
       }
       vmcase(OP_NEWTABLE) {

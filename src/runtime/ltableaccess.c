@@ -321,3 +321,60 @@ void luaH_recordstore (lua_State *L, Table *table, unsigned index, lu_byte oldta
   }
   luaC_barrierback(L, obj2gco(table), value);
 }
+
+/* A private scalar replacement preserves both the key and the graph. The
+** marker can see the field without taking ownership. While it is tracing,
+** use its ordinary version protocol for any tag change. */
+l_sinline int replacelocalscalar (lua_State *L, Table *table, TString *name,
+                                   const TValue *value) {
+  lu_byte tag = rawtt(value), oldtag;
+  Node *nodes = table->node;
+  Table *keys = luaH_recordkeys(nodes);
+  Value *payload;
+  lu_byte *node_tag = NULL;
+  unsigned field = 0;
+  if (tagisempty(tag) || (tag & BIT_ISCOLLECTABLE) ||
+      table->metatable != NULL ||
+      (gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)))
+    return 0;
+  if (keys != NULL) {
+    uintptr_t tags = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
+    field = luaH_recordindex(keys, name);
+    if (field == keys->asize) return 0;
+    oldtag = luaH_recordtag(tags, field);
+    payload = luaH_recordvalues(table) + field;
+  }
+  else {
+    Node *node;
+    lua_assert(luaH_hashdir(nodes) == NULL);
+    node = luaH_shortposition(nodes, name);
+    if (!keyisshrstr(node) || keystrval(node) != name) return 0;
+    node_tag = &node->u.tt_;
+    oldtag = __atomic_load_n(node_tag, __ATOMIC_ACQUIRE);
+    payload = &node->u.value_;
+  }
+  if (tagisempty(oldtag) || (oldtag & BIT_ISCOLLECTABLE) ||
+      (tag != oldtag && luaC_tracing(L))) return 0;
+  __atomic_store(payload, &val_(value), __ATOMIC_RELEASE);
+  if (tag != oldtag) {
+    if (node_tag != NULL) __atomic_store_n(node_tag, tag, __ATOMIC_RELEASE);
+    else luaH_setrecordtag(table, field, tag);
+  }
+  return 1;
+}
+
+/* Keep the private lookup's stack frame out of shared assignments. */
+static int __attribute__((noinline)) tryprivatefield (lua_State *L, Table *table,
+    const TValue *key, TValue *value, int raw) {
+  if (ttisshrstring(key) &&
+      !(__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1) &&
+      replacelocalscalar(L, table, tsvalue(key), value)) return 1;
+  return luaH_tryset(L, table, key, value, raw);
+}
+
+int luaH_trysetfield (lua_State *L, Table *table, const TValue *key, TValue *value,
+                      int raw) {
+  if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L))
+    return tryprivatefield(L, table, key, value, raw);
+  return luaH_tryset(L, table, key, value, raw);
+}

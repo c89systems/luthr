@@ -1472,9 +1472,9 @@ l_sinline StkId directregister (StkId base, int reg) {
   } \
 }
 
-#define vmtableset(receiver,key,value,upvalue) { \
+#define vmtableset(receiver,key,value,upvalue,write) { \
   if (l_unlikely(!ttistable(receiver) || \
-      !luaH_tryset(L, hvalue(receiver), key, value, 0))) { \
+      !write(L, hvalue(receiver), key, value, 0))) { \
     Protect(finishset(L, receiver, key, value, upvalue)); \
     updatebase(ci); \
   } \
