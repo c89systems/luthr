@@ -181,6 +181,73 @@ int __wrap_luaS_eqstr(TString *a, TString *b) {
   return __real_luaS_eqstr(a, b);
 }
 
+struct length_reader {
+  lua_State *state;
+  pthread_barrier_t started;
+};
+
+static void *read_length(void *argument) {
+  struct length_reader *reader = argument;
+  rendezvous(&reader->started);
+  for (unsigned i = 0; i < 10000; ++i)
+    require(lua_rawlen(reader->state, 1) <= 1);
+  return NULL;
+}
+
+static int length_method(lua_State *state) {
+  lua_pushinteger(state, 77);
+  return 1;
+}
+
+static void shared_length(lua_State *state, int generational) {
+  struct length_reader reader;
+  pthread_t thread;
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(state, LUA_GCSTOP);
+  lua_createtable(state, 0, 4);
+  lua_pushboolean(state, 1);
+  lua_setfield(state, 1, "field");
+  lua_newtable(state);
+  lua_pushcfunction(state, length_method);
+  lua_setfield(state, -2, "__len");
+  lua_setmetatable(state, 1);
+  reader.state = lua_newthread(state);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, reader.state, 1);
+
+  access_calls = 0;
+  measuring = 1;
+  require(lua_rawlen(reader.state, 1) == 0);
+  measuring = 0;
+  require(access_calls == 0);
+  lua_len(reader.state, 1);
+  require(lua_tointeger(reader.state, -1) == 77);
+  lua_pop(reader.state, 1);
+
+  lua_pushinteger(state, 123);
+  lua_rawseti(state, 1, 1);
+  require(lua_rawlen(reader.state, 1) == 1);
+  lua_pushnil(state);
+  lua_rawseti(state, 1, 1);
+
+  require(pthread_barrier_init(&reader.started, NULL, 2) == 0);
+  require(pthread_create(&thread, NULL, read_length, &reader) == 0);
+  rendezvous(&reader.started);
+  for (unsigned i = 1; i <= 2048; ++i) {
+    lua_pushinteger(state, i);
+    lua_rawseti(state, 1, -(lua_Integer)i);
+    lua_pushinteger(state, i);
+    lua_rawseti(state, 1, 1);
+    lua_pushnil(state);
+    lua_rawseti(state, 1, 1);
+    if (i % 256 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+  }
+  require(pthread_join(thread, NULL) == 0);
+  require(pthread_barrier_destroy(&reader.started) == 0);
+  require(lua_rawlen(reader.state, 1) == 0);
+}
+
 static void fast(lua_State *state) {
   Table *table;
   TValue key, value, result;
@@ -1781,6 +1848,8 @@ int main(int argc, char **argv) {
     resume_epoch(state);
   else if (strcmp(argv[1], "fast") == 0)
     fast(state);
+  else if (strncmp(argv[1], "length_", 7) == 0)
+    shared_length(state, strcmp(argv[1], "length_generational") == 0);
   else if (strcmp(argv[1], "primitive") == 0)
     primitive(state);
   else if (strcmp(argv[1], "primitive_reattach") == 0)

@@ -361,6 +361,9 @@ static void finalize_ordered_bindings(lua_State *L, int generational) {
   require(pthread_create(&binder, NULL, bind_userdata, test.binder) == 0);
   while (!__atomic_load_n(&test.entered, __ATOMIC_ACQUIRE))
     sched_yield();
+  /* Reading the hash-only metatable's border must not join a pending
+   * finalizer registration. The editor below still has to wait for it. */
+  require(lua_rawlen(L, 1) == 0);
   /* Another receiver can finish its binding while the first mark is pending.
    * Pick a different lane so this exercises the simultaneous reservations. */
   for (i = 0; i < LUA_TABLE_WRITERS; ++i) {

@@ -3617,10 +3617,28 @@ int luaH_nextlocked (lua_State *L, Table *t, StkId key) {
   return result;
 }
 
+/* With no array prefix, the owned search first tests the hash's key 1.
+** The ordinary read admission retains the sampled hash or partition image.
+** A miss is already a border, so it needs no exclusive layout claim. */
+static int emptyborder (lua_State *L, Table *t) {
+  LuaTableSlot slot = {0};
+  uint64_t layout;
+  TValue key, ignored;
+  lu_byte tag;
+  if (!readsequence(L, t, &layout) ||
+      __atomic_load_n(&t->asize, __ATOMIC_ACQUIRE) != 0)
+    return 0;
+  setivalue(&key, 1);
+  return findhashslot(t, &key, LUA_VNUMINT, layout, &slot, 0) &&
+         readslot(G(L), L, t, &slot, layout, &ignored, &tag) &&
+         tagisempty(tag) && luaH_samelayout(t, layout);
+}
+
 lua_Unsigned luaH_getn (lua_State *L, Table *t) {
   LuaObjectScope scope;
   lua_Unsigned result = luaH_cachedborder(L, t, 0);
   if (result != 0) return result;
+  if (emptyborder(L, t)) return 0;
   luaA_begin(L, obj2gco(t), &scope);
   result = rawgetn(L, t);
   luaA_end(L, &scope);
