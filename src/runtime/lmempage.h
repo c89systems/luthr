@@ -57,6 +57,26 @@ struct LuaAllocPage {
   LuaAllocPage **sweep_previous;  /* pool-mutex collector directory */
 };
 
+typedef struct LuaUserdataPools {
+  pthread_mutex_t mutex[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage *pages[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage *available[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage *sweep[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage *cursor[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage *spare[LUA_ALLOC_USERDATA_BINS];
+  LuaAllocPage **spare_tail[LUA_ALLOC_USERDATA_BINS];
+} LuaUserdataPools;
+
+LUAI_FUNC unsigned luaMP_sweepcount (struct global_State *g);
+LUAI_FUNC LuaAllocPage **luaMP_sweephead (struct global_State *g, unsigned pool);
+LUAI_FUNC LuaAllocPage **luaMP_sweepcursor (struct global_State *g, unsigned pool);
+LUAI_FUNC pthread_mutex_t *luaMP_sweepmutex (struct global_State *g, unsigned pool);
+
+l_sinline unsigned luaMP_sweeppool (unsigned index) {
+  return index < LUA_ALLOC_BINS ? index
+    : LUA_ALLOC_USERDATA_POOL + index - LUA_ALLOC_BINS;
+}
+
 /* Task pages reserve this storage after their slots. Keep the same slot
 ** boundaries after publication, until the backing page is reused. */
 typedef struct LuaTaskPageBits {
@@ -111,6 +131,7 @@ LUAI_FUNC void luaMC_notify (LuaCacheBorrow *borrow);
   (((sizeof(LuaAllocPage) + sizeof(LuaAllocBlock) - 1) / sizeof(LuaAllocBlock)) \
     * sizeof(LuaAllocBlock))
 #define LUA_ALLOC_MAX 512
+#define LUA_ALLOC_USERDATA_MAX 2048
 #define LUA_ALLOC_PAGE_MAX 65536
 
 l_sinline unsigned luaMP_slotindex (const LuaAllocPage *page,

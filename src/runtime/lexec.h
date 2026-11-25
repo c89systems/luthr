@@ -33,9 +33,18 @@ typedef struct LuaWorldScope {
 #define LUA_ALLOC_STACK_CLASSES 6
 #define LUA_ALLOC_SLOT_POOLS (1 + LUA_ALLOC_STACK_CLASSES)
 #define LUA_ALLOC_TOTAL_POOLS (LUA_ALLOC_POOLS + LUA_ALLOC_SLOT_POOLS)
+#define LUA_ALLOC_USERDATA_POOL LUA_ALLOC_TOTAL_POOLS
+#define LUA_ALLOC_USERDATA_BINS 8
+
+typedef struct LuaUserdataCache {
+  struct LuaAllocPage *pages[LUA_ALLOC_USERDATA_BINS];
+  unsigned char growth[LUA_ALLOC_USERDATA_BINS];
+} LuaUserdataCache;
+
 typedef struct LuaSlotAllocPages {
   struct LuaAllocPage *pages[LUA_ALLOC_SLOT_POOLS];
   unsigned char growth[LUA_ALLOC_SLOT_POOLS];
+  LuaUserdataCache userdata;
 } LuaSlotAllocPages;
 typedef struct LuaAllocationCache {
   struct LuaAllocationCache *next;  /* VM registry, collection/quiescence */
@@ -48,6 +57,7 @@ typedef struct LuaAllocationCache {
   unsigned char growth[LUA_ALLOC_POOLS];  /* backing-size history survives handoffs */
   uint64_t growth_epoch;  /* a collection invalidates stale capacity demand */
   LuaSlotAllocPages *slot_pages;  /* allocated with a scheduler slot */
+  LuaUserdataCache *userdata;  /* optional cache for unmanaged coroutines */
 } LuaAllocationCache;
 
 typedef struct LuaCallScope {

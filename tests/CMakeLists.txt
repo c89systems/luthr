@@ -226,6 +226,7 @@ foreach(case IN ITEMS fast length_incremental length_generational
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     table_reattach userdata_reattach userdata_empty_reattach userdata_index
+    userdata_named_incremental userdata_named_generational
     registry_incremental registry_generational
     long_string_hash long_string_partition
     index_hit index_miss private_inherited_read index_metatable_change object_bindings_incremental object_bindings_generational
@@ -623,7 +624,7 @@ target_compile_options(gc_epochs_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_epochs_test PRIVATE luthr_static)
 target_link_options(gc_epochs_test PRIVATE -Wl,--wrap=luaC_scansweep)
 foreach(case IN ITEMS live live_generational modes rotations weak_age mature_page
-    mature_userdata_page)
+    mature_userdata_page mature_medium_userdata_page)
   add_test(NAME gc_epochs_${case} COMMAND gc_epochs_test ${case})
   set_tests_properties(gc_epochs_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

@@ -3477,8 +3477,10 @@ int luaH_readsharedname (lua_State *L, Table *table, const char *name,
   uint64_t layout, revision = 0;
   Node *nodes;
   unsigned hash, size, index, steps;
-  lua_assert(__atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED) &
-             LUA_GATE_SHARED_READ);
+  lua_assert((__atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED) &
+              LUA_GATE_SHARED_READ) ||
+             (__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+              LUA_GATE_MANAGED));
   lua_assert(len <= LUAI_MAXSHORTLEN);
   if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) != LUA_OBJECT_SHARED)
     return 0;

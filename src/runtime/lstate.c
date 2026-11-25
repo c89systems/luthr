@@ -468,6 +468,7 @@ lu_mem luaE_threadsize (lua_State *L) {
   if (L->stack.p != NULL)
     sz += cast_uint(stacksize(L) + EXTRA_STACK) * sizeof(StackValue);
   if (L->strcache != NULL) sz += sizeof(*L->strcache);
+  if (L->allocation.userdata != NULL) sz += sizeof(*L->allocation.userdata);
   return sz;
 }
 
@@ -498,9 +499,10 @@ static void close_state (lua_State *L, int owns_gate) {
   luaCP_bind(L, NULL);
   luaHS_reclaim(L, LUAHS_DRAIN);
   luaM_reclaimpages(L);
+  if (L->allocation.userdata != NULL) luaM_free(L, L->allocation.userdata);
+  luaM_destroypools(L);
   lua_assert(gettotalbytes(g) == sizeof(global_State) &&
              getgcbytes(g) == sizeof(global_State) && g->GCretired == 0);
-  luaM_destroypools(L);
   if (owns_gate) {
     luaW_start(L);
     lua_unlock(L);
@@ -600,6 +602,9 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
                      cast_sizet(stacksize(thread) + EXTRA_STACK));
   if (thread->strcache != NULL)
     luaM_retire_(L, thread->strcache, sizeof(*thread->strcache));
+  if (thread->allocation.userdata != NULL)
+    luaM_retire_(L, thread->allocation.userdata,
+                 sizeof(*thread->allocation.userdata));
   if (luaC_taskrootbytes(thread) != 0)
     luaM_retire_(L, luaC_taskrootallocation(thread), luaC_taskrootbytes(thread));
   luaM_retire_(L, fromstate(thread), sizeof(LX));
@@ -614,6 +619,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   luai_userstatefree(L, L1);
   freestack(L, L1);
   if (L1->strcache != NULL) luaM_free(L, L1->strcache);
+  if (L1->allocation.userdata != NULL) luaM_free(L, L1->allocation.userdata);
   if (luaC_taskrootbytes(L1) != 0)
     luaM_free_(L, luaC_taskrootallocation(L1), luaC_taskrootbytes(L1));
   {

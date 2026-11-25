@@ -13,6 +13,7 @@
 LUAI_FUNC TValue *luaA_indexvalue (lua_State *L, int idx, LuaNativeRoot *root);
 LUAI_FUNC int luaA_testnamedudata (lua_State *L, int idx, const char *name,
                                   void **result);
+LUAI_FUNC void luaA_setnamedmeta (lua_State *L, const char *name);
 
 l_sinline void *luaA_udatapointer (const TValue *o) {
   switch (ttype(o)) {

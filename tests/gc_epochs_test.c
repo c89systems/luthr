@@ -181,10 +181,10 @@ static void mature_page(lua_State *state) {
   require(lua_tointeger(state, -1) == 43);
 }
 
-static void mature_userdata_page(lua_State *state) {
+static void mature_userdata_page(lua_State *state, size_t size) {
   lua_gc(state, LUA_GCGEN);
   lua_gc(state, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
-  int *payload = lua_newuserdatauv(state, sizeof(*payload), 1);
+  int *payload = lua_newuserdatauv(state, size, 1);
   *payload = 43;
   GCObject *object = (GCObject *)((char *)payload - udatamemoffset(1));
   LuaAllocBlock *old = (LuaAllocBlock *)object - 1;
@@ -198,7 +198,7 @@ static void mature_userdata_page(lua_State *state) {
   minor(state);
   require(page_visits == 0);
 
-  void *temporary = lua_newuserdatauv(state, sizeof(*payload), 1);
+  void *temporary = lua_newuserdatauv(state, size, 1);
   LuaAllocBlock *young =
       (LuaAllocBlock *)((char *)temporary - udatamemoffset(1)) - 1;
   require(luaMP_page(young) == watched_page);
@@ -210,13 +210,45 @@ static void mature_userdata_page(lua_State *state) {
   require(lua_touserdata(state, -1) == payload && *payload == 43);
 
   /* An old userdata's uservalue can keep a new paged object alive. */
-  lua_newuserdatauv(state, sizeof(*payload), 1);
+  lua_newuserdatauv(state, size, 1);
   void *child = lua_touserdata(state, -1);
   require(lua_setiuservalue(state, -2, 1));
   minor(state);
   minor(state);
   require(lua_getiuservalue(state, -1, 1) == LUA_TUSERDATA);
   require(lua_touserdata(state, -1) == child);
+}
+
+struct capped_allocator {
+  lua_Alloc allocate;
+  void *context;
+  size_t limit;
+  unsigned rejected;
+};
+
+static void *capped_alloc(void *user, void *block, size_t old, size_t size) {
+  struct capped_allocator *alloc = user;
+  if (block == NULL && size > alloc->limit) {
+    alloc->rejected++;
+    return NULL;
+  }
+  return alloc->allocate(alloc->context, block, old, size);
+}
+
+static void medium_userdata_fallback(lua_State *state) {
+  const size_t size = 1730;
+  struct capped_allocator alloc = {0};
+  alloc.allocate = lua_getallocf(state, &alloc.context);
+  alloc.limit = sizeudata(0, size) + sizeof(LuaAllocBlock);
+  lua_setallocf(state, capped_alloc, &alloc);
+  char *payload = lua_newuserdatauv(state, size, 0);
+  LuaAllocBlock *block = (LuaAllocBlock *)(payload - udatamemoffset(0)) - 1;
+  require(alloc.rejected != 0 && luaMP_page(block) == NULL);
+  payload[size - 1] = 'x';
+  lua_gc(state, LUA_GCCOLLECT);
+  require(lua_touserdata(state, -1) == payload && payload[size - 1] == 'x');
+  lua_pop(state, 1);
+  lua_setallocf(state, alloc.allocate, alloc.context);
 }
 
 static void *release_string(void *context, void *pointer, size_t old,
@@ -304,8 +336,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "mature_page") == 0)
     mature_page(state);
   else if (strcmp(argv[1], "mature_userdata_page") == 0)
-    mature_userdata_page(state);
-  else if (strcmp(argv[1], "rotations") == 0) {
+    mature_userdata_page(state, sizeof(int));
+  else if (strcmp(argv[1], "mature_medium_userdata_page") == 0) {
+    mature_userdata_page(state, 1136);
+    medium_userdata_fallback(state);
+  } else if (strcmp(argv[1], "rotations") == 0) {
     rotations(state);
     return 0;
   } else {

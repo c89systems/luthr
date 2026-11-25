@@ -2438,11 +2438,12 @@ static void deletelist (lua_State *L, GCObject *p, GCObject *limit, int fixed) {
 
 static void retire_pages (lua_State *L) {
   global_State *g = G(L);
-  unsigned pool;
-  for (pool = 0; pool < LUA_ALLOC_BINS; pool++) {
+  unsigned i, pools = luaMP_sweepcount(g);
+  for (i = 0; i < pools; i++) {
     LuaAllocPage *page;
-    size_t stride = sizeof(LuaAllocBlock) + luaMP_binbytes(pool);
-    for (page = g->sweep_pages[pool]; page != NULL; page = page->sweep_next) {
+    unsigned pool = luaMP_sweeppool(i);
+    for (page = *luaMP_sweephead(g, pool); page != NULL; page = page->sweep_next) {
+      size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
       size_t offset, limit = luaMP_slotend(page);
       if (__atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED) == 0) continue;
       for (offset = LUA_ALLOC_PAGE_HEADER; offset + stride <= limit;

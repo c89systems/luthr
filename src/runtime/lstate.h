@@ -667,6 +667,7 @@ typedef struct global_State {
   struct LuaAllocPage *trace_page_incoming;  /* atomic producer stack */
   struct LuaAllocPage *trace_pages;  /* imported under trace_mutex */
   struct LuaAllocPage *sweep_pages[LUA_ALLOC_BINS];  /* pool mutex */
+  struct LuaUserdataPools *userdata_pools;  /* published on first medium allocation */
 } global_State;
 
 

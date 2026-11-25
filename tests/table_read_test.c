@@ -412,6 +412,65 @@ static void userdata_index(lua_State *state) {
   require(strcmp(lua_tostring(child, -1), "dynamic") == 0);
 }
 
+static unsigned named_lookups, finalizer_order;
+
+static int named_finalizer(lua_State *state) {
+  int *payload = lua_touserdata(state, 1);
+  require(payload != NULL && lua_rawlen(state, 1) == 1136);
+  finalizer_order = 10 * finalizer_order + (unsigned)*payload;
+  lua_pushvalue(state, 1);
+  lua_setglobal(state, "named_resurrected");
+  return 0;
+}
+
+static int named_registry_index(lua_State *state) {
+  require(strcmp(luaL_checkstring(state, 2), "named.fallback") == 0);
+  named_lookups++;
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_pushliteral(state, "named.target");
+  require(lua_rawget(state, 1) == LUA_TTABLE);
+  return 1;
+}
+
+static void userdata_named(lua_State *state, int generational) {
+  lua_State *owner;
+  const void *metatable;
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(state, LUA_GCSTOP);
+  luaL_newmetatable(state, "named.target");
+  metatable = lua_topointer(state, -1);
+  lua_pushcfunction(state, named_finalizer);
+  lua_setfield(state, -2, "__gc");
+  lua_pop(state, 1);
+  lua_newtable(state);
+  lua_pushcfunction(state, named_registry_index);
+  lua_setfield(state, -2, "__index");
+  require(lua_setmetatable(state, LUA_REGISTRYINDEX));
+  owner = lua_newthread(state);
+  for (int i = 1; i <= 2; ++i) {
+    int *payload = lua_newuserdatauv(owner, 1136, 0);
+    *payload = i;
+    lua_newtable(owner);
+    require(lua_setmetatable(owner, -2));
+    luaL_setmetatable(owner, i == 1 ? "named.target" : "named.fallback");
+    require(lua_gettop(owner) == i && lua_getmetatable(owner, i));
+    require(lua_topointer(owner, -1) == metatable);
+    lua_pop(owner, 1);
+    require(lua_touserdata(owner, i) == payload && *payload == i);
+  }
+  require(named_lookups == 1 && finalizer_order == 0);
+  lua_settop(owner, 0);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(finalizer_order == 21);
+  require(lua_getglobal(state, "named_resurrected") == LUA_TUSERDATA);
+  require(*(int *)lua_touserdata(state, -1) == 1);
+  lua_pop(state, 1);
+  lua_pushnil(state);
+  lua_setglobal(state, "named_resurrected");
+  lua_gc(state, LUA_GCCOLLECT);
+  require(finalizer_order == 21);
+}
+
 static Table *set_string_method(lua_State *state, const char *value) {
   Table *methods;
   lua_newtable(state);
@@ -1939,6 +1998,8 @@ int main(int argc, char **argv) {
     metatable_reattach(state, LUA_TUSERDATA, 0);
   else if (strcmp(argv[1], "userdata_index") == 0)
     userdata_index(state);
+  else if (strncmp(argv[1], "userdata_named_", 15) == 0)
+    userdata_named(state, strcmp(argv[1], "userdata_named_generational") == 0);
   else if (strncmp(argv[1], "registry_", 9) == 0)
     registry_snapshots(state, strcmp(argv[1], "registry_generational") == 0);
   else if (strcmp(argv[1], "primitive_index") == 0)

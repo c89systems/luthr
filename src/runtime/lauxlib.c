@@ -389,8 +389,7 @@ LUALIB_API int luaL_newmetatable (lua_State *L, const char *tname) {
 
 
 LUALIB_API void luaL_setmetatable (lua_State *L, const char *tname) {
-  luaL_getmetatable(L, tname);
-  lua_setmetatable(L, -2);
+  luaA_setnamedmeta(L, tname);
 }
 
 

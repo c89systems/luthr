@@ -17,14 +17,17 @@
 ** mutex serializes cursor advancement against return of the backing page. */
 static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
   LuaSweepPlan *plan = &g->sweep_plan;
+  unsigned pools = luaMP_sweepcount(g);
   unsigned inspected = 0;
-  while (plan->page_pool < LUA_ALLOC_BINS && inspected < limit) {
-    unsigned pool = plan->page_pool;
-    luaX_checksync(pthread_mutex_lock(&g->allocation_mutex[pool]));
-    while (plan->pages[pool] != NULL && inspected < limit) {
-      LuaAllocPage *page = plan->pages[pool];
+  while (plan->page_pool < pools && inspected < limit) {
+    unsigned pool = luaMP_sweeppool(plan->page_pool);
+    pthread_mutex_t *mutex = luaMP_sweepmutex(g, pool);
+    LuaAllocPage **cursor = luaMP_sweepcursor(g, pool);
+    luaX_checksync(pthread_mutex_lock(mutex));
+    while (*cursor != NULL && inspected < limit) {
+      LuaAllocPage *page = *cursor;
       uint64_t epoch = __atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED);
-      plan->pages[pool] = page->sweep_next;
+      *cursor = page->sweep_next;
       inspected++;
       if (page->state == LUA_PAGE_OPEN && epoch != 0 &&
           (plan->kind != SWEEP_YOUNG || epoch >= plan->epoch)) {
@@ -36,8 +39,8 @@ static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
         break;
       }
     }
-    if (plan->pages[pool] == NULL) plan->page_pool++;
-    luaX_checksync(pthread_mutex_unlock(&g->allocation_mutex[pool]));
+    if (*cursor == NULL) plan->page_pool++;
+    luaX_checksync(pthread_mutex_unlock(mutex));
     if (work->page != NULL) break;
   }
   work->count = inspected;
@@ -46,7 +49,7 @@ static void takepage (global_State *g, LuaSweepWork *work, unsigned limit) {
 int luaC_sweepready (global_State *g) {
   LuaSweepPlan *plan = &g->sweep_plan;
   return plan->phase == SWEEP_OBJECTS &&
-    (plan->next != plan->limit || plan->page_pool < LUA_ALLOC_BINS);
+    (plan->next != plan->limit || plan->page_pool < luaMP_sweepcount(g));
 }
 
 void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
@@ -61,8 +64,13 @@ void luaC_beginsweep (lua_State *L, unsigned kind, l_mem marked) {
   __atomic_store_n(&g->young_work, LUA_YOUNG_SURVIVOR, __ATOMIC_RELEASE);
   plan->epoch = epoch;
   plan->kind = kind;
-  for (unsigned pool = 0; pool < LUA_ALLOC_BINS; pool++)
-    plan->pages[pool] = g->sweep_pages[pool];
+  {
+    unsigned pools = luaMP_sweepcount(g);
+    for (unsigned i = 0; i < pools; i++) {
+      unsigned pool = luaMP_sweeppool(i);
+      *luaMP_sweepcursor(g, pool) = *luaMP_sweephead(g, pool);
+    }
+  }
   __atomic_fetch_and(&g->world.control, ~cast(uint64_t, AGEBITS),
                    __ATOMIC_RELAXED);
   plan->base_marked = marked;
@@ -303,10 +311,10 @@ static lu_mem sweepbatch (lua_State *L, unsigned limit, int advance,
     luaHS_scanend(L);
     if (work.count != 0) scanned = work.count;
     if (work.page != NULL) {
-      unsigned pool = work.page->pool;
-      luaX_checksync(pthread_mutex_lock(&G(L)->allocation_mutex[pool]));
+      pthread_mutex_t *mutex = luaMP_sweepmutex(G(L), work.page->pool);
+      luaX_checksync(pthread_mutex_lock(mutex));
       work.page->state = LUA_PAGE_OPEN;
-      luaX_checksync(pthread_mutex_unlock(&G(L)->allocation_mutex[pool]));
+      luaX_checksync(pthread_mutex_unlock(mutex));
     }
     frame.batch = 0;
     luaX_checksync(pthread_mutex_lock(&world->mutex));

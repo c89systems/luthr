@@ -1560,11 +1560,10 @@ LUA_API void lua_rawseti (lua_State *L, int idx, lua_Integer n) {
 }
 
 
-LUA_API int lua_setmetatable (lua_State *L, int objindex) {
+static void setmetatableowned (lua_State *L, int objindex) {
   LuaNativeRoot indexed;
   TValue *obj;
   Table *mt;
-  lua_lock(L);
   api_checkpop(L, 1);
   obj = luaA_indexvalue(L, objindex, &indexed);
   if (ttisnil(s2v(L->top.p - 1)))
@@ -1578,8 +1577,34 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
     luaA_setmetatable(L, obj, mt);
   L->top.p--;
   luaR_poproot(L, &indexed);
+}
+
+
+LUA_API int lua_setmetatable (lua_State *L, int objindex) {
+  lua_lock(L);
+  setmetatableowned(L, objindex);
   lua_unlock(L);
   return 1;
+}
+
+
+void luaA_setnamedmeta (lua_State *L, const char *name) {
+  TValue registry, value;
+  lua_lock(L);
+  if (luaA_tryregistry(G(L), &registry) &&
+      readnamedfield(L, &registry, name, &value)) {
+    setobj2s(L, L->top.p, &value);
+    api_incr_top(L);
+  }
+  else {
+    LuaNativeRoot root;
+    luaR_pushroot(L, &root);
+    luaA_getregistry(L, &root);
+    luaA_pushfield(L, &root.value, name);
+    luaR_poproot(L, &root);
+  }
+  setmetatableowned(L, -2);
+  lua_unlock(L);
 }
 
 

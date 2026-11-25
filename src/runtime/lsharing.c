@@ -203,8 +203,8 @@ void luaA_publish (lua_State *L, GCObject *owner, const TValue *edge) {
 
 /* Borrow a layout lane for the finalizer decision. A __gc edit must close
 ** that layout and drain the lanes, so the mark and its ordering stay inside
-** the binding operation. Publish the receiver graph before taking the lane:
-** there must be no safepoint or ownership wait while the lane is held. */
+** the binding operation. Publish receivers with user values before taking
+** the lane. A receiver without user values can publish its sole edge here. */
 int luaA_bindprivateuserdata (lua_State *L, Udata *userdata, Table *mt) {
   global_State *g = G(L);
   GCObject *owner = obj2gco(userdata);
@@ -212,24 +212,34 @@ int luaA_bindprivateuserdata (lua_State *L, Udata *userdata, Table *mt) {
   LuaTableWriter *lane;
   TValue method;
   uint64_t layout;
-  int ready, shared;
+  int ready, shared = 0;
+  int leaf = userdata->nuvalue == 0;
   if (!luaA_local(L, owner) || luaW_iscollector(L) || (g->gcstp & GCSTPCLS) ||
-      !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) ||
-      !luaH_readshortstr(g, L, mt, g->tmname[TM_GC], &method)) return 0;
-  shared = !ttisnil(&method);
-  if (shared) luaA_share(L, owner);
-  luaA_begin(L, owner, &receiver);
+      !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED))
+    return 0;
+  if (!leaf) {
+    if (!luaH_readshortstr(g, L, mt, g->tmname[TM_GC], &method)) return 0;
+    shared = !ttisnil(&method);
+    if (shared) luaA_share(L, owner);
+    luaA_begin(L, owner, &receiver);
+  }
   layout = __atomic_load_n(&mt->sequence, __ATOMIC_ACQUIRE);
   lane = (layout & 1) ? NULL : luaH_claimwriter(L, mt, owner, layout);
   ready = lane != NULL && luaH_readshortstr(g, L, mt, g->tmname[TM_GC], &method) &&
-          (shared || ttisnil(&method));
+          (leaf || shared || ttisnil(&method));
   if (ready) {
     luaC_prewriteptr(L, __atomic_load_n(&userdata->metatable, __ATOMIC_ACQUIRE), mt);
     luaA_storeudatameta(userdata, mt);
     luaC_objbarrier(L, userdata, mt);
-    if (!ttisnil(&method)) luaC_registerfinalizer(L, owner);
+    if (!ttisnil(&method)) {
+      /* The stack still owns this receiver. Its new metatable is already
+      ** shared, so there is no remaining graph to promote. */
+      if (leaf)
+        __atomic_store_n(&userdata->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
+      luaC_registerfinalizer(L, owner);
+    }
   }
   if (lane != NULL) luaH_releasewriter(L, mt, lane);
-  luaA_end(L, &receiver);
+  if (!leaf) luaA_end(L, &receiver);
   return ready;
 }

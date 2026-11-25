@@ -201,30 +201,80 @@ static void accountprivate (lua_State *L, l_mem change) {
 #define ALLOC_SPARE_RESIDENT (16u * 1024 * 1024)
 #define ALLOC_SPARE_LIMIT (64u * 1024 * 1024)
 
+l_sinline LuaUserdataPools *udatapools (global_State *g) {
+  return __atomic_load_n(&g->userdata_pools, __ATOMIC_ACQUIRE);
+}
+
+l_sinline LuaUserdataCache *udatacache (LuaAllocationCache *cache) {
+  return cache->slot_pages != NULL ? &cache->slot_pages->userdata
+                                   : cache->userdata;
+}
+
 l_sinline pthread_mutex_t *poolmutex (global_State *g, unsigned pool) {
+  if (pool >= LUA_ALLOC_USERDATA_POOL)
+    return &udatapools(g)->mutex[pool - LUA_ALLOC_USERDATA_POOL];
   return pool < LUA_ALLOC_POOLS ? &g->allocation_mutex[pool]
       : &g->slot_allocation_mutex[pool - LUA_ALLOC_POOLS];
 }
 
 l_sinline LuaAllocPage **poolpages (global_State *g, unsigned pool) {
+  if (pool >= LUA_ALLOC_USERDATA_POOL)
+    return &udatapools(g)->pages[pool - LUA_ALLOC_USERDATA_POOL];
   return pool < LUA_ALLOC_POOLS ? &g->allocation_pages[pool]
       : &g->slot_allocation_pages[pool - LUA_ALLOC_POOLS];
 }
 
 l_sinline LuaAllocPage **poolavailable (global_State *g, unsigned pool) {
+  if (pool >= LUA_ALLOC_USERDATA_POOL)
+    return &udatapools(g)->available[pool - LUA_ALLOC_USERDATA_POOL];
   return pool < LUA_ALLOC_POOLS ? &g->allocation_available[pool]
       : &g->slot_allocation_available[pool - LUA_ALLOC_POOLS];
 }
 
 l_sinline LuaAllocPage **cachepage (LuaAllocationCache *cache, unsigned pool) {
+  if (pool >= LUA_ALLOC_USERDATA_POOL)
+    return &udatacache(cache)->pages[pool - LUA_ALLOC_USERDATA_POOL];
   if (pool < LUA_ALLOC_POOLS) return &cache->pages[pool];
   lua_assert(cache->slot_pages != NULL);
   return &cache->slot_pages->pages[pool - LUA_ALLOC_POOLS];
 }
 
+unsigned luaMP_sweepcount (global_State *g) {
+  return LUA_ALLOC_BINS + (udatapools(g) != NULL ? LUA_ALLOC_USERDATA_BINS : 0);
+}
+
+LuaAllocPage **luaMP_sweephead (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_BINS ? &g->sweep_pages[pool]
+    : &udatapools(g)->sweep[pool - LUA_ALLOC_USERDATA_POOL];
+}
+
+LuaAllocPage **luaMP_sweepcursor (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_BINS ? &g->sweep_plan.pages[pool]
+    : &udatapools(g)->cursor[pool - LUA_ALLOC_USERDATA_POOL];
+}
+
+l_sinline int objectpool (unsigned pool) {
+  return pool < LUA_ALLOC_BINS || pool >= LUA_ALLOC_USERDATA_POOL;
+}
+
+l_sinline LuaAllocPage **sparehead (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_BINS ? &g->allocation_spare[pool]
+    : &udatapools(g)->spare[pool - LUA_ALLOC_USERDATA_POOL];
+}
+
+l_sinline LuaAllocPage ***sparetail (global_State *g, unsigned pool) {
+  return pool < LUA_ALLOC_BINS ? &g->allocation_spare_tail[pool]
+    : &udatapools(g)->spare_tail[pool - LUA_ALLOC_USERDATA_POOL];
+}
+
+pthread_mutex_t *luaMP_sweepmutex (global_State *g, unsigned pool) {
+  return poolmutex(g, pool);
+}
+
 int luaM_initpools (lua_State *L) {
   global_State *g = G(L);
   int i, status;
+  g->userdata_pools = NULL;
   memset(g->sweep_pages, 0, sizeof(g->sweep_pages));
   g->allocation_dirty = g->allocation_pending = NULL;
   g->allocation_retired = g->allocation_returning = NULL;
@@ -250,6 +300,7 @@ int luaM_initpools (lua_State *L) {
 
 void luaM_destroypools (lua_State *L) {
   int i;
+  LuaUserdataPools *userdata = udatapools(G(L));
   lua_assert(G(L)->allocation_dirty == NULL &&
              G(L)->allocation_pending == NULL &&
              G(L)->allocation_retired == NULL &&
@@ -261,23 +312,42 @@ void luaM_destroypools (lua_State *L) {
     lua_assert(i >= LUA_ALLOC_BINS || G(L)->sweep_pages[i] == NULL);
     luaX_checksync(pthread_mutex_destroy(poolmutex(G(L), i)));
   }
+  if (userdata != NULL) {
+    for (i = 0; i < LUA_ALLOC_USERDATA_BINS; i++) {
+      lua_assert(userdata->pages[i] == NULL && userdata->available[i] == NULL
+                 && userdata->sweep[i] == NULL && userdata->cursor[i] == NULL
+                 && userdata->spare[i] == NULL);
+      luaX_checksync(pthread_mutex_destroy(&userdata->mutex[i]));
+    }
+    luaM_free(L, userdata);
+    G(L)->userdata_pools = NULL;
+  }
+}
+
+static void releasecachepage (global_State *g, LuaAllocationCache *cache,
+                              unsigned pool) {
+  LuaAllocPage **link = cachepage(cache, pool);
+  LuaAllocPage *page;
+  luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+  page = *link;
+  if (page != NULL) {
+    lua_assert(page->owner == cache);
+    *link = NULL;
+    page->owner = NULL;
+    luaMP_notify(g, page);
+  }
+  luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
 }
 
 void luaM_releasecache (lua_State *L, LuaAllocationCache *cache) {
-  int i;
-  int end = cache->slot_pages != NULL ? LUA_ALLOC_TOTAL_POOLS : LUA_ALLOC_POOLS;
-  for (i = 0; i < end; i++) {
-    LuaAllocPage *page;
-    luaX_checksync(pthread_mutex_lock(poolmutex(G(L), i)));
-    page = *cachepage(cache, i);
-    if (page != NULL) {
-      lua_assert(page->owner == cache);
-      *cachepage(cache, i) = NULL;
-      page->owner = NULL;
-      luaMP_notify(G(L), page);
-    }
-    luaX_checksync(pthread_mutex_unlock(poolmutex(G(L), i)));
-  }
+  global_State *g = G(L);
+  unsigned i;
+  unsigned end = cache->slot_pages != NULL ? LUA_ALLOC_TOTAL_POOLS
+                                           : LUA_ALLOC_POOLS;
+  for (i = 0; i < end; i++) releasecachepage(g, cache, i);
+  if (udatacache(cache) != NULL && udatapools(g) != NULL)
+    for (i = 0; i < LUA_ALLOC_USERDATA_BINS; i++)
+      releasecachepage(g, cache, LUA_ALLOC_USERDATA_POOL + i);
 }
 
 static LuaAllocBlock *takeblock (LuaAllocPage *page) {
@@ -306,12 +376,13 @@ static void offerpage (global_State *g, LuaAllocPage *page);
 ** of the frozen sweep cursor and enter the next cohort. */
 static void tracksweep (global_State *g, LuaAllocPage *page) {
   unsigned pool = page->pool;
-  lua_assert(pool < LUA_ALLOC_BINS && page->sweep_previous == NULL);
-  page->sweep_next = g->sweep_pages[pool];
-  page->sweep_previous = &g->sweep_pages[pool];
+  LuaAllocPage **head = luaMP_sweephead(g, pool);
+  lua_assert(page->sweep_previous == NULL);
+  page->sweep_next = *head;
+  page->sweep_previous = head;
   if (page->sweep_next != NULL)
     page->sweep_next->sweep_previous = &page->sweep_next;
-  g->sweep_pages[pool] = page;
+  *head = page;
 }
 
 void luaM_enrollsweep (lua_State *L, LuaAllocPage *page, uint64_t epoch) {
@@ -462,8 +533,9 @@ static int adviseunused (LuaAllocPage *page) {
 static int keepsparepage (global_State *g, LuaAllocPage *page) {
   size_t bytes;
   unsigned pool = page->pool;
+  LuaAllocPage **head, ***tail;
   int discard;
-  if (pool >= LUA_ALLOC_BINS || page->bytes != LUA_ALLOC_PAGE_MAX ||
+  if (!objectpool(pool) || page->bytes != LUA_ALLOC_PAGE_MAX ||
       g->allocator.function != luaAL_builtin || g->gcemergency ||
       (g->gcstp & GCSTPCLS)) return 0;
   bytes = __atomic_load_n(&g->allocation_spare_bytes, __ATOMIC_RELAXED);
@@ -477,16 +549,18 @@ static int keepsparepage (global_State *g, LuaAllocPage *page) {
     return 0;
   }
   luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
+  head = sparehead(g, pool);
+  tail = sparetail(g, pool);
   /* Supply recent pages first to keep the kernel out of allocation churn. */
   if (discard) {
     page->next = NULL;
-    *g->allocation_spare_tail[pool] = page;
-    g->allocation_spare_tail[pool] = &page->next;
+    **tail = page;
+    *tail = &page->next;
   }
   else {
-    page->next = g->allocation_spare[pool];
-    if (page->next == NULL) g->allocation_spare_tail[pool] = &page->next;
-    g->allocation_spare[pool] = page;
+    page->next = *head;
+    if (page->next == NULL) *tail = &page->next;
+    *head = page;
   }
   luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
   return 1;
@@ -494,12 +568,14 @@ static int keepsparepage (global_State *g, LuaAllocPage *page) {
 
 void luaM_drainsparepages (lua_State *L) {
   global_State *g = G(L);
-  unsigned pool;
+  unsigned i, pools = luaMP_sweepcount(g);
   lua_assert(!completestate(g) || luaW_iscollector(L));
-  for (pool = 0; pool < LUA_ALLOC_BINS; pool++) {
-    LuaAllocPage *page = g->allocation_spare[pool];
-    g->allocation_spare[pool] = NULL;
-    g->allocation_spare_tail[pool] = &g->allocation_spare[pool];
+  for (i = 0; i < pools; i++) {
+    unsigned pool = luaMP_sweeppool(i);
+    LuaAllocPage **head = sparehead(g, pool);
+    LuaAllocPage *page = *head;
+    *head = NULL;
+    *sparetail(g, pool) = head;
     while (page != NULL) {
       LuaAllocPage *next = page->next;
       luaAL_builtin(NULL, page, page->bytes, 0);
@@ -543,8 +619,8 @@ static unsigned returnpagebatch (lua_State *L, uint64_t *epoch) {
     luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
     swept = page->state == LUA_PAGE_SWEPT;
     if (page->sweep_previous != NULL) {
-      if (g->sweep_plan.pages[pool] == page)
-        g->sweep_plan.pages[pool] = page->sweep_next;
+      LuaAllocPage **cursor = luaMP_sweepcursor(g, pool);
+      if (*cursor == page) *cursor = page->sweep_next;
       *page->sweep_previous = page->sweep_next;
       if (page->sweep_next != NULL)
         page->sweep_next->sweep_previous = page->sweep_previous;
@@ -581,7 +657,9 @@ static void reclaimpages (lua_State *L, int complete) {
     }
     {
       unsigned pool;
-      for (pool = 0; pool < LUA_ALLOC_TOTAL_POOLS; pool++)
+      unsigned end = LUA_ALLOC_TOTAL_POOLS +
+                     (udatapools(g) != NULL ? LUA_ALLOC_USERDATA_BINS : 0);
+      for (pool = 0; pool < end; pool++)
         for (page = *poolpages(g, pool); page != NULL; page = page->next)
           if (page->state == LUA_PAGE_OPEN) luaMP_notify(g, page);
     }
@@ -855,15 +933,16 @@ static LuaAllocPage *availablepage (lua_State *L, unsigned pool) {
 
 static LuaAllocPage *takesparepage (global_State *g, unsigned pool) {
   LuaAllocPage *page;
-  if (pool >= LUA_ALLOC_BINS ||
+  LuaAllocPage **head;
+  if (!objectpool(pool) ||
       __atomic_load_n(&g->allocation_spare_bytes, __ATOMIC_RELAXED) == 0)
     return NULL;
   luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
-  page = g->allocation_spare[pool];
+  head = sparehead(g, pool);
+  page = *head;
   if (page != NULL) {
-    g->allocation_spare[pool] = page->next;
-    if (page->next == NULL)
-      g->allocation_spare_tail[pool] = &g->allocation_spare[pool];
+    *head = page->next;
+    if (page->next == NULL) *sparetail(g, pool) = head;
     __atomic_fetch_sub(&g->allocation_spare_bytes, page->bytes, __ATOMIC_RELAXED);
   }
   luaX_checksync(pthread_mutex_unlock(poolmutex(g, pool)));
@@ -1092,10 +1171,15 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
     memset(cache->growth, 0, sizeof(cache->growth));
     if (cache->slot_pages != NULL)
       memset(cache->slot_pages->growth, 0, sizeof(cache->slot_pages->growth));
+    if (udatacache(cache) != NULL)
+      memset(udatacache(cache)->growth, 0, sizeof(udatacache(cache)->growth));
     cache->growth_epoch = luaC_traceepoch(cache->global);
   }
-  growth = pool < LUA_ALLOC_POOLS ? &cache->growth[pool]
-      : &cache->slot_pages->growth[pool - LUA_ALLOC_POOLS];
+  if (pool >= LUA_ALLOC_USERDATA_POOL)
+    growth = &udatacache(cache)->growth[pool - LUA_ALLOC_USERDATA_POOL];
+  else
+    growth = pool < LUA_ALLOC_POOLS ? &cache->growth[pool]
+        : &cache->slot_pages->growth[pool - LUA_ALLOC_POOLS];
   bytes = minimum << *growth;
   if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
   while (bytes < requested && bytes < LUA_ALLOC_PAGE_MAX) {
@@ -1268,7 +1352,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     return block;
   }
   if (allocation != NULL && luaMP_page(allocation) == NULL &&
-      nsize > luaMP_binbytes(LUA_ALLOC_BINS - 1)) {
+      nsize > LUA_ALLOC_MAX) {
     LuaAllocBlock *replacement;
     size_t oldbytes = osize + sizeof(LuaAllocBlock);
     size_t bytes;
@@ -1302,11 +1386,68 @@ void *luaM_saferealloc_ (lua_State *L, void *block, size_t osize,
 }
 
 
+/* Only VMs that allocate medium userdata have these directories. The
+** backing allocator can park, so publish a fully initialized directory
+** and reacquire the current cache after each allocation. */
+static int prepareudatapools (lua_State *L) {
+  global_State *g = G(L);
+  LuaAllocationCache *cache;
+  if (udatapools(g) == NULL) {
+    LuaUserdataPools *pools = cast(LuaUserdataPools *,
+                                   luaM_tryalloc(L, sizeof(LuaUserdataPools)));
+    LuaUserdataPools *expected = NULL;
+    unsigned ready = 0;
+    if (pools == NULL) return 0;
+    memset(pools, 0, sizeof(*pools));
+    while (ready < LUA_ALLOC_USERDATA_BINS &&
+           pthread_mutex_init(&pools->mutex[ready], NULL) == 0) {
+      pools->spare_tail[ready] = &pools->spare[ready];
+      ready++;
+    }
+    if (ready != LUA_ALLOC_USERDATA_BINS ||
+        !__atomic_compare_exchange_n(&g->userdata_pools, &expected, pools, 0,
+                                      __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+      while (ready != 0)
+        luaX_checksync(pthread_mutex_destroy(&pools->mutex[--ready]));
+      luaM_free(L, pools);
+      if (expected == NULL) return 0;
+    }
+  }
+  cache = allocationcache(L);
+  if (udatacache(cache) == NULL) {
+    LuaUserdataCache *pages = cast(LuaUserdataCache *,
+                                    luaM_tryalloc(L, sizeof(LuaUserdataCache)));
+    if (pages == NULL) return 0;
+    cache = allocationcache(L);
+    if (udatacache(cache) != NULL) luaM_free(L, pages);
+    else {
+      memset(pages, 0, sizeof(*pages));
+      cache->userdata = pages;
+    }
+  }
+  return 1;
+}
+
+static void *allocudata (lua_State *L, size_t size) {
+  static const unsigned short sizes[LUA_ALLOC_USERDATA_BINS] =
+    {640, 768, 896, 1024, 1280, 1536, 1792, LUA_ALLOC_USERDATA_MAX};
+  unsigned bin = 0;
+  while (size > sizes[bin]) bin++;
+  if ((udatapools(G(L)) == NULL || udatacache(allocationcache(L)) == NULL) &&
+      !prepareudatapools(L)) return NULL;
+  /* An embedding allocator may accept the object but reject a page. */
+  return allocatepooled(L, size, sizes[bin], LUA_ALLOC_USERDATA_POOL + bin, 0);
+}
+
 void *luaM_malloc_ (lua_State *L, size_t size, int tag) {
   if (size == 0)
     return NULL;  /* that's all */
   else {
-    void *block = allocateblock(L, size, tag, 0, 1);
+    void *block = NULL;
+    if (tag == LUA_TUSERDATA && size > LUA_ALLOC_MAX &&
+        size <= LUA_ALLOC_USERDATA_MAX)
+      block = allocudata(L, size);
+    if (block == NULL) block = allocateblock(L, size, tag, 0, 1);
     if (block == NULL) luaM_error(L);
     return block;
   }
