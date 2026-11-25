@@ -107,35 +107,41 @@ TValue *luaA_indexvalue (lua_State *L, int idx, LuaNativeRoot *snapshot) {
     luaA_begin(L, gcvalue(s2v(L->ci->func.p)), &scope);
     source = index2addr(L, idx);
     valid = isvalid(L, source);
-    luaR_setroot(L, snapshot, source);
+    luaR_copyroot(L, snapshot, source);
     luaA_end(L, &scope);
   }
   else {
     source = index2addr(L, idx);
     valid = isvalid(L, source);
-    luaR_setroot(L, snapshot, source);
+    /* Native stack slots are covered by the epoch's root snapshot and
+    ** by the barriers on the strong heap edges from which C reads them.
+    ** An embedded hook can also address a Lua frame's register shadow. */
+    if (isLua(L->ci)) luaR_setroot(L, snapshot, source);
+    else luaR_copyroot(L, snapshot, source);
   }
   return valid ? &snapshot->value : &G(L)->nilvalue;
 }
 
-/* A value API has no safepoint after this read. Ordinary registers remain
-** borrowed from the owned stack; shared pseudo-indices use the same guarded
-** snapshot and shading as allocating APIs, then retain only its valid value. */
-static const TValue *index2read (lua_State *L, int idx, TValue *snapshot,
-                                 uintptr_t owner) {
+static const TValue *readpseudo (lua_State *L, int idx, TValue *snapshot) {
+  LuaNativeRoot root;
+  const TValue *source = luaA_indexvalue(L, idx, &root);
+  int valid = isvalid(L, source);
+  setobj(L, snapshot, source);
+  luaR_poproot(L, &root);
+  return valid ? snapshot : &G(L)->nilvalue;
+}
+
+/* A value API has no safepoint after reading the owned slot. C closure and
+** registry writers preserve overwritten values before publishing new ones. */
+l_sinline const TValue *index2read (lua_State *L, int idx, TValue *snapshot,
+                                   uintptr_t owner) {
   if (!ispseudo(idx)) {
     const TValue *source = index2addr(L, idx);
-    if (owner != LUA_VALUE_BOUNDED) luaC_tracevalue(L, source);
+    if (owner != LUA_VALUE_BOUNDED && isLua(L->ci))
+      luaC_tracevalue(L, source);
     return source;
   }
-  else {
-    LuaNativeRoot root;
-    const TValue *source = luaA_indexvalue(L, idx, &root);
-    int valid = isvalid(L, source);
-    setobj(L, snapshot, source);
-    luaR_poproot(L, &root);
-    return valid ? snapshot : &G(L)->nilvalue;
-  }
+  return readpseudo(L, idx, snapshot);
 }
 
 l_sinline uintptr_t readenter (lua_State *L, int idx) {
@@ -1220,7 +1226,7 @@ LUA_API int lua_getmetatable (lua_State *L, int objindex) {
   const TValue *object = index2read(L, objindex, &indexed, owner);
   Table *mt = luaA_readmetatable(G(L), object);
   if (mt != NULL) {
-    if (owner != LUA_VALUE_BOUNDED) luaC_tracepointer(L, mt);
+    /* Metatable replacements shade the outgoing pointer before publishing. */
     sethvalue2s(L, L->top.p, mt);
     api_incr_top(L);
   }
@@ -1272,7 +1278,7 @@ LUA_API int lua_getiuservalue (lua_State *L, int idx, int n) {
       lua_unlock(L);
       return t;
     }
-    if (owner != LUA_VALUE_BOUNDED) luaC_tracevalue(L, &value);
+    /* The writer's deletion barrier preserves an overwritten user value. */
     setobj2s(L, L->top.p, &value);
     t = ttype(&value);
   }

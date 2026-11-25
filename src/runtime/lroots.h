@@ -26,10 +26,16 @@ l_sinline void luaR_pushroot (lua_State *L, LuaNativeRoot *root) {
   L->native_roots = root;
 }
 
-l_sinline void luaR_setroot (lua_State *L, LuaNativeRoot *root,
-                            const TValue *value) {
+/* Copy a value retained by an already-covered strong edge. */
+l_sinline void luaR_copyroot (lua_State *L, LuaNativeRoot *root,
+                             const TValue *value) {
   root->table_view = NULL;
   setobj(L, &root->value, value);
+}
+
+l_sinline void luaR_setroot (lua_State *L, LuaNativeRoot *root,
+                            const TValue *value) {
+  luaR_copyroot(L, root, value);
   luaC_tracevalue(L, &root->value);
 }
 

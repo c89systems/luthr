@@ -237,11 +237,11 @@ void luaA_getregistry (lua_State *L, LuaNativeRoot *result) {
   global_State *g = G(L);
   TValue value;
   if (luaA_tryregistry(g, &value))
-    luaR_setroot(L, result, &value);
+    luaR_copyroot(L, result, &value);
   else {
     LuaObjectScope access;
     luaA_beginlock(L, &g->registry_access, &access);
-    luaR_setroot(L, result, &g->l_registry);
+    luaR_copyroot(L, result, &g->l_registry);
     luaA_end(L, &access);
   }
 }
@@ -263,10 +263,7 @@ void luaA_getmetatable (lua_State *L, const TValue *object, LuaNativeRoot *resul
   /* A binding is a single pointer. Managed admission and the writer's
   ** deletion barrier keep a detached metatable alive until we root it. */
   Table *mt = luaA_readmetatable(G(L), object);
-  if (mt != NULL) {
-    sethvalue(L, &result->value, mt);
-    luaC_tracepointer(L, mt);
-  }
+  if (mt != NULL) { sethvalue(L, &result->value, mt); }
   else setnilvalue(&result->value);
 }
 

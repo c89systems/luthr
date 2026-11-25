@@ -363,10 +363,19 @@ static int noresult(lua_State *L) {
   return 0;
 }
 
+static int return_capture(lua_State *L) {
+  lua_pushvalue(L, lua_upvalueindex(1));
+  return 1;
+}
+
 static void overwrite(const char *kind) {
   lua_State *L = newstate();
   GCObject *child, *descendant;
   int read_capture = strcmp(kind, "capture_read") == 0;
+  int read_userdata = strcmp(kind, "userdata_read") == 0;
+  int read_metatable = strcmp(kind, "metatable_read") == 0;
+  int read_cclosure = strcmp(kind, "cclosure_read") == 0;
+  int read_native = read_userdata || read_metatable || read_cclosure;
   require(L != NULL);
   /* Put the only child reference in a heap edge; retain its descendant only
    * through that child. No C pointer below is registered as a collector root.
@@ -387,13 +396,13 @@ static void overwrite(const char *kind) {
       lua_rawseti(L, -2, 1);
     else
       lua_setfield(L, -2, "child");
-  } else if (strcmp(kind, "userdata") == 0) {
+  } else if (read_userdata || strcmp(kind, "userdata") == 0) {
     lua_newuserdatauv(L, 1, 1);
     lua_pushvalue(L, 1);
     require(lua_setiuservalue(L, -2, 1));
-  } else if (strcmp(kind, "cclosure") == 0) {
+  } else if (read_cclosure || strcmp(kind, "cclosure") == 0) {
     lua_pushvalue(L, 1);
-    lua_pushcclosure(L, noresult, 1);
+    lua_pushcclosure(L, read_cclosure ? return_capture : noresult, 1);
   } else if (read_capture || strcmp(kind, "capture") == 0) {
     const char *source =
         read_capture ? "local value=...; return function() value.n=42; "
@@ -403,7 +412,7 @@ static void overwrite(const char *kind) {
     lua_pushvalue(L, 1);
     require(lua_pcall(L, 1, 1, 0) == LUA_OK);
   } else {
-    require(strcmp(kind, "metatable") == 0);
+    require(read_metatable || strcmp(kind, "metatable") == 0);
     lua_newtable(L);
     lua_pushvalue(L, 1);
     require(lua_setmetatable(L, -2));
@@ -422,14 +431,30 @@ static void overwrite(const char *kind) {
     require(iswhite(G(L), child));
     lua_unlock(L);
   }
+  if (read_native) {
+    if (read_userdata)
+      require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
+    else if (read_metatable)
+      require(lua_getmetatable(L, 1));
+    else {
+      lua_pushvalue(L, 1);
+      require(lua_pcall(L, 0, 1, 0) == LUA_OK);
+    }
+    /* The copy passes through the C stack before its heap edge is removed. */
+    lua_pushvalue(L, 2);
+    lua_remove(L, 2);
+    lua_lock(L);
+    require(gcvalue(s2v(L->top.p - 1)) == child && iswhite(G(L), child));
+    lua_unlock(L);
+  }
   lua_pushnil(L);
   if (strcmp(kind, "array") == 0)
     lua_rawseti(L, 1, 1);
   else if (strcmp(kind, "hash") == 0)
     lua_setfield(L, 1, "child");
-  else if (strcmp(kind, "userdata") == 0)
+  else if (read_userdata || strcmp(kind, "userdata") == 0)
     require(lua_setiuservalue(L, 1, 1));
-  else if (read_capture || strcmp(kind, "cclosure") == 0 ||
+  else if (read_capture || read_cclosure || strcmp(kind, "cclosure") == 0 ||
            strcmp(kind, "capture") == 0)
     require(lua_setupvalue(L, 1, 1) != NULL);
   else
@@ -437,7 +462,7 @@ static void overwrite(const char *kind) {
   require(!iswhite(G(L), child));
   drain(L);
   require(isblack(G(L), child) && isblack(G(L), descendant));
-  if (read_capture) {
+  if (read_capture || read_native) {
     lua_gc(L, LUA_GCCOLLECT);
     require(lua_rawgeti(L, -1, 1) == LUA_TTABLE);
     require(lua_topointer(L, -1) == descendant);
