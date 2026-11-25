@@ -656,7 +656,9 @@ static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
-  g->trace_plan.pending = g->tobefnz;
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  g->trace_plan.pending = __atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
   g->trace_plan.finalizers = g->finobj != g->finobjold1 ? &g->finobj : NULL;
   g->trace_plan.finalizer_gray = NULL;
   g->trace_plan.finalizer_tail = NULL;
@@ -672,7 +674,9 @@ static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   if (arming) {
     /* Prepare the root queue before workers can complete the handshake. */
     luaC_initialtrace(L);
+    luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
     luaC_readytrace(g);
+    luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
     luaW_armtrace(L);
   }
   else luaC_publishtraceplan(g);
@@ -1730,37 +1734,40 @@ static void checkSizes (lua_State *L, global_State *g) {
 }
 
 
-/*
-** Get the next object to finalize. Its allocation membership never changes.
-*/
-static GCObject *udata2finalize (global_State *g) {
-  GCObject *o = g->tobefnz;  /* get first element */
-  lua_assert(tofinalize(o));
-  /* An older callback can finish while another cycle scans queued roots.
-  ** Remove this root from that walk before releasing its queue link. */
-  if (g->trace_plan.pending == o) g->trace_plan.pending = o->next;
-  g->tobefnz = o->next;  /* remove it from 'tobefnz' list */
-  if (g->tobefnz == NULL) g->tobefnz_tail = &g->tobefnz;
-  o->next = NULL;
-  resetbit(o->marked, FINALIZEDBIT);  /* object is "normal" again */
-  return o;
-}
-
-
 static void dothecall (lua_State *L, void *ud) {
   UNUSED(ud);
   luaD_callnoyield(L, L->top.p - 2, 0);
 }
 
 
-static void GCTM (lua_State *L) {
+static int GCTM (lua_State *L) {
   global_State *g = G(L);
-  LuaNativeRoot method;
-  TValue v;
+  LuaNativeRoot object, method;
+  GCObject *o;
   lua_assert(!g->gcemergency);
-  setgcovalue(L, &v, udata2finalize(g));
+  if (!luaC_hasfinalizers(g)) return 0;
+  luaR_pushroot(L, &object);
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  o = __atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED);
+  if (o != NULL) {
+    lua_assert(tofinalize(o));
+    /* Move the pending root to this admitted invocation before releasing
+    ** the link. The trace cursor can be walking the same queue. */
+    setgcovalue(L, &object.value, o);
+    if (g->trace_plan.pending == o) g->trace_plan.pending = o->next;
+    __atomic_store_n(&g->tobefnz, o->next, __ATOMIC_RELEASE);
+    if (o->next == NULL) g->tobefnz_tail = &g->tobefnz;
+    o->next = NULL;
+    resetbit(o->marked, FINALIZEDBIT);
+  }
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  if (o == NULL) {
+    luaR_poproot(L, &object);
+    return 0;
+  }
+  luaC_tracepointer(L, o);
   luaR_pushroot(L, &method);
-  luaT_gettmbyobj(L, &v, TM_GC, &method);
+  luaT_gettmbyobj(L, &object.value, TM_GC, &method);
   if (!ttisnil(&method.value)) {
     TStatus status;
     lu_byte oldah = L->allowhook;
@@ -1768,7 +1775,7 @@ static void GCTM (lua_State *L) {
     /* Embedding limits also account for Lua finalizer instructions. */
     L->allowhook = (gethookmask(L) & LUTHR_LUA_RUNTIME_MASK_FINALIZERS) ? 1 : 0;
     setobj2s(L, L->top.p++, &method.value);  /* push finalizer... */
-    setobj2s(L, L->top.p++, &v);  /* ... and its argument */
+    setobj2s(L, L->top.p++, &object.value);  /* ... and its argument */
     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
     depth = luaW_suspend(L);
     status = luaD_pcall(L, dothecall, NULL, savestack(L, L->top.p - 2), 0);
@@ -1781,16 +1788,37 @@ static void GCTM (lua_State *L) {
     }
   }
   luaR_poproot(L, &method);
+  luaR_poproot(L, &object);
+  return 1;
 }
 
 
-/*
-** call all pending finalizers
-*/
-static void callallpendingfinalizers (lua_State *L) {
-  global_State *g = G(L);
-  while (g->tobefnz)
-    GCTM(L);
+/* Release collector ownership once per drain. An individual callback can
+** park while another execution collects and takes the next pending root. */
+static l_mem drainfinalizers (lua_State *L, l_mem limit) {
+  LuaWorldScope scope;
+  l_mem count = 0;
+  int suspend = L->object_scopes == NULL;
+  if (!luaC_hasfinalizers(G(L))) return 0;
+  if (suspend) scope = luaW_suspend(L);
+  while (count < limit && GCTM(L)) count++;
+  if (suspend) luaW_restore(L, scope, L->native_depth);
+  return count;
+}
+
+void luaC_runfinalizers (lua_State *L) {
+  drainfinalizers(L, MAX_LMEM);
+}
+
+
+/* Only a stopped collector appends. A concurrent read of the head is a
+** readiness hint until the claimant owns trace_mutex. */
+static void appendfinalizers (global_State *g, GCObject *head, GCObject **tail) {
+  if (g->tobefnz_tail == &g->tobefnz)
+    __atomic_store_n(&g->tobefnz, head, __ATOMIC_RELEASE);
+  else
+    *g->tobefnz_tail = head;
+  g->tobefnz_tail = tail;
 }
 
 
@@ -1802,8 +1830,7 @@ static void separateallfinalizers (global_State *g) {
     lua_assert(tofinalize(curr));
     g->finobj = curr->next;
     curr->next = NULL;
-    *g->tobefnz_tail = curr;
-    g->tobefnz_tail = &curr->next;
+    appendfinalizers(g, curr, &curr->next);
   }
 }
 
@@ -2193,7 +2220,7 @@ void luaC_endsweep (lua_State *L) {
   LuaSweepPlan *plan = &g->sweep_plan;
   if (plan->kind == SWEEP_MAJOR) {
     /* Pending finalizers run in a separate incremental step. */
-    if (g->tobefnz != NULL && !g->gcemergency) {
+    if (luaC_hasfinalizers(g) && !g->gcemergency) {
       luaC_setstate(g, GCScallfin);
       luaE_setdebt(g, 0);
     }
@@ -2227,18 +2254,17 @@ void luaC_endsweep (lua_State *L) {
 
 /* Index resizing and young finalizers require an admitted collector. They
 ** can run after the completed cohort and its next allocation limits publish. */
-void luaC_sweepmaintenance (lua_State *L) {
+int luaC_sweepmaintenance (lua_State *L) {
   global_State *g = G(L);
   lu_byte stopem = g->gcstopem;
   lua_assert(luaW_iscollector(L));
-  if (g->gcemergency) return;
+  if (g->gcemergency) return 0;
   __atomic_store_n(&g->shrink_strings, 0, __ATOMIC_RELAXED);
   g->gcstopem = 1;
   checkSizes(L, g);
   g->gcstopem = stopem;
-  if (luaC_kind(g) == KGC_GENMINOR && g->tobefnz != NULL &&
-      luaD_checkminstack(L))
-    callallpendingfinalizers(L);
+  return luaC_kind(g) == KGC_GENMINOR && luaC_hasfinalizers(g) &&
+         luaD_checkminstack(L);
 }
 
 /*
@@ -2393,7 +2419,7 @@ void luaC_freeallobjects (lua_State *L) {
   luaC_waitsweep(L);
   separateallfinalizers(g);  /* teardown finalizes every remaining object */
   lua_assert(g->finobj == NULL);
-  callallpendingfinalizers(L);
+  luaC_runfinalizers(L);
   retire_table_pages(L);
   deletelist(L, g->allgc, obj2gco(mainthread(g)), 0);
   lua_assert(g->finobj == NULL);  /* no new finalizers */
@@ -2413,8 +2439,10 @@ void luaC_initialtrace (lua_State *L) {
   lua_assert(g->ephemeron == NULL && g->weak == NULL);
   markobject(g, mainthread(g));
   luaC_setstate(g, GCSatomic);
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
   __atomic_store_n(&g->trace_plan.phase,
     g->trace_plan.pending != NULL ? TRACE_PENDING : TRACE_MARK, __ATOMIC_RELAXED);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
   markobject(g, L);  /* mark running thread */
   if (!g->trace_plan.roots_pending) {
     marknativeframes(g);
@@ -2453,8 +2481,8 @@ void luaC_finishtrace (lua_State *L) {
   /* A previous cycle's callbacks may still be running. Publish this cohort
   ** only after its reachability and weak decisions are complete. */
   if (g->trace_plan.finalizer_new != NULL) {
-    *g->tobefnz_tail = g->trace_plan.finalizer_new;
-    g->tobefnz_tail = g->trace_plan.finalizer_newtail;
+    appendfinalizers(g, g->trace_plan.finalizer_new,
+                     g->trace_plan.finalizer_newtail);
     g->trace_plan.finalizer_new = NULL;
     g->trace_plan.finalizer_newtail = &g->trace_plan.finalizer_new;
   }
@@ -2676,7 +2704,7 @@ static int sweepstep (lua_State *L, global_State *g, int fast) {
 #define stepinterrupted -4  /* an emergency completed suspended collection */
 
 
-static l_mem singlestep (lua_State *L, int fast) {
+static l_mem singlestep (lua_State *L, int fast, l_mem budget) {
   global_State *g = G(L);
   l_mem stepresult;
   lua_assert(!g->gcstopem);  /* collector is not reentrant */
@@ -2711,16 +2739,22 @@ static l_mem singlestep (lua_State *L, int fast) {
       break;
     }
     case GCScallfin: {  /* call finalizers */
-      if (g->tobefnz && !g->gcemergency && luaD_checkminstack(L)) {
+      if (luaC_hasfinalizers(g) && !g->gcemergency && luaD_checkminstack(L)) {
+        uint64_t epoch = luaC_traceepoch(g);
+        l_mem limit = budget == 0 ? MAX_LMEM : 1 + (budget - 1) / CWUFIN;
+        l_mem count;
         g->gcstopem = 0;  /* ok collections during finalizers */
-        GCTM(L);  /* call one finalizer */
-        stepresult = CWUFIN;
+        count = drainfinalizers(L, limit);
+        if (luaC_traceepoch(g) != epoch || luaC_state(g) != GCScallfin)
+          return stepinterrupted;
+        if (luaC_hasfinalizers(g)) {
+          stepresult = count > MAX_LMEM / CWUFIN ? MAX_LMEM : count * CWUFIN;
+          break;
+        }
       }
-      else {  /* no more finalizers or emergency mode or not enough stack
-                 to run finalizers */
-        finishincremental(L, g);
-        stepresult = step2pause;
-      }
+      /* No pending work can run in this collection. */
+      finishincremental(L, g);
+      stepresult = step2pause;
       break;
     }
     default: lua_assert(0); return 0;
@@ -2739,7 +2773,7 @@ void luaC_runtilstate (lua_State *L, int state, int fast) {
   global_State *g = G(L);
   lua_assert(luaC_kind(g) != KGC_GENMINOR);
   while (state != luaC_state(g) && luaC_kind(g) != KGC_GENMINOR) {
-    l_mem result = singlestep(L, fast);
+    l_mem result = singlestep(L, fast, 0);
     if (result == stepinterrupted || result == step2minor) return;
   }
 }
@@ -2797,7 +2831,7 @@ static void incstep (lua_State *L, global_State *g, l_mem debt, int concurrent) 
       if (luaC_traceepoch(g) != epoch || luaC_kind(g) == KGC_GENMINOR) return;
       break;
     }
-    stres = singlestep(L, fast);  /* perform one single step */
+    stres = singlestep(L, fast, fast ? 0 : work2do);
     if (stres == stepinterrupted) return;
     if (stres == step2minor)  /* returned to minor collections? */
       return;  /* nothing else to be done here */
@@ -2996,13 +3030,15 @@ static void completefinalizers (lua_State *L, uint64_t epoch) {
   global_State *g = G(L);
   if (luaC_traceepoch(g) != epoch || luaC_state(g) != GCScallfin) return;
   luaW_collectenter(L);
-  if (luaC_traceepoch(g) == epoch && luaC_state(g) == GCScallfin) {
-    luaW_stop(L);
+  if (luaC_traceepoch(g) == epoch && luaC_state(g) == GCScallfin &&
+      luaD_checkminstack(L)) {
     luaW_heapleave(L);
-    luaC_runtilstate(L, GCSpause, 1);
-    luaW_start(L);
+    luaC_runfinalizers(L);
+    luaW_collectenter(L);
   }
-  else luaW_heapleave(L);
+  if (luaC_traceepoch(g) == epoch && luaC_state(g) == GCScallfin)
+    finishincremental(L, g);
+  luaW_heapleave(L);
 }
 
 /* Join the current cohort. A basic incremental request lends one slice;
@@ -3143,7 +3179,7 @@ static void fullinc (lua_State *L, global_State *g) {
   /* finish any pending sweep phase to start a new cycle */
   luaC_runtilstate(L, GCSpause, 1);
   if (g->trace_interrupt != interrupted || luaC_kind(g) == KGC_GENMINOR) return;
-  singlestep(L, 1);  /* begin exactly one fresh cycle */
+  singlestep(L, 1, 0);  /* begin exactly one fresh cycle */
   luaC_runtilstate(L, GCSpause, 1);  /* finish collection */
 }
 
@@ -3209,11 +3245,8 @@ static void fullconcurrent (lua_State *L) {
     completecycle(L, epoch);
   }
   completecycle(L, epoch);
-  if (g->trace_interrupt != interrupted && g->tobefnz != NULL) {
-    luaW_stop(L);
-    callallpendingfinalizers(L);
-    luaW_start(L);
-  }
+  if (g->trace_interrupt != interrupted && luaC_hasfinalizers(g))
+    luaC_runfinalizers(L);
   if (started) {
     trimstacks(L);
     L->reclaim_pages = 1;
@@ -3269,8 +3302,8 @@ void luaC_fullgc (lua_State *L, int isemergency) {
     luaC_reclaim(L);
   }
   g->gcemergency = 0;
-  if (!isemergency && g->trace_interrupt != interrupted && g->tobefnz != NULL)
-    callallpendingfinalizers(L);
+  if (!isemergency && g->trace_interrupt != interrupted && luaC_hasfinalizers(g))
+    luaC_runfinalizers(L);
   if (!isemergency) trimstacks(L);
   luaW_start(L);
   if (!L->reclaiming && L->world_depth == 0 &&

@@ -22,9 +22,17 @@ static struct fixture {
   pthread_cond_t changed;
   lua_State *collector;
   unsigned phase, finalized, selected, rooted, batches, expected, postponed;
-  unsigned old_finalized;
+  unsigned old_finalized, finalizer_stops;
   int entered, release, generational, overlap, old_entered, old_release;
 } *fixture;
+
+void __real_luaW_restore(lua_State *, LuaWorldScope, unsigned);
+void __wrap_luaW_restore(lua_State *L, LuaWorldScope scope, unsigned native) {
+  if (fixture != NULL && scope.collection != 0 &&
+      (L->ci->callstatus & CIST_FIN))
+    __atomic_fetch_add(&fixture->finalizer_stops, 1, __ATOMIC_RELAXED);
+  __real_luaW_restore(L, scope, native);
+}
 
 void __real_luaC_claimtrace(lua_State *, LuaTraceWork *, unsigned);
 void __wrap_luaC_claimtrace(lua_State *state, LuaTraceWork *work,
@@ -382,6 +390,8 @@ int main(int argc, char **argv) {
   require(pthread_join(collector, NULL) == 0);
   require(test.finalized == OBJECTS - (test.postponed != 0) &&
           test.batches > (test.overlap ? 0u : 1u));
+  if (strncmp(argv[1], "discovery_", 10) == 0)
+    require(test.finalizer_stops == 0);
   if (test.postponed != 0) {
     test.expected = test.postponed;
     test.postponed = 0;

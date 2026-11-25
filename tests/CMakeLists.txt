@@ -634,7 +634,7 @@ set_target_properties(finalizer_work_test PROPERTIES C_STANDARD 99)
 target_compile_options(finalizer_work_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(finalizer_work_test PRIVATE luthr_static)
 target_link_options(finalizer_work_test PRIVATE -Wl,--wrap=luaC_claimtrace
-  -Wl,--wrap=luaC_tracebatch)
+  -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_restore)
 foreach(case IN ITEMS discovery_incremental discovery_generational
     pending_incremental pending_generational promote_incremental promote_generational
     overlap_incremental overlap_pending_incremental order_incremental order_generational

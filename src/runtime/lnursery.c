@@ -1007,7 +1007,7 @@ void luaC_collectnursery (lua_State *L) {
   if (L->nursery_tables < NURSERY_MIN_TABLES ||
       L->openupval != NULL || L->native_roots != NULL ||
       L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
-      g->tobefnz != NULL || luaW_stopped(&g->world) ||
+      luaC_hasfinalizers(g) || luaW_stopped(&g->world) ||
       g->gcparams[LUA_GCPSTEPSIZE] == 0 || g->gcparams[LUA_GCPSTEPMUL] == 0 ||
       __atomic_load_n(&g->pacer.nursery_scans, __ATOMIC_RELAXED) >=
         NURSERY_SCANS_PER_CYCLE)
