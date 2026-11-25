@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <ltable.h>
 #include <ltableaccess.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,6 +283,100 @@ static void check_packed_transition(lua_State *L) {
           lua_tointeger(L, -1) == 43);
 }
 
+typedef struct {
+  lua_State *state;
+  pthread_barrier_t *resize;
+  lua_Integer number;
+  int graph;
+} BackedWriter;
+
+static void check_backed_value(lua_State *L, int graph) {
+  int type = lua_getfield(L, 1, "field");
+  if (graph && type == LUA_TTABLE) {
+    require(lua_rawequal(L, 2, -1));
+    require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 7);
+    lua_pop(L, 1);
+  } else {
+    require(type == LUA_TNUMBER);
+    if (lua_isinteger(L, -1)) {
+      lua_Integer number = lua_tointeger(L, -1);
+      require(number == LUA_MAXINTEGER || number == LUA_MININTEGER);
+    } else {
+      lua_Number number = lua_tonumber(L, -1);
+      require(number == 0.0 && signbit(number));
+    }
+  }
+  lua_pop(L, 1);
+}
+
+static void *backed_writer(void *argument) {
+  BackedWriter *writer = argument;
+  lua_State *L = writer->state;
+  for (unsigned i = 0; i < 4096; ++i) {
+    if (i % 3 == 0)
+      lua_pushinteger(L, writer->number);
+    else if (i % 3 == 1 || !writer->graph)
+      lua_pushnumber(L, -0.0);
+    else
+      lua_pushvalue(L, 2);
+    lua_setfield(L, 1, "field");
+    check_backed_value(L, writer->graph);
+    if (i == 2047) {
+      int result = pthread_barrier_wait(writer->resize);
+      require(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+    }
+  }
+  return NULL;
+}
+
+static void check_backed_transition(lua_State *L, int graph) {
+  pthread_t threads[2];
+  pthread_barrier_t resize;
+  BackedWriter writers[2];
+  const Table *table;
+  uint64_t layout;
+  int result;
+  require(luaL_dostring(L, "return {field=0, sibling=42}") == LUA_OK);
+  table = lua_topointer(L, 1);
+  lua_createtable(L, 1, 0);
+  lua_pushinteger(L, 7);
+  lua_rawseti(L, 2, 1);
+  require(pthread_barrier_init(&resize, NULL, 3) == 0);
+  for (unsigned i = 0; i < 2; ++i) {
+    lua_State *state = lua_newthread(L);
+    lua_pushvalue(L, 1);
+    lua_pushvalue(L, 2);
+    lua_xmove(L, state, 2);
+    writers[i] = (BackedWriter){
+        state, &resize, i == 0 ? LUA_MININTEGER : LUA_MAXINTEGER, graph};
+  }
+  lua_pushinteger(L, LUA_MAXINTEGER);
+  lua_setfield(L, 1, "field");
+  require(luaH_recordbacking(table->arraydata) != NULL);
+  layout = table->sequence;
+  lua_pushnumber(L, -0.0);
+  lua_setfield(L, 1, "field");
+  require(table->sequence == layout && !(layout & LUA_TABLE_WRITER_FLAGS));
+  check_backed_value(L, graph);
+  for (unsigned i = 0; i < 2; ++i)
+    require(pthread_create(&threads[i], NULL, backed_writer, &writers[i]) == 0);
+  result = pthread_barrier_wait(&resize);
+  require(result == 0 || result == PTHREAD_BARRIER_SERIAL_THREAD);
+  lua_gc(L, LUA_GCSTEP, (size_t)0);
+  lua_pushinteger(L, 17);
+  lua_rawseti(L, 1, 1);
+  for (unsigned i = 0; i < 2; ++i)
+    require(pthread_join(threads[i], NULL) == 0);
+  require(pthread_barrier_destroy(&resize) == 0);
+  require(luaH_recordkeys(table->node) == NULL);
+  lua_gc(L, LUA_GCCOLLECT);
+  check_backed_value(L, graph);
+  require(lua_getfield(L, 1, "sibling") == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 42);
+  require(lua_rawgeti(L, 1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 17);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   pthread_t a, b, c;
@@ -299,8 +394,11 @@ int main(int argc, char **argv) {
   probe.second_parent = 1;
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
-  if (strcmp(argv[2], "record_packed") == 0) {
-    check_packed_transition(L);
+  if (backed || strcmp(argv[2], "record_packed") == 0) {
+    if (backed)
+      check_backed_transition(L, probe.graph);
+    else
+      check_packed_transition(L);
     lua_close(L);
     require(pthread_cond_destroy(&probe.changed) == 0);
     require(pthread_mutex_destroy(&probe.mutex) == 0);
@@ -383,11 +481,6 @@ int main(int argc, char **argv) {
                                 : probe.layout;
     lua_pushvalue(L, i == 1 ? probe.second_parent : 1);
     lua_xmove(L, state, 1);
-  }
-  if (backed) {
-    lua_pushinteger(L, LUA_MININTEGER);
-    lua_setfield(L, 1, "spare"); /* force the published record to expand */
-    require(luaH_recordbacking(probe.table->arraydata) != NULL);
   }
   require(!(probe.table->sequence & LUA_TABLE_WRITER_FLAGS));
   require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);

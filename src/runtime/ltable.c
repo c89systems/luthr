@@ -1378,7 +1378,12 @@ static lu_byte freezerecordslot (Table *table, uintptr_t image, uintptr_t tags,
     return luaH_unpackrecord(__atomic_exchange_n(&payload->bits, LUA_RECORD_FROZEN,
                                                 __ATOMIC_ACQ_REL), value);
   }
-  return luaH_recordlocalvalue(luaH_recordvalues(table, image) + index, tag,
+  if (tag == LUA_RECORD_WIDE) {
+    LuaRecordStorage *backing = luaH_recordbacking(image);
+    return luaH_unpackwide(luaH_exchangewide(&backing->fields[index],
+                                            LUA_RECORD_WIDE_FROZEN, 0), value);
+  }
+  return luaH_recordlocalvalue(luaH_inlinerecordvalues(table) + index, tag,
                                 value);
 }
 
@@ -2443,6 +2448,9 @@ l_sinline LuaTableWriter *claimslot (lua_State *L, Table *table, Value *payload,
   return writer;
 }
 
+static int sharedwideset (lua_State *L, Table *table, LuaRecordField *slot,
+                           const TValue *value, int raw, LuaTableWriteRetry *retry);
+
 static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table,
     TString *name, unsigned field, const TValue *value, int raw,
     LuaTableWriteRetry *retry) {
@@ -2456,8 +2464,15 @@ static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table
   int assigned = 0;
   if (!(image & LUA_RECORD_TAGS)) return 0;
   backing = luaH_recordbacking(image);
-  payload = (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) +
-            field;
+  if (backing != NULL) {
+    if (luaH_recordtag(__atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE), field)
+          != LUA_RECORD_WIDE ||
+        !sharedwideset(L, table, &backing->fields[field], value, raw, retry))
+      return 0;
+    invalidatemethod(L, table, name);
+    return 1;
+  }
+  payload = luaH_inlinerecordvalues(table) + field;
   if ((layout & 1) || !sharedwriteallowed(L, table)) return 0;
   if (!published(value) &&
       ((!raw && table->metatable != NULL) || !ttistable(value) ||
@@ -2467,7 +2482,7 @@ static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table
   if (writer == NULL) return 0;
   /* A successful claim pins the sampled address. Other fields can still
   ** change their tag bytes through the same word. */
-  tags = backing != NULL ? &backing->tags : &table->arraydata;
+  tags = &table->arraydata;
   oldtag = luaH_recordtag(__atomic_load_n(tags, __ATOMIC_ACQUIRE), field);
   newtag = ttisnil(value) ? LUA_VEMPTY : rawtt(value);
   if (oldtag != LUA_RECORD_PACKED &&
@@ -2587,6 +2602,52 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   return 1;
 }
 
+static int __attribute__((noinline)) sharedwideset (lua_State *L, Table *table,
+    LuaRecordField *slot, const TValue *value, int raw, LuaTableWriteRetry *retry) {
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  uint64_t stamp;
+  lu_byte tag;
+  int tracing;
+  LuaTableWriter *writer = NULL;
+  GCObject *displaced = NULL;
+  int assigned;
+  if ((layout & 1) || !sharedwriteallowed(L, table) || ttisnil(value)) return 0;
+  if (!published(value) &&
+      ((!raw && table->metatable != NULL) || !ttistable(value) ||
+       !luaA_tryshareleaf(L, hvalue(value)))) return 0;
+  /* Task-private strings must be published by the rooted path before the
+  ** new field is visible to another execution. */
+  if (ttislngstring(value) && luaC_taskstring(gcvalue(value))) return 0;
+  tracing = luaC_tracing(L);
+  if (tracing) {
+    LuaRecordField old;
+    writer = claimslot(L, table, &slot->payload, layout, retry);
+    if (writer == NULL) return 0;
+    /* An admission from before trace arming may still finish an unclaimed
+    ** write. Validate its tag and payload together before following an edge. */
+    if (!luaH_tryloadwide(slot, &old)) {
+      luaH_releasewriter(L, table, writer);
+      return 0;
+    }
+    stamp = old.stamp;
+    if (cast_byte(stamp) & BIT_ISCOLLECTABLE) displaced = old.payload.gc;
+  }
+  else stamp = __atomic_load_n(&slot->stamp, __ATOMIC_ACQUIRE);
+  tag = cast_byte(stamp);
+  assigned = 0;
+  if (!(stamp & LUA_RECORD_BUSY) && !tagisempty(tag) &&
+      tag != LUA_RECORD_WIDE_FROZEN) {
+    if (tracing) {
+      luaC_tracepointer(L, displaced);
+      luaC_tracevalue(L, value);
+    }
+    assigned = luaH_replacewide(slot, stamp, rawtt(value), val_(value).bits);
+    if (assigned) luaC_barrierback(L, obj2gco(table), value);
+  }
+  if (writer != NULL) luaH_releasewriter(L, table, writer);
+  return assigned;
+}
+
 static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
                        const TValue *key, TValue *value, int raw,
                        LuaTableWriteRetry *retry) {
@@ -2643,15 +2704,21 @@ static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
       backing->tags = table->arraydata;  /* allocation can clear weak entries */
       for (i = 0; i < fields; i++) {
         lu_byte tag = luaH_recordtag(backing->tags, i);
-        if (tag != LUA_RECORD_PACKED && !tagisempty(tag))
-          backing->values[i] = luaH_inlinerecordvalues(table)[i];
+        if (tag != LUA_RECORD_PACKED) {
+          LuaRecordField *slot = &backing->fields[i];
+          slot->payload.bits = !tagisempty(tag)
+            ? luaH_inlinerecordvalues(table)[i].bits : 0;
+          slot->stamp = tag;
+          luaH_setrecordtag(&backing->tags, i, LUA_RECORD_WIDE);
+        }
       }
     }
     /* Writers of other packed fields keep their inline addresses. A writer
     ** retaining this address must see the freeze before using the new tag. */
     __atomic_exchange_n(&payload->bits, LUA_RECORD_FROZEN, __ATOMIC_ACQ_REL);
-    __atomic_store(&backing->values[index], &val_(value), __ATOMIC_RELEASE);
-    luaH_setrecordtag(&backing->tags, index, rawtt(value));
+    backing->fields[index].payload = val_(value);
+    backing->fields[index].stamp = rawtt(value);
+    luaH_setrecordtag(&backing->tags, index, LUA_RECORD_WIDE);
     if (install)
       __atomic_store_n(&table->arraydata, cast(uintptr_t, backing) |
                        LUA_RECORD_TAGS | LUA_RECORD_BACKING, __ATOMIC_RELEASE);
@@ -2696,14 +2763,26 @@ l_sinline int assignrecord (lua_State *L, Table *table, Table *keys,
   unsigned index = recordwriteindex(keys, key);
   uintptr_t image;
   LuaRecordStorage *backing;
+  lu_byte tag;
   if (index == keys->asize) return ignorerecordmiss(table, key, value, raw);
   image = table->arraydata;
   backing = luaH_recordbacking(image);
-  if (luaH_recordtag(luaH_recordtags(image), index) == LUA_RECORD_PACKED)
+  tag = luaH_recordtag(luaH_recordtags(image), index);
+  if (tag == LUA_RECORD_PACKED)
     return assignpackedrecord(L, table, index, value, raw);
-  if (backing != NULL)
-    return storeownedrecord(L, table, backing->values + index, &backing->tags,
-                            index, value, raw, luaC_tracing(L));
+  if (tag == LUA_RECORD_WIDE) {
+    LuaRecordField *slot = &backing->fields[index];
+    LuaRecordField old;
+    lu_byte oldtag = cast_byte(__atomic_load_n(&slot->stamp, __ATOMIC_ACQUIRE));
+    if (tagisempty(oldtag) && !raw && table->metatable != NULL) return 0;
+    if (oldtag == LUA_VABSTKEY && ttisnil(value)) return 1;
+    old = luaH_exchangewide(slot,
+        ttisnil(value) ? LUA_VEMPTY : rawtt(value),
+        ttisnil(value) ? 0 : val_(value).bits);
+    if (cast_byte(old.stamp) & BIT_ISCOLLECTABLE)
+      luaC_tracepointer(L, old.payload.gc);
+    return 1;
+  }
   return storeownedrecord(L, table, luaH_inlinerecordvalues(table) + index,
                           &table->arraydata, index, value, raw, luaC_tracing(L));
 }

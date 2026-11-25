@@ -75,12 +75,17 @@ void luaC_traceview (lua_State *L, const Table *view) {
   if (!luaC_tracing(L)) return;
   keys = luaH_recordkeys(view->node);
   if (keys != NULL) {
-    const Value *values = luaH_recordvalues(view, view->arraydata);
     uintptr_t tags = luaH_recordtags(view->arraydata);
     luaC_traceobject(L, cast(GCObject *, keys));
-    for (p = 0; p < keys->asize; p++)
-      if (luaH_recordtag(tags, p) & BIT_ISCOLLECTABLE)
-        luaC_traceobject(L, values[p].gc);
+    for (p = 0; p < keys->asize; p++) {
+      lu_byte tag = luaH_recordtag(tags, p);
+      if (tag == LUA_RECORD_WIDE || (tag & BIT_ISCOLLECTABLE)) {
+        TValue value = {0};
+        if (luaH_ownedrecordvalue(view, view->arraydata, p, tag, &value) &
+            BIT_ISCOLLECTABLE)
+          luaC_traceobject(L, gcvalue(&value));
+      }
+    }
     return;
   }
   if (view->asize < LUA_ARRAY_CARD_MIN)
@@ -331,13 +336,21 @@ void luaC_prepareweak (lua_State *L, Table *table) {
   if (keys != NULL) {
     /* The descriptor owns interned names and has no weak key edges. */
     LuaRecordStorage *backing = luaH_recordbacking(table->arraydata);
-    Value *values = backing != NULL ? backing->values : luaH_inlinerecordvalues(table);
     uintptr_t *tags = backing != NULL ? &backing->tags : &table->arraydata;
     if (pending & 1) {
-      for (i = 0; i < keys->asize; i++)
-        if ((luaH_recordtag(*tags, i) & BIT_ISCOLLECTABLE) &&
-            weakdead(L, values[i].gc))
-          luaH_setrecordtag(tags, i, LUA_VEMPTY);
+      for (i = 0; i < keys->asize; i++) {
+        lu_byte tag = luaH_recordtag(*tags, i);
+        if (tag == LUA_RECORD_WIDE || (tag & BIT_ISCOLLECTABLE)) {
+          TValue value = {0};
+          lu_byte found = luaH_ownedrecordvalue(table, table->arraydata, i,
+                                                  tag, &value);
+          if ((found & BIT_ISCOLLECTABLE) && weakdead(L, gcvalue(&value))) {
+            if (tag == LUA_RECORD_WIDE)
+              luaH_exchangewide(&backing->fields[i], LUA_VEMPTY, 0);
+            else luaH_setrecordtag(tags, i, LUA_VEMPTY);
+          }
+        }
+      }
     }
   }
   parts = luaH_hashparts(table);

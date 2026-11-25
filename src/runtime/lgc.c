@@ -830,15 +830,18 @@ static int traversearray (LuaTraceWork *work, Table *h) {
 
 static int traverserecord (LuaTraceWork *work, Table *h, Table *keys) {
   uintptr_t image = h->arraydata;
-  Value *values = luaH_recordvalues(h, image);
   uintptr_t tags = luaH_recordtags(image);
   unsigned i;
   int marked = 0;
   for (i = 0; i < keys->asize; i++) {
-    if ((luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) &&
-        iswhite(work->global, values[i].gc)) {
-      markwork(work, values[i].gc);
-      marked = 1;
+    lu_byte tag = luaH_recordtag(tags, i);
+    if (tag == LUA_RECORD_WIDE || (tag & BIT_ISCOLLECTABLE)) {
+      TValue value = {0};
+      tag = luaH_ownedrecordvalue(h, image, i, tag, &value);
+      if ((tag & BIT_ISCOLLECTABLE) && iswhite(work->global, gcvalue(&value))) {
+        markwork(work, gcvalue(&value));
+        marked = 1;
+      }
     }
   }
   return marked;

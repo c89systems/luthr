@@ -129,7 +129,7 @@ void luaA_share (lua_State *L, GCObject *object) {
           enqueue(L, cast(GCObject *, table->metatable), &roots.pending);
           if (keys != NULL) {
             uintptr_t tags = table->arraydata;
-            Value *values = luaH_recordvalues(table, tags);
+            Value *values = luaH_inlinerecordvalues(table);
             lua_assert(luaH_recordbacking(tags) == NULL);
             for (i = 0; i < keys->asize; i++) {
               lu_byte tag = luaH_recordtag(tags, i);

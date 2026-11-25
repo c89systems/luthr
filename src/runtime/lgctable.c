@@ -155,19 +155,20 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   keys = luaH_recordkeys(view.node);
   if (keys != NULL) {
     GCObject *edges[LUA_RECORD_MAX_FIELDS + 2];
-    Value *values = luaH_recordvalues(table, view.arraydata);
+    Value *values = luaH_inlinerecordvalues(table);
     uintptr_t tags = luaH_recordtags(view.arraydata);
     unsigned count = 1;
     edges[0] = obj2gco(keys);
     if (metatable != NULL) edges[count++] = obj2gco(metatable);
     for (i = 0; i < keys->asize; i++) {
-      if (sequence & LUA_TABLE_SPLIT_VALUES) {
+      lu_byte tag = luaH_recordtag(tags, i);
+      if (tag == LUA_RECORD_WIDE || (sequence & LUA_TABLE_SPLIT_VALUES)) {
         TValue value = {0};
         if (!luaH_readrecord(G(L), table, view.arraydata, i, &value, sequence))
           return 0;
         if (iscollectable(&value)) edges[count++] = val_(&value).gc;
       }
-      else if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE)
+      else if (tag & BIT_ISCOLLECTABLE)
         __atomic_load(&values[i].gc, &edges[count++], __ATOMIC_ACQUIRE);
     }
     if (!luaH_samelayout(table, sequence))

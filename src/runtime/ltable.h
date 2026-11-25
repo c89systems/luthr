@@ -46,13 +46,23 @@ l_sinline int luaH_samelayout (const Table *table, uint64_t layout) {
 #define LUA_RECORD_TAGS cast(uintptr_t, 1)
 #define LUA_RECORD_BACKING cast(uintptr_t, 2)
 /* The packed marker is outside the Lua tag range and carries no GC edge. */
-enum { LUA_RECORD_MAX_FIELDS = 4, LUA_RECORD_PACKED = 0x3f };
+enum { LUA_RECORD_MAX_FIELDS = 4, LUA_RECORD_PACKED = 0x3f,
+       LUA_RECORD_WIDE = 0x3e, LUA_RECORD_WIDE_FROZEN = 0x3d };
 #define LUA_RECORD_FROZEN UINT64_MAX
 _Static_assert(sizeof(uintptr_t) > LUA_RECORD_MAX_FIELDS, "record tag word");
 
+/* The low byte is the Lua tag. Bit 8 reserves the payload for a writer.
+** Each publication advances the version above those bits. */
+enum { LUA_RECORD_BUSY = 1 << 8, LUA_RECORD_VERSION_STEP = 1 << 9 };
+
+typedef struct LuaRecordField {
+  Value payload;
+  uint64_t stamp;
+} LuaRecordField;
+
 typedef struct LuaRecordStorage {
   uintptr_t tags;
-  Value values[LUA_RECORD_MAX_FIELDS];  /* packed fields stay inline */
+  LuaRecordField fields[LUA_RECORD_MAX_FIELDS];
 } LuaRecordStorage;
 
 l_sinline LuaRecordStorage *luaH_recordbacking (uintptr_t image) {
@@ -75,9 +85,52 @@ l_sinline Value *luaH_inlinerecordvalues (const Table *table) {
   return cast(Value *, table + 1);
 }
 
-l_sinline Value *luaH_recordvalues (const Table *table, uintptr_t image) {
-  LuaRecordStorage *backing = luaH_recordbacking(image);
-  return backing != NULL ? backing->values : luaH_inlinerecordvalues(table);
+l_sinline lu_byte luaH_unpackwide (LuaRecordField field, TValue *result) {
+  lu_byte tag = cast_byte(field.stamp);
+  if (!tagisempty(tag)) {
+    val_(result) = field.payload;
+    settt_(result, tag);
+  }
+  return tag;
+}
+
+l_sinline int luaH_tryloadwide (const LuaRecordField *slot,
+                                  LuaRecordField *field) {
+  uint64_t stamp = __atomic_load_n(&slot->stamp, __ATOMIC_ACQUIRE);
+  if (stamp & LUA_RECORD_BUSY) return 0;
+  field->stamp = stamp;
+  /* Observing a newer payload also orders the second stamp load after
+  ** the reservation that preceded that payload's release store. */
+  __atomic_load(&slot->payload, &field->payload, __ATOMIC_ACQUIRE);
+  return __atomic_load_n(&slot->stamp, __ATOMIC_ACQUIRE) == stamp;
+}
+
+/* Layout ownership prevents new fast writers. A previously admitted
+** reservation has only the two publication stores left to perform. */
+l_sinline LuaRecordField luaH_loadownedwide (const LuaRecordField *slot) {
+  LuaRecordField field;
+  while (!luaH_tryloadwide(slot, &field)) __builtin_ia32_pause();
+  return field;
+}
+
+l_sinline int luaH_replacewide (LuaRecordField *slot, uint64_t stamp,
+                                  lu_byte tag, uint64_t bits) {
+  uint64_t published = (stamp & ~UINT64_C(255)) + LUA_RECORD_VERSION_STEP;
+  lua_assert(!(stamp & LUA_RECORD_BUSY));
+  if (!__atomic_compare_exchange_n(&slot->stamp, &stamp,
+          stamp | LUA_RECORD_BUSY, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+    return 0;
+  __atomic_store_n(&slot->payload.bits, bits, __ATOMIC_RELEASE);
+  __atomic_store_n(&slot->stamp, published | tag, __ATOMIC_RELEASE);
+  return 1;
+}
+
+l_sinline LuaRecordField luaH_exchangewide (LuaRecordField *slot, lu_byte tag,
+                                             uint64_t bits) {
+  LuaRecordField old;
+  do { old = luaH_loadownedwide(slot); }
+  while (!luaH_replacewide(slot, old.stamp, tag, bits));
+  return old;
 }
 
 l_sinline lu_byte luaH_recordtag (uintptr_t tags, unsigned index) {
@@ -137,17 +190,28 @@ l_sinline lu_byte luaH_recordlocalvalue (const Value *payload, lu_byte tag,
 
 /* Ownership protects the image. Published scalar slots remain atomic even
 ** under ownership because an earlier writer may still be finishing. */
-l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
-                                    TValue *result) {
-  uintptr_t image = table->arraydata;
-  lu_byte tag = luaH_recordtag(luaH_recordtags(image), index);
+l_sinline lu_byte luaH_ownedrecordvalue (const Table *table, uintptr_t image,
+                                         unsigned index, lu_byte tag,
+                                         TValue *result) {
   if (tag == LUA_RECORD_PACKED) {
     const Value *payload = luaH_inlinerecordvalues(table) + index;
     return luaH_unpackrecord(__atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE),
                              result);
   }
-  return luaH_recordlocalvalue(luaH_recordvalues(table, image) + index, tag,
+  if (tag == LUA_RECORD_WIDE) {
+    const LuaRecordStorage *backing = luaH_recordbacking(image);
+    return luaH_unpackwide(luaH_loadownedwide(&backing->fields[index]), result);
+  }
+  return luaH_recordlocalvalue(luaH_inlinerecordvalues(table) + index, tag,
                                 result);
+}
+
+l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
+                                    TValue *result) {
+  uintptr_t image = table->arraydata;
+  return luaH_ownedrecordvalue(table, image, index,
+                                 luaH_recordtag(luaH_recordtags(image), index),
+                                 result);
 }
 
 #define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))

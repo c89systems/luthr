@@ -19,7 +19,7 @@ static int nextrecordview (lua_State *L, Table *table, TValue *key,
   Table *keys;
   unsigned index = 0;
   uintptr_t image;
-  TValue value;
+  TValue value = {0};
   if ((version & 1) || !luaH_strongaccess(L, table)) return -1;
   keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
   if (keys == NULL) return -1;

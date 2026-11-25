@@ -302,8 +302,9 @@ int main(int argc, char **argv) {
   pthread_t marker, writer, drainer;
   struct timespec deadline;
   unsigned i, array_size;
-  int small;
+  int small, backed;
   require((argc == 2 || argc == 3) && L != NULL);
+  backed = strncmp(argv[1], "record_backed_", 14) == 0;
   lua_gc(L, strstr(argv[1], "generational") ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCSTOP);
@@ -330,7 +331,9 @@ int main(int argc, char **argv) {
     lua_gc(L, LUA_GCCOLLECT);
   }
   if (probe.record) {
-    require(luaL_loadstring(L, "return {replaced=1, deleted=1}") == LUA_OK);
+    const char *source = backed ? "return {replaced=1, deleted=1, spare=0}"
+                                : "return {replaced=1, deleted=1}";
+    require(luaL_loadstring(L, source) == LUA_OK);
     require(lua_pcall(L, 0, 1, 0) == LUA_OK);
   } else
     lua_createtable(L, probe.relocate || probe.fields ? 0 : (int)array_size,
@@ -418,6 +421,11 @@ int main(int argc, char **argv) {
     lua_pop(L, 1);
   } else
     lua_xmove(L, probe.writer, 1);
+  if (backed) {
+    lua_pushinteger(L, LUA_MININTEGER);
+    lua_setfield(L, 3, "spare");
+    require(luaH_recordbacking(probe.table->arraydata) != NULL);
+  }
   if (probe.relocate) {
     key(L, 63);
     lua_xmove(L, probe.writer, 1);

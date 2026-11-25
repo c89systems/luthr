@@ -724,14 +724,22 @@ static int drainnursery (lua_State *L, LuaNurseryTrace *trace, NurseryScan scan,
       if (t->metatable != NULL)
         visitnursery(L, obj2gco(t->metatable), &gray, scan);
       if (keys != NULL) {
-        Value *values = luaH_recordvalues(t, t->arraydata);
+        Value *values = luaH_inlinerecordvalues(t);
         uintptr_t tags = luaH_recordtags(t->arraydata);
         unsigned i;
         if (scan == NURSERY_CONSTRUCTION || scan == NURSERY_TASK_ROOTS)
           visitnursery(L, obj2gco(keys), &gray, scan);
-        for (i = 0; i < keys->asize; i++)
-          if (nurseryedge(luaH_recordtag(tags, i), scan))
+        for (i = 0; i < keys->asize; i++) {
+          lu_byte tag = luaH_recordtag(tags, i);
+          if (tag == LUA_RECORD_WIDE) {
+            TValue value = {0};
+            if (nurseryedge(luaH_ownedrecordvalue(t, t->arraydata, i,
+                                                  tag, &value), scan))
+              visitnursery(L, gcvalue(&value), &gray, scan);
+          }
+          else if (nurseryedge(tag, scan))
             visitnursery(L, values[i].gc, &gray, scan);
+        }
         budget -= budget < keys->asize ? budget : keys->asize;
         t = NULL;
         continue;
