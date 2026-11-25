@@ -40,7 +40,7 @@ l_sinline int luaH_samelayout (const Table *table, uint64_t layout) {
 }
 
 /* The node field points to the constructor's immutable key array. The array
-** word holds either inline tags or a pointer to complete replacement slots.
+** word holds either inline tags or a pointer to tags and full-width slots.
 ** Both forms keep the low bit set, unlike an ordinary array pointer. */
 #define LUA_RECORD_TAG cast(uintptr_t, 2)
 #define LUA_RECORD_TAGS cast(uintptr_t, 1)
@@ -52,7 +52,7 @@ _Static_assert(sizeof(uintptr_t) > LUA_RECORD_MAX_FIELDS, "record tag word");
 
 typedef struct LuaRecordStorage {
   uintptr_t tags;
-  Value values[LUA_RECORD_MAX_FIELDS];
+  Value values[LUA_RECORD_MAX_FIELDS];  /* packed fields stay inline */
 } LuaRecordStorage;
 
 l_sinline LuaRecordStorage *luaH_recordbacking (uintptr_t image) {
@@ -140,12 +140,14 @@ l_sinline lu_byte luaH_recordlocalvalue (const Value *payload, lu_byte tag,
 l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
                                     TValue *result) {
   uintptr_t image = table->arraydata;
-  const Value *payload = luaH_recordvalues(table, image) + index;
   lu_byte tag = luaH_recordtag(luaH_recordtags(image), index);
-  if (tag == LUA_RECORD_PACKED)
+  if (tag == LUA_RECORD_PACKED) {
+    const Value *payload = luaH_inlinerecordvalues(table) + index;
     return luaH_unpackrecord(__atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE),
                              result);
-  return luaH_recordlocalvalue(payload, tag, result);
+  }
+  return luaH_recordlocalvalue(luaH_recordvalues(table, image) + index, tag,
+                                result);
 }
 
 #define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))

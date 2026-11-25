@@ -147,42 +147,51 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
   return luaH_samerow(writer, before);
 }
 
-/* Packed slots are complete atomic values. For a split slot, sample the tag
-** after entering the writer row's version. The caller validates the layout,
-** including the shape it used to select this field. */
-l_sinline int luaH_readrecord (global_State *g, Table *table, uintptr_t image,
-                               unsigned index, TValue *value, uint64_t layout) {
-  LuaRecordStorage *backing;
-  const Value *payload;
+l_sinline int luaH_readpackedrecord (Table *table, unsigned index, TValue *value) {
+  const Value *payload = luaH_inlinerecordvalues(table) + index;
+  uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
+  if (bits == LUA_RECORD_FROZEN) return 0;
+  luaH_unpackrecord(bits, value);
+  return 1;
+}
+
+/* A split slot's tag must be sampled within the writer row's version.
+** The storage epoch retains the backing through layout validation. */
+l_sinline int luaH_readsplitrecord (global_State *g, Table *table,
+    const LuaRecordStorage *backing, unsigned index, lu_byte tag,
+    TValue *value, uint64_t layout) {
+  const Value *payload =
+    (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) + index;
   LuaTableWriter *writer = NULL;
   uint64_t before = 0;
-  lu_byte tag;
-  if (!(image & LUA_RECORD_TAGS)) return 0;
-  backing = luaH_recordbacking(image);
-  payload = (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) +
-            index;
-  if (backing == NULL && luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
-    uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
-    if (bits == LUA_RECORD_FROZEN) return 0;
-    luaH_unpackrecord(bits, value);
-    return 1;
-  }
   if (layout & LUA_TABLE_SPLIT_VALUES) {
+    uintptr_t tags;
     writer = luaH_writer(g, payload);
     if (!luaH_readrow(writer, payload, &before)) return 0;
-    if (backing == NULL) {
-      image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-      if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) != LUA_RECORD_TAGS ||
-          luaH_recordtag(image, index) == LUA_RECORD_PACKED) return 0;
-    }
+    tags = __atomic_load_n(backing != NULL ? &backing->tags : &table->arraydata,
+                           __ATOMIC_ACQUIRE);
+    if ((tags & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) != LUA_RECORD_TAGS)
+      return 0;
+    tag = luaH_recordtag(tags, index);
+    if (tag == LUA_RECORD_PACKED) return 0;
   }
-  /* The storage epoch retains the backing through layout validation. */
-  tag = luaH_recordtag(backing != NULL
-                       ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE)
-                       : image, index);
   settt_(value, tag);
   if (!isempty(value)) __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
   return luaH_samerow(writer, before);
+}
+
+l_sinline int luaH_readrecord (global_State *g, Table *table, uintptr_t image,
+                               unsigned index, TValue *value, uint64_t layout) {
+  LuaRecordStorage *backing;
+  lu_byte tag;
+  if (!(image & LUA_RECORD_TAGS)) return 0;
+  backing = luaH_recordbacking(image);
+  tag = luaH_recordtag(backing != NULL
+                       ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE)
+                       : image, index);
+  if (tag == LUA_RECORD_PACKED)
+    return luaH_readpackedrecord(table, index, value);
+  return luaH_readsplitrecord(g, table, backing, index, tag, value, layout);
 }
 
 l_sinline int luaH_strongaccess (lua_State *L, Table *table) {

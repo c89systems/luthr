@@ -1372,12 +1372,14 @@ static int insertkey (lua_State *L, Node *nodes, const TValue *key, TValue *valu
 ** must be complete before the first exchange. */
 static lu_byte freezerecordslot (Table *table, uintptr_t image, uintptr_t tags,
                                   unsigned index, TValue *value) {
-  Value *payload = luaH_recordvalues(table, image) + index;
   lu_byte tag = luaH_recordtag(tags, index);
-  if (tag == LUA_RECORD_PACKED)
+  if (tag == LUA_RECORD_PACKED) {
+    Value *payload = luaH_inlinerecordvalues(table) + index;
     return luaH_unpackrecord(__atomic_exchange_n(&payload->bits, LUA_RECORD_FROZEN,
                                                 __ATOMIC_ACQ_REL), value);
-  return luaH_recordlocalvalue(payload, tag, value);
+  }
+  return luaH_recordlocalvalue(luaH_recordvalues(table, image) + index, tag,
+                                value);
 }
 
 static void materializerecord (lua_State *L, Table *t) {
@@ -2598,8 +2600,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
       image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
       /* A packed field's CAS orders it against the freeze of its inline
       ** word. Updating a present scalar changes neither membership nor edges. */
-      if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS &&
-          luaH_recordtag(image, field) == LUA_RECORD_PACKED) {
+      if ((image & LUA_RECORD_TAGS) &&
+          luaH_recordtag(luaH_recordtags(image), field) == LUA_RECORD_PACKED) {
         Value *payload = luaH_inlinerecordvalues(table) + field;
         uint64_t next = luaH_packrecord(value);
         uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
@@ -2620,8 +2622,7 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
 
 static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
     Table *table, unsigned index, const TValue *value, int raw) {
-  uintptr_t image = table->arraydata;
-  Value *payload = luaH_recordvalues(table, image) + index;
+  Value *payload = luaH_inlinerecordvalues(table) + index;
   uint64_t old = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
   uint64_t next;
   lua_assert(old != LUA_RECORD_FROZEN);
@@ -2634,19 +2635,26 @@ static int __attribute__((noinline)) assignpackedrecord (lua_State *L,
     __atomic_store_n(&payload->bits, next, __ATOMIC_RELEASE);
   }
   else {
-    unsigned i, fields = luaH_recordkeys(table->node)->asize;
-    LuaRecordStorage *backing = luaM_new(L, LuaRecordStorage);
-    image = table->arraydata;
-    backing->tags = LUA_RECORD_TAGS;
-    for (i = 0; i < fields; i++) {
-      TValue saved = {0};
-      lu_byte tag = freezerecordslot(table, image, image, i, &saved);
-      backing->values[i] = i == index ? val_(value) : val_(&saved);
-      if (i == index) tag = rawtt(value);
-      backing->tags |= cast(uintptr_t, tag) << ((i + 1) * 8);
+    LuaRecordStorage *backing = luaH_recordbacking(table->arraydata);
+    int install = backing == NULL;
+    if (install) {
+      unsigned i, fields = luaH_recordkeys(table->node)->asize;
+      backing = luaM_new(L, LuaRecordStorage);
+      backing->tags = table->arraydata;  /* allocation can clear weak entries */
+      for (i = 0; i < fields; i++) {
+        lu_byte tag = luaH_recordtag(backing->tags, i);
+        if (tag != LUA_RECORD_PACKED && !tagisempty(tag))
+          backing->values[i] = luaH_inlinerecordvalues(table)[i];
+      }
     }
-    __atomic_store_n(&table->arraydata, cast(uintptr_t, backing) |
-                     LUA_RECORD_TAGS | LUA_RECORD_BACKING, __ATOMIC_RELEASE);
+    /* Writers of other packed fields keep their inline addresses. A writer
+    ** retaining this address must see the freeze before using the new tag. */
+    __atomic_exchange_n(&payload->bits, LUA_RECORD_FROZEN, __ATOMIC_ACQ_REL);
+    __atomic_store(&backing->values[index], &val_(value), __ATOMIC_RELEASE);
+    luaH_setrecordtag(&backing->tags, index, rawtt(value));
+    if (install)
+      __atomic_store_n(&table->arraydata, cast(uintptr_t, backing) |
+                       LUA_RECORD_TAGS | LUA_RECORD_BACKING, __ATOMIC_RELEASE);
   }
   return 1;
 }
@@ -2691,11 +2699,11 @@ l_sinline int assignrecord (lua_State *L, Table *table, Table *keys,
   if (index == keys->asize) return ignorerecordmiss(table, key, value, raw);
   image = table->arraydata;
   backing = luaH_recordbacking(image);
+  if (luaH_recordtag(luaH_recordtags(image), index) == LUA_RECORD_PACKED)
+    return assignpackedrecord(L, table, index, value, raw);
   if (backing != NULL)
     return storeownedrecord(L, table, backing->values + index, &backing->tags,
                             index, value, raw, luaC_tracing(L));
-  if (luaH_recordtag(image, index) == LUA_RECORD_PACKED)
-    return assignpackedrecord(L, table, index, value, raw);
   return storeownedrecord(L, table, luaH_inlinerecordvalues(table) + index,
                           &table->arraydata, index, value, raw, luaC_tracing(L));
 }
@@ -3127,17 +3135,24 @@ l_sinline int readshortslot (global_State *g, lua_State *L, Table *table,
       TValue value = {0};
       if (index < keys->asize) {
         uintptr_t image = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
-        if ((image & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS &&
-            luaH_recordtag(image, index) == LUA_RECORD_PACKED) {
-          const Value *payload = luaH_inlinerecordvalues(table) + index;
-          uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
-          if (bits != LUA_RECORD_FROZEN && !tagisempty(cast_byte(bits))) {
-            *tag = luaH_unpackrecord(bits, result);
+        LuaRecordStorage *backing;
+        lu_byte found;
+        if (!(image & LUA_RECORD_TAGS)) return 0;
+        backing = luaH_recordbacking(image);
+        found = luaH_recordtag(backing != NULL
+                                ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE)
+                                : image, index);
+        if (found == LUA_RECORD_PACKED) {
+          if (!luaH_readpackedrecord(table, index, &value)) return 0;
+          if (!isempty(&value)) {
+            *tag = luaH_hashvalue(&value, result);
             return 1;
           }
+          if (!availableread(L, table, *sequence)) return 0;
         }
-        if (!availableread(L, table, *sequence)) return 0;
-        if (!luaH_readrecord(g, table, image, index, &value, *sequence)) return 0;
+        else if (!availableread(L, table, *sequence) ||
+                 !luaH_readsplitrecord(g, table, backing, index, found,
+                                        &value, *sequence)) return 0;
       }
       else {
         if (!availableread(L, table, *sequence)) return 0;

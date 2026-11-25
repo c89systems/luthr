@@ -79,15 +79,14 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
   __real_luaQ_wait(L, mutex, changed, waiters);
 }
 
-static void *first(void *unused) {
-  (void)unused;
+static void *first(void *name) {
   if (probe.graph)
     lua_createtable(probe.first, 1, 0);
   lua_pushinteger(probe.first, 11);
   if (probe.graph)
     lua_rawseti(probe.first, -2, 1);
   if (probe.hash)
-    lua_setfield(probe.first, 1, "field-1");
+    lua_setfield(probe.first, 1, name != NULL ? name : "field-1");
   else
     lua_rawseti(probe.first, 1, 1);
   return NULL;
@@ -229,46 +228,58 @@ static void check_writer_groups(lua_State *L) {
 }
 
 static void check_packed_transition(lua_State *L) {
-  struct timespec deadline;
-  pthread_t owner;
-  require(luaL_dostring(L, "return {['field-1']=1, ['field-2']=2}") == LUA_OK);
+  const char *fields[] = {"field-1", "field-2"};
+  LuaRecordStorage *backing = NULL;
+  require(luaL_dostring(
+              L, "return {['field-1']=1, ['field-2']=2, sibling=3}") == LUA_OK);
   probe.table = (Table *)lua_topointer(L, 1);
   probe.hash = probe.graph = 1;
   probe.first = lua_newthread(L);
   lua_pushvalue(L, 1);
   lua_xmove(L, probe.first, 1);
-  require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-  deadline.tv_sec += 10;
-  require(pthread_create(&owner, NULL, first, NULL) == 0);
-  require(pthread_mutex_lock(&probe.mutex) == 0);
-  while (!probe.entered)
-    require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
-            0);
-  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  for (unsigned i = 0; i < 2; ++i) {
+    struct timespec deadline;
+    pthread_t owner;
+    probe.entered = probe.release = 0;
+    require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+    deadline.tv_sec += 10;
+    require(pthread_create(&owner, NULL, first, (void *)fields[i]) == 0);
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    while (!probe.entered)
+      require(pthread_cond_timedwait(&probe.changed, &probe.mutex, &deadline) ==
+              0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
 
-  /* The first writer holds the layout to insert a GC reference. The scalar
-   * write can still finish, and the conversion must copy its new value. */
-  lua_pushinteger(L, 42);
-  lua_setfield(L, 1, "field-2");
-  require(lua_getfield(L, 1, "field-2") == LUA_TNUMBER);
-  require(lua_tointeger(L, -1) == 42);
-  lua_pop(L, 1);
-  require(pthread_mutex_lock(&probe.mutex) == 0);
-  probe.release = 1;
-  require(pthread_cond_broadcast(&probe.changed) == 0);
-  require(pthread_mutex_unlock(&probe.mutex) == 0);
-  require(pthread_join(owner, NULL) == 0);
+    /* The record owner is inserting a GC edge. An unrelated scalar store
+     * must still complete, both before and after backing is installed. */
+    lua_pushinteger(L, 42 + i);
+    lua_setfield(L, 1, "sibling");
+    require(lua_getfield(L, 1, "sibling") == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 42 + i);
+    lua_pop(L, 1);
+    require(pthread_mutex_lock(&probe.mutex) == 0);
+    probe.release = 1;
+    require(pthread_cond_broadcast(&probe.changed) == 0);
+    require(pthread_mutex_unlock(&probe.mutex) == 0);
+    require(pthread_join(owner, NULL) == 0);
 
-  require(luaH_recordbacking(probe.table->arraydata) != NULL);
-  require(luaH_inlinerecordvalues(probe.table)[1].bits == LUA_RECORD_FROZEN);
+    if (i == 0)
+      backing = luaH_recordbacking(probe.table->arraydata);
+    require(backing != NULL &&
+            luaH_recordbacking(probe.table->arraydata) == backing);
+    require(luaH_inlinerecordvalues(probe.table)[i].bits == LUA_RECORD_FROZEN);
+    require(luaH_recordtag(backing->tags, 2) == LUA_RECORD_PACKED);
+  }
   lua_pushinteger(L, 33);
   lua_rawseti(L, 1, 1); /* retire the general record as it grows */
   lua_gc(L, LUA_GCCOLLECT);
-  require(lua_getfield(L, 1, "field-1") == LUA_TTABLE);
-  require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 11);
-  lua_pop(L, 2);
-  require(lua_getfield(L, 1, "field-2") == LUA_TNUMBER &&
-          lua_tointeger(L, -1) == 42);
+  for (unsigned i = 0; i < 2; ++i) {
+    require(lua_getfield(L, 1, fields[i]) == LUA_TTABLE);
+    require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 11);
+    lua_pop(L, 2);
+  }
+  require(lua_getfield(L, 1, "sibling") == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 43);
 }
 
 int main(int argc, char **argv) {
