@@ -597,7 +597,7 @@ LUAI_FUNC void luaC_assistsweep (lua_State *L);
 LUAI_FUNC int luaC_sweepobject (lua_State *L, GCObject *object, unsigned kind,
                               LuaSweepWork *work);
 LUAI_FUNC void luaC_endsweep (lua_State *L);
-LUAI_FUNC int luaC_sweepmaintenance (lua_State *L);
+LUAI_FUNC void luaC_shrinkstrings (lua_State *L);
 LUAI_FUNC void luaC_runfinalizers (lua_State *L);
 l_sinline int luaC_hasfinalizers (global_State *g) {
   return __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE) != NULL;

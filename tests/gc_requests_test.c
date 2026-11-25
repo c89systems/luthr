@@ -25,7 +25,7 @@ static struct {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   unsigned arrived[2], startup_waits, trace_waits, done;
-  int driver_parked, release_driver, finalized;
+  int driver_parked, release_driver, finalized, finalizer_sweep;
 } fixture = {.mutex = PTHREAD_MUTEX_INITIALIZER,
              .changed = PTHREAD_COND_INITIALIZER};
 static __thread unsigned role;
@@ -41,6 +41,18 @@ void __wrap_luaW_stop(lua_State *L) {
     arrive();
   }
   __real_luaW_stop(L);
+}
+
+void __real_luaC_endsweep(lua_State *);
+void __wrap_luaC_endsweep(lua_State *L) {
+  global_State *g = G(L);
+  if (minor_case == MINOR_FINALIZER && g->sweep_plan.kind == SWEEP_YOUNG &&
+      luaC_hasfinalizers(g)) {
+    require(!__atomic_load_n(&g->shrink_strings, __ATOMIC_RELAXED));
+    require(!luaW_stopped(&g->world));
+    fixture.finalizer_sweep++;
+  }
+  __real_luaC_endsweep(L);
 }
 
 void __real_luaW_heapenter(lua_State *);
@@ -508,7 +520,8 @@ static void explicit_minor_followers(lua_State *L, int unwind) {
   if (unwind)
     require(driver.status == LUA_ERRRUN);
   else
-    require(fixture.finalized == 1 && follower.stops == 0);
+    require(fixture.finalized == 1 && fixture.finalizer_sweep == 1 &&
+            follower.stops == 0);
 }
 
 static void explicit_trace_slice(lua_State *L) {

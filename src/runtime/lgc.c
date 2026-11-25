@@ -2258,19 +2258,16 @@ void luaC_endsweep (lua_State *L) {
     __atomic_fetch_add(&g->major_completed, 1, __ATOMIC_RELEASE);
 }
 
-/* Index resizing and young finalizers require an admitted collector. They
-** can run after the completed cohort and its next allocation limits publish. */
-int luaC_sweepmaintenance (lua_State *L) {
+/* Rehash intern tables only after joining mutators and sweep workers. */
+void luaC_shrinkstrings (lua_State *L) {
   global_State *g = G(L);
   lu_byte stopem = g->gcstopem;
   lua_assert(luaW_iscollector(L));
-  if (g->gcemergency) return 0;
+  if (g->gcemergency) return;
   __atomic_store_n(&g->shrink_strings, 0, __ATOMIC_RELAXED);
   g->gcstopem = 1;
   checkSizes(L, g);
   g->gcstopem = stopem;
-  return luaC_kind(g) == KGC_GENMINOR && luaC_hasfinalizers(g) &&
-         luaD_checkminstack(L);
 }
 
 /*

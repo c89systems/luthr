@@ -382,7 +382,7 @@ target_link_options(gc_requests_test PRIVATE -Wl,--wrap=luaW_heapenter
   -Wl,--wrap=luaW_heapleave
   -Wl,--wrap=luaW_collectenter -Wl,--wrap=luaW_trycollectenter
   -Wl,--wrap=luaW_stop -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaC_tracebatch
-  -Wl,--wrap=luaD_tryscalarcall)
+  -Wl,--wrap=luaD_tryscalarcall -Wl,--wrap=luaC_endsweep)
 foreach(case IN ITEMS incremental generational explicit explicit_trace_slice stopped phase_incremental phase_generational
     overdue_incremental overdue_generational overdue_stopped shrink_strings reachable_finalizers late_finalizer
     handoff_trace_incremental handoff_trace_generational handoff_sweep_incremental handoff_sweep_generational
