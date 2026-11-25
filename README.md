@@ -71,6 +71,7 @@ Lua workloads for both runtimes:
 make benchmark
 make benchmark-parallel
 make benchmark-scheduler
+make benchmark-native                # LoneJSON via LUA_PATH and LUA_CPATH
 make benchmark-gc                    # collector work, coordination and stopped-GC controls
 ```
 
