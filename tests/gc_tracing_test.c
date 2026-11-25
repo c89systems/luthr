@@ -33,6 +33,14 @@ struct collection {
   int entered, release, done, emergency, minor, help;
 };
 static struct collection *collecting;
+static lua_State *bounded_stack;
+
+uintptr_t __real_luaX_valueenterslow(lua_State *, int);
+uintptr_t __wrap_luaX_valueenterslow(lua_State *L, int reserved) {
+  require(L != bounded_stack);
+  return __real_luaX_valueenterslow(L, reserved);
+}
+
 static lua_State *weak_marker;
 static GCObject *weak_table, *weak_key, *weak_target;
 static unsigned weak_deferred_seen, weak_rescans, weak_target_scanned;
@@ -482,6 +490,42 @@ static void stack_snapshot(void) {
   require(worker->trace_snapshot == G(L)->trace_epoch && !iswhite(G(L), child));
   drain(L);
   require(isblack(G(L), child));
+  finish(L);
+}
+
+static void bounded_stack_after_snapshot(void) {
+  lua_State *L = newstate(), *worker = lua_newthread(L);
+  unsigned *payload = lua_newuserdatauv(worker, sizeof(*payload), 1);
+  uintptr_t owner;
+  *payload = 42;
+  lua_newtable(worker);
+  lua_pushliteral(worker, "value stored only in the userdata");
+  lua_rawseti(worker, -2, 1);
+  require(lua_setiuservalue(worker, 1, 1));
+  lua_newtable(worker);
+  lua_setmetatable(worker, 1);
+
+  begin(L);
+  owner = luaX_enterbounded(worker, 1);
+  require(owner == (LUA_VALUE_STACK | LUA_VALUE_TRACING));
+  luaX_leaveboundedvalue(worker, owner);
+  require(luaC_tracing(worker));
+  bounded_stack = worker;
+  require(lua_rawlen(worker, 1) == sizeof(*payload));
+  require(lua_touserdata(worker, 1) == payload && *payload == 42);
+  require(lua_getiuservalue(worker, 1, 1) == LUA_TTABLE);
+  require(lua_getmetatable(worker, 1));
+  lua_rotate(worker, 2, 1);
+  lua_copy(worker, 3, 2);
+  lua_settop(worker, 2);
+  require(lua_type(worker, 2) == LUA_TTABLE);
+  bounded_stack = NULL;
+  lua_pushnil(worker);
+  require(lua_setiuservalue(worker, 1, 1));
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_rawgeti(worker, 2, 1) == LUA_TSTRING);
+  require(strcmp(lua_tostring(worker, -1),
+                 "value stored only in the userdata") == 0);
   finish(L);
 }
 
@@ -1366,6 +1410,8 @@ int main(int argc, char **argv) {
   require(argc == 2);
   if (strcmp(argv[1], "stack") == 0)
     stack_snapshot();
+  else if (strcmp(argv[1], "stack_bounded") == 0)
+    bounded_stack_after_snapshot();
   else if (strcmp(argv[1], "stack_wait_snapshot") == 0)
     wait_for_stack(STACK_SNAPSHOT);
   else if (strcmp(argv[1], "stack_wait_release") == 0)

@@ -402,16 +402,22 @@ static void reverse (lua_State *L, StkId from, StkId to) {
 */
 LUA_API void lua_rotate (lua_State *L, int idx, int n) {
   StkId p, t, m;
-  uintptr_t owner = luaX_valueenter(L, 1);
+  uintptr_t owner = luaX_enterbounded(L, 1);
   t = L->top.p - 1;  /* end of stack segment being rotated */
   p = index2stack(L, idx);  /* start of segment */
+  if (owner == LUA_VALUE_BOUNDED && t - p >= LUA_MINSTACK) {
+    luaX_leavebounded(L);
+    owner = luaX_valueenter(L, 1);
+    t = L->top.p - 1;
+    p = index2stack(L, idx);
+  }
   api_check(L, L->tbclist.p < p, "moving a to-be-closed slot");
   api_check(L, (n >= 0 ? n : -n) <= (t - p + 1), "invalid 'n'");
   m = (n >= 0 ? t - n : p - n - 1);  /* end of prefix */
   reverse(L, p, m);  /* reverse the prefix with length 'n' */
   reverse(L, m + 1, t);  /* reverse the suffix */
   reverse(L, p, t);  /* reverse the entire segment */
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
 }
 
 
@@ -439,17 +445,17 @@ LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
     copyshared(L, fromidx, toidx);
     return;
   }
-  owner = luaX_valueenter(L, 1);
+  owner = luaX_enterbounded(L, 1);
   from = index2addr(L, fromidx);
   to = index2addr(L, toidx);
   api_check(L, isvalid(L, to), "invalid index");
   if (fromidx != toidx) {
     /* A hook can read shadow registers of a Lua frame. Keep the
     ** conservative source barrier when copying one into a live slot. */
-    if (isLua(L->ci)) luaC_tracevalue(L, from);
+    if (owner != LUA_VALUE_BOUNDED && isLua(L->ci)) luaC_tracevalue(L, from);
     setobj(L, to, from);
   }
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
 }
 
 
@@ -740,24 +746,33 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
 }
 
 
-LUA_API lua_Unsigned lua_rawlen (lua_State *L, int idx) {
-  LuaNativeRoot snapshot;
-  const TValue *o;
-  lua_Unsigned result = 0;
-  uintptr_t owner = luaX_valueenter(L, 0);
-  o = luaA_indexvalue(L, idx, &snapshot);
+static lua_Unsigned fixedlen (const TValue *o) {
   switch (ttypetag(o)) {
-    case LUA_VSHRSTR: result = cast(lua_Unsigned, tsvalue(o)->shrlen); break;
-    case LUA_VLNGSTR: result = cast(lua_Unsigned, tsvalue(o)->u.lnglen); break;
-    case LUA_VUSERDATA: result = cast(lua_Unsigned, uvalue(o)->len); break;
-    case LUA_VTABLE: {
-      result = luaH_getn(L, hvalue(o));
-      break;
-    }
-    default: break;
+    case LUA_VSHRSTR: return tsvalue(o)->shrlen;
+    case LUA_VLNGSTR: return cast(lua_Unsigned, tsvalue(o)->u.lnglen);
+    case LUA_VUSERDATA: return cast(lua_Unsigned, uvalue(o)->len);
+    default: return 0;
   }
-  luaR_poproot(L, &snapshot);
-  luaX_valueleave(L, owner);
+}
+
+
+LUA_API lua_Unsigned lua_rawlen (lua_State *L, int idx) {
+  TValue snapshot;
+  lua_Unsigned result;
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
+  const TValue *o = index2read(L, idx, &snapshot, owner);
+  if (l_likely(!ttistable(o))) {
+    result = fixedlen(o);
+    luaX_leaveboundedvalue(L, owner);
+  }
+  else {
+    LuaNativeRoot rooted;
+    if (!luaX_valuecall(L, owner)) lua_lock(L);
+    o = luaA_indexvalue(L, idx, &rooted);
+    result = ttistable(o) ? luaH_getn(L, hvalue(o)) : fixedlen(o);
+    luaR_poproot(L, &rooted);
+    lua_unlock(L);
+  }
   return result;
 }
 
@@ -766,12 +781,12 @@ LUA_API lua_CFunction lua_tocfunction (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   lua_CFunction result = NULL;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   if (ttislcf(o)) result = fvalue(o);
   else if (ttisCclosure(o))
     result = clCvalue(o)->f;
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
   return result;
 }
 
@@ -780,10 +795,10 @@ LUA_API void *lua_touserdata (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   void *result;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = luaA_udatapointer(o);
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
   return result;
 }
 
@@ -792,10 +807,10 @@ LUA_API lua_State *lua_tothread (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   lua_State *result;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = (!ttisthread(o)) ? NULL : thvalue(o);
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
   return result;
 }
 
@@ -811,7 +826,7 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   const void *result = NULL;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t owner = luaX_enterbounded(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   switch (ttypetag(o)) {
     case LUA_VLCF: case LUA_VMCF:
@@ -824,7 +839,7 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
       break;
     }
   }
-  luaX_valueleave(L, owner);
+  luaX_leaveboundedvalue(L, owner);
   return result;
 }
 
@@ -867,7 +882,7 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
   TString *ts;
   if (len <= LUAI_MAXSHORTLEN &&
       !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
-        ~LUA_GATE_OFFER_MASK) && luaX_trybounded(L)) {
+        ~LUA_GATE_OFFER_MASK) && luaX_tryunmarked(L)) {
     ts = luaS_trycachedshort(L, s, len);
     if (ts != NULL) {
       setsvalue2s(L, L->top.p, ts);
@@ -1197,7 +1212,8 @@ l_sinline int localheap (lua_State *L, int idx) {
   uintptr_t gate = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
   return !ispseudo(idx) && (gate & ~LUA_GATE_OFFER_MASK) == 0 &&
     (gate != 0 || __atomic_load_n(&L->task_owner, __ATOMIC_RELAXED) != NULL) &&
-    luaX_tryboundedscope(L, LUA_MARK_ARMING | LUA_WORLD_ARM_TRACE);
+    luaX_tryboundedscope(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                           LUA_WORLD_ARM_TRACE);
 }
 
 l_sinline Table *localarray (lua_State *L, int idx, lua_Integer key,

@@ -543,7 +543,7 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
     /* Use the cheaper reservation for repeated scalar reentry. Calls that
     ** normally need managed admission avoid a speculative reservation. */
     if (context->scalar_reentry) {
-      if ((expected & ~LUA_GATE_OFFER_MASK) == 0 && luaX_trybounded(L)) {
+      if ((expected & ~LUA_GATE_OFFER_MASK) == 0 && luaX_tryunmarked(L)) {
         StkId func;
         const Proto *p = scalarcallee(L, nargs, nresults, &func);
         int complete = p != NULL &&

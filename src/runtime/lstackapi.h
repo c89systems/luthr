@@ -71,33 +71,38 @@ l_sinline void luaX_leavebounded (lua_State *L) {
   __atomic_store_n(&L->stack_gate.values, 0, __ATOMIC_RELEASE);
 }
 
-/* The two-sided claim uses sequentially consistent publication and checks.
-** Either the full owner or collector sees this scope, or this scope sees
-** its request and withdraws before reading the stack. Its release has no
-** waiters to notify and never changes the scheduler's slot offer. */
+/* A stack reader or mutator that acquires the full gate joins this claim
+** before touching the stack. Once a C frame's roots have been published
+** for this trace, it can rearrange them and read strong inline fields.
+** Lua frames can contain register shadows which require a read barrier. */
 l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
   LuaStackGate *gate = &L->stack_gate;
   if (l_likely(__atomic_exchange_n(&gate->values, 1, __ATOMIC_SEQ_CST) == 0)) {
     if (l_likely((__atomic_load_n(&gate->word, __ATOMIC_SEQ_CST) &
-                  ~LUA_GATE_OFFER_MASK) == 0 &&
-                 !(luaW_control(&G(L)->world) &
-                   (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE | LUA_WORLD_STACK_ROOTS |
-                    LUA_WORLD_SEAL_NURSERIES | requests))))
-      return 1;
+                  ~LUA_GATE_OFFER_MASK) == 0)) {
+      uint64_t control = luaW_control(&G(L)->world);
+      if (l_likely(!(control & (LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS |
+                                LUA_WORLD_SEAL_NURSERIES | requests)) &&
+                   (!(control & LUA_MARK_ACTIVE) ||
+                    (!isLua(L->ci) &&
+                     __atomic_load_n(&L->trace_snapshot, __ATOMIC_ACQUIRE) ==
+                       luaC_traceepoch(G(L))))))
+        return 1;
+    }
     luaX_leavebounded(L);
   }
   return 0;
 }
 
-l_sinline int luaX_trybounded (lua_State *L) {
-  return luaX_tryboundedscope(L, 0);
+l_sinline int luaX_tryunmarked (lua_State *L) {
+  return luaX_tryboundedscope(L, LUA_MARK_ACTIVE);
 }
 
 l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
   if (!stackonly || l_unlikely(__atomic_load_n(&L->stack_gate.word,
                            __ATOMIC_RELAXED) & ~LUA_GATE_OFFER_MASK))
     return luaX_valueenterslow(L, 0);
-  if (luaX_trybounded(L)) return LUA_VALUE_BOUNDED;
+  if (luaX_tryboundedscope(L, 0)) return LUA_VALUE_BOUNDED;
   return luaX_reservevalues(L);
 }
 
