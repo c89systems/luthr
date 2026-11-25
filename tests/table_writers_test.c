@@ -231,8 +231,11 @@ static void check_writer_groups(lua_State *L) {
 static void check_packed_transition(lua_State *L) {
   const char *fields[] = {"field-1", "field-2"};
   LuaRecordStorage *backing = NULL;
-  require(luaL_dostring(
-              L, "return {['field-1']=1, ['field-2']=2, sibling=3}") == LUA_OK);
+  require(
+      luaL_dostring(
+          L,
+          "return {['field-1']=1, ['field-2']=2, sibling=3, floating=0.0}") ==
+      LUA_OK);
   probe.table = (Table *)lua_topointer(L, 1);
   probe.hash = probe.graph = 1;
   probe.first = lua_newthread(L);
@@ -253,6 +256,12 @@ static void check_packed_transition(lua_State *L) {
 
     /* The record owner is inserting a GC edge. An unrelated scalar store
      * must still complete, both before and after backing is installed. */
+    lua_pushnumber(L, -0.0);
+    lua_setfield(L, 1, "floating");
+    require(lua_getfield(L, 1, "floating") == LUA_TNUMBER);
+    require(!lua_isinteger(L, -1) && lua_tonumber(L, -1) == 0.0 &&
+            signbit(lua_tonumber(L, -1)));
+    lua_pop(L, 1);
     lua_pushinteger(L, 42 + i);
     lua_setfield(L, 1, "sibling");
     require(lua_getfield(L, 1, "sibling") == LUA_TNUMBER);
@@ -270,6 +279,7 @@ static void check_packed_transition(lua_State *L) {
             luaH_recordbacking(probe.table->arraydata) == backing);
     require(luaH_inlinerecordvalues(probe.table)[i].bits == LUA_RECORD_FROZEN);
     require(luaH_recordtag(backing->tags, 2) == LUA_RECORD_PACKED);
+    require(luaH_recordtag(backing->tags, 3) == LUA_RECORD_FLOAT);
   }
   lua_pushinteger(L, 33);
   lua_rawseti(L, 1, 1); /* retire the general record as it grows */
@@ -281,6 +291,9 @@ static void check_packed_transition(lua_State *L) {
   }
   require(lua_getfield(L, 1, "sibling") == LUA_TNUMBER &&
           lua_tointeger(L, -1) == 43);
+  require(lua_getfield(L, 1, "floating") == LUA_TNUMBER);
+  require(!lua_isinteger(L, -1) && lua_tonumber(L, -1) == 0.0 &&
+          signbit(lua_tonumber(L, -1)));
 }
 
 typedef struct {

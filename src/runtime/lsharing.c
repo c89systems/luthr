@@ -11,6 +11,11 @@ l_sinline void packrecordfield (Table *table, Value *payload, unsigned index,
                                  lu_byte tag) {
   TValue value = {0};
   uint64_t packed;
+  if (tag == LUA_VNUMFLT) {
+    if (payload->bits < LUA_RECORD_FLOAT_EMPTY)
+      luaH_setrecordtag(&table->arraydata, index, LUA_RECORD_FLOAT);
+    return;
+  }
   settt_(&value, tag);
   if (tag == LUA_VNUMINT) val_(&value) = *payload;
   packed = luaH_packrecord(&value);

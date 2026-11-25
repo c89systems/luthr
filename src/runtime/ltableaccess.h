@@ -147,11 +147,12 @@ l_sinline int luaH_readvalue (global_State *g, const Value *payload,
   return luaH_samerow(writer, before);
 }
 
-l_sinline int luaH_readpackedrecord (Table *table, unsigned index, TValue *value) {
+l_sinline int luaH_readpackedrecord (Table *table, unsigned index, lu_byte kind,
+                                     TValue *value) {
   const Value *payload = luaH_inlinerecordvalues(table) + index;
   uint64_t bits = __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE);
   if (bits == LUA_RECORD_FROZEN) return 0;
-  luaH_unpackrecord(bits, value);
+  luaH_unpackinlinerecord(kind, bits, value);
   return 1;
 }
 
@@ -179,7 +180,7 @@ l_sinline int luaH_readsplitrecord (global_State *g, Table *table,
     if ((tags & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) != LUA_RECORD_TAGS)
       return 0;
     tag = luaH_recordtag(tags, index);
-    if (tag == LUA_RECORD_PACKED) return 0;
+    if (luaH_recordinline(tag)) return 0;
   }
   settt_(value, tag);
   if (!isempty(value)) __atomic_load(payload, &value->value_, __ATOMIC_ACQUIRE);
@@ -195,8 +196,8 @@ l_sinline int luaH_readrecord (global_State *g, Table *table, uintptr_t image,
   tag = luaH_recordtag(backing != NULL
                        ? __atomic_load_n(&backing->tags, __ATOMIC_ACQUIRE)
                        : image, index);
-  if (tag == LUA_RECORD_PACKED)
-    return luaH_readpackedrecord(table, index, value);
+  if (luaH_recordinline(tag))
+    return luaH_readpackedrecord(table, index, tag, value);
   return luaH_readsplitrecord(g, table, backing, index, tag, value, layout);
 }
 

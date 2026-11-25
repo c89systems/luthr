@@ -1479,6 +1479,51 @@ static void shared_record_iteration(lua_State *state, int generational) {
   lua_pop(state, 1);
 }
 
+static void shared_record_numbers(lua_State *state, int generational) {
+  lua_State *reader;
+  Table *record;
+  luaL_openlibs(state);
+  lua_gc(state, generational ? LUA_GCGEN : LUA_GCINC);
+  require(luaL_dostring(state, "return {x=0.5, y=0.75, z=0.0}") == LUA_OK);
+  record = (Table *)lua_topointer(state, 1);
+  reader = lua_newthread(state);
+  require(
+      luaL_loadstring(
+          reader,
+          "local row=...; "
+          "local function frombits(x) "
+          "  return (string.unpack('d',string.pack('I8',x))) end; "
+          "local function asbits(x) "
+          "  assert(math.type(x)=='float'); "
+          "  return (string.unpack('I8',string.pack('d',x))) end; "
+          "assert(asbits(row.x)==0x3fe0000000000000); "
+          "for _,bits in ipairs{0,math.mininteger,1,0x400921fb54442d18,"
+          "                     0x7ff8000000000001,0x7ff0000000000000} do "
+          "  row.x=frombits(bits); assert(asbits(row.x)==bits) end; "
+          "row.z=nil; assert(row.z==nil); "
+          "local seen; "
+          "setmetatable(row,{__newindex=function(_,k,v) "
+          "  assert(k=='z'); seen=v end}); "
+          "row.z=-0.0; assert(row.z==nil and asbits(seen)==math.mininteger); "
+          "rawset(row,'z',-0.0); setmetatable(row,nil); "
+          "local x,y=0xffffffffffffffff,0xfffffffffffffffe; "
+          "row.x=frombits(x); row.y=frombits(y); "
+          "collectgarbage('collect'); "
+          "assert(asbits(row.x)==x and asbits(row.y)==y); "
+          "assert(asbits(row.z)==math.mininteger); "
+          "row.extra=true; "
+          "assert(asbits(row.x)==x and asbits(row.y)==y); "
+          "assert(asbits(row.z)==math.mininteger and row.extra); "
+          "row.x=math.maxinteger; row.y=math.mininteger; "
+          "assert(row.x==math.maxinteger and row.y==math.mininteger)") ==
+      LUA_OK);
+  lua_pushvalue(state, 1);
+  lua_xmove(state, reader, 1);
+  for (unsigned index = 0; index < 3; ++index)
+    require(luaH_recordtag(record->arraydata, index) == LUA_RECORD_FLOAT);
+  require(lua_pcall(reader, 1, 0, 0) == LUA_OK);
+}
+
 static void shared_ordinary_iteration(lua_State *state, int generational) {
   static const int sizes[][2] = {{64, 0}, {0, 24}, {16, 600}};
   luaL_openlibs(state);
@@ -1567,6 +1612,9 @@ int main(int argc, char **argv) {
   else if (strncmp(argv[1], "record_iteration_", 17) == 0)
     shared_record_iteration(
         state, strcmp(argv[1], "record_iteration_generational") == 0);
+  else if (strncmp(argv[1], "record_numbers_", 15) == 0)
+    shared_record_numbers(state,
+                          strcmp(argv[1], "record_numbers_generational") == 0);
   else if (strncmp(argv[1], "ordinary_iteration_", 19) == 0)
     shared_ordinary_iteration(
         state, strcmp(argv[1], "ordinary_iteration_generational") == 0);

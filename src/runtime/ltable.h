@@ -47,8 +47,10 @@ l_sinline int luaH_samelayout (const Table *table, uint64_t layout) {
 #define LUA_RECORD_BACKING cast(uintptr_t, 2)
 /* The packed marker is outside the Lua tag range and carries no GC edge. */
 enum { LUA_RECORD_MAX_FIELDS = 4, LUA_RECORD_PACKED = 0x3f,
-       LUA_RECORD_WIDE = 0x3e, LUA_RECORD_WIDE_FROZEN = 0x3d };
+       LUA_RECORD_WIDE = 0x3e, LUA_RECORD_WIDE_FROZEN = 0x3d,
+       LUA_RECORD_FLOAT = 0x3c };
 #define LUA_RECORD_FROZEN UINT64_MAX
+#define LUA_RECORD_FLOAT_EMPTY (UINT64_MAX - 1)
 _Static_assert(sizeof(uintptr_t) > LUA_RECORD_MAX_FIELDS, "record tag word");
 
 /* The low byte is the Lua tag. Bit 8 reserves the payload for a writer.
@@ -168,6 +170,35 @@ l_sinline lu_byte luaH_unpackrecord (uint64_t bits, TValue *result) {
   return tag;
 }
 
+l_sinline int luaH_recordinline (lu_byte kind) {
+  return kind == LUA_RECORD_PACKED || kind == LUA_RECORD_FLOAT;
+}
+
+/* The field's layout identifies binary64. Two reserved words represent
+** deletion and retirement. Conflicting NaN payloads use full-width storage. */
+l_sinline uint64_t luaH_packfloatrecord (const TValue *value) {
+  if (ttisnil(value)) return LUA_RECORD_FLOAT_EMPTY;
+  if (!ttisfloat(value) || val_(value).bits >= LUA_RECORD_FLOAT_EMPTY)
+    return LUA_RECORD_FROZEN;
+  return val_(value).bits;
+}
+
+l_sinline int luaH_inlinerecordempty (lu_byte kind, uint64_t bits) {
+  return kind == LUA_RECORD_FLOAT ? bits == LUA_RECORD_FLOAT_EMPTY
+                                 : tagisempty(cast_byte(bits));
+}
+
+l_sinline lu_byte luaH_unpackinlinerecord (lu_byte kind, uint64_t bits,
+                                           TValue *result) {
+  if (kind == LUA_RECORD_FLOAT) {
+    lu_byte tag = bits == LUA_RECORD_FLOAT_EMPTY ? LUA_VEMPTY : LUA_VNUMFLT;
+    val_(result).bits = bits;
+    settt_(result, tag);
+    return tag;
+  }
+  return luaH_unpackrecord(bits, result);
+}
+
 /* The logical array is empty throughout the compact layout's lifetime. */
 l_sinline Value *luaH_readarray (const Table *table) {
   uintptr_t data = __atomic_load_n(&table->arraydata, __ATOMIC_ACQUIRE);
@@ -193,10 +224,10 @@ l_sinline lu_byte luaH_recordlocalvalue (const Value *payload, lu_byte tag,
 l_sinline lu_byte luaH_ownedrecordvalue (const Table *table, uintptr_t image,
                                          unsigned index, lu_byte tag,
                                          TValue *result) {
-  if (tag == LUA_RECORD_PACKED) {
+  if (luaH_recordinline(tag)) {
     const Value *payload = luaH_inlinerecordvalues(table) + index;
-    return luaH_unpackrecord(__atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE),
-                             result);
+    return luaH_unpackinlinerecord(tag,
+                __atomic_load_n(&payload->bits, __ATOMIC_ACQUIRE), result);
   }
   if (tag == LUA_RECORD_WIDE) {
     const LuaRecordStorage *backing = luaH_recordbacking(image);
