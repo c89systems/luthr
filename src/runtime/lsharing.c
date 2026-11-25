@@ -7,6 +7,60 @@
 #include "ltable.h"
 
 
+l_sinline void packrecordfield (Table *table, Value *payload, unsigned index,
+                                 lu_byte tag) {
+  TValue value = {0};
+  uint64_t packed;
+  settt_(&value, tag);
+  if (tag == LUA_VNUMINT) val_(&value) = *payload;
+  packed = luaH_packrecord(&value);
+  if (packed != LUA_RECORD_FROZEN) {
+    __atomic_store_n(&payload->bits, packed, __ATOMIC_RELEASE);
+    luaH_setrecordtag(&table->arraydata, index, LUA_RECORD_PACKED);
+  }
+}
+
+/* The owner is still the only mutator. With no tracing, the representation
+** can change before publishing ownership, without an object scope. A trace
+** cannot start scanning the new epoch before this admission acknowledges it. */
+static int shareleaf (lua_State *L, Table *table) {
+  enum { LEAF_SLOTS = 4 };
+  Node *nodes = table->node;
+  Table *keys = luaH_recordkeys(nodes);
+  unsigned i, size;
+  if (table->metatable != NULL ||
+      (__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1) ||
+      luaC_tracing(L) || luaC_tasktable(table))
+    return 0;
+  if (keys != NULL) {
+    uintptr_t tags = table->arraydata;
+    lua_assert((tags & (LUA_RECORD_TAGS | LUA_RECORD_BACKING)) == LUA_RECORD_TAGS);
+    for (i = 0; i < keys->asize; i++)
+      if (luaH_recordtag(tags, i) & BIT_ISCOLLECTABLE) return 0;
+    for (i = 0; i < keys->asize; i++)
+      packrecordfield(table, luaH_inlinerecordvalues(table) + i, i,
+                       luaH_recordtag(tags, i));
+  }
+  else {
+    if (table->asize > LEAF_SLOTS || luaH_hashdir(nodes) != NULL) return 0;
+    size = luaH_nodesize(nodes);
+    if (size > LEAF_SLOTS - table->asize) return 0;
+    for (i = 0; i < table->asize; i++)
+      if (*getArrTag(table, i) & BIT_ISCOLLECTABLE) return 0;
+    for (i = 0; i < size; i++)
+      if (!isempty(gval(nodes + i)) && (iscollectable(gval(nodes + i)) ||
+          (keyiscollectable(nodes + i) && !keyisshrstr(nodes + i))))
+        return 0;
+  }
+  __atomic_store_n(&table->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
+  return 1;
+}
+
+int luaA_tryshareleaf (lua_State *L, Table *table) {
+  return __atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) == cast(uintptr_t, L) &&
+         shareleaf(L, table);
+}
+
 static void enqueue (lua_State *L, GCObject *object, GCObject **pending) {
   uintptr_t *state;
   uintptr_t owner;
@@ -32,14 +86,19 @@ static void value (lua_State *L, const TValue *edge, GCObject **pending) {
 
 void luaA_share (lua_State *L, GCObject *object) {
   LuaSharingRoots roots;
-  uintptr_t *initial;
+  uintptr_t *initial, owner;
   if (object == NULL) return;
   initial = luaA_sharing(object);
   if (initial == NULL) {
     if (luaC_taskstring(object)) luaC_sealtask(L);
     return;
   }
-  if (__atomic_load_n(initial, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED) return;
+  owner = __atomic_load_n(initial, __ATOMIC_ACQUIRE);
+  if (owner & LUA_OBJECT_SHARED) return;
+  /* Keep children discovered by transitive promotion on the pending root
+  ** list. In particular a weak edge must survive a later promotion wait. */
+  if (object->tt == LUA_VTABLE && owner == cast(uintptr_t, L) &&
+      shareleaf(L, gco2t(object))) return;
   roots.previous = L->sharing_roots;
   roots.pending = roots.current = NULL;
   L->sharing_roots = &roots;
@@ -76,17 +135,7 @@ void luaA_share (lua_State *L, GCObject *object) {
               lu_byte tag = luaH_recordtag(tags, i);
               if (tag & BIT_ISCOLLECTABLE)
                 enqueue(L, values[i].gc, &roots.pending);
-              else {
-                TValue value = {0};
-                uint64_t packed;
-                settt_(&value, tag);
-                if (tag == LUA_VNUMINT) val_(&value) = values[i];
-                packed = luaH_packrecord(&value);
-                if (packed != LUA_RECORD_FROZEN) {
-                  __atomic_store_n(&values[i].bits, packed, __ATOMIC_RELEASE);
-                  luaH_setrecordtag(&table->arraydata, i, LUA_RECORD_PACKED);
-                }
-              }
+              else packrecordfield(table, values + i, i, tag);
             }
             break;
           }

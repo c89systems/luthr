@@ -2411,16 +2411,15 @@ static int __attribute__((noinline)) sharedpartset (
   return result;
 }
 
-l_sinline int sharedwriteallowed (lua_State *L, Table *table,
-                                   const TValue *value) {
+l_sinline int sharedwriteallowed (lua_State *L, Table *table) {
   return !luaW_stopped(&G(L)->world) &&
     !(gettableflags(table) & (LUA_TABLE_STRING_INDEX | LUA_TABLE_STRING_RANGES)) &&
-    published(value) && luaH_strongaccess(L, table);
+    luaH_strongaccess(L, table);
 }
 
 l_sinline uint64_t sharedlayout (lua_State *L, Table *table,
                                  const TValue *key, const TValue *value) {
-  return sharedwriteallowed(L, table, value) && published(key)
+  return sharedwriteallowed(L, table) && published(key) && published(value)
     ? __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) : 1;
 }
 
@@ -2456,7 +2455,11 @@ static int __attribute__((noinline)) sharedrecordset (lua_State *L, Table *table
   backing = luaH_recordbacking(image);
   payload = (backing != NULL ? backing->values : luaH_inlinerecordvalues(table)) +
             field;
-  if ((layout & 1) || !sharedwriteallowed(L, table, value)) return 0;
+  if ((layout & 1) || !sharedwriteallowed(L, table)) return 0;
+  if (!published(value) &&
+      ((!raw && table->metatable != NULL) || !ttistable(value) ||
+       !luaA_tryshareleaf(L, hvalue(value))))
+    return 0;
   writer = claimslot(L, table, payload, layout, retry);
   if (writer == NULL) return 0;
   /* A successful claim pins the sampled address. Other fields can still

@@ -137,9 +137,52 @@ static void record_constructor_hooks(lua_State *L) {
             0);
 }
 
+static void record_publish_child(lua_State *L, lua_State *other) {
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCSTOP);
+  run_chunk(L,
+            "local old, wide = {}, math.mininteger; "
+            "return {child=old, leaf=old}, "
+            "       {small=41, wide=wide, flag=false, gap=nil}, {small=42}",
+            3);
+  lua_pushvalue(L, -3);
+  lua_xmove(L, other, 1);
+  lua_pushliteral(L, "child");
+  lua_pushliteral(L, "leaf");
+  lua_lock(L);
+  {
+    StkId key = L->top.p - 1;
+    Table *parent = hvalue(s2v(key - 4));
+    require(luaH_recordkeys(parent->node) != NULL);
+    require(luaH_trysetfield(L, parent, s2v(key - 1), s2v(key - 3), 0));
+    require(luaH_trysetfield(L, parent, s2v(key), s2v(key - 2), 0));
+  }
+  lua_unlock(L);
+  lua_pop(L, 5);
+  lua_gc(L, LUA_GCRESTART);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getfield(other, -1, "leaf") == LUA_TTABLE);
+  require(lua_getfield(other, -1, "small") == LUA_TNUMBER);
+  require(lua_tointeger(other, -1) == 42);
+  lua_pop(other, 2);
+  require(lua_getfield(other, -1, "child") == LUA_TTABLE);
+  require(lua_getfield(other, -1, "small") == LUA_TNUMBER);
+  require(lua_tointeger(other, -1) == 41);
+  lua_pop(other, 1);
+  require(lua_getfield(other, -1, "wide") == LUA_TNUMBER);
+  require(lua_tointeger(other, -1) == LUA_MININTEGER);
+  lua_pop(other, 1);
+  require(lua_getfield(other, -1, "flag") == LUA_TBOOLEAN);
+  require(!lua_toboolean(other, -1));
+  lua_pop(other, 1);
+  require(lua_getfield(other, -1, "gap") == LUA_TNIL);
+  lua_pop(other, 3);
+}
+
 static void record_table(lua_State *L, lua_State *other) {
   const Table *record, *second, *keys, *metatable;
   luaL_openlibs(L);
+  record_publish_child(L, other);
   run_chunk(L,
             "local function check(t) "
             "  for i=1,64 do "

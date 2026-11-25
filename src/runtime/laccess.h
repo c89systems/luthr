@@ -52,6 +52,8 @@ l_sinline int luaA_local (lua_State *L, GCObject *object) {
 }
 LUAI_FUNC void luaA_share (lua_State *L, GCObject *object);
 LUAI_FUNC void luaA_sharevalue (lua_State *L, const TValue *value);
+/* Publish a small table without transitive promotion or a safepoint. */
+LUAI_FUNC int luaA_tryshareleaf (lua_State *L, Table *table);
 LUAI_FUNC void luaA_publish (lua_State *L, GCObject *owner,
                             const TValue *value);
 /* Split values are validated by the owner's sequence before GC follows their
