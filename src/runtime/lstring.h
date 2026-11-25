@@ -29,6 +29,8 @@
 #define LUAI_MAXSHORTLEN	40
 #endif
 
+LUAI_FUNC unsigned luaS_hash (const char *str, size_t len, unsigned seed);
+
 
 /*
 ** Size of a short TString: Size of the header plus space for the string

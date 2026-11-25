@@ -493,6 +493,35 @@ static void stack_snapshot(void) {
   finish(L);
 }
 
+static void native_shared_field(void) {
+  lua_State *L = newstate(), *worker;
+  GCObject *value;
+  lua_newtable(L);
+  lua_newtable(L);
+  value = (GCObject *)lua_topointer(L, -1);
+  lua_pushliteral(L, "only reachable from the field");
+  lua_rawseti(L, -2, 1);
+  lua_setfield(L, 1, "field");
+  worker = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, worker, 1);
+  begin(L);
+  /* Publish the worker's stack before retrieving an unmarked strong value. */
+  luaX_valueleave(worker, luaX_valueenter(worker, 1));
+  require(iswhite(G(L), value));
+  require(lua_getfield(worker, 1, "field") == LUA_TTABLE);
+  require(iswhite(G(L), value));
+  lua_pushnil(L);
+  lua_setfield(L, 1, "field");
+  require(!iswhite(G(L), value));
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_topointer(worker, 2) == value);
+  require(lua_rawgeti(worker, 2, 1) == LUA_TSTRING);
+  require(strcmp(lua_tostring(worker, -1), "only reachable from the field") ==
+          0);
+  finish(L);
+}
+
 static void bounded_stack_after_snapshot(void) {
   lua_State *L = newstate(), *worker = lua_newthread(L);
   unsigned *payload = lua_newuserdatauv(worker, sizeof(*payload), 1);
@@ -1412,6 +1441,8 @@ int main(int argc, char **argv) {
     stack_snapshot();
   else if (strcmp(argv[1], "stack_bounded") == 0)
     bounded_stack_after_snapshot();
+  else if (strcmp(argv[1], "native_shared_field") == 0)
+    native_shared_field();
   else if (strcmp(argv[1], "stack_wait_snapshot") == 0)
     wait_for_stack(STACK_SNAPSHOT);
   else if (strcmp(argv[1], "stack_wait_release") == 0)

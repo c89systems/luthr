@@ -89,7 +89,7 @@ foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incr
     native_burst_parking native_burst_poll native_burst_single native_lease_expiry native_lease_inactive native_lease_full
     late_native_waiter cancel_granted_native startup_failures callback_progress
     timed_callback_progress synchronous_callback simultaneous_reentry parallel_native_compensation native_overlapping_stops native_return_compensation native_return_handoff native_leaf_return native_recall_during_stack_borrow native_recall_without_stack_offer native_recall_with_retirement
-    native_metadata_without_slot native_array_without_slot native_allocation_without_slot
+    native_metadata_without_slot native_registry_without_slot native_array_without_slot native_allocation_without_slot
     parked cancel_parked idle_notifications standby_carriers idle_affinity metadata_progress
     timed_metadata_progress timed_slice timed_continuation_slice timed_retained_slice timed_retained_start
     nursery_incremental nursery_generational nursery_pacing
@@ -222,7 +222,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaH_trygetsharedshortstr -Wl,--wrap=luaH_get
   -Wl,--wrap=lua_setmetatable)
 foreach(case IN ITEMS fast length_incremental length_generational
-    primitive batching stack_grace private_resize overlap retirement pressure failure hash_failure resume
+    primitive batching stack_grace private_resize overlap retirement pressure native_retirement failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     table_reattach userdata_reattach registry_incremental registry_generational
@@ -420,7 +420,7 @@ target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaX_valueenterslow)
 foreach(case IN ITEMS array hash userdata metatable cclosure capture stack stack_bounded stack_wait_snapshot stack_wait_release stack_wait_offer stack_wait_reopen stack_wait_collect stack_wait_park busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak weak_retry weak_stamp_wrap intern cache
     concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues
-    capture_read userdata_read metatable_read cclosure_read
+    capture_read userdata_read metatable_read cclosure_read native_shared_field
     weaken_array_after_read weaken_hash_after_read page_frontier)
   add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})
   set_tests_properties(gc_tracing_${case} PROPERTIES

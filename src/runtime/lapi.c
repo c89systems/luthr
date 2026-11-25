@@ -31,6 +31,7 @@
 #include "lstackapi.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "ltm.h"
 #include "lundump.h"
 #include "lvm.h"
@@ -1081,9 +1082,52 @@ LUA_API int lua_gettable (lua_State *L, int idx) {
 }
 
 
+static int readnamedfield (lua_State *L, const TValue *object, const char *name,
+                            TValue *result) {
+  size_t len = 0;
+  if (!ttistable(object)) return 0;
+  while (len <= LUAI_MAXSHORTLEN && name[len] != '\0') len++;
+  return len <= LUAI_MAXSHORTLEN &&
+         luaH_readsharedname(L, hvalue(object), name, len, result);
+}
+
+
+int luaA_testnamedudata (lua_State *L, int idx, const char *name, void **result) {
+  const TValue *object;
+  TValue registry, value;
+  Table *mt;
+  void *payload;
+  int ready;
+  if (ispseudo(idx) || !luaX_trysharedread(L)) return 0;
+  object = index2addr(L, idx);
+  payload = luaA_udatapointer(object);
+  mt = payload != NULL ? luaA_readmetatable(G(L), object) : NULL;
+  ready = mt == NULL || (luaA_tryregistry(G(L), &registry) &&
+                         readnamedfield(L, &registry, name, &value));
+  if (ready)
+    *result = mt != NULL && ttistable(&value) && hvalue(&value) == mt
+      ? payload : NULL;
+  luaX_leavesharedread(L);
+  return ready;
+}
+
+
 LUA_API int lua_getfield (lua_State *L, int idx, const char *k) {
   LuaNativeRoot indexed;
   int result;
+  if (idx >= LUA_REGISTRYINDEX && luaX_trysharedread(L)) {
+    TValue registry, value;
+    const TValue *object = idx != LUA_REGISTRYINDEX ? index2addr(L, idx)
+      : luaA_tryregistry(G(L), &registry) ? &registry : NULL;
+    if (object != NULL && readnamedfield(L, object, k, &value)) {
+      setobj2s(L, L->top.p, &value);
+      api_incr_top(L);
+      result = ttype(&value);
+      luaX_leavesharedread(L);
+      return result;
+    }
+    luaX_leavesharedread(L);
+  }
   lua_lock(L);
   result = luaA_pushfield(L, luaA_indexvalue(L, idx, &indexed), k);
   luaR_poproot(L, &indexed);

@@ -142,8 +142,8 @@ void luaHS_report (LuaWorld *world, LuaParticipation *participant,
   notify(world);
 }
 
-/* world.mutex keeps the directory alive. Shared layouts depend on all
-** managed admissions. Private layouts depend on active scanner borrows. */
+/* world.mutex keeps the directory alive. Bounded reads can borrow shared
+** layouts. Only collector payload work can borrow private layouts. */
 static uint64_t minimum (LuaWorld *world, int collector_only) {
   LuaParticipation *participant;
   uint64_t result = luaW_epoch(luaW_control(world));
@@ -157,8 +157,11 @@ static uint64_t minimum (LuaWorld *world, int collector_only) {
       if (scan != 0 && after(result, epoch)) result = epoch;
     }
     else {
-      uintptr_t gate = __atomic_load_n(&participant->thread->stack_gate.word,
-                                       __ATOMIC_SEQ_CST);
+      LuaStackGate *stack = &participant->thread->stack_gate;
+      uintptr_t gate = __atomic_load_n(&stack->word, __ATOMIC_SEQ_CST);
+      uint64_t ticket = __atomic_load_n(&stack->values, __ATOMIC_SEQ_CST);
+      if ((ticket & LUA_GATE_SHARED_READ) && after(result, luaW_epoch(ticket)))
+        result = luaW_epoch(ticket);
       if (gate & LUA_GATE_MANAGED) {
         uint64_t epoch = __atomic_load_n(&participant->storage_epoch,
                                          __ATOMIC_SEQ_CST);

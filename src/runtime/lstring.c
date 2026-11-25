@@ -53,7 +53,7 @@ static unsigned hashbytes (const char *str, size_t l, unsigned h) {
 }
 
 
-static unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
+unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
   return hashbytes(str, l, seed ^ cast_uint(l));
 }
 

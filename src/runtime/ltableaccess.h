@@ -16,6 +16,9 @@ LUAI_FUNC int luaH_trygetsharedint (lua_State *, Table *, lua_Integer,
                                     TValue *, lu_byte *);
 LUAI_FUNC int luaH_trygetsharedshortstr (lua_State *, Table *, TString *,
                                          TValue *, lu_byte *);
+/* Caller holds a shared read ticket. Only a strong, present field succeeds. */
+LUAI_FUNC int luaH_readsharedname (lua_State *, Table *, const char *, size_t,
+                                   TValue *);
 LUAI_FUNC lu_byte luaH_getinthash (Table *, lua_Integer, TValue *);
 
 l_sinline unsigned luaH_indexin (lua_Integer key, unsigned limit) {

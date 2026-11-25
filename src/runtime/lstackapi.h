@@ -71,26 +71,61 @@ l_sinline void luaX_leavebounded (lua_State *L) {
   __atomic_store_n(&L->stack_gate.values, 0, __ATOMIC_RELEASE);
 }
 
-/* A stack reader or mutator that acquires the full gate joins this claim
-** before touching the stack. Once a C frame's roots have been published
-** for this trace, it can rearrange them and read strong inline fields.
-** Lua frames can contain register shadows which require a read barrier. */
-l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
-  LuaStackGate *gate = &L->stack_gate;
-  if (l_likely(__atomic_exchange_n(&gate->values, 1, __ATOMIC_SEQ_CST) == 0)) {
-    if (l_likely((__atomic_load_n(&gate->word, __ATOMIC_SEQ_CST) &
-                  ~LUA_GATE_OFFER_MASK) == 0)) {
-      uint64_t control = luaW_control(&G(L)->world);
-      if (l_likely(!(control & (LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS |
-                                LUA_WORLD_SEAL_NURSERIES | requests)) &&
-                   (!(control & LUA_MARK_ACTIVE) ||
-                    (!isLua(L->ci) &&
-                     __atomic_load_n(&L->trace_snapshot, __ATOMIC_ACQUIRE) ==
-                       luaC_traceepoch(G(L))))))
-        return 1;
-    }
-    luaX_leavebounded(L);
+/* A full gate joins this claim before touching the stack. A C frame
+** whose roots have been published can rearrange them and read strong
+** fields. Lua register shadows can still require a read barrier. */
+l_sinline int luaX_boundedready (lua_State *L, unsigned requests) {
+  if (l_likely((__atomic_load_n(&L->stack_gate.word, __ATOMIC_SEQ_CST) &
+                ~LUA_GATE_OFFER_MASK) == 0)) {
+    uint64_t control = luaW_control(&G(L)->world);
+    return !(control & (LUA_WORLD_STOPPED | LUA_WORLD_STACK_ROOTS |
+                        LUA_WORLD_SEAL_NURSERIES | requests)) &&
+      (!(control & LUA_MARK_ACTIVE) ||
+       (!isLua(L->ci) &&
+        __atomic_load_n(&L->trace_snapshot, __ATOMIC_ACQUIRE) ==
+          luaC_traceepoch(G(L))));
   }
+  return 0;
+}
+
+l_sinline int luaX_claimvalues (LuaStackGate *gate, uint64_t ticket) {
+  uint64_t expected = 0;
+  return __atomic_compare_exchange_n(&gate->values, &expected, ticket, 0,
+                                      __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
+
+l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
+  if (!luaX_claimvalues(&L->stack_gate, LUA_GATE_VALUES)) return 0;
+  if (l_likely(luaX_boundedready(L, requests))) return 1;
+  luaX_leavebounded(L);
+  return 0;
+}
+
+l_sinline void luaX_leavesharedread (lua_State *L) {
+  global_State *g = G(L);
+  uint64_t control;
+  uintptr_t stack = cast(uintptr_t, L);
+  /* A waiter registers before testing the ticket. It must observe our
+  ** withdrawal or we must observe its request and wake it. */
+  __atomic_store_n(&L->stack_gate.values, 0, __ATOMIC_SEQ_CST);
+  control = luaW_control(&g->world);
+  if (l_unlikely(control & LUA_WORLD_STORAGE_WAIT))
+    luaW_leave(g, stack, 0, control);
+}
+
+/* Publish the epoch with the stack claim, then acquire the current control
+** word before loading a layout. A reclaimer either sees the earlier ticket
+** or its replacement preceded the reader's final control-word load. */
+l_sinline int luaX_trysharedread (lua_State *L) {
+  uint64_t control;
+  if (__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+      ~LUA_GATE_OFFER_MASK) return 0;
+  control = luaW_control(&G(L)->world);
+  if (control & LUA_WORLD_STORAGE_WAIT) return 0;
+  if (!luaX_claimvalues(&L->stack_gate,
+                        luaW_epoch(control) | LUA_GATE_SHARED_READ)) return 0;
+  if (l_likely(luaX_boundedready(L, LUA_WORLD_STORAGE_WAIT))) return 1;
+  luaX_leavesharedread(L);
   return 0;
 }
 

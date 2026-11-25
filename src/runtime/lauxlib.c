@@ -398,6 +398,7 @@ static void *testudata (lua_State *L, int ud, const char *tname) {
   LuaNativeRoot indexed;
   const TValue *object;
   void *p;
+  if (luaA_testnamedudata(L, ud, tname, &p)) return p;
   lua_lock(L);
   object = luaA_indexvalue(L, ud, &indexed);
   p = luaA_udatapointer(object);
@@ -425,8 +426,6 @@ static void *testudata (lua_State *L, int ud, const char *tname) {
 
 
 LUALIB_API void *luaL_testudata (lua_State *L, int ud, const char *tname) {
-  /* A stack-only type probe avoids managed admission on ordinary misses. */
-  if (ud > LUA_REGISTRYINDEX && lua_touserdata(L, ud) == NULL) return NULL;
   return testudata(L, ud, tname);
 }
 

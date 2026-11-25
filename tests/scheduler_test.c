@@ -1386,6 +1386,49 @@ static void native_metadata_without_slot(struct fixture *f) {
   finish(f);
 }
 
+static int read_native_registry(lua_State *L) {
+  blocked_leaf(L);
+  unsigned *payload = luaL_checkudata(L, 1, "luthr.registry-read");
+  require(*payload == 42);
+  require(lua_getfield(L, LUA_REGISTRYINDEX, "luthr.registry-read") ==
+          LUA_TTABLE);
+  require(lua_getfield(L, -1, "answer") == LUA_TNUMBER);
+  native_operation_done();
+  return 1;
+}
+
+static void native_registry_without_slot(struct fixture *f) {
+  init(f, 1);
+  lua_gc(f->main, LUA_GCSTOP);
+  luaL_newmetatable(f->main, "luthr.registry-read");
+  lua_pushinteger(f->main, 51);
+  lua_setfield(f->main, -2, "answer");
+  unsigned *payload = lua_newuserdatauv(f->main, sizeof(*payload), 0);
+  *payload = 42;
+  lua_pushvalue(f->main, -2);
+  lua_setmetatable(f->main, -2);
+  lua_setglobal(f->main, "registry_object");
+  lua_pop(f->main, 1);
+  lua_pushcfunction(f->main, read_native_registry);
+  lua_setglobal(f->main, "read_native_registry");
+  managed(f->main, "wait_for_native_operation", wait_for_native_operation);
+  submit(f, 0, "return read_native_registry(registry_object)", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1, "wait_for_native_operation(); return 52", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->waiting)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  require(collect(f, 1, LUA_OK) == 52);
+  finish(f);
+}
+
 static int edit_native_array(lua_State *L) {
   blocked_leaf(L);
   const Table *table = lua_topointer(L, 1);
@@ -3099,6 +3142,8 @@ int main(int argc, char **argv) {
     native_recall_during_stack_borrow(f, 1, 1);
   else if (strcmp(argv[1], "native_metadata_without_slot") == 0)
     native_metadata_without_slot(f);
+  else if (strcmp(argv[1], "native_registry_without_slot") == 0)
+    native_registry_without_slot(f);
   else if (strcmp(argv[1], "native_array_without_slot") == 0)
     native_array_without_slot(f, 0);
   else if (strcmp(argv[1], "native_allocation_without_slot") == 0)

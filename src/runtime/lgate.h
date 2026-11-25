@@ -14,9 +14,8 @@ struct LuaGateWaiter;
 /* Managed reservations carry an aligned owner token. A stack-only
 ** reservation needs only its flag: it cannot recurse, migrate or park.
 ** Both modes participate in root rendezvous.
-** Only managed owners can borrow retired table storage. An owner can
-** withdraw admission while retaining the stack. WAITING reserves an
-** unowned gate for its FIFO head. DORMANT reserves a bit for a Lua-created
+** A managed owner can withdraw admission while retaining the stack.
+** WAITING reserves an unowned gate for its FIFO head. DORMANT marks a Lua-created
 ** coroutine that has never entered the managed rendezvous directory. */
 enum {
   LUA_GATE_MANAGED = 1,
@@ -26,6 +25,8 @@ enum {
   LUA_GATE_ACTIVE = LUA_GATE_MANAGED | LUA_GATE_STACK,
   LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING | LUA_GATE_DORMANT
 };
+
+enum { LUA_GATE_VALUES = 1, LUA_GATE_SHARED_READ = 2 };
 
 /* A scheduled root can publish its inactive stack and its recallable slot
 ** in one word. Linux x86-64 userspace addresses use at most 56 bits.
@@ -38,7 +39,7 @@ typedef struct LuaStackGate {
   struct LuaGateWaiter *head;
   struct LuaGateWaiter **tail;
   int ready;
-  unsigned values;  /* bounded API scope, with its own uncontended release */
+  uint64_t values;  /* bounded API scope; a shared read also carries its epoch */
 } LuaStackGate;
 
 l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {

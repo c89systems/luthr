@@ -3311,6 +3311,62 @@ int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key
   return 1;
 }
 
+int luaH_readsharedname (lua_State *L, Table *table, const char *name,
+                         size_t len, TValue *result) {
+  global_State *g = G(L);
+  LuaHashDirectory *directory;
+  LuaHashPart *part = NULL;
+  uint64_t layout, revision = 0;
+  Node *nodes;
+  unsigned hash, size, index, steps;
+  lua_assert(__atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED) &
+             LUA_GATE_SHARED_READ);
+  lua_assert(len <= LUAI_MAXSHORTLEN);
+  if (__atomic_load_n(&table->sharing, __ATOMIC_ACQUIRE) != LUA_OBJECT_SHARED)
+    return 0;
+  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  if ((layout & 1) || !luaC_strongtable(g, table)) return 0;
+  nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  if (luaH_recordkeys(nodes) != NULL) return 0;
+  hash = luaS_hash(name, len, g->seed);
+  directory = luaH_hashdir(nodes);
+  if (directory != NULL) {
+    part = luaH_part(directory, distributedpart(hash));
+    revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
+    if (revision & 1) return 0;
+    nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  }
+  size = nodesteps(nodes);
+  index = lmod(hash, size);
+  for (steps = 0; steps < 8; steps++) {
+    Node *node = nodes + index;
+    int next;
+    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) ==
+        ctb(LUA_VSHRSTR)) {
+      GCObject *key = __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE);
+      TValue value;
+      if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value,
+                         part != NULL ? 0 : layout) ||
+          !samepartversion(table, layout, part, revision)) return 0;
+      /* A published nonempty key belongs to this strong layout. Deleting
+      ** the entry shades the key, and the ticket retains the layout. */
+      if (!isempty(&value)) {
+        TString *str = gco2ts(key);
+        if (str->hash == hash && cast_sizet(str->shrlen) == len &&
+            memcmp(getshrstr(str), name, len) == 0) {
+          setobj(L, result, &value);
+          return 1;
+        }
+      }
+    }
+    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (next == 0) return 0;
+    index += cast_uint(next);
+    if (index >= size) return 0;
+  }
+  return 0;
+}
+
 /* These are raw pointer representations until the caller validates the table
 ** sequence. Empty keys are retired by writers; scanning never edits storage. */
 l_sinline unsigned __attribute__((always_inline)) tracechunk (

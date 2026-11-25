@@ -11,6 +11,8 @@
 
 /* Push a root for the value at an API index. The caller pops the root. */
 LUAI_FUNC TValue *luaA_indexvalue (lua_State *L, int idx, LuaNativeRoot *root);
+LUAI_FUNC int luaA_testnamedudata (lua_State *L, int idx, const char *name,
+                                  void **result);
 
 l_sinline void *luaA_udatapointer (const TValue *o) {
   switch (ttype(o)) {

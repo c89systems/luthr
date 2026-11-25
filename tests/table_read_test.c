@@ -8,6 +8,7 @@
 #include <lstate.h>
 #include <lstring.h>
 #include <ltable.h>
+#include <ltableaccess.h>
 #include <ltablestorage.h>
 #include <ltm.h>
 #include <lua.h>
@@ -973,6 +974,48 @@ static void *writer(void *argument) {
   return NULL;
 }
 
+static void *drain_native_retirement(void *argument) {
+  struct fixture *test = argument;
+  lua_State *L = test->writer;
+  luaX_lockstate(L);
+  luaH_resize(L, hvalue(s2v(L->stack.p + 1)), 0, 256);
+  luaHS_reclaim(L, LUAHS_DRAIN);
+  luaX_unlockstate(L);
+  __atomic_store_n(&test->writer_done, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+static void native_retirement(lua_State *L) {
+  struct fixture test = {0};
+  pthread_t writer;
+  Table *table;
+  TValue value;
+  lua_gc(L, LUA_GCSTOP);
+  lua_createtable(L, 8, 2);
+  lua_pushinteger(L, 42);
+  lua_setfield(L, 1, "field");
+  test.writer = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, test.writer, 1);
+  require(luaX_trysharedread(L));
+  table = hvalue(s2v(L->stack.p + 1));
+  watched = table->node;
+  returned = 0;
+  require(luaH_readsharedname(L, table, "field", 5, &value));
+  require(ttisinteger(&value) && ivalue(&value) == 42);
+  require(pthread_create(&writer, NULL, drain_native_retirement, &test) == 0);
+  while (!(luaW_control(&G(L)->world) & LUA_WORLD_STORAGE_WAIT))
+    sched_yield();
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
+  require(__atomic_load_n(&test.writer_done, __ATOMIC_ACQUIRE) == 0);
+  luaX_leavesharedread(L);
+  require(pthread_join(writer, NULL) == 0);
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);
+  watched = NULL;
+  require(lua_getfield(L, 1, "field") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 42);
+}
+
 static void retirement(lua_State *state, int pressure, unsigned readers,
                        int inline_storage) {
   struct fixture test;
@@ -1896,6 +1939,8 @@ int main(int argc, char **argv) {
     retirement(state, 0, 1, 0);
   else if (strcmp(argv[1], "pressure") == 0)
     retirement(state, 1, 1, 0);
+  else if (strcmp(argv[1], "native_retirement") == 0)
+    native_retirement(state);
   else {
     require(strcmp(argv[1], "failure") == 0 ||
             strcmp(argv[1], "hash_failure") == 0 ||
