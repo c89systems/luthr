@@ -1427,6 +1427,10 @@ static void f_parser (lua_State *L, void *ud) {
   int c;
   Table *anchor;
   ptrdiff_t otop = savestack(L, L->top.p);  /* original top */
+  /* A managed load can hand off before entering the parser. Native callers
+  ** retain their existing cancellation boundaries. */
+  if (!isLua(L->ci) && managedCfunction(s2v(L->ci->func.p)))
+    luaTK_checkstop(L);
   luaD_checknativestack(L);
   luaD_checkstack(L, 2);
   luaR_pushroot(L, &anchor_root);
