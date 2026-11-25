@@ -52,6 +52,7 @@ struct fixture {
   int measured;
   int launched;
   int trace_busy;
+  int trace_complete;
   int entered;
   int release;
   int rejected;
@@ -204,6 +205,10 @@ static void trace(void *user, const luthr_lua_runtime_trace_event *event,
         if (luthr_lua_runtime_set_trace_callback(fixture->runtime, NULL,
                                                  NULL) != LUTHR_LUA_RUNTIME_OK)
           abort();
+        check(pthread_mutex_lock(&fixture->mutex));
+        fixture->trace_complete = 1;
+        check(pthread_cond_broadcast(&fixture->changed));
+        check(pthread_mutex_unlock(&fixture->mutex));
       }
     }
   }
@@ -255,6 +260,14 @@ static int ready(lua_State *state) {
   status = pthread_barrier_wait(&fixture->ready);
   if (status != 0 && status != PTHREAD_BARRIER_SERIAL_THREAD)
     abort();
+  /* The stripped worker has no line events. Let the traced worker exercise
+   * observer replacement before the stripped loop can exhaust the budget. */
+  if (fixture->mode == BUDGET_TRACE && lua_tointeger(state, 1) == 2) {
+    check(pthread_mutex_lock(&fixture->mutex));
+    while (!fixture->trace_complete)
+      check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
+    check(pthread_mutex_unlock(&fixture->mutex));
+  }
   return 0;
 }
 
