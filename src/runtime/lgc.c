@@ -1849,7 +1849,8 @@ static void resetfinalizercursor (lua_State *L) {
 
 /* Finalization is an independent index. Registration never searches or
 ** modifies allocation membership, generation boundaries, or a sweep cursor. */
-static void registerfinalizer (lua_State *L, GCObject *o) {
+l_sinline void __attribute__((always_inline)) registerfinalizer (lua_State *L,
+                                                                GCObject *o) {
   global_State *g = G(L);
   if (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT), __ATOMIC_RELAXED) &
       bitmask(FINALIZEDBIT)) return;
@@ -1937,6 +1938,11 @@ void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt) {
     return;
   }
   luaA_share(L, o);
+  registerfinalizer(L, o);
+}
+
+void luaC_registerfinalizer (lua_State *L, GCObject *o) {
+  lua_assert(__atomic_load_n(luaA_sharing(o), __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED);
   registerfinalizer(L, o);
 }
 

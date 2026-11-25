@@ -110,7 +110,7 @@ l_sinline int luaH_tryget (lua_State *L, Table *table, const TValue *key,
   return luaH_trygetkey(L, table, key, result, tag);
 }
 
-l_sinline unsigned luaH_writerindex (const Value *slot) {
+l_sinline unsigned luaH_writerindex (const void *slot) {
   uintptr_t address = cast(uintptr_t, slot);
   return cast_uint((address >> 3) ^ (address >> 12)) & (LUA_TABLE_WRITERS - 1);
 }
@@ -229,7 +229,7 @@ l_sinline unsigned luaH_cachedborder (lua_State *L, Table *table, int nometa) {
   return 0;
 }
 
-LUAI_FUNC LuaTableWriter *luaH_claimwriter (lua_State *, Table *, Value *, uint64_t);
+LUAI_FUNC LuaTableWriter *luaH_claimwriter (lua_State *, Table *, const void *, uint64_t);
 LUAI_FUNC int luaH_beginsplit (Table *, LuaTableWriter *, Value *, uint64_t);
 LUAI_FUNC void luaH_releasewriter (lua_State *, Table *, LuaTableWriter *);
 /* One grants admission, zero rejects the layout, and minus one means busy. */

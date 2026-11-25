@@ -94,6 +94,8 @@ LUAI_FUNC void luaA_storeregistry (lua_State *L, const TValue *value);
 LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
                                  LuaNativeRoot *result);
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
+/* Both objects stay rooted by the caller across promotion or a receiver wait. */
+LUAI_FUNC int luaA_bindprivateuserdata (lua_State *L, Udata *owner, Table *mt);
 LUAI_FUNC void luaA_invalidatestringindex (lua_State *L, Table *mt);
 /* Admission retains the published index during a nonparking lookup. */
 l_sinline Table *luaA_stringindex (lua_State *L) {

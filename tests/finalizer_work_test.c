@@ -2,8 +2,10 @@
 #include <lauxlib.h>
 #include <lgc.h>
 #include <lstate.h>
+#include <ltableaccess.h>
 #include <lualib.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -282,12 +284,135 @@ static void finalize_concurrent_registrations(lua_State *L, int generational) {
   lua_close(L);
 }
 
+static struct binding_test {
+  Table *metatable;
+  lua_State *binder, *editor;
+  unsigned lane, entered, release, edited, next_id;
+} *binding;
+
+void __real_luaC_registerfinalizer(lua_State *, GCObject *);
+void __wrap_luaC_registerfinalizer(lua_State *L, GCObject *object) {
+  struct binding_test *test = binding;
+  if (test != NULL && L == test->binder) {
+    require(luaA_lockowner(&test->metatable->access) == NULL);
+    test->lane = luaH_writerindex(object);
+    require(__atomic_load_n(&G(L)->table_writers[test->lane].owner,
+                            __ATOMIC_ACQUIRE) == test->metatable);
+    __atomic_store_n(&test->entered, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&test->release, __ATOMIC_ACQUIRE))
+      sched_yield();
+  }
+  __real_luaC_registerfinalizer(L, object);
+}
+
+static int bound_userdata_finalizer(lua_State *L) {
+  unsigned *id = lua_touserdata(L, 1);
+  require(id != NULL && *id == ++binding->next_id && *id <= 2);
+  if (*id == 1) {
+    require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
+    require(lua_getfield(L, -1, "value") == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 42);
+    lua_pop(L, 2);
+  }
+  return 0;
+}
+
+static void *bind_userdata(void *argument) {
+  lua_State *L = argument;
+  unsigned *id = lua_newuserdatauv(L, sizeof(*id), 1);
+  *id = 1;
+  lua_newtable(L);
+  lua_pushinteger(L, 42);
+  lua_setfield(L, -2, "value");
+  require(lua_setiuservalue(L, 2, 1));
+  lua_pushvalue(L, 1);
+  lua_setmetatable(L, 2);
+  return NULL;
+}
+
+static void *remove_finalizer(void *argument) {
+  struct binding_test *test = argument;
+  lua_State *L = test->editor;
+  lua_pushexternalstring(L, "__gc", 4, NULL, NULL);
+  lua_pushnil(L);
+  lua_rawset(L, 1);
+  __atomic_store_n(&test->edited, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+static void finalize_ordered_bindings(lua_State *L, int generational) {
+  struct binding_test test = {0};
+  pthread_t binder, editor;
+  unsigned *id, i;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  lua_newtable(L);
+  test.metatable = (Table *)lua_topointer(L, 1);
+  lua_pushcfunction(L, bound_userdata_finalizer);
+  lua_setfield(L, 1, "__gc");
+  test.binder = lua_newthread(L);
+  test.editor = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, test.binder, 1);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, test.editor, 1);
+  binding = &test;
+
+  require(pthread_create(&binder, NULL, bind_userdata, test.binder) == 0);
+  while (!__atomic_load_n(&test.entered, __ATOMIC_ACQUIRE))
+    sched_yield();
+  /* Another receiver can finish its binding while the first mark is pending.
+   * Pick a different lane so this exercises the simultaneous reservations. */
+  for (i = 0; i < LUA_TABLE_WRITERS; ++i) {
+    id = lua_newuserdatauv(L, sizeof(*id), 1);
+    if (luaH_writerindex((char *)id - udatamemoffset(1)) != test.lane)
+      break;
+    lua_pop(L, 1);
+  }
+  require(i < LUA_TABLE_WRITERS);
+  *id = 2;
+  lua_pushvalue(L, 1);
+  lua_setmetatable(L, -2);
+  lua_pop(L, 1);
+
+  require(pthread_create(&editor, NULL, remove_finalizer, &test) == 0);
+  /* Wait for the editor to own the closed layout and watch the active lane. */
+  while (!luaA_lockwatched(&test.metatable->access)) {
+    require(!__atomic_load_n(&test.edited, __ATOMIC_ACQUIRE));
+    sched_yield();
+  }
+  require(!__atomic_load_n(&test.edited, __ATOMIC_ACQUIRE));
+  __atomic_store_n(&test.release, 1, __ATOMIC_RELEASE);
+  require(pthread_join(binder, NULL) == 0);
+  require(pthread_join(editor, NULL) == 0);
+  require(lua_getfield(L, 1, "__gc") == LUA_TNIL);
+  lua_pop(L, 1);
+  id = lua_newuserdatauv(L, sizeof(*id), 1);
+  *id = 3;
+  lua_pushvalue(L, 1);
+  lua_setmetatable(L, -2);
+  lua_pushcfunction(L, bound_userdata_finalizer);
+  lua_setfield(L, 1, "__gc");
+  lua_settop(test.binder, 0);
+  lua_settop(test.editor, 0);
+  lua_settop(L, 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(test.next_id == 2);
+  lua_close(L);
+  binding = NULL;
+}
+
 int main(int argc, char **argv) {
   struct fixture test = {0};
   lua_State *state = luaL_newstate(), *worker;
   pthread_t collector, older;
   unsigned before, i;
   require(state != NULL && argc == 2);
+  if (strncmp(argv[1], "binding_", 8) == 0) {
+    finalize_ordered_bindings(state,
+                              strcmp(argv[1], "binding_generational") == 0);
+    return 0;
+  }
   if (strncmp(argv[1], "order_", 6) == 0) {
     finalize_across_coroutines(state,
                                strcmp(argv[1], "order_generational") == 0);

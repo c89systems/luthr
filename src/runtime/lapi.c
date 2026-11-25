@@ -1370,7 +1370,9 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
     api_check(L, ttistable(s2v(L->top.p - 1)), "table expected");
     mt = hvalue(s2v(L->top.p - 1));
   }
-  luaA_setmetatable(L, obj, mt);
+  if (!(mt != NULL && ttisfulluserdata(obj) &&
+        luaA_bindprivateuserdata(L, uvalue(obj), mt)))
+    luaA_setmetatable(L, obj, mt);
   L->top.p--;
   luaR_poproot(L, &indexed);
   lua_unlock(L);

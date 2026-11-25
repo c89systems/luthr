@@ -2658,9 +2658,12 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
                        const TValue *key, TValue *value, int raw,
                        LuaTableWriteRetry *retry) {
   if (ttisshrstring(key)) {
-    Table *keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
+    TString *name = tsvalue(key);
+    Table *keys;
+    /* Finalizer registrations borrow the layout through separate lanes. */
+    if (name->shrlen == 4 && memcmp(getshrstr(name), "__gc", 4) == 0) return 0;
+    keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
     if (keys != NULL) {
-      TString *name = tsvalue(key);
       unsigned field = luaH_recordindex(keys, name);
       uintptr_t image;
       lu_byte kind;
@@ -2687,6 +2690,8 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
       return sharedrecordset(L, table, name, field, value, raw, retry);
     }
   }
+  else if (ttislngstring(key) && tsslen(tsvalue(key)) == 4 &&
+           memcmp(getstr(tsvalue(key)), "__gc", 4) == 0) return 0;
   return sharedarrayhashset(L, table, key, value, raw, retry);
 }
 

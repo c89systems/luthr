@@ -685,6 +685,8 @@ LUAI_FUNC void luaC_finishreclaim (lua_State *L);
 ** construction lists, exact allocation totals and finalizer registrations. */
 LUAI_FUNC void luaC_publish (lua_State *L);
 LUAI_FUNC void luaC_checkfinalizer (lua_State *L, GCObject *o, Table *mt);
+/* The caller has published the receiver's graph and checked eligibility. */
+LUAI_FUNC void luaC_registerfinalizer (lua_State *L, GCObject *o);
 LUAI_FUNC void luaC_changemode (lua_State *L, int newmode);
 
 

@@ -120,7 +120,7 @@ static int advertise (Table *table, uint64_t layout, uint64_t flag) {
   return 0;
 }
 
-LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, Value *slot,
+LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, const void *slot,
                                   uint64_t layout) {
   unsigned index = luaH_writerindex(slot);
   unsigned group = index / LUA_TABLE_WRITERS_PER_GROUP;
