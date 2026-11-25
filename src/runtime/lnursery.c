@@ -162,9 +162,12 @@ static int taskspace (const lua_State *L, size_t bytes) {
   return used <= capacity && bytes <= capacity - used;
 }
 
+static int nurseryopen (lua_State *L) {
+  return !L->task_nursery_closed && !gethookmask(L) && gcrunning(G(L));
+}
+
 int luaC_tasktableeligible (lua_State *L, size_t bytes) {
-  return !L->task_nursery_closed && !gethookmask(L) && gcrunning(G(L)) &&
-         isLua(L->ci) && L->native_depth == 0 && taskspace(L, bytes);
+  return nurseryopen(L) && taskspace(L, bytes);
 }
 
 /* Limit fragmented private pages independently of the live payload. The
@@ -176,14 +179,23 @@ int luaC_taskpagefits (lua_State *L, size_t bytes) {
          bytes <= limit - L->task_page_bytes;
 }
 
+static void charge (lua_State *L, size_t bytes) {
+  L->task_nursery_bytes += bytes;
+  /* A C API allocation has no NEWTABLE instruction to check the budget.
+  ** Let the next Lua poll collect after the native roots are restored. */
+  if (L->task_nursery_bytes >= L->task_nursery_limit) {
+    L->task_nursery_pending = 1;
+    L->poll_remaining = 1;
+  }
+}
+
 int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
   int table = o->tt == LUA_VTABLE;
   int page = table &&
     __atomic_load_n(&luaMP_page(cast(LuaAllocBlock *, o) - 1)->task_private,
                     __ATOMIC_RELAXED);
   if (!page) {
-    if (L->task_nursery_closed || gethookmask(L) || !gcrunning(G(L)) ||
-        (table && (!isLua(L->ci) || L->native_depth != 0))) return 0;
+    if (!nurseryopen(L)) return 0;
     if (!taskspace(L, bytes) ||
         bytes > TASK_UNPAGED_BYTES - L->task_unpaged_bytes) {
       luaC_sealtask(L);
@@ -199,11 +211,7 @@ int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
     L->task_objects = o;
     L->task_unpaged_bytes += cast_uint(bytes);
   }
-  L->task_nursery_bytes += bytes;
-  if (!table && L->task_nursery_bytes >= L->task_nursery_limit) {
-    L->task_nursery_pending = 1;
-    L->poll_remaining = 1;
-  }
+  charge(L, bytes);
   if (page) L->task_live_bytes += bytes;  /* already charged as private */
   else taskresize(L, cast(l_mem, bytes));
   return 1;
@@ -478,7 +486,7 @@ void luaC_taskbacking (lua_State *L, Table *table, size_t bytes) {
     else {
       if (__atomic_load_n(&page->task_private, __ATOMIC_RELAXED))
         page->task_backing = 1;
-      L->task_nursery_bytes += bytes;
+      charge(L, bytes);
     }
   }
 }

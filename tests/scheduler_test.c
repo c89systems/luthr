@@ -2215,22 +2215,36 @@ static int nursery_roundtrip(lua_State *L) {
   return 1;
 }
 
+static int native_array(lua_State *L) {
+  lua_Integer first = luaL_checkinteger(L, 1);
+  lua_newtable(L);
+  for (int i = 1; i <= 6; i++) {
+    lua_pushinteger(L, first + i - 1);
+    lua_rawseti(L, -2, i);
+  }
+  return 1;
+}
+
 static void nursery_native_call(struct fixture *f, int generational) {
   init(f, 1);
   lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
   managed(f->main, "nursery_inspect", nursery_inspect);
   lua_pushcfunction(f->main, nursery_roundtrip);
   lua_setglobal(f->main, "nursery_roundtrip");
-  submit(f, 0,
-         "local sample={('private record'):rep(12)}; "
-         "local private,edges=nursery_inspect(sample); "
-         "local row={child={answer=42,note=('child only'):rep(16)},"
-         "           payload=('private record'):rep(12)}; "
-         "assert(nursery_inspect(row)); "
-         "local result=nursery_roundtrip(function(value) "
-         "  return nursery_inspect(value),value.child.answer "
-         "end,row); assert(private and edges==0); return result",
-         0);
+  lua_pushcfunction(f->main, native_array);
+  lua_setglobal(f->main, "native_array");
+  submit(
+      f, 0,
+      "local array=native_array(41); assert(nursery_inspect(array)); "
+      "local sample={('private record'):rep(12)}; "
+      "local private,edges=nursery_inspect(sample); "
+      "local row={child={answer=42,note=('child only'):rep(16)},"
+      "           payload=('private record'):rep(12)}; "
+      "assert(nursery_inspect(row)); "
+      "local result=nursery_roundtrip(function(value) "
+      "  return nursery_inspect(value),value.child.answer "
+      "end,row); assert(private and edges==0 and array[2]==42); return result",
+      0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -2255,6 +2269,32 @@ static void nursery_native_call(struct fixture *f, int generational) {
   require(lua_getfield(f->main, -1, "answer") == LUA_TNUMBER);
   require(lua_tointeger(f->main, -1) == 42);
   lua_pop(f->main, 4);
+  finish(f);
+}
+
+static void nursery_native_allocation(struct fixture *f, int generational) {
+  int status, results;
+  init(f, 1);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  managed(f->main, "nursery_inspect", nursery_inspect);
+  lua_pushcfunction(f->main, native_array);
+  lua_setglobal(f->main, "native_array");
+  submit(f, 0,
+         "local first=native_array(41); assert(nursery_inspect(first)); "
+         "for i=1,30000 do "
+         "  local row=native_array(i); "
+         "  if i%100==0 then assert(nursery_inspect(row) and row[6]==i+5) end "
+         "end; "
+         "assert(nursery_inspect(first)); return first",
+         0);
+  luaSC_wait(&f->tasks[0]);
+  require(luaSC_collect(f->main, &f->tasks[0], &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  require(lua_rawlen(f->main, -1) == 6);
+  require(lua_rawgeti(f->main, -1, 2) == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 42);
+  lua_pop(f->main, 2);
   finish(f);
 }
 
@@ -3037,6 +3077,10 @@ int main(int argc, char **argv) {
     nursery_native_call(f, 0);
   else if (strcmp(argv[1], "nursery_native_generational") == 0)
     nursery_native_call(f, 1);
+  else if (strcmp(argv[1], "nursery_native_allocation_incremental") == 0)
+    nursery_native_allocation(f, 0);
+  else if (strcmp(argv[1], "nursery_native_allocation_generational") == 0)
+    nursery_native_allocation(f, 1);
   else if (strcmp(argv[1], "nursery_full_incremental") == 0)
     nursery_full(f, 0);
   else if (strcmp(argv[1], "nursery_mark_incremental") == 0)

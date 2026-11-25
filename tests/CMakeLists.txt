@@ -103,12 +103,17 @@ foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incr
     nursery_mark_incremental nursery_mark_generational
     nursery_mark_publish_incremental nursery_mark_publish_generational
     nursery_native_incremental nursery_native_generational
+    nursery_native_allocation_incremental nursery_native_allocation_generational
     nursery_full_incremental nursery_full_generational
     nursery_full_cutoff_incremental nursery_full_cutoff_generational)
   add_test(NAME scheduler_${case} COMMAND scheduler_test ${case})
   set_tests_properties(scheduler_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 10)
 endforeach()
+
+# Keep the full allocation stress case under Valgrind as well.
+set_tests_properties(scheduler_nursery_native_allocation_incremental
+  scheduler_nursery_native_allocation_generational PROPERTIES TIMEOUT 30)
 
 luthr_test_program(native_lifecycle_test native_lifecycle_test.c)
 set_target_properties(native_lifecycle_test PROPERTIES C_STANDARD 99)
