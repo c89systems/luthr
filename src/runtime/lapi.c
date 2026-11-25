@@ -1194,6 +1194,8 @@ int luaA_ref (lua_State *L, int idx) {
   luaR_pushroot(L, &value);
   luaR_setroot(L, &value, s2v(L->top.p - 1));
   table = gettable(L, idx, &indexed);
+  ref = luaH_ref(L, table, &value.value);
+  if (ref != 0) goto done;
   luaA_begin(L, obj2gco(table), &scope);
   setnilvalue(&link);
   luaH_getint(L, table, 1, &link);
@@ -1214,6 +1216,7 @@ int luaA_ref (lua_State *L, int idx) {
   else ref = cast_int(luaH_getn(L, table)) + 1;
   luaH_setint(L, table, ref, &value.value);
   luaA_end(L, &scope);
+ done:
   L->top.p--;
   luaR_poproot(L, &indexed);
   luaR_poproot(L, &value);
@@ -1228,14 +1231,16 @@ void luaA_unref (lua_State *L, int idx, int ref) {
   TValue head;
   lua_lock(L);
   table = gettable(L, idx, &indexed);
-  luaA_begin(L, obj2gco(table), &scope);
-  setnilvalue(&head);
-  luaH_getint(L, table, 1, &head);
-  lua_assert(ttisinteger(&head));
-  luaH_setint(L, table, ref, &head);
-  setivalue(&head, ref);
-  luaH_setint(L, table, 1, &head);
-  luaA_end(L, &scope);
+  if (!luaH_unref(L, table, ref)) {
+    luaA_begin(L, obj2gco(table), &scope);
+    setnilvalue(&head);
+    luaH_getint(L, table, 1, &head);
+    lua_assert(ttisinteger(&head));
+    luaH_setint(L, table, ref, &head);
+    setivalue(&head, ref);
+    luaH_setint(L, table, 1, &head);
+    luaA_end(L, &scope);
+  }
   luaR_poproot(L, &indexed);
   lua_unlock(L);
 }

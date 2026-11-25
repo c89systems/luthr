@@ -55,17 +55,17 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
     GCObject *edges[TRACE_SLOTS * 2];
     unsigned slots = end - first, count;
     uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
-    uint64_t revision = part != NULL && hash ?
+    int partition = part != NULL && (hash || part->references);
+    uint64_t revision = partition ?
       __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
     if ((sequence | revision) & 1) return 0;
     if (slots > TRACE_SLOTS) slots = TRACE_SLOTS;
-    count = luaH_tracechunk((part == NULL || !hash) &&
-                            (sequence & LUA_TABLE_SPLIT_VALUES) ?
+    count = luaH_tracechunk(!partition && (sequence & LUA_TABLE_SPLIT_VALUES) ?
                             G(L) : NULL,
                             view, first, slots, hash, edges);
     /* Never inspect the target header before the tag/payload pair is valid. */
     if (count == UINT_MAX ||
-        (part != NULL && hash &&
+        (partition &&
          __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) != revision) ||
         !luaH_samelayout(table, sequence))
       return 0;

@@ -339,6 +339,7 @@ static void init_registry (lua_State *L, global_State *g) {
   /* registry[LUA_RIDX_GLOBALS] = new table (table of globals) */
   sethvalue(L, &aux, luaH_new(L, 0, 0));
   luaH_setint(L, registry, LUA_RIDX_GLOBALS, &aux);
+  luaH_initrefs(L, registry);
   luaA_share(L, obj2gco(registry));
 }
 

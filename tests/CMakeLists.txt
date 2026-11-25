@@ -697,7 +697,7 @@ target_compile_options(reference_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(reference_test PRIVATE luthr_static)
 target_link_options(reference_test PRIVATE -Wl,--wrap=lua_rawgeti)
 foreach(backend IN ITEMS raw facade)
-  foreach(case IN ITEMS registry table oom hook)
+  foreach(case IN ITEMS registry registry_weak registry_oom table oom hook)
     add_test(NAME reference_${backend}_${case} COMMAND reference_test ${backend}_${case})
     set_tests_properties(reference_${backend}_${case}
       PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 60)
@@ -1178,6 +1178,7 @@ target_link_options(synchronization_failure_test PRIVATE
   -Wl,--wrap=pthread_mutex_destroy -Wl,--wrap=pthread_cond_destroy)
 foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_condition
     world_resume_condition world_rendezvous_condition world_phase_condition world_trace_condition
+    registry_first_condition registry_last_condition
     publisher_mutex pool_mutex pool_last_mutex
     thread_no_resources closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex
     facade_world_mutex facade_pool_mutex)

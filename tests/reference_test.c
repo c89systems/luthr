@@ -15,11 +15,12 @@
       abort();                                                                 \
     }                                                                          \
   } while (0)
-enum { WORKERS = 2, ROUNDS = 128 };
+enum { WORKERS = 2, ROUNDS = 128, REGISTRY_BATCH = 130 };
 struct fixture {
   lua_State *main, *children[WORKERS];
   pthread_barrier_t phase, head_read;
   const char *mode;
+  int references[WORKERS][REGISTRY_BATCH];
   size_t live;
   unsigned deny, denied, finalized, entered, hooks;
   int facade, registry;
@@ -107,7 +108,7 @@ static void *parallel(void *context) {
   lua_State *state = test->children[actor->id];
   for (unsigned n = 0; n < ROUNDS; ++n) {
     unsigned expected = (n + 1) * WORKERS + actor->id;
-    int table = test->registry ? LUA_REGISTRYINDEX : n % 2 ? 1 : -2;
+    int table = n % 2 ? 1 : -2;
     int ref;
     push_value(state, expected);
     meet(&test->phase);
@@ -119,16 +120,110 @@ static void *parallel(void *context) {
     if (actor->id == 0 && n % 16 == 0)
       lua_gc(state, LUA_GCCOLLECT);
     meet(&test->phase);
-    table = test->registry ? LUA_REGISTRYINDEX : 1;
-    verify(state, table, ref, expected);
+    verify(state, 1, ref, expected);
     meet(&test->phase);
     interleave = 1;
-    unreference(state, test->registry ? LUA_REGISTRYINDEX : -1, ref);
+    unreference(state, -1, ref);
     interleave = 0;
     require(lua_gettop(state) == 1);
     meet(&test->phase);
   }
   return NULL;
+}
+static unsigned registry_value(unsigned worker, unsigned index,
+                               unsigned round) {
+  return (round * WORKERS + worker) * REGISTRY_BATCH + index;
+}
+static void *parallel_registry(void *context) {
+  struct actor *actor = context;
+  struct fixture *test = actor->test;
+  lua_State *state = test->children[actor->id];
+  unsigned peer = (actor->id + 1) % WORKERS;
+  int *ours = test->references[actor->id], *theirs = test->references[peer];
+  for (unsigned n = 0; n < ROUNDS; ++n) {
+    for (unsigned i = 0; i < REGISTRY_BATCH; ++i) {
+      push_value(state, registry_value(actor->id, i, n));
+      ours[i] = reference(state, i % 2 ? LUA_REGISTRYINDEX : 1);
+      require(ours[i] > LUA_RIDX_LAST && lua_gettop(state) == 1);
+    }
+    meet(&test->phase);
+    if (actor->id == 0 && n % 8 == 0)
+      lua_gc(state, LUA_GCCOLLECT);
+    for (unsigned i = 0; i < REGISTRY_BATCH; ++i) {
+      verify(state, i % 2 ? 1 : LUA_REGISTRYINDEX, theirs[i],
+             registry_value(peer, i, n));
+    }
+    meet(&test->phase);
+    for (unsigned i = 0; i < REGISTRY_BATCH; ++i)
+      unreference(state, i % 2 ? LUA_REGISTRYINDEX : 1, theirs[i]);
+    require(lua_gettop(state) == 1);
+    meet(&test->phase);
+  }
+  return NULL;
+}
+static void weak_registry(lua_State *state) {
+  int ref;
+  lua_pushvalue(state, LUA_REGISTRYINDEX);
+  lua_pushglobaltable(state);
+  lua_pushthread(state);
+  lua_newtable(state);
+  lua_pushliteral(state, "v");
+  lua_setfield(state, -2, "__mode");
+  lua_setmetatable(state, 1);
+  push_value(state, 77);
+  ref = reference(state, 1);
+  verify(state, LUA_REGISTRYINDEX, ref, 77);
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(lua_rawgeti(state, 1, ref) == LUA_TNIL);
+  lua_pop(state, 1);
+  unreference(state, 1, ref);
+  lua_pushinteger(state, 42);
+  require(reference(state, LUA_REGISTRYINDEX) == ref);
+  require(lua_geti(state, 1, ref) == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 42);
+  lua_pop(state, 1);
+  unreference(state, 1, ref);
+  lua_pushnil(state);
+  lua_setmetatable(state, 1);
+  lua_settop(state, 0);
+}
+static int try_registry_growth(lua_State *state, struct fixture *test,
+                               int value, int deny) {
+  int status;
+  lua_pushcfunction(state, once);
+  lua_pushvalue(state, LUA_REGISTRYINDEX);
+  lua_pushinteger(state, value);
+  test->deny = deny;
+  status = lua_pcall(state, 2, 1, 0);
+  test->deny = 0;
+  return status;
+}
+static void registry_oom(lua_State *state, struct fixture *test) {
+  int first, last, next, value;
+  require(try_registry_growth(state, test, 1, 0) == LUA_OK);
+  first = last = lua_tointeger(state, -1);
+  lua_pop(state, 1);
+  for (value = 2; value < 32768; ++value) {
+    int status = try_registry_growth(state, test, value, 2);
+    if (status == LUA_ERRMEM)
+      break;
+    require(status == LUA_OK);
+    last = lua_tointeger(state, -1);
+    lua_pop(state, 1);
+  }
+  require(test->denied >= 2 && value < 32768);
+  lua_pop(state, 1);
+  require(try_registry_growth(state, test, value, 0) == LUA_OK);
+  next = lua_tointeger(state, -1);
+  require(next != first && next != last);
+  require(lua_rawgeti(state, LUA_REGISTRYINDEX, first) == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == 1);
+  require(lua_rawgeti(state, LUA_REGISTRYINDEX, last) == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == value - 1);
+  require(lua_rawgeti(state, LUA_REGISTRYINDEX, next) == LUA_TNUMBER);
+  require(lua_tointeger(state, -1) == value);
+  lua_settop(state, 0);
 }
 static void *after_failure(void *context) {
   lua_State *state = context;
@@ -170,9 +265,17 @@ static void *run(void *context) {
   lua_setglobal(state, "references");
   for (unsigned n = 0; n < WORKERS; ++n) {
     test->children[n] = lua_newthread(state);
-    lua_getglobal(test->children[n], "references");
+    if (test->registry)
+      lua_pushvalue(test->children[n], LUA_REGISTRYINDEX);
+    else
+      lua_getglobal(test->children[n], "references");
   }
-  if (strstr(test->mode, "oom")) {
+  if (strstr(test->mode, "registry_weak")) {
+    lua_settop(state, 0);
+    weak_registry(state);
+  } else if (strstr(test->mode, "registry_oom")) {
+    registry_oom(test->children[0], test);
+  } else if (strstr(test->mode, "oom")) {
     lua_State *child = test->children[0];
     /* Fill a large reference table so the next insertion requires backing
      * storage even when small allocations can reuse existing pages. */
@@ -222,7 +325,9 @@ static void *run(void *context) {
     require(pthread_barrier_init(&test->phase, NULL, WORKERS) == 0);
     require(pthread_barrier_init(&test->head_read, NULL, WORKERS) == 0);
     for (unsigned n = 0; n < WORKERS; ++n)
-      require(pthread_create(&threads[n], NULL, parallel, &actors[n]) == 0);
+      require(pthread_create(&threads[n], NULL,
+                             test->registry ? parallel_registry : parallel,
+                             &actors[n]) == 0);
     for (unsigned n = 0; n < WORKERS; ++n)
       require(pthread_join(threads[n], NULL) == 0);
     require(pthread_barrier_destroy(&test->head_read) == 0);

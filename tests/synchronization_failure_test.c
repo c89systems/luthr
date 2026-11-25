@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "lstate.h"
+#include "ltable.h"
 
 static int fail_mutex;
 static int fail_condition;
@@ -137,7 +138,9 @@ static int run_case(const char *name) {
   int allocator_case = strncmp(name, "allocator_", 10) == 0;
   int publisher_case = strcmp(name, "publisher_mutex") == 0;
   int pool_case = strncmp(name, "pool_", 5) == 0;
-  int main_case = pool_case || world_case || allocator_case || publisher_case;
+  int registry_case = strncmp(name, "registry_", 9) == 0;
+  int main_case = pool_case || world_case || allocator_case || publisher_case ||
+                  registry_case;
   int thread_case = strcmp(name, "thread_no_resources") == 0;
   int condition_case = strstr(name, "condition") != NULL;
   if (strncmp(name, "facade_", 7) == 0)
@@ -152,7 +155,12 @@ static int run_case(const char *name) {
           break;
         }
       }
-      if (fail_condition == 0)
+      if (registry_case) {
+        int count = sizeof(conditions) / sizeof(conditions[0]);
+        fail_condition = count + (strcmp(name, "registry_last_condition") == 0
+                                      ? LUA_HASH_PARTS - 1
+                                      : 1);
+      } else if (fail_condition == 0)
         return 1;
     } else if (publisher_case)
       fail_mutex = 2 + LUA_PUBLISH_SHARDS;

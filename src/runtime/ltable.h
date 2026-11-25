@@ -269,6 +269,9 @@ typedef struct LuaHashPart {
   unsigned gate;
   unsigned firsthashindex;  /* lower bound on the array indices in the hash */
   unsigned general_array;  /* an array assignment needed the full value format */
+  unsigned references;  /* registry array cells use the partition version */
+  unsigned refend;  /* highest allocated local index, including released slots */
+  unsigned reffree;  /* first released local index, or zero */
   pthread_cond_t changed;
   struct LuaWaiter *waiters;  /* address-sharded hash wait mutex */
 } LuaHashPart;
@@ -603,6 +606,9 @@ LUAI_FUNC Table *luaH_newrecord (lua_State *, Table *, int);
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);
+LUAI_FUNC void luaH_initrefs (lua_State *L, Table *registry);
+LUAI_FUNC int luaH_ref (lua_State *L, Table *t, TValue *value);
+LUAI_FUNC int luaH_unref (lua_State *L, Table *t, int ref);
 LUAI_FUNC lu_mem luaH_size (const Table *owner, const Table *layout);
 /* A dead table and its buffers can be freed by a sweep worker if all are
 ** pooled. Returning those blocks cannot enter the host allocator. */
