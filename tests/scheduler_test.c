@@ -2221,10 +2221,16 @@ static int nursery_roundtrip(lua_State *L) {
 
 static int native_array(lua_State *L) {
   lua_Integer first = luaL_checkinteger(L, 1);
+  int nested = lua_istable(L, 2);
   lua_newtable(L);
   for (int i = 1; i <= 6; i++) {
-    lua_pushinteger(L, first + i - 1);
+    if (nested && i == 1)
+      lua_pushvalue(L, 2);
+    else
+      lua_pushinteger(L, first + i - 1);
     lua_rawseti(L, -2, i);
+    if (nested)
+      require(lua_rawlen(L, -1) == (lua_Unsigned)i);
   }
   return 1;
 }
@@ -2284,7 +2290,7 @@ static void nursery_native_allocation(struct fixture *f, int generational) {
   lua_pushcfunction(f->main, native_array);
   lua_setglobal(f->main, "native_array");
   submit(f, 0,
-         "local first=native_array(41); assert(nursery_inspect(first)); "
+         "local first=native_array(41,{41}); assert(nursery_inspect(first)); "
          "for i=1,30000 do "
          "  local row=native_array(i); "
          "  if i%100==0 then assert(nursery_inspect(row) and row[6]==i+5) end "
@@ -2296,6 +2302,10 @@ static void nursery_native_allocation(struct fixture *f, int generational) {
   require(status == LUA_OK && results == 1);
   lua_gc(f->main, LUA_GCCOLLECT);
   require(lua_rawlen(f->main, -1) == 6);
+  require(lua_rawgeti(f->main, -1, 1) == LUA_TTABLE);
+  require(lua_rawgeti(f->main, -1, 1) == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 41);
+  lua_pop(f->main, 2);
   require(lua_rawgeti(f->main, -1, 2) == LUA_TNUMBER);
   require(lua_tointeger(f->main, -1) == 42);
   lua_pop(f->main, 2);

@@ -1025,6 +1025,19 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
   unsigned nsize;  /* size for the hash part */
   int arraykey = ttisinteger(ek) && arrayindex(ivalue(ek)) != 0;
   lua_assert(luaH_hashdir(t->node) == NULL);
+  /* Start an unhinted private sequence with one small backing block. The
+  ** first key proves there are no hash entries to redistribute and growing
+  ** into the rest of the block needs only ordinary owner stores. */
+  if (t->node == &luaH_dummynode && t->asize == 0 && arraykey &&
+      ivalue(ek) == 1 && luaC_tasktable(t)) {
+    enum { SMALL_ARRAY = (64 - sizeof(LuaArrayHeader)) / (sizeof(Value) + 1) };
+    Value *array = resizearray(L, t, 0, SMALL_ARRAY);
+    if (l_unlikely(array == NULL)) luaM_error(L);
+    __atomic_store_n(&t->arraydata, cast(uintptr_t, array), __ATOMIC_RELEASE);
+    __atomic_store_n(&t->asize, SMALL_ARRAY, __ATOMIC_RELEASE);
+    if (luaC_tasktable(t)) luaC_taskresize(L, t, cast(l_mem, concretesize(SMALL_ARRAY)));
+    return;
+  }
   /* reset counts */
   for (i = 0; i <= MAXABITS; i++) ct.nums[i] = 0;
   ct.na = 0;
