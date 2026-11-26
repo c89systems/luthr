@@ -459,6 +459,7 @@ static uintptr_t *stringcacherow (lua_State *L, unsigned set) {
     cache = cast(LuaStringCache *, luaM_tryalloc(L, sizeof(*cache)));
     if (cache == NULL) return NULL;
     cache->epoch = 0;
+    cache->results = NULL;
     L->strcache = cache;
   }
   if (l_unlikely(cache->epoch != G(L)->strcache_epoch)) {
@@ -529,6 +530,66 @@ TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   return result;
 }
 
+/* Retain recurring fingerprints until distinct results fill the history.
+** A saturated history can be cleared without visiting any string objects. */
+static int recentresult (lua_State *L, unsigned hash) {
+  LuaResultHistory *history = L->strcache->results;
+  unsigned fingerprint = hash | 1u;
+  unsigned home = lmod(hash ^ (hash >> 16), LUA_RESULT_HISTORY);
+  unsigned slot = home;
+  if (history == NULL) {
+    history = cast(LuaResultHistory *, luaM_tryalloc(L, sizeof(*history)));
+    if (history == NULL) return 1;  /* use interning if the cache cannot grow */
+    memset(history, 0, sizeof(*history));
+    L->strcache->results = history;
+  }
+  while (history->hashes[slot] != 0) {
+    if (history->hashes[slot] == fingerprint) return 1;
+    slot = lmod(slot + 1, LUA_RESULT_HISTORY);
+  }
+  if (history->count == (LUA_RESULT_HISTORY * 3) / 4) {
+    memset(history, 0, sizeof(*history));
+    slot = home;
+  }
+  history->hashes[slot] = fingerprint;
+  history->count++;
+  return 0;
+}
+
+/* Fresh library results compare by contents. Short keys are canonicalized
+** on insertion. A repeated result can enter the interned string cache. */
+TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
+  global_State *g = G(L);
+  TString *result;
+  uintptr_t *row;
+  unsigned hash;
+  if (len > LUAI_MAXSHORTLEN) return copylong(L, str, len, 1);
+  if (len <= 1) return internshrstr(L, str, len);
+  row = stringcacherow(L, shortstringset(str, len));
+  if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
+    luaC_tracepointer(L, result);
+    return result;
+  }
+  hash = luaS_hash(str, len, g->seed);
+  if (row == NULL || recentresult(L, hash))
+    result = internshrstr(L, str, len);
+  else {
+    result = tryinterned(L, stringtableof(g, hash), str, len, hash);
+    if (result == NULL) {
+      /* The regular value tag still compares by contents. The bytes use
+      ** the compact short layout and the hash is already available. */
+      GCObject *object = luaC_newresultstring(L, sizestrshr(len));
+      result = gco2ts(object);
+      result->hash = hash;
+      if (hash == 0) result->extra |= LSTR_ZEROHASH;
+      copyshrstr(result, str, len);
+      return result;
+    }
+  }
+  rememberstring(row, result, memchr(getshrstr(result), '\0', len) != NULL);
+  return result;
+}
+
 l_sinline TString *cachedname (const uintptr_t *row, const char *str,
                                 int shortonly) {
   int j;
@@ -536,7 +597,7 @@ l_sinline TString *cachedname (const uintptr_t *row, const char *str,
     uintptr_t entry = row[j];
     TString *ts = cast(TString *, entry & ~cast(uintptr_t, CACHE_BINARY));
     if (ts != NULL && !(entry & CACHE_BINARY) &&
-        (!shortonly || strisshr(ts)) && strcmp(str, getstr(ts)) == 0)
+        (!shortonly || strisinterned(ts)) && strcmp(str, getstr(ts)) == 0)
       return ts;
   }
   return NULL;
@@ -625,14 +686,14 @@ TString *luaS_newextlstr (lua_State *L,
 
 
 /*
-** Normalize an external string: If it is short, internalize it.
+** Internalize short keys received in the ordinary string representation.
 */
 TString *luaS_normstr (lua_State *L, TString *ts) {
-  size_t len = ts->lnglen;
+  size_t len = tsslen(ts);
   if (len > LUAI_MAXSHORTLEN)
     return ts;  /* long string; keep the original */
   else {
-    const char *str = getlngstr(ts);
+    const char *str = getstr(ts);
     return internshrstr(L, str, len);
   }
 }

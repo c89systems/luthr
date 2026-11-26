@@ -45,5 +45,6 @@ LUAI_FUNC const char *luaL_roottostring (lua_State *L, LuaNativeRoot *root,
 LUAI_FUNC void luaL_pushrooted (lua_State *L, const LuaNativeRoot *root);
 LUAI_FUNC int luaL_rootresult (lua_State *L, LuaNativeRoot *roots,
                               unsigned count, int results);
+LUAI_FUNC void luaL_pushstringresult (luaL_Buffer *B);
 
 #endif

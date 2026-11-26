@@ -1328,7 +1328,7 @@ void luaK_self (FuncState *fs, expdesc *e, expdesc *key) {
   luaK_reserveregs(fs, 2);  /* method and 'self' produced by op_self */
   lua_assert(key->k == VKSTR);
   /* is method name a short string in a valid K index? */
-  if (strisshr(key->u.strval) && luaK_exp2K(fs, key)) {
+  if (strisinterned(key->u.strval) && luaK_exp2K(fs, key)) {
     /* can use 'self' opcode */
     luaK_codeABCk(fs, OP_SELF, base, ereg, key->u.info, 0);
   }

@@ -776,7 +776,7 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
 static lua_Unsigned fixedlen (const TValue *o) {
   switch (ttypetag(o)) {
     case LUA_VSHRSTR: return tsvalue(o)->shrlen;
-    case LUA_VLNGSTR: return cast(lua_Unsigned, tsvalue(o)->lnglen);
+    case LUA_VLNGSTR: return cast(lua_Unsigned, tsslen(tsvalue(o)));
     case LUA_VUSERDATA: return cast(lua_Unsigned, uvalue(o)->len);
     default: return 0;
   }
@@ -910,7 +910,8 @@ LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
 ** Pushes on the stack a string with given length. The canonical empty
 ** string is selected without reading 's' when 'len' is zero.
 */
-LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
+l_sinline const char *pushlstring (lua_State *L, const char *s, size_t len,
+                                   int library) {
   TString *ts;
   if (len <= LUA_ALLOC_MAX - sizestrreg(0) &&
       !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
@@ -928,13 +929,21 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
     luaX_leavebounded(L);
   }
   lua_lock(L);
-  ts = luaS_cachelstr(L, s, len);
+  ts = library ? luaS_resultlstr(L, s, len) : luaS_cachelstr(L, s, len);
   setsvalue2s(L, L->top.p, ts);
   api_incr_top(L);
   luaC_checkGC(L);
   s = getstr(ts);
   lua_unlock(L);
   return s;
+}
+
+LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
+  return pushlstring(L, s, len, 0);
+}
+
+void luaA_pushresultstring (lua_State *L, const char *s, size_t len) {
+  pushlstring(L, s, len, 1);
 }
 
 

@@ -31,7 +31,7 @@ l_sinline Node *luaH_shortposition (Node *nodes, TString *key) {
 }
 
 l_sinline const TValue *luaH_shortslot (Node *node, TString *key) {
-  lua_assert(strisshr(key));
+  lua_assert(strisinterned(key));
   for (;;) {
     int next;
     if (keyisshrstr(node) && keystrval(node) == key) return gval(node);

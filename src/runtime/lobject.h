@@ -420,7 +420,7 @@ enum { LSTR_ZEROHASH = 1, LSTR_TASK = 2, LSTR_TASKLIVE = 4,
 typedef struct TString {
   CommonHeader;
   lu_byte extra;  /* reserved short string or long-string flags */
-  ls_byte shrlen;  /* length for short strings, negative for long strings */
+  ls_byte shrlen;  /* inline length, or a negative layout kind */
   unsigned int hash;
   size_t lnglen;  /* length for long strings */
   char *contents;  /* pointer to content in long strings */
@@ -433,7 +433,7 @@ typedef struct TString {
 
 
 #define strisshr(ts)	((ts)->shrlen >= 0)
-#define isextstr(ts)	(ttislngstring(ts) && tsvalue(ts)->shrlen != LSTRREG)
+#define strisinterned(ts)	((ts)->tt == LUA_VSHRSTR)
 
 
 /*

@@ -15,7 +15,8 @@ local function work(id)
     own[name(id, i)] = i
     local stable = i % 128 + 1
     assert(names[name(0, stable)] == stable)
-    assert(#name(id + 1024, i) == 8)
+    local result = name(id + 1024, i)
+    assert(#result == 8 and rawlen(result) == 8)
     if i % 127 == 0 then collectgarbage("step", 0) end
   end
   collectgarbage("collect")
@@ -24,6 +25,14 @@ local function work(id)
     assert(value == i)
     sum = sum + value
   end
+  local weak = setmetatable({}, {__mode = "kv"})
+  do
+    local value = name(id + 2048, count)
+    weak[value] = value
+  end
+  collectgarbage("collect")
+  local key = name(id + 2048, count)
+  assert(rawequal(weak[key], key))
   return sum
 end
 

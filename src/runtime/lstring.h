@@ -50,7 +50,7 @@ LUAI_FUNC unsigned luaS_hash (const char *str, size_t len, unsigned seed);
 /*
 ** test whether a string is a reserved word
 */
-#define isreserved(s)	(strisshr(s) && (s)->extra > 0)
+#define isreserved(s)	(strisinterned(s) && (s)->extra > 0)
 
 
 /*
@@ -81,6 +81,7 @@ LUAI_FUNC Udata *luaS_newudata (lua_State *L, size_t s,
                                               unsigned short nuvalue);
 LUAI_FUNC TString *luaS_newlstr (lua_State *L, const char *str, size_t l);
 LUAI_FUNC TString *luaS_cachelstr (lua_State *L, const char *str, size_t len);
+LUAI_FUNC TString *luaS_resultlstr (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len);
 /* A managed caller can reuse an existing interned value without allocating. */
 LUAI_FUNC TString *luaS_findshort (lua_State *L, const char *str, size_t len);
@@ -92,5 +93,10 @@ LUAI_FUNC TString *luaS_newextlstr (lua_State *L,
 		const char *s, size_t len, lua_Alloc falloc, void *ud);
 LUAI_FUNC size_t luaS_sizelngstr (size_t len, int kind);
 LUAI_FUNC TString *luaS_normstr (lua_State *L, TString *ts);
+
+l_sinline size_t luaS_size (const TString *ts) {
+  return strisshr(ts) ? sizestrshr(cast_uint(ts->shrlen))
+                      : luaS_sizelngstr(ts->lnglen, ts->shrlen);
+}
 
 #endif

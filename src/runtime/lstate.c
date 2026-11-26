@@ -470,9 +470,20 @@ lu_mem luaE_threadsize (lua_State *L) {
   lu_mem sz = cast(lu_mem, sizeof(LX)) + L->call_bytes + luaC_taskrootbytes(L);
   if (L->stack.p != NULL)
     sz += cast_uint(stacksize(L) + EXTRA_STACK) * sizeof(StackValue);
-  if (L->strcache != NULL) sz += sizeof(*L->strcache);
+  if (L->strcache != NULL) {
+    sz += sizeof(*L->strcache);
+    if (L->strcache->results != NULL) sz += sizeof(*L->strcache->results);
+  }
   if (L->allocation.userdata != NULL) sz += sizeof(*L->allocation.userdata);
   return sz;
+}
+
+
+static void freestrcache (lua_State *L, LuaStringCache *cache) {
+  if (cache != NULL) {
+    if (cache->results != NULL) luaM_free(L, cache->results);
+    luaM_free(L, cache);
+  }
 }
 
 
@@ -498,7 +509,7 @@ static void close_state (lua_State *L, int owns_gate) {
   for (i = 0; i < LUA_STRING_SHARDS; i++)
     luaS_freeindex(L, g->strt[i].index);
   freestack(L, L);
-  if (L->strcache != NULL) luaM_free(L, L->strcache);
+  freestrcache(L, L->strcache);
   luaCP_bind(L, NULL);
   luaHS_reclaim(L, LUAHS_DRAIN);
   luaM_reclaimpages(L);
@@ -603,8 +614,12 @@ void luaE_retirethread (lua_State *L, lua_State *thread) {
   if (thread->stack.p != NULL)
     luaM_retirearray(L, thread->stack.p,
                      cast_sizet(stacksize(thread) + EXTRA_STACK));
-  if (thread->strcache != NULL)
+  if (thread->strcache != NULL) {
+    if (thread->strcache->results != NULL)
+      luaM_retire_(L, thread->strcache->results,
+                   sizeof(*thread->strcache->results));
     luaM_retire_(L, thread->strcache, sizeof(*thread->strcache));
+  }
   if (thread->allocation.userdata != NULL)
     luaM_retire_(L, thread->allocation.userdata,
                  sizeof(*thread->allocation.userdata));
@@ -621,7 +636,7 @@ void luaE_freethread (lua_State *L, lua_State *L1) {
   lua_assert(L1->openupval == NULL);
   luai_userstatefree(L, L1);
   freestack(L, L1);
-  if (L1->strcache != NULL) luaM_free(L, L1->strcache);
+  freestrcache(L, L1->strcache);
   if (L1->allocation.userdata != NULL) luaM_free(L, L1->allocation.userdata);
   if (luaC_taskrootbytes(L1) != 0)
     luaM_free_(L, luaC_taskrootallocation(L1), luaC_taskrootbytes(L1));

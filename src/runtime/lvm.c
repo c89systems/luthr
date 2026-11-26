@@ -700,9 +700,7 @@ int luaV_equalobj (lua_State *L, const TValue *t1, const TValue *t2) {
                 i1 == ivalue(t2));
       }
       case LUA_VSHRSTR: case LUA_VLNGSTR: {
-        /* compare two strings with different variants: they can be
-           equal when one string is a short string and the other is
-           an external string  */
+        /* Interned and ordinary strings can have the same contents. */
         return luaS_eqstr(tsvalue(t1), tsvalue(t2));
       }
       case LUA_VLCF: case LUA_VMCF:

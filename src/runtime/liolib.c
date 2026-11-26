@@ -21,6 +21,7 @@
 
 #include "lapiowned.h"
 #include "lauxlib.h"
+#include "lauxowned.h"
 #include "llimits.h"
 #include "lualib.h"
 
@@ -534,7 +535,7 @@ static int read_line (lua_State *L, FILE *f, int chop) {
   } while (c != EOF && c != '\n');  /* repeat until end of line */
   if (!chop && c == '\n')  /* want a newline and have one? */
     luaL_addchar(&b, '\n');  /* add ending newline to result */
-  luaL_pushresult(&b);  /* close buffer */
+  luaL_pushstringresult(&b);  /* close buffer */
   /* return ok if read something (either a newline or something else) */
   return (c == '\n' || lua_rawlen(L, -1) > 0);
 }
@@ -549,7 +550,7 @@ static void read_all (lua_State *L, FILE *f) {
     nr = fread(p, sizeof(char), LUAL_BUFFERSIZE, f);
     luaL_addsize(&b, nr);
   } while (nr == LUAL_BUFFERSIZE);
-  luaL_pushresult(&b);  /* close buffer */
+  luaL_pushstringresult(&b);  /* close buffer */
 }
 
 
@@ -561,7 +562,7 @@ static int read_chars (lua_State *L, FILE *f, size_t n) {
   p = luaL_prepbuffsize(&b, n);  /* prepare buffer to read whole block */
   nr = fread(p, sizeof(char), n, f);  /* try to read 'n' chars */
   luaL_addsize(&b, nr);
-  luaL_pushresult(&b);  /* close buffer */
+  luaL_pushstringresult(&b);  /* close buffer */
   return (nr > 0);  /* true iff read something */
 }
 

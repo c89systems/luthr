@@ -197,6 +197,15 @@ static void check_cached_results(lua_State *L, lua_State *owner) {
       value = lua_tolstring(owner, -1, &len);
       require(value != NULL && len == 5 &&
               memcmp(value, sources[i] + 1, 5) == 0);
+      if (i == 0) {
+        /* Repeat the result so it is eligible for the interned cache. */
+        lua_pushvalue(owner, 2);
+        lua_pushvalue(owner, 4);
+        lua_pushvalue(owner, 7);
+        lua_call(owner, 2, 1);
+        require(lua_rawequal(owner, -1, -2));
+        lua_pop(owner, 1);
+      }
     }
     require(lua_rawequal(owner, 9, 11) && !lua_rawequal(owner, 9, 10));
     lua_pushvalue(owner, 3);

@@ -1594,7 +1594,7 @@ static unsigned recordlongindex (const Table *keys, TString *key) {
 
 static const TValue *gethashlongstr (Table *t, TString *key) {
   TValue ko;
-  lua_assert(!strisshr(key));
+  lua_assert(!strisinterned(key));
   setsvalue(cast(lua_State *, NULL), &ko, key);
   return getgeneric(keynodes(t, &ko), &ko, 0);
 }
@@ -1743,6 +1743,13 @@ static int rawpset (lua_State *L, Table *t, const TValue *key, TValue *val) {
   }
 }
 
+/* Short keys use the canonical representation even when their values were
+** formed as regular strings. External keys keep the ordinary owned path. */
+l_sinline int needsstringkey (const TValue *key) {
+  return ttislngstring(key) &&
+    (tsvalue(key)->shrlen != LSTRREG || tsslen(tsvalue(key)) <= LUAI_MAXSHORTLEN);
+}
+
 /*
 ** Finish a raw "set table" operation, where 'hres' encodes where the
 ** value should have been (the result of a previous 'pset' operation).
@@ -1767,7 +1774,7 @@ static void rawfinishset (lua_State *L, Table *t, const TValue *key,
       else if (l_unlikely(luai_numisnan(f)))
         luaG_runerror(L, "table index is NaN");
     }
-    else if (isextstr(key)) {  /* external string? */
+    else if (needsstringkey(key)) {
       /* If string is short, must internalize it to be used as table key */
       TString *ts = luaS_normstr(L, tsvalue(key));
       setsvalue2s(L, L->top.p++, ts);  /* anchor 'ts' (EXTRA_STACK) */
@@ -2436,7 +2443,7 @@ static int __attribute__((noinline)) sharedpartset (
   TValue normalized;
   lua_Integer integer;
   int result;
-  if ((layout & 1) || part == NULL || isextstr(key)) return 0;
+  if ((layout & 1) || part == NULL || needsstringkey(key)) return 0;
   if (ttisfloat(key)) {
     if (luai_numisnan(fltvalue(key))) return 0;
     if (luaV_flttointeger(fltvalue(key), &integer, F2Ieq)) {
@@ -3055,7 +3062,7 @@ l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
   if (result == HOK) return 1;
   if (!raw && table->metatable != NULL) return 0;
   if (result == HNOTFOUND) {
-    if (ttisnil(key) || ttisfloat(key) || isextstr(key)) return 0;
+    if (ttisnil(key) || ttisfloat(key) || needsstringkey(key)) return 0;
     if (!ttisnil(value)) {
       if (!insertkey(L, table->node, key, value)) return 0;
       luaC_barrierback(L, obj2gco(table), key);
@@ -3219,7 +3226,7 @@ int luaH_assignowned (lua_State *L, Table *t, const TValue *key, TValue *value,
         key = &normalized;
       }
     }
-    if (!isextstr(key)) return partassignment(L, t, part, key, value, raw);
+    if (!needsstringkey(key)) return partassignment(L, t, part, key, value, raw);
     luaR_pushroot(L, &anchor);
     setsvalue(L, &anchor.value, luaS_normstr(L, tsvalue(key)));
     luaC_tracevalue(L, &anchor.value);
@@ -3801,7 +3808,7 @@ lu_byte luaH_getint (lua_State *L, Table *t, lua_Integer key, TValue *res) {
 int luaH_trygetsharedshortstr (lua_State *L, Table *t, TString *key,
                                 TValue *res, lu_byte *tag) {
   uint64_t sequence;
-  lua_assert(strisshr(key));
+  lua_assert(strisinterned(key));
   if (!readshortslot(G(L), L, t, key, res, tag, &sequence)) return 0;
   *tag = finishsharedread(L, t, res, *tag, sequence);
   return 1;
@@ -3810,7 +3817,7 @@ int luaH_trygetsharedshortstr (lua_State *L, Table *t, TString *key,
 static int trygetstr (lua_State *L, Table *t, TString *key, TValue *res,
                        lu_byte *tag) {
   TValue index;
-  if (strisshr(key)) return luaH_trygetshortstr(L, t, key, res, tag);
+  if (strisinterned(key)) return luaH_trygetshortstr(L, t, key, res, tag);
   if (luaA_localtable(L, t)) {
     *tag = luaH_privatevalue(L, t, res, rawgetlongstr(t, key, res));
     return 1;

@@ -704,11 +704,13 @@ LUALIB_API void luaL_addstring (luaL_Buffer *B, const char *s) {
 }
 
 
-LUALIB_API void luaL_pushresult (luaL_Buffer *B) {
+static void pushbufferresult (luaL_Buffer *B, int library) {
   lua_State *L = B->L;
   checkbufferlevel(B, -1);
-  if (!buffonstack(B))  /* using static buffer? */
-    lua_pushlstring(L, B->b, B->n);  /* save result as regular string */
+  if (!buffonstack(B)) {
+    if (library) luaA_pushresultstring(L, B->b, B->n);
+    else lua_pushlstring(L, B->b, B->n);
+  }
   else {  /* reuse buffer already allocated */
     UBox *box = (UBox *)lua_touserdata(L, -1);
     void *ud;
@@ -725,6 +727,14 @@ LUALIB_API void luaL_pushresult (luaL_Buffer *B) {
     lua_gc(L, LUA_GCSTEP, len);
   }
   lua_remove(L, -2);  /* remove box or placeholder from the stack */
+}
+
+LUALIB_API void luaL_pushresult (luaL_Buffer *B) {
+  pushbufferresult(B, 0);
+}
+
+void luaL_pushstringresult (luaL_Buffer *B) {
+  pushbufferresult(B, 1);
 }
 
 

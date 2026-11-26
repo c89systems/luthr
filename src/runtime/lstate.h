@@ -147,9 +147,17 @@ struct lua_longjmp;  /* defined in ldo.c */
 #define STRCACHE_M              2
 #endif
 
+enum { LUA_RESULT_HISTORY = 256 };
+
+typedef struct LuaResultHistory {
+  unsigned hashes[LUA_RESULT_HISTORY];
+  unsigned count;
+} LuaResultHistory;
+
 typedef struct LuaStringCache {
   uint64_t epoch;
   uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
+  LuaResultHistory *results;
 } LuaStringCache;
 
 

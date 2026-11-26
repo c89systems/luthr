@@ -143,14 +143,8 @@ l_mem luaC_objsize (GCObject *o) {
       res = luaE_threadsize(gco2th(o));
       break;
     }
-    case LUA_VSHRSTR: {
-      TString *ts = gco2ts(o);
-      res = sizestrshr(cast_uint(ts->shrlen));
-      break;
-    }
-    case LUA_VLNGSTR: {
-      TString *ts = gco2ts(o);
-      res = luaS_sizelngstr(ts->lnglen, ts->shrlen);
+    case LUA_VSHRSTR: case LUA_VLNGSTR: {
+      res = luaS_size(gco2ts(o));
       break;
     }
     case LUA_VUPVAL: {
@@ -391,6 +385,15 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
   }
   if (tasklocal && !collector && L->task_owner != NULL &&
       luaC_taskallocate(L, o, sz)) return o;
+  if (tt == LUA_VLNGSTR && tasklocal) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
+    LuaAllocPage *page = luaMP_page(block);
+    lua_assert(offset == 0);
+    if (page != NULL) {
+      publishslot(L, block, page);
+      return o;
+    }
+  }
   publishobjects(L, o, o, &(cast(LuaAllocBlock *, p) - 1)->block.link.object,
                  collector);
   return o;
@@ -2380,7 +2383,7 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
     else {
       lua_assert(!tofinalize(object));
       lua_assert(object->tt == LUA_VUSERDATA ||
-                 (object->tt == LUA_VLNGSTR && gco2ts(object)->shrlen == LSTRREG));
+                 (object->tt == LUA_VLNGSTR && gco2ts(object)->shrlen >= LSTRREG));
       size = cast_sizet(luaC_objsize(object));
       headers += cast(l_mem, size);
     }
@@ -2423,10 +2426,11 @@ static void sweep_page_batch (lua_State *L, LuaSweepWork *work) {
           continue;
         if (work->kind == SWEEP_YOUNG && isold(object))
           continue;
-        if (object->tt == LUA_VUSERDATA && isdead(g, object)) {
-          Udata *u = gco2u(object);
+        if ((object->tt == LUA_VUSERDATA || object->tt == LUA_VLNGSTR) &&
+            isdead(g, object)) {
           lua_assert(!tofinalize(object));
-          bytes += cast(l_mem, sizeudata(u->nuvalue, u->len));
+          lua_assert(object->tt != LUA_VLNGSTR || gco2ts(object)->shrlen >= LSTRREG);
+          bytes += luaC_objsize(object);
           __atomic_store_n(&block->block.page, cast(uintptr_t, page),
                            __ATOMIC_RELAXED);
           block->block.link.next = first;

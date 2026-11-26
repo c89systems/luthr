@@ -60,17 +60,12 @@ static void freeobj (lua_State *L, GCObject *o) {
       luaM_freemem(L, o, sizeudata(u->nuvalue, u->len));
       break;
     }
-    case LUA_VSHRSTR: {
-      TString *ts = gco2ts(o);
-      luaM_freemem(L, ts, sizestrshr(cast_uint(ts->shrlen)));
-      break;
-    }
-    case LUA_VLNGSTR: {
+    case LUA_VSHRSTR: case LUA_VLNGSTR: {
       TString *ts = gco2ts(o);
       if (ts->shrlen == LSTRMEM)
         luaAL_freeexternal(L, ts->storage.falloc, ts->ud, ts->contents,
                           ts->lnglen + 1);
-      luaM_freemem(L, ts, luaS_sizelngstr(ts->lnglen, ts->shrlen));
+      luaM_freemem(L, ts, luaS_size(ts));
       break;
     }
     default: lua_assert(0);
