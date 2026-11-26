@@ -31,7 +31,9 @@ void luaAL_destroy (LuaAllocator *allocator) {
 static void admit (lua_State *L) {
   LuaAllocator *allocator = &G(L)->allocator;
   LuaWorld *world = &G(L)->world;
-  void *token = luaX_token(L), *owner;
+  void *token, *owner;
+  if (l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
+  token = luaX_token(L);
   owner = __atomic_load_n(&allocator->owner, __ATOMIC_RELAXED);
   if (owner == token) {
     lua_assert(allocator->depth != 0);

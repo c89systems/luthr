@@ -40,20 +40,17 @@ static void suspend_owner(lua_State *state) {
   hold(active);
   luaW_attach(state, suspended);
 }
-void __real_luaX_transferpair(lua_State *, lua_State *);
-void __wrap_luaX_transferpair(lua_State *caller, lua_State *state) {
-  __real_luaX_transferpair(caller, state);
+int __real_luaD_resume(lua_State *, l_uint32, int, int *);
+int __wrap_luaD_resume(lua_State *state, l_uint32 calls, int count,
+                       int *results) {
+  int status;
   if (active->armed && state == active->target &&
       strstr(active->mode, "prepare") != NULL &&
       strstr(active->mode, "close") == NULL) {
     active->armed = 0;
     suspend_owner(state);
   }
-}
-int __real_luaD_resume(lua_State *, l_uint32, int, int *);
-int __wrap_luaD_resume(lua_State *state, l_uint32 calls, int count,
-                       int *results) {
-  int status = __real_luaD_resume(state, calls, count, results);
+  status = __real_luaD_resume(state, calls, count, results);
   if (active->armed && state == active->target &&
       strstr(active->mode, "result") != NULL &&
       strstr(active->mode, "close") == NULL) {
@@ -385,6 +382,7 @@ static void *run(void *context) {
                 state,
                 "local token=...; close_calls=0; local function body(arg) "
                 "local retained=token; "
+                "if body_wait then hold_close() end; "
                 "local value <close> =setmetatable({}, {__close=function() "
                 "close_calls=close_calls+1; if closing_reentrant then "
                 "coroutine.close() end; "
@@ -400,6 +398,8 @@ static void *run(void *context) {
     lua_getglobal(state, "shared");
     test->target = lua_tothread(state, -1);
     lua_pop(state, 1);
+    if (strstr(test->mode, "wrap_native") != NULL)
+      execute(state, "body_wait=true");
     if (close) {
       execute(state, "assert(coroutine.resume(shared,11))");
       if (strstr(test->mode, "result") != NULL)
@@ -434,6 +434,8 @@ static void *run(void *context) {
   while (!test->entered)
     require(pthread_cond_wait(&test->changed, &test->mutex) == 0);
   require(pthread_mutex_unlock(&test->mutex) == 0);
+  if (strstr(test->mode, "wrap_native") != NULL)
+    require(lua_status(test->caller) == LUA_OK);
   if (!root && !bridge) {
     snapshot(test->target, &before, 0);
     if (strstr(test->mode, "oom") != NULL) {

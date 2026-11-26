@@ -382,6 +382,7 @@ struct lua_State {
   LuaSharingRoots *sharing_roots;  /* promotion can outlive a marking epoch */
   struct LuaCallback *callback_owner;
   unsigned callback_active;
+  unsigned resume_with_parent;  /* child is executing under the caller's gate */
   struct LuaCoroutineScope *operation;  /* atomic claim on the target */
   struct LuaTaskRoot *task_owner;  /* persistent scheduled-task reservation */
   unsigned owned_operations;  /* atomic outgoing scopes */

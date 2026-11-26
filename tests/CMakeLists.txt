@@ -84,7 +84,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime -Wl,--wrap=luaC_endtask
   -Wl,--wrap=luaC_preparefull)
 foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incremental early_generational wake_waiters stopped_dispatch trace_pause_retains_collector trace_pause_retains_mutators
-    native native_reentry shutdown yield saturation cancel_admission early_native_return native_grant_stopped_world native_fifo native_competitive
+    native native_reentry native_coroutine_progress shutdown yield saturation cancel_admission early_native_return native_grant_stopped_world native_fifo native_competitive
     native_accounting_count native_accounting_arm
     native_burst_parking native_burst_poll native_burst_single native_lease_expiry native_lease_inactive native_lease_full native_lease_yield
     late_native_waiter cancel_granted_native startup_failures callback_progress
@@ -969,12 +969,12 @@ luthr_test_program(coroutine_operation_test coroutine_operation_test.c)
 set_target_properties(coroutine_operation_test PROPERTIES C_STANDARD 99)
 target_compile_options(coroutine_operation_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(coroutine_operation_test PRIVATE luthr_static)
-target_link_options(coroutine_operation_test PRIVATE -Wl,--wrap=luaX_transferpair
+target_link_options(coroutine_operation_test PRIVATE
   -Wl,--wrap=luaD_resume -Wl,--wrap=lua_closethread -Wl,--wrap=luaW_restore
   -Wl,--wrap=luaV_execute)
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
-    foreach(case IN ITEMS resume_prepare resume_prepare_oom resume_result wrap_prepare wrap_result
+    foreach(case IN ITEMS resume_prepare resume_prepare_oom resume_result wrap_prepare wrap_result wrap_native
         close_prepare close_result close_cleanup close_reentrant active_yield active_yield_host root_normal root_recover
         root_error root_handler_error root_oom root_selfclose root_construction bridge_close)
       add_test(NAME coroutine_operation_${backend}_${case}_${gc}

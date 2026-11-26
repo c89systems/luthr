@@ -12,6 +12,8 @@
 l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
   NativeStackContext *context;
   LuaExecution *execution;
+  /* Native admission can park before the C function has been entered. */
+  if (!managed && l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
   context = luaX_context(L);
   execution = context->execution;
   scope->context = context;

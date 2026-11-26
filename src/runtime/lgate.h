@@ -80,6 +80,7 @@ LUAI_FUNC void luaX_unlockpair (lua_State *first, lua_State *second);
 /* Keep the execution slot when transferring from a pair to its callee.
 ** Joining the suspended caller at return never waits on its gate. */
 LUAI_FUNC void luaX_transferpair (lua_State *caller, lua_State *callee);
+LUAI_FUNC void luaX_releaseparent (lua_State *child);
 LUAI_FUNC int luaX_joinpair (lua_State *owner, lua_State *other);
 LUAI_FUNC l_uint32 luaX_parentcalls (lua_State *from);
 LUAI_FUNC void luaX_checksync (int status);

@@ -1007,18 +1007,28 @@ static void native_accounting(struct fixture *f, int arm) {
   finish(f);
 }
 
-static void native_progress(struct fixture *f, int shutdown) {
+static void native_progress(struct fixture *f, int shutdown, int nested) {
   unsigned i;
   init(f, 1);
   lua_pushcfunction(f->main, block_binding); /* unchanged foreign binding */
   lua_setglobal(f->main, "block_binding");
-  submit(f, 0, "return block_binding()", 0);
+  submit(f, 0,
+         nested
+             ? "local call=coroutine.wrap(function() "
+               "local result=block_binding(); return result end); return call()"
+             : "return block_binding()",
+         0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
+  if (nested)
+    require(lua_status(f->tasks[0].root.thread) == LUA_OK);
   for (i = 1; i < 5; i++)
-    submit(f, i, "local t={}; for i=1,500 do t[i]=i end; return t[500]",
+    submit(f, i,
+           nested && i == 1
+               ? "collectgarbage('collect'); return 500"
+               : "local t={}; for i=1,500 do t[i]=i end; return t[500]",
            (int)i);
   for (i = 1; i < 5; i++)
     require(collect(f, i, LUA_OK) == 500);
@@ -1041,7 +1051,10 @@ static void native_progress(struct fixture *f, int shutdown) {
   f->native_release = 1;
   require(pthread_cond_broadcast(&f->changed) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  (void)collect(f, 0, shutdown ? LUA_ERRRUN : LUA_OK);
+  if (nested)
+    require(collect(f, 0, LUA_OK) == 500500);
+  else
+    (void)collect(f, 0, shutdown ? LUA_ERRRUN : LUA_OK);
   require(f->scheduler.native == 0);
   if (shutdown)
     require(luaSC_shutdown(&f->scheduler) == LUA_OK);
@@ -3184,11 +3197,13 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "trace_pause_retains_mutators") == 0)
     trace_pause(f, 1);
   else if (strcmp(argv[1], "native") == 0)
-    native_progress(f, 0);
+    native_progress(f, 0, 0);
   else if (strcmp(argv[1], "native_reentry") == 0)
     native_reentry(f);
+  else if (strcmp(argv[1], "native_coroutine_progress") == 0)
+    native_progress(f, 0, 1);
   else if (strcmp(argv[1], "shutdown") == 0)
-    native_progress(f, 1);
+    native_progress(f, 1, 0);
   else if (strcmp(argv[1], "parallel_native_compensation") == 0)
     parallel_native_compensation(f);
   else if (strcmp(argv[1], "native_overlapping_stops") == 0)

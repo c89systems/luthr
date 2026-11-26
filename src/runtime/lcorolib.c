@@ -88,9 +88,16 @@ static int auxresume (lua_State *L, lua_State *co, int narg,
   }
   luaA_move(L, co, narg);
   calls = getCcalls(L);
-  luaX_transferpair(L, co);
+  /* Same-carrier resumes can run with both stacks retained. Safepoints
+  ** and opaque calls withdraw the suspended caller before leaving Lua. */
+  if (region != NULL)
+    co->resume_with_parent = 1;
+  else
+    luaX_transferpair(L, co);
   status = luaD_resume(co, calls, narg, &nres);
-  if (!luaX_joinpair(co, L)) {
+  if (co->resume_with_parent)
+    co->resume_with_parent = 0;
+  else if (!luaX_joinpair(co, L)) {
     luaX_unlockstate(co);
     luaX_lockpair(L, co);
   }

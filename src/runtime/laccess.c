@@ -128,6 +128,7 @@ static void beginaccess (lua_State *L, LuaObjectLock *lock, GCObject *object,
     }
     scope->held = mutatoraccess(L, lock, object);
     if (!scope->held) {
+      if (l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
       luaX_checksync(pthread_mutex_lock(&world->mutex));
       luaA_watchlock(lock);
       if (luaW_stopped(world) || !(scope->held = tryaccess(L, lock, object))) {

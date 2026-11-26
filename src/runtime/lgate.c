@@ -232,6 +232,7 @@ static void unlockstate (lua_State *L, NativeStackContext *context, int values,
   LuaExecution *execution = context->execution;
   int native = execution != NULL && execution->scheduler != NULL &&
                execution->native_depth != 0;
+  if (l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
   /* Pure value operations cannot create reclamation work. Work inherited
   ** from a collector snapshot remains serviceable by the ordinary workers
   ** and the next allocating/calling API, instead of extending every read. */
@@ -706,6 +707,14 @@ void luaX_transferpair (lua_State *caller, lua_State *callee) {
   }
 }
 
+void luaX_releaseparent (lua_State *child) {
+  lua_State *parent = child->stack_peer;
+  lua_assert(child->resume_with_parent && parent != NULL &&
+             child->admission == &parent->participation);
+  child->resume_with_parent = 0;
+  luaX_transferpair(parent, child);
+}
+
 int luaX_joinpair (lua_State *owner, lua_State *other) {
   NativeStackContext *context = luaX_boundcontext(owner);
   uintptr_t expected = 0;
@@ -759,6 +768,7 @@ void luaX_pollrequests (lua_State *L) {
 }
 
 void luaX_poll (lua_State *L) {
+  if (l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
   if (l_unlikely(luaW_control(&G(L)->world) & LUA_WORLD_SEAL_NURSERIES))
     luaC_pollseal(L);
   luaHS_quiescent(L);

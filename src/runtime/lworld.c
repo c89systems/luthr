@@ -563,7 +563,9 @@ int luaW_iscollector (lua_State *L) {
 ** The outermost acquisition must be a GC-safe boundary, before mutation. */
 static void heapenter (lua_State *L, int collector) {
   LuaWorld *world = &G(L)->world;
-  NativeStackContext *context = luaX_context(L);
+  NativeStackContext *context;
+  if (l_unlikely(L->resume_with_parent)) luaX_releaseparent(L);
+  context = luaX_context(L);
   if (__atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) == context) {
     setheapcount(world, heapcount(world) + 1);
     return;
@@ -624,6 +626,7 @@ int luaW_trycollectenter (lua_State *L) {
   LuaWorld *world = &G(L)->world;
   NativeStackContext *context = luaX_context(L);
   int acquired = 0;
+  if (l_unlikely(L->resume_with_parent)) return 0;
   if (__atomic_load_n(&world->heap_owner.token, __ATOMIC_ACQUIRE) == context) {
     setheapcount(world, heapcount(world) + 1);
     return 1;

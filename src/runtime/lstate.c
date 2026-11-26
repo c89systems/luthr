@@ -447,6 +447,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->object_waiting = 0;
   L->root_waiting = 0;
   L->stack_peer = NULL;
+  L->resume_with_parent = 0;
   L->object_scopes = NULL;
   L->errorJmp = NULL;
   L->hook = NULL;
