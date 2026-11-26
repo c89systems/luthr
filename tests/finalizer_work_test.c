@@ -181,6 +181,60 @@ static void finalize_across_coroutines(lua_State *L, int generational) {
   lua_close(L);
 }
 
+static int finalize_leaf(lua_State *L) {
+  const lua_Integer *id = lua_touserdata(L, 1);
+  require(id != NULL && *id == expected_order);
+  expected_order--;
+  require(lua_getmetatable(L, 1));
+  require(lua_getfield(L, -1, "token") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == (*id % 2 == 0 ? *id : -1));
+  if (*id == 2) {
+    lua_pushvalue(L, 1);
+    lua_setglobal(L, "resurrected");
+  }
+  return 0;
+}
+
+static void leaf_metatable(lua_State *L, lua_Integer token) {
+  lua_newtable(L);
+  lua_pushcfunction(L, finalize_leaf);
+  lua_setfield(L, -2, "__gc");
+  lua_pushinteger(L, token);
+  lua_setfield(L, -2, "token");
+}
+
+static void finalize_leaf_userdata(lua_State *L, int generational) {
+  enum { LEAVES = 384 };
+  int i;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  leaf_metatable(L, -1);
+  expected_order = LEAVES;
+  for (i = 1; i <= LEAVES; i++) {
+    lua_Integer *id = lua_newuserdatauv(L, sizeof(*id), 0);
+    *id = i;
+    /* Odd records share a rooted metatable. An even record's metatable
+     * survives only through that record. */
+    if (i % 2 == 0)
+      leaf_metatable(L, i);
+    else
+      lua_pushvalue(L, 1);
+    require(lua_setmetatable(L, -2));
+    lua_pop(L, 1);
+  }
+  if (generational)
+    lua_gc(L, LUA_GCSTEP, (size_t)0);
+  else
+    lua_gc(L, LUA_GCCOLLECT);
+  require(expected_order == 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_getglobal(L, "resurrected") == LUA_TUSERDATA);
+  require(lua_getmetatable(L, -1));
+  require(lua_getfield(L, -1, "token") == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 2);
+  lua_close(L);
+}
+
 enum { PRODUCERS = 4, REGISTRATIONS = 512 };
 
 struct finalizer_registrations {
@@ -419,6 +473,10 @@ int main(int argc, char **argv) {
   if (strncmp(argv[1], "order_", 6) == 0) {
     finalize_across_coroutines(state,
                                strcmp(argv[1], "order_generational") == 0);
+    return 0;
+  }
+  if (strncmp(argv[1], "leaf_", 5) == 0) {
+    finalize_leaf_userdata(state, strcmp(argv[1], "leaf_generational") == 0);
     return 0;
   }
   if (strncmp(argv[1], "register_", 9) == 0) {

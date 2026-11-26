@@ -1408,6 +1408,22 @@ static unsigned pendingfinalizers (global_State *g, unsigned limit) {
   return count;
 }
 
+/* A userdata without user values needs no second scan when its only edge
+** is already marked. Metatable writes shade both pointers before publishing,
+** and a finalized receiver has completed sharing before it enters this list. */
+static int markfinalizerleaf (global_State *g, GCObject *object) {
+  Udata *u;
+  Table *mt;
+  if (object->tt != LUA_VUSERDATA || isold(object)) return 0;
+  u = gco2u(object);
+  if (u->nuvalue != 0) return 0;
+  mt = __atomic_load_n(&u->metatable, __ATOMIC_ACQUIRE);
+  if (mt != NULL && iswhite(g, mt)) return 0;
+  g->GCmarked += cast(l_mem, sizeudata(0, u->len));
+  nw2black(object);
+  return 1;
+}
+
 static unsigned discoverfinalizers (global_State *g, unsigned limit) {
   LuaTracePlan *plan = &g->trace_plan;
   unsigned count = 0;
@@ -1428,6 +1444,7 @@ static unsigned discoverfinalizers (global_State *g, unsigned limit) {
       object->next = NULL;
       *plan->finalizer_newtail = object;
       plan->finalizer_newtail = &object->next;
+      if (markfinalizerleaf(g, object)) continue;
       /* Discover every candidate before tracing their outgoing edges. Doing
       ** so in an earlier batch could hide another unreachable finalizable
       ** object and defer its callback to a later collection. */
