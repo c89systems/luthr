@@ -62,6 +62,26 @@ enum { LUA_CELL_WRITING = 1, LUA_CELL_WAITERS = 2, LUA_CELL_VERSION_STEP = 4 };
 LUAI_FUNC uint64_t luaF_waitcell (UpVal *uv);
 LUAI_FUNC void luaF_wakecell (UpVal *uv);
 
+/* The minimum integer uses the general slot. Every other integer fits one
+** atomic word without a range check or a managed reference. */
+l_sinline lua_Unsigned luaF_packinteger (const TValue *value) {
+  return ttisinteger(value) ? l_castS2U(ivalue(value)) ^ l_castS2U(LUA_MININTEGER)
+                           : 0;
+}
+
+l_sinline lua_Integer luaF_unpackinteger (lua_Unsigned integer) {
+  return l_castU2S(integer ^ l_castS2U(LUA_MININTEGER));
+}
+
+l_sinline int luaF_trystoreinteger (UpVal *uv, const TValue *value) {
+  lua_Unsigned next = luaF_packinteger(value), previous;
+  if (next == 0) return 0;
+  previous = __atomic_load_n(&uv->integer, __ATOMIC_RELAXED);
+  return previous != 0 &&
+    __atomic_compare_exchange_n(&uv->integer, &previous, next, 0,
+                                 __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
+
 l_sinline uint64_t luaF_trylockcell (UpVal *uv) {
   uint64_t version = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
   uint64_t writing = version | LUA_CELL_WRITING;
@@ -69,6 +89,14 @@ l_sinline uint64_t luaF_trylockcell (UpVal *uv) {
       !__atomic_compare_exchange_n(&uv->sequence, &version, writing, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
     return 0;
+  /* Stop integer-only writers before giving the full owner its ordinary
+  ** slot. The exchange includes any integer written before it won. */
+  if (__atomic_load_n(&uv->integer, __ATOMIC_RELAXED) != 0) {
+    lua_Unsigned packed = __atomic_exchange_n(&uv->integer, 0, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&uv->value.value_.i, luaF_unpackinteger(packed),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&uv->value.tt_, LUA_VNUMINT, __ATOMIC_RELEASE);
+  }
   return writing;
 }
 
@@ -129,13 +157,20 @@ l_sinline void luaF_writeprivate (lua_State *L, UpVal *uv, const TValue *value) 
 /* Acquiring either written component also observes its preceding odd
 ** sequence. An unchanged even sequence validates the whole value. */
 l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
-  uint64_t before = __atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE);
+  lua_Unsigned integer = __atomic_load_n(&uv->integer, __ATOMIC_ACQUIRE);
+  uint64_t before;
   Value payload;
   lu_byte tag;
+  if (integer != 0) {
+    setivalue(value, luaF_unpackinteger(integer));
+    return 1;
+  }
+  before = __atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE);
   if (before & LUA_CELL_WRITING) return 0;
   __atomic_load(&uv->value.value_, &payload, __ATOMIC_ACQUIRE);
   tag = __atomic_load_n(&uv->value.tt_, __ATOMIC_ACQUIRE);
-  if (__atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE) != before) return 0;
+  if (__atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE) != before ||
+      __atomic_load_n(&uv->integer, __ATOMIC_ACQUIRE) != 0) return 0;
   value->value_ = payload;
   value->tt_ = tag;
   return 1;

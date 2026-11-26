@@ -237,6 +237,43 @@ static void contended_binding(lua_State *state) {
   lua_pop(state, 2);
 }
 
+static void *switch_shared_values(void *argument) {
+  run(argument, "for i=1,3000 do "
+                "write_shared(i); write_shared(-i); "
+                "write_shared({marker=i}); write_shared(math.mininteger) end; "
+                "write_shared(math.maxinteger)");
+  return NULL;
+}
+
+static void integer_bindings(lua_State *state) {
+  pthread_t writer;
+  lua_State *worker;
+  run(state, "local value=0; "
+             "write_shared=function(next) value=next end; "
+             "read_shared=function() return value end; "
+             "for _,v in ipairs({17,0,-1,math.mininteger,math.maxinteger,"
+             "false,1.5,{marker=23}}) do "
+             "  write_shared(v); collectgarbage('collect'); "
+             "  assert(rawequal(read_shared(),v)); "
+             "  assert(debug.setupvalue(write_shared,1,0)=='value'); "
+             "  assert(read_shared()==0 and value==0) "
+             "end");
+  worker = lua_newthread(state);
+  require(pthread_create(&writer, NULL, switch_shared_values, worker) == 0);
+  run(state, "for i=1,8000 do "
+             "local value=read_shared(); "
+             "if type(value)=='table' then "
+             "  assert(value.marker>=1 and value.marker<=3000) "
+             "else assert(math.type(value)=='integer'); "
+             "  assert(value==math.mininteger or value==math.maxinteger "
+             "         or (value>=-3000 and value<=3000)) "
+             "end; if i%80==0 then collectgarbage('step',5) end end");
+  require(pthread_join(writer, NULL) == 0);
+  run(state,
+      "collectgarbage('collect'); assert(read_shared()==math.maxinteger)");
+  lua_pop(state, 1);
+}
+
 static void deep_snapshot(lua_State *state) {
   lua_pushcfunction(state, collect_shared_stack);
   lua_setglobal(state, "collect_shared_stack");
@@ -797,7 +834,11 @@ int main(int argc, char **argv) {
     independent(state);
   else if (strcmp(argv[1], "contended_binding") == 0)
     contended_binding(state);
-  else if (strncmp(argv[1], "mixed_", 6) == 0) {
+  else if (strncmp(argv[1], "integer_bindings_", 17) == 0) {
+    if (strcmp(argv[1], "integer_bindings_generational") == 0)
+      lua_gc(state, LUA_GCGEN);
+    integer_bindings(state);
+  } else if (strncmp(argv[1], "mixed_", 6) == 0) {
     if (strcmp(argv[1], "mixed_generational") == 0)
       lua_gc(state, LUA_GCGEN);
     mixed_capture(state);

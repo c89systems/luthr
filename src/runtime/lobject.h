@@ -758,6 +758,7 @@ typedef struct UpVal {
   lu_byte reg;  /* register in the binding frame, while open */
   uintptr_t sharing;
   uint64_t sequence;
+  lua_Unsigned integer;  /* shared integer, encoded with zero as the empty word */
   GCObject *gclist;
   TValue value;  /* binding, or the owner thread while private and open */
   ptrdiff_t level;  /* byte offset in owner's stack, never a borrowed pointer */

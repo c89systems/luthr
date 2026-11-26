@@ -62,7 +62,7 @@
         UpVal *uv = luaF_capturecell(cl, GETARG_B(i));
         if (luaF_localupval(L, uv))
           luaF_writeprivate(L, uv, s2v(ra));
-        else {
+        else if (!luaF_trystoreinteger(uv, s2v(ra))) {
           savestate(L, ci);
           luaF_writecapture(L, uv, s2v(ra));
           updatebase(ci);

@@ -143,6 +143,7 @@ target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaF_loadshared -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
 foreach(case IN ITEMS independent readers contended_binding access uncaptured operands semantics pair_boundaries incremental generational
+    integer_bindings_incremental integer_bindings_generational
     private_incremental private_generational mixed_incremental mixed_generational
     deep_snapshot_incremental deep_snapshot_generational
     shadow_incremental shadow_generational lowered_source_incremental lowered_source_generational

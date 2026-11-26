@@ -72,6 +72,7 @@ static UpVal *newupvalobject (lua_State *L) {
   uv->gclist = NULL;
   uv->level = 0;
   uv->sequence = 0;
+  uv->integer = 0;
   luaA_initsharing(L, uv);
   uv->value.value_.gc = NULL;
   setnilvalue(&uv->value);
@@ -209,7 +210,20 @@ void luaF_writecapture (lua_State *L, UpVal *uv, const TValue *value) {
   LuaNativeRoot transfer, upvalue_root;
   /* An immediate value can be stored entirely under the current admission. */
   if (!iscollectable(value)) {
-    luaF_writecell(L, uv, value);
+    lua_Unsigned integer = luaF_packinteger(value);
+    if (integer != 0) {
+      if (!luaF_trystoreinteger(uv, value)) {
+        TValue empty = {0};
+        uint64_t writing = luaF_lockcell(uv);
+        setnilvalue(&empty);
+        /* The scanner still reads the general slot. Shade its displaced
+        ** edge before handing the cell to integer-only readers and writers. */
+        storecell(L, uv, &empty);
+        __atomic_store_n(&uv->integer, integer, __ATOMIC_RELEASE);
+        luaF_unlockcell(uv, writing);
+      }
+    }
+    else luaF_writecell(L, uv, value);
     return;
   }
   luaR_pushroot(L, &transfer);
