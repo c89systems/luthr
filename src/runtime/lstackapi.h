@@ -47,15 +47,19 @@ LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
 LUAI_FUNC uintptr_t luaX_reservevalues (lua_State *L);
 LUAI_FUNC void luaX_releasevalues (lua_State *L, uintptr_t owner);
 
-/* An observation is one atomic word. It holds either a payload with its
-** length or userdata tag, or packed types for a wider argument list.
-** A payload borrower still needs the corresponding live stack value. */
+/* Detached arguments are published one word at a time. Each word combines
+** a pointer and length, a small integer, or the exact Lua tag. A string
+** or userdata borrower still needs the corresponding live stack value. */
 enum {
   LUA_ARGUMENT_ALIGN_SHIFT = 2,
   LUA_ARGUMENT_LENGTH_SHIFT = LUA_GATE_OFFER_SHIFT - LUA_ARGUMENT_ALIGN_SHIFT,
   LUA_ARGUMENT_USERDATA = (1u << (64 - LUA_ARGUMENT_LENGTH_SHIFT)) - 1,
-  LUA_ARGUMENT_TYPES = LUA_ARGUMENT_USERDATA - 1
+  LUA_ARGUMENT_INTEGER = LUA_ARGUMENT_USERDATA - 1,
+  LUA_ARGUMENT_TAG = LUA_ARGUMENT_INTEGER - 1
 };
+
+#define LUA_ARGUMENT_MASK ((cast(uintptr_t, 1) << LUA_ARGUMENT_LENGTH_SHIFT) - 1)
+#define LUA_ARGUMENT_SIGN (cast(uintptr_t, 1) << (LUA_ARGUMENT_LENGTH_SHIFT - 1))
 
 l_sinline uintptr_t luaX_argument (lua_State *L, int idx) {
   unsigned slot = cast_uint(idx) - 1u;
@@ -63,24 +67,27 @@ l_sinline uintptr_t luaX_argument (lua_State *L, int idx) {
     ? __atomic_load_n(&L->stack_gate.arguments[slot], __ATOMIC_ACQUIRE) : 0;
 }
 
-/* Only positive indices survive an append. The encoded tags carry no roots
-** and can be used without borrowing the stack or dereferencing a Lua object. */
-l_sinline int luaX_argumenttype (lua_State *L, int idx) {
-  unsigned slot = cast_uint(idx) - 1u;
-  uintptr_t first;
-  if (slot >= LUA_NATIVE_TYPES) return LUA_TNONE;
-  first = luaX_argument(L, 1);
-  if ((first >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_TYPES)
-    return cast_int((first >> (4 * slot)) & 15u) - 1;
-  if (slot != 0) first = luaX_argument(L, idx);
-  if (first == 0) return LUA_TNONE;
-  return (first >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA
-         ? LUA_TUSERDATA : LUA_TSTRING;
+l_sinline unsigned luaX_argumentkind (uintptr_t argument) {
+  return cast_uint(argument >> LUA_ARGUMENT_LENGTH_SHIFT);
+}
+
+l_sinline int luaX_argumenttag (uintptr_t argument) {
+  if (argument == 0) return LUA_TNONE;
+  switch (luaX_argumentkind(argument)) {
+    case LUA_ARGUMENT_TAG: return cast_int(argument & LUA_ARGUMENT_MASK);
+    case LUA_ARGUMENT_INTEGER: return LUA_VNUMINT;
+    case LUA_ARGUMENT_USERDATA: return ctb(LUA_VUSERDATA);
+    default: return ctb(LUA_VLNGSTR);
+  }
 }
 
 l_sinline void *luaX_argumentaddress (uintptr_t argument) {
-  const uintptr_t mask = (cast(uintptr_t, 1) << LUA_ARGUMENT_LENGTH_SHIFT) - 1;
-  return cast(void *, (argument & mask) << LUA_ARGUMENT_ALIGN_SHIFT);
+  return cast(void *, (argument & LUA_ARGUMENT_MASK) << LUA_ARGUMENT_ALIGN_SHIFT);
+}
+
+l_sinline lua_Integer luaX_argumentinteger (uintptr_t argument) {
+  return l_castU2S(((argument & LUA_ARGUMENT_MASK) ^ LUA_ARGUMENT_SIGN) -
+                  LUA_ARGUMENT_SIGN);
 }
 
 l_sinline void luaX_invalidatearguments (LuaStackGate *gate) {

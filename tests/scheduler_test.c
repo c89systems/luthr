@@ -1336,18 +1336,28 @@ static int observe_arguments(lua_State *L) {
   require(before && len == 7 && memcmp(before, "old\0key", len) == 0);
   require(lua_tolstring(L, 1, NULL) == NULL);
   if (nargs > 2) {
+    int isnum;
     require(lua_type(L, 3) == LUA_TNUMBER && lua_type(L, 8) == LUA_TBOOLEAN);
+    require(lua_isinteger(L, 3) && lua_tointegerx(L, 3, &isnum) == -17 &&
+            isnum);
+    require(lua_tonumberx(L, 3, &isnum) == -17 && isnum);
+    require(!lua_toboolean(L, 6) && !lua_toboolean(L, 7) &&
+            lua_toboolean(L, 8));
     require(lua_checkstack(L, 3));
   }
   lua_pushinteger(L, 17);
   require(__atomic_load_n(&L->stack_gate.arguments[0], __ATOMIC_ACQUIRE) != 0);
-  require((__atomic_load_n(&L->stack_gate.arguments[1], __ATOMIC_ACQUIRE) !=
-           0) == (nargs == 2));
+  require(lua_tolstring(L, 2, &len) == before && len == 7);
   blocked_leaf(L);
   /* The old string is now at index 1 and still roots this borrowed pointer. */
   require(lua_type(L, 1) == LUA_TSTRING && lua_touserdata(L, 1) == NULL);
   require(memcmp(before, "old\0key", 7) == 0);
   require(lua_tolstring(L, 1, &len) == before && len == 7);
+  if (nargs > 2) {
+    require(!lua_isinteger(L, 3) && lua_tonumber(L, 3) == 4.5);
+    require(lua_isinteger(L, 4) && lua_tointeger(L, 4) == LUA_MININTEGER);
+    require(!lua_isinteger(L, 5) && lua_tonumber(L, 5) == 2.0);
+  }
   lua_getglobal(L, "check_native_arguments");
   lua_pushvalue(L, 1);
   lua_pushvalue(L, 2);
@@ -1371,7 +1381,8 @@ static void native_argument_observation(struct fixture *f, int wide) {
                                  "return 51 end") == LUA_OK);
   submit(f, 0,
          wide ? "warm_native_permit(); return observe_arguments("
-                "make_argument(),'old\\0key',3,nil,nil,nil,nil,true)"
+                "make_argument(),'old\\0key',-17,math.mininteger,2.0,false,nil,"
+                "true)"
               : "warm_native_permit(); "
                 "return observe_arguments(make_argument(),'old\\0key')",
          0);
@@ -1387,6 +1398,10 @@ static void native_argument_observation(struct fixture *f, int wide) {
   require(lua_type(target, 1) == LUA_TSTRING);
   lua_pushlstring(target, "next\0key", 8);
   lua_replace(target, 2);
+  if (wide) {
+    lua_pushnumber(target, 4.5);
+    lua_replace(target, 3);
+  }
   submit(f, 1, "return 52", 0);
   require(collect(f, 1, LUA_OK) == 52);
   require(lua_gc(f->main, LUA_GCCOLLECT) == 0);

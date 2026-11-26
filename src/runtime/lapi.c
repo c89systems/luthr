@@ -499,9 +499,9 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
 LUA_API int lua_type (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
-  int result = luaX_argumenttype(L, idx);
+  int result = luaX_argumenttag(luaX_argument(L, idx));
   uintptr_t owner;
-  if (result != LUA_TNONE) return result;
+  if (result != LUA_TNONE) return novariant(result);
   owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = isvalid(L, o) ? ttype(o) : LUA_TNONE;
@@ -533,7 +533,10 @@ LUA_API int lua_isinteger (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   int result;
-  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
+  int tag = luaX_argumenttag(luaX_argument(L, idx));
+  uintptr_t owner;
+  if (tag != LUA_TNONE) return tag == LUA_VNUMINT;
+  owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = ttisinteger(o);
   luaX_leaveboundedvalue(L, owner);
@@ -691,7 +694,13 @@ LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
   lua_Number n = 0;
   const TValue *o;
   int isnum;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t argument = luaX_argument(L, idx);
+  uintptr_t owner;
+  if (luaX_argumentkind(argument) == LUA_ARGUMENT_INTEGER) {
+    if (pisnum) *pisnum = 1;
+    return cast_num(luaX_argumentinteger(argument));
+  }
+  owner = readenter(L, idx);
   o = index2read(L, idx, &snapshot, owner);
   isnum = tonumber(o, &n);
   if (pisnum)
@@ -706,7 +715,13 @@ LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
   lua_Integer res = 0;
   const TValue *o;
   int isnum;
-  uintptr_t owner = readenter(L, idx);
+  uintptr_t argument = luaX_argument(L, idx);
+  uintptr_t owner;
+  if (luaX_argumentkind(argument) == LUA_ARGUMENT_INTEGER) {
+    if (pisnum) *pisnum = 1;
+    return luaX_argumentinteger(argument);
+  }
+  owner = readenter(L, idx);
   o = index2read(L, idx, &snapshot, owner);
   isnum = tointeger(o, &res);
   if (pisnum)
@@ -720,7 +735,10 @@ LUA_API int lua_toboolean (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   int result;
-  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
+  int tag = luaX_argumenttag(luaX_argument(L, idx));
+  uintptr_t owner;
+  if (tag != LUA_TNONE) return tag != LUA_VNIL && tag != LUA_VFALSE;
+  owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = !l_isfalse(o);
   luaX_leaveboundedvalue(L, owner);
@@ -745,8 +763,9 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
   const TValue *value;
   int stackonly = !ispseudo(idx);
   uintptr_t argument = luaX_argument(L, idx);
-  if (argument != 0 && (argument >> LUA_ARGUMENT_LENGTH_SHIFT) < LUA_ARGUMENT_TYPES) {
-    if (len != NULL) *len = argument >> LUA_ARGUMENT_LENGTH_SHIFT;
+  unsigned kind = luaX_argumentkind(argument);
+  if (argument != 0 && kind < LUA_ARGUMENT_TAG) {
+    if (len != NULL) *len = kind;
     return luaX_argumentaddress(argument);
   }
  retry:
@@ -823,9 +842,11 @@ LUA_API void *lua_touserdata (lua_State *L, int idx) {
   const TValue *o;
   void *result;
   uintptr_t owner, argument = luaX_argument(L, idx);
-  if ((argument >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA)
+  int tag = luaX_argumenttag(argument);
+  if (luaX_argumentkind(argument) == LUA_ARGUMENT_USERDATA)
     return luaX_argumentaddress(argument);
-  if (argument != 0 && (argument >> LUA_ARGUMENT_LENGTH_SHIFT) != LUA_ARGUMENT_TYPES)
+  if (tag != LUA_TNONE && novariant(tag) != LUA_TUSERDATA &&
+      novariant(tag) != LUA_TLIGHTUSERDATA)
     return NULL;
   owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
