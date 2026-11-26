@@ -123,6 +123,8 @@ LUAI_FUNC TStatus luaD_protectedparser (lua_State *L, ZIO *z,
 LUAI_FUNC void luaD_hook (lua_State *L, int event, int line,
                                         int fTransfer, int nTransfer);
 LUAI_FUNC void luaD_hookcall (lua_State *L, CallInfo *ci);
+LUAI_FUNC void luaD_calllightmethod (lua_State *L, StkId func,
+                                    lua_CFunction method);
 #if !defined(HARDSTACKTESTS)
 LUAI_FUNC NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
                                                    unsigned status);

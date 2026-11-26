@@ -127,7 +127,9 @@ lu_byte luaT_callTMres (lua_State *L, const TValue *f, const TValue *p1,
   setobj2s(L, func + 2, p2);  /* 2nd argument */
   L->top.p += 3;
   /* metamethod may yield only when called from Lua code */
-  if (isLuacode(L->ci))
+  if (checktag(f, LUA_VLCF))
+    luaD_calllightmethod(L, func, fvalue(f));
+  else if (isLuacode(L->ci))
     luaD_call(L, func, 1);
   else
     luaD_callnoyield(L, func, 1);

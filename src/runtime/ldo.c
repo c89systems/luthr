@@ -1087,20 +1087,34 @@ CallInfo *luaD_precall (lua_State *L, StkId func, int nresults) {
 ** check the stack before doing anything else. 'luaD_precall' already
 ** does that.
 */
-l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,
-                       int returnyield) {
-  CallInfo *ci;
+l_sinline StkId entercall (lua_State *L, StkId func, l_uint32 inc) {
   luaD_checknativestack(L);
   L->nCcalls += inc;
   if (l_unlikely(getCcalls(L) >= LUAI_MAXCCALLS)) {
     checkstackp(L, 0, func);  /* free any use of EXTRA_STACK */
     luaE_checkcstack(L);
   }
+  return func;
+}
+
+l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,
+                       int returnyield) {
+  CallInfo *ci;
+  func = entercall(L, func, inc);
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
     ci->callstatus |= CIST_FRESH;  /* mark that it is a "fresh" execute */
     if (luaV_execute(L, ci) && !returnyield)
       luaD_throw(L, LUA_YIELD);  /* unwind a caller using the C API */
   }
+  L->nCcalls -= inc;
+}
+
+/* Method lookup already resolved an opaque light C function. Keep the
+** normal C frame, detach/attach and yield path without classifying it again. */
+void luaD_calllightmethod (lua_State *L, StkId func, lua_CFunction method) {
+  l_uint32 inc = isLuacode(L->ci) ? 1 : nyci;
+  func = entercall(L, func, inc);
+  luaD_precallC(L, func, 1 + 1, method, 0);
   L->nCcalls -= inc;
 }
 

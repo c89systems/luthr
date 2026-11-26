@@ -1219,6 +1219,65 @@ static int blocked_leaf(lua_State *L) {
   return 0;
 }
 
+static int native_index_method(lua_State *L) {
+  const char *key = luaL_checkstring(L, 2);
+  require(lua_type(L, 1) == LUA_TUSERDATA);
+  if (strcmp(key, "blocked") == 0)
+    blocked_leaf(L);
+  else if (strcmp(key, "failure") == 0)
+    return luaL_error(L, "index failure");
+  else if (strcmp(key, "yielded") == 0) {
+    lua_pushinteger(L, 42);
+    return lua_yield(L, 1);
+  }
+  lua_pushinteger(L, 41);
+  return 1;
+}
+
+static int native_index_api(lua_State *L) {
+  lua_getfield(L, 1, "yielded");
+  return 1;
+}
+
+static void native_index_dispatch(struct fixture *f) {
+  init(f, 1);
+  lua_newuserdatauv(f->main, 1, 0);
+  lua_newtable(f->main);
+  lua_pushcfunction(f->main, native_index_method);
+  lua_setfield(f->main, -2, "__index");
+  require(lua_setmetatable(f->main, -2));
+  lua_setglobal(f->main, "index_target");
+  lua_pushcfunction(f->main, native_index_api);
+  lua_setglobal(f->main, "native_index_api");
+  submit(
+      f, 0,
+      "local u=index_target; assert(u.value==41 and u.value==41); "
+      "local ok,err=pcall(function() return u.failure end); "
+      "assert(not ok and err:find('index failure',1,true)); "
+      "local co=coroutine.wrap(function() return u.yielded end); "
+      "assert(co()==42 and co(43)==43); "
+      "ok,err=pcall(native_index_api,u); "
+      "assert(not ok and err:find('yield across a C-call boundary',1,true)); "
+      "local old=u.blocked; return old+u.replaced",
+      0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  submit(f, 1,
+         "local mt=getmetatable(index_target); mt.__index=nil; "
+         "for i=1,300 do mt['grow'..i]=i end; "
+         "mt.__index={replaced=10}; collectgarbage('collect'); return 52",
+         0);
+  require(collect(f, 1, LUA_OK) == 52);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  finish(f);
+}
+
 static int inspect_leaf_return(lua_State *L) {
   struct fixture *f = fixture;
   lua_State *target = f->tasks[0].root.thread;
@@ -3369,6 +3428,8 @@ int main(int argc, char **argv) {
     native_argument_observation(f, 0);
   else if (strcmp(argv[1], "native_argument_types") == 0)
     native_argument_observation(f, 1);
+  else if (strcmp(argv[1], "native_index_dispatch") == 0)
+    native_index_dispatch(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
     native_recall_during_stack_borrow(f, 1, 0);
   else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
