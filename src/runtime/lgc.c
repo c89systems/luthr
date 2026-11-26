@@ -404,7 +404,28 @@ GCObject *luaC_newtable (lua_State *L, size_t size, int tasklocal) {
   return newobjdt(L, LUA_VTABLE, size, 0, tasklocal);
 }
 
+GCObject *luaC_trytaskstring (lua_State *L, size_t size, int refill) {
+  GCObject *object;
+  if (L->task_owner == NULL || !luaC_tasktableeligible(L, size) ||
+      (refill && luaW_iscollector(L))) return NULL;
+  object = luaM_trytaskstring(L, size, refill);
+  if (object != NULL) {
+    int owned;
+    object->tt = LUA_VLNGSTR;
+    object->next = NULL;
+    setmarked(object, luaC_newmark(G(L)));
+    owned = luaC_taskallocate(L, object, size);
+    lua_assert(owned);
+    UNUSED(owned);
+  }
+  return object;
+}
+
 GCObject *luaC_newresultstring (lua_State *L, size_t size) {
+  if (size <= LUA_ALLOC_MAX) {
+    GCObject *object = luaC_trytaskstring(L, size, 1);
+    if (object != NULL) return object;
+  }
   return newobjdt(L, LUA_VLNGSTR, size, 0, size <= LUA_ALLOC_MAX);
 }
 
@@ -2357,9 +2378,10 @@ static int release_dead_page (lua_State *L, LuaSweepWork *work,
       headers += cast(l_mem, sizeof(*table) + table->inline_bytes);
     }
     else {
-      Udata *u = gco2u(object);
       lua_assert(!tofinalize(object));
-      size = sizeudata(u->nuvalue, u->len);
+      lua_assert(object->tt == LUA_VUSERDATA ||
+                 (object->tt == LUA_VLNGSTR && gco2ts(object)->shrlen == LSTRREG));
+      size = cast_sizet(luaC_objsize(object));
       headers += cast(l_mem, size);
     }
     bytes += cast(l_mem, size);

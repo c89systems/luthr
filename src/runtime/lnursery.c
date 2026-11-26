@@ -297,11 +297,15 @@ static void sealtask (lua_State *L, lua_State *thread) {
     }
     else {
       TString *s = gco2ts(o);
+      LuaAllocPage *page = luaMP_page(cast(LuaAllocBlock *, o) - 1);
       __atomic_fetch_and(&s->extra, cast_byte(~(LSTR_TASK | LSTR_TASKOLD | LSTR_TASKLIVE)),
                          __ATOMIC_RELEASE);
-      luaC_allocnext(o) = strings;
-      strings = o;
-      if (tail == NULL) tail = o;
+      /* Private slots enter the page sweep when the page is adopted. */
+      if (page == NULL || !__atomic_load_n(&page->task_private, __ATOMIC_RELAXED)) {
+        luaC_allocnext(o) = strings;
+        strings = o;
+        if (tail == NULL) tail = o;
+      }
     }
   }
   while (finalizers != NULL) {
@@ -559,15 +563,15 @@ l_sinline void freeset (lua_State *L, GCObject *o, int allocation_links) {
     l_mem bytes = 0;
     if (page == NULL) {
       GCObject *next = allocation_links ? luaC_allocnext(o) : o->next;
-      Udata *userdata = gco2u(o);
-      luaM_freeprivate_(L, userdata, sizeudata(userdata->nuvalue, userdata->len));
+      lua_assert(o->tt == LUA_VUSERDATA || luaC_taskstring(o));
+      luaM_freeprivate_(L, o, cast_sizet(luaC_objsize(o)));
       o = next;
       continue;
     }
     for (;;) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
       GCObject *next = allocation_links ? luaC_allocnext(o) : o->next;
-      if (o->tt == LUA_VUSERDATA)
+      if (o->tt != LUA_VTABLE)
         __atomic_store_n(&block->block.page, cast(uintptr_t, page),
                           __ATOMIC_RELAXED);
       lua_assert(luaMP_header(block) == cast(uintptr_t, page));
@@ -1051,7 +1055,9 @@ void luaC_taskstep (lua_State *L) {
   L->task_nursery_pending = 0;
   if (!cansteptask(L)) {
     L->task_nursery_limit = taskcapacity(L) + 1;
-    L->task_nursery_pending = L->task_mark_scan != 0;
+    /* A Lua callback can hit the poll while its opaque C caller is live.
+    ** Keep the request for an enclosing Lua frame that can trace the heap. */
+    L->task_nursery_pending = L->task_mark_scan != 0 || L->native_depth != 0;
     return;
   }
   if (L->task_old_bytes < TASK_NURSERY_START / 2 &&

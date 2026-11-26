@@ -485,6 +485,7 @@ LUAI_FUNC int luaC_trytaskedge (lua_State *L, Table *table, uint64_t state,
 LUAI_FUNC int luaC_tasklayout (lua_State *L, Table *table, Table *keys);
 LUAI_FUNC int luaC_taskallocate (lua_State *L, GCObject *object, size_t bytes);
 LUAI_FUNC GCObject *luaC_trytasktable (lua_State *L, size_t size, int refill);
+LUAI_FUNC GCObject *luaC_trytaskstring (lua_State *L, size_t size, int refill);
 LUAI_FUNC int luaC_tasktableeligible (lua_State *L, size_t bytes);
 LUAI_FUNC int luaC_taskpagefits (lua_State *L, size_t bytes);
 #define luaC_hastaskheap(L) ((L)->task_objects != NULL || (L)->task_pages != NULL)

@@ -821,6 +821,9 @@ int luaD_precallC (lua_State *L, StkId func,
     checkreturn(L);
   }
   else luaD_poscall(L, ci, n);
+  /* A callback can consume the poll that first requested nursery work. */
+  if (l_unlikely(L->task_nursery_pending) && L->native_depth == 0 && isLua(L->ci))
+    L->poll_remaining = 1;
   return n;
 }
 

@@ -2529,6 +2529,58 @@ static void nursery_native_allocation(struct fixture *f, int generational) {
   finish(f);
 }
 
+static int native_string_callback(lua_State *L) {
+  char input[80];
+  unsigned byte = (unsigned)luaL_checkinteger(L, 2) % 128;
+  const char *copy;
+  memset(input, 'x', sizeof(input));
+  input[8] = '\0';
+  input[9] = (char)byte;
+  copy = lua_pushlstring(L, input, sizeof(input));
+  memset(input, 'y', sizeof(input));
+  lua_pushvalue(L, 1);
+  lua_pushvalue(L, -2);
+  lua_call(L, 1, 0);
+  require(copy[0] == 'x' && copy[8] == '\0' && (unsigned char)copy[9] == byte &&
+          copy[79] == 'x' && copy[80] == '\0');
+  return 1;
+}
+
+static int native_publish_strings(lua_State *L) {
+  enum { count = 2048 };
+  char bytes[80];
+  memset(bytes, 'z', sizeof(bytes));
+  luaL_checkstack(L, count, "native strings");
+  for (int i = 0; i < count; i++)
+    lua_pushlstring(L, bytes, sizeof(bytes));
+  lua_setglobal(L, "published_string");
+  return 0;
+}
+
+static void nursery_native_strings(struct fixture *f, int generational) {
+  init(f, 1);
+  lua_gc(f->main, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_pushcfunction(f->main, native_string_callback);
+  lua_setglobal(f->main, "copy_string");
+  lua_pushcfunction(f->main, native_publish_strings);
+  lua_setglobal(f->main, "publish_strings");
+  submit(f, 0,
+         "local function check(s) assert(#s==80 and s:byte(9)==0) end; "
+         "local before=collectgarbage('count'); "
+         "local saved=copy_string(function(s) check(s); "
+         "collectgarbage('collect') end,42); "
+         "for i=1,18000 do copy_string(check,i) end; "
+         "assert(collectgarbage('count') < before+1024); "
+         "publish_strings(); collectgarbage('collect'); "
+         "local after=collectgarbage('count'); "
+         "assert(after>0 and after<before+1024); "
+         "assert(saved:byte(10)==42 and published_string==('z'):rep(80)); "
+         "return 42",
+         0);
+  require(collect(f, 0, LUA_OK) == 42);
+  finish(f);
+}
+
 static void nursery_edges(struct fixture *f, int generational) {
   int status, results;
   init(f, 2);
@@ -3331,6 +3383,10 @@ int main(int argc, char **argv) {
     nursery_native_allocation(f, 0);
   else if (strcmp(argv[1], "nursery_native_allocation_generational") == 0)
     nursery_native_allocation(f, 1);
+  else if (strcmp(argv[1], "nursery_native_strings_incremental") == 0)
+    nursery_native_strings(f, 0);
+  else if (strcmp(argv[1], "nursery_native_strings_generational") == 0)
+    nursery_native_strings(f, 1);
   else if (strcmp(argv[1], "nursery_full_incremental") == 0)
     nursery_full(f, 0);
   else if (strcmp(argv[1], "nursery_mark_incremental") == 0)

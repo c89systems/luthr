@@ -282,20 +282,31 @@ void luaS_init (lua_State *L) {
 }
 
 
-TString *luaS_createlngstrobj (lua_State *L, size_t l, int result) {
-  TString *ts;
-  GCObject *object;
-  if (l_unlikely(l >= MAX_SIZE - sizeof(TString)))
-    luaM_toobig(L);
-  object = result ? luaC_newresultstring(L, sizestrreg(l))
-                  : luaC_newobj(L, LUA_VLNGSTR, sizestrreg(l));
-  ts = gco2ts(object);
+static TString *initlong (lua_State *L, GCObject *object, size_t l) {
+  TString *ts = gco2ts(object);
   ts->hash = 0;
   ts->lnglen = l;
   ts->shrlen = LSTRREG;  /* signals that it is a regular long string */
   ts->storage.seed = G(L)->seed;
   ts->contents = cast_charp(ts) + REGULAR_STRING_HEADER;
   ts->contents[l] = '\0';  /* ending 0 */
+  return ts;
+}
+
+TString *luaS_createlngstrobj (lua_State *L, size_t l, int result) {
+  GCObject *object;
+  if (l_unlikely(l >= MAX_SIZE - sizeof(TString))) luaM_toobig(L);
+  object = result ? luaC_newresultstring(L, sizestrreg(l))
+                  : luaC_newobj(L, LUA_VLNGSTR, sizestrreg(l));
+  return initlong(L, object, l);
+}
+
+TString *luaS_trytasklstr (lua_State *L, const char *str, size_t len) {
+  GCObject *object = luaC_trytaskstring(L, sizestrreg(len), 0);
+  TString *ts;
+  if (object == NULL) return NULL;
+  ts = initlong(L, object, len);
+  memcpy(getlngstr(ts), str, len);
   return ts;
 }
 
@@ -417,15 +428,16 @@ static TString *internshrstr (lua_State *L, const char *str, size_t len) {
 /*
 ** new string (with explicit length)
 */
+static TString *copylong (lua_State *L, const char *str, size_t len, int result) {
+  TString *ts = luaS_createlngstrobj(L, len, result);
+  memcpy(getlngstr(ts), str, len);
+  luaS_finishlongstr(ts);
+  return ts;
+}
+
 TString *luaS_newlstr (lua_State *L, const char *str, size_t l) {
-  if (l <= LUAI_MAXSHORTLEN)  /* short string? */
-    return internshrstr(L, str, l);
-  else {
-    TString *ts = luaS_createlngstrobj(L, l, 0);
-    memcpy(getlngstr(ts), str, l * sizeof(char));
-    luaS_finishlongstr(ts);
-    return ts;
-  }
+  if (l <= LUAI_MAXSHORTLEN) return internshrstr(L, str, l);
+  return copylong(L, str, l, 0);
 }
 
 
@@ -493,7 +505,8 @@ TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len) {
 TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   uintptr_t *row;
   TString *result;
-  if (len <= 1 || len > LUAI_MAXSHORTLEN) return luaS_newlstr(L, str, len);
+  if (len > LUAI_MAXSHORTLEN) return copylong(L, str, len, 1);
+  if (len <= 1) return internshrstr(L, str, len);
   row = stringcacherow(L, shortstringset(str, len));
   if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
     luaC_tracepointer(L, result);

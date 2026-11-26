@@ -1655,7 +1655,7 @@ static int __attribute__((noinline)) trystringrangecall (
     if (L->top.p < ci->top.p) L->top.p = ci->top.p; \
     L->poll_remaining = 1024; \
     luaX_poll(L); \
-    if (L->task_nursery_pending) luaC_taskstep(L); \
+    if (L->task_nursery_pending && L->native_depth == 0) luaC_taskstep(L); \
     updatebase(ci); \
     L->top.p = restorestack(L, top); \
     updatetrap(ci); \

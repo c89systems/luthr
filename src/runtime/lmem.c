@@ -1106,7 +1106,7 @@ void luaM_trimtaskpages (lua_State *L) {
 }
 
 static void *trytaskpage (lua_State *L, size_t size, unsigned blockbytes,
-                          unsigned pool, int refill) {
+                          unsigned pool, int refill, int table) {
   unsigned index = taskpageindex(pool);
   LuaAllocPage *page = L->task_alloc_pages[index];
   LuaAllocBlock *block;
@@ -1148,7 +1148,7 @@ static void *trytaskpage (lua_State *L, size_t size, unsigned blockbytes,
   page->used++;
   __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_COLLECTABLE,
                     __ATOMIC_RELAXED);
-  if (pool < LUA_ALLOC_BINS) {
+  if (table) {
     bit = UINT64_C(1) << (slot % 64);
     lua_assert(!(page->trace_slots[slot / 64] & bit));
     page->trace_slots[slot / 64] |= bit;
@@ -1166,7 +1166,12 @@ static void *trytaskpage (lua_State *L, size_t size, unsigned blockbytes,
 
 void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
   unsigned pool = luaMP_sizeclass(size);
-  return trytaskpage(L, size, cast_uint(luaMP_binbytes(pool)), pool, refill);
+  return trytaskpage(L, size, cast_uint(luaMP_binbytes(pool)), pool, refill, 1);
+}
+
+void *luaM_trytaskstring (lua_State *L, size_t size, int refill) {
+  unsigned pool = luaMP_sizeclass(size);
+  return trytaskpage(L, size, cast_uint(luaMP_binbytes(pool)), pool, refill, 0);
 }
 
 static void abandonpage (lua_State *L, unsigned pool) {
@@ -1475,7 +1480,8 @@ void *luaM_trytaskuserdata (lua_State *L, size_t size) {
   if (udatapools(G(L)) == NULL && !prepareudatapools(L)) return NULL;
   if (!luaC_tasktableeligible(L, size)) return NULL;
   bin = udatasizeclass(size);
-  return trytaskpage(L, size, userdata_sizes[bin], LUA_ALLOC_USERDATA_POOL + bin, 1);
+  return trytaskpage(L, size, userdata_sizes[bin], LUA_ALLOC_USERDATA_POOL + bin,
+                     1, 0);
 }
 
 static void *allocudata (lua_State *L, size_t size) {
