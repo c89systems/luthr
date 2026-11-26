@@ -2,9 +2,26 @@ include("${CMAKE_CURRENT_LIST_DIR}/BenchmarkGc.cmake")
 file(STRINGS "${output_dir}/summary.csv" header LIMIT_COUNT 1)
 foreach(field IN ITEMS metadata_handoffs metadata_handoff_ns metadata_handoff_max_ns
     minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
-    minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns)
+    minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns
+    sweep_empty_calls sweep_complete_calls sweep_finalizer_calls sweep_finalizer_ns)
   if(NOT header MATCHES "(^|,)gc_${field}(,|$)")
     message(FATAL_ERROR "GC wait metric is missing from summary: ${field}")
+  endif()
+endforeach()
+file(WRITE "${output_dir}/native-probe.lua"
+  "local native=assert(package.loadlib([==[${native_fixture}]==], 'luaopen_compat_fixture'))()\n"
+  "return function() return native.reference(42) end,function() end,function() end,42\n")
+foreach(runtime IN ITEMS control profile)
+  execute_process(COMMAND "${${runtime}}" "${output_dir}/native-probe.lua" native_probe
+    generational 1 1 2 1 1 0 0 RESULT_VARIABLE result
+    OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  if(NOT result STREQUAL "0" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "Native GC probe failed: ${runtime}: ${result}: ${output}${error}")
+  endif()
+  string(STRIP "${output}" output)
+  string(JSON checksum GET "${output}" checksum)
+  if(NOT checksum EQUAL 84)
+    message(FATAL_ERROR "Native GC probe returned the wrong checksum: ${runtime}: ${output}")
   endif()
 endforeach()
 # The quick matrix can fit below the collector's debt threshold. These bounded
@@ -65,7 +82,8 @@ foreach(path IN LISTS gc_profile_paths)
         back_records repeated_back_records object_reclaim_calls object_reclaim_ns
         trace_ns trace_scan_ns trace_peak_workers trace_work_bytes
         root_snapshot_requests root_snapshot_calls root_snapshot_ns stopped_ns
-        sweep_ns sweep_scan_ns sweep_records sweep_paused_records
+        sweep_calls sweep_empty_calls sweep_complete_calls
+        sweep_ns sweep_scan_ns sweep_finalizer_calls sweep_finalizer_ns sweep_records sweep_paused_records
         startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
         minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
         minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns
@@ -77,6 +95,7 @@ foreach(path IN LISTS gc_profile_paths)
     math(EXPR minor_measured "${minor_before_wake_ns} + ${minor_during_wake_ns} + ${minor_after_wake_ns}")
     math(EXPR minor_fiber "${minor_dispatch_ns} + ${minor_restore_ns}")
     math(EXPR root_capacity "2 * ${root_snapshot_requests}")
+    math(EXPR sweep_measured "${sweep_scan_ns} + ${sweep_finalizer_ns}")
     foreach(clock IN ITEMS cpu wall)
       string(JSON total GET "${row}" "${clock}_ns")
       string(JSON execution GET "${row}" "execution_${clock}_ns")
@@ -101,7 +120,10 @@ foreach(path IN LISTS gc_profile_paths)
         repeated_back_records GREATER back_records OR
         back_records GREATER barrier_records OR
         object_reclaim_ns GREATER collector_body_ns OR trace_scan_ns GREATER trace_ns OR
-        sweep_scan_ns GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
+        sweep_measured GREATER sweep_ns OR sweep_paused_records GREATER 0 OR
+        sweep_empty_calls GREATER sweep_calls OR sweep_complete_calls GREATER sweep_calls OR
+        sweep_finalizer_calls GREATER sweep_calls OR
+        (sweep_finalizer_calls EQUAL 0 AND NOT sweep_finalizer_ns EQUAL 0) OR
         root_snapshot_calls GREATER root_capacity OR
         (root_snapshot_calls EQUAL 0 AND NOT root_snapshot_ns EQUAL 0) OR
         metadata_handoffs GREATER metadata_waits OR metadata_handoff_ns GREATER metadata_wait_ns OR

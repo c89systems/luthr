@@ -63,7 +63,9 @@ set(probes stop_requests stop_gc stop_barrier stop_other collector_calls
   startup_waits startup_wait_ns arm_waits arm_wait_ns minor_waits minor_wait_ns
   minor_woken minor_before_wake_ns minor_during_wake_ns minor_after_wake_ns
   minor_fiber_woken minor_dispatch_ns minor_restore_ns minor_wake_batches minor_wake_ns
-  phase_waits phase_wait_ns trace_waits trace_wait_ns sweep_calls sweep_ns sweep_scan_ns sweep_records
+  phase_waits phase_wait_ns trace_waits trace_wait_ns
+  sweep_calls sweep_empty_calls sweep_complete_calls sweep_ns sweep_scan_ns
+  sweep_finalizer_calls sweep_finalizer_ns sweep_records
   sweep_paused_records sweep_poll_calls sweep_assist_calls sweep_peak_workers
   root_snapshot_requests root_snapshot_calls root_snapshot_ns
   heap_deferred_entries

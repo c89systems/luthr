@@ -142,6 +142,35 @@ static void snapshot_while_arming(lua_State *state, GcProbe *record) {
           record->root_snapshot_ns == elapsed);
 }
 
+static unsigned finalized;
+
+static int finalize(lua_State *state) {
+  require(lua_type(state, 1) == LUA_TUSERDATA);
+  finalized++;
+  return 0;
+}
+
+static void sweep_finalizer(lua_State *state, GcProbe *record) {
+  lua_gc(state, LUA_GCGEN);
+  lua_gc(state, LUA_GCSTOP);
+  lua_gc(state, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_newuserdatauv(state, 1, 0);
+  lua_newtable(state);
+  lua_pushcfunction(state, finalize);
+  lua_setfield(state, -2, "__gc");
+  lua_setmetatable(state, -2);
+  lua_pop(state, 1);
+  record->enabled = 1;
+  lua_gc(state, LUA_GCSTEP, (size_t)0);
+  record->enabled = 0;
+  require(finalized == 1 && record->sweep_finalizer_calls == 1);
+  require(record->sweep_complete_calls != 0 &&
+          record->sweep_empty_calls <= record->sweep_calls);
+  require(record->sweep_finalizer_ns > 0 &&
+          record->sweep_finalizer_ns + record->sweep_scan_ns <=
+              record->sweep_ns);
+}
+
 int main(void) {
   lua_State *state = luaL_newstate();
   struct fixture fixture = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
@@ -177,6 +206,7 @@ int main(void) {
           record.metadata_wait_ns == wait_ns);
   minor_notification(state, &fixture, &record);
   snapshot_while_arming(state, &record);
+  sweep_finalizer(state, &record);
   gc_probe_bind(NULL, NULL);
   lua_close(state);
   require(pthread_cond_destroy(&fixture.changed) == 0);

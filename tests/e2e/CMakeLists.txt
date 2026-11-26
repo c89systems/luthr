@@ -160,6 +160,7 @@ foreach(mode IN ITEMS control profile)
   set_target_properties(scheduled_gc_${mode} PROPERTIES C_STANDARD 99)
   target_compile_options(scheduled_gc_${mode} PRIVATE -Wall -Wextra -Werror)
   target_compile_definitions(scheduled_gc_${mode} PRIVATE LUTHR_BENCH_SCHEDULER)
+  target_link_options(scheduled_gc_${mode} PRIVATE -Wl,--export-dynamic)
   target_link_libraries(scheduled_gc_${mode} PRIVATE luthr_static)
 endforeach()
 target_sources(scheduled_gc_profile PRIVATE gc_probe.c)
@@ -174,7 +175,8 @@ foreach(symbol IN ITEMS luaW_stop luaW_start luaW_heapenter luaW_collectenter lu
     luaC_step luaC_userstep luaC_fullgc luaC_syncbarrier luaC_publish luaC_drainbarriers luaC_reclaim
     luaM_reclaimpages luaQ_wait luaQ_waitcarrier luaC_assistreclaim luaW_waitcollector luaCT_pause
     luaC_tracebatch luaC_scantrace luaC_assisttrace luaC_polltrace luaC_snapshot luaC_checksnapshot luaC_finishtrace
-    luaC_sweepbatch luaC_sweeppayload luaSC_collectidle luaC_scansweep luaC_pollsweep luaC_assistsweep luaQ_wake)
+    luaC_sweepbatch luaC_sweeppayload luaSC_collectidle luaC_scansweep luaC_pollsweep luaC_assistsweep
+    luaC_runfinalizers luaQ_wake)
   target_link_options(scheduled_gc_profile PRIVATE "-Wl,--wrap=${symbol}")
   target_link_options(gc_handoff_probe_test PRIVATE "-Wl,--wrap=${symbol}")
 endforeach()
@@ -197,6 +199,7 @@ add_custom_target(benchmark_gc
   VERBATIM USES_TERMINAL)
 add_test(NAME lua_gc_probe_smoke COMMAND "${CMAKE_COMMAND}" ${gc_arguments}
   -Dsamples=2 -Dwarmups=1 -Dtasks=8 -Dwork_divisor=16 "-Dlevels=1;2"
+  "-Dnative_fixture=$<TARGET_FILE:compat_fixture>"
   "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}/gc-probe-smoke"
   -P "${CMAKE_CURRENT_SOURCE_DIR}/GcProbeSmoke.cmake")
 set_tests_properties(lua_gc_probe_smoke PROPERTIES

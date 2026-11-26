@@ -26,7 +26,8 @@
   X(trace_empty_init) X(trace_empty_mark) X(trace_empty_weak) X(trace_empty_quiescing) \
   X(trace_empty_soft) X(trace_empty_busy) X(trace_empty_ready) X(trace_empty_metadata) \
   X(trace_retry_protos) X(trace_retry_upvalues) X(trace_retry_closures) X(trace_retry_userdata) \
-  X(sweep_calls) X(sweep_ns) X(sweep_scan_ns) X(sweep_records) \
+  X(sweep_calls) X(sweep_empty_calls) X(sweep_complete_calls) \
+  X(sweep_ns) X(sweep_scan_ns) X(sweep_finalizer_calls) X(sweep_finalizer_ns) X(sweep_records) \
   X(sweep_paused_records) X(sweep_poll_calls) X(sweep_assist_calls) \
   X(root_snapshot_requests) X(root_snapshot_calls) X(root_snapshot_ns) \
   X(heap_entries) X(heap_gc_entries) X(heap_contended_entries) X(heap_gc_wait_ns) X(heap_deferred_entries) \

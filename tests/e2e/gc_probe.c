@@ -667,6 +667,8 @@ lu_mem __wrap_luaC_sweepbatch(lua_State *L, unsigned limit, int complete) {
   lu_mem worked = __real_luaC_sweepbatch(L, limit, complete);
   if (record != NULL) {
     record->sweep_calls++;
+    record->sweep_empty_calls += worked == 0;
+    record->sweep_complete_calls += complete != 0;
     record->sweep_ns += now() - started;
   }
   return worked;
@@ -679,10 +681,24 @@ lu_mem __wrap_luaC_sweeppayload(lua_State *L, unsigned limit) {
   lu_mem worked = __real_luaC_sweeppayload(L, limit);
   if (record != NULL) {
     record->sweep_calls++;
+    record->sweep_empty_calls += worked == 0;
     record->worker_sweep_calls++;
     record->sweep_ns += now() - started;
   }
   return worked;
+}
+
+void __real_luaC_runfinalizers(lua_State *L);
+void __wrap_luaC_runfinalizers(lua_State *L) {
+  /* The reference from lsweep.c runs inside the sweep timer. Calls inside
+   * lgc.c are accounted by their enclosing collection operation. */
+  GcProbe *record = probe(L);
+  uint64_t started = record != NULL ? now() : 0;
+  __real_luaC_runfinalizers(L);
+  if (record != NULL) {
+    record->sweep_finalizer_calls++;
+    record->sweep_finalizer_ns += now() - started;
+  }
 }
 
 void __wrap_luaC_scansweep(lua_State *L, LuaSweepWork *work) {
