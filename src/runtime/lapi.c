@@ -1713,6 +1713,9 @@ LUA_API int lua_setiuservalue (lua_State *L, int idx, int n) {
   api_checkpop(L, 1);
   o = luaA_indexvalue(L, idx, &indexed);
   api_check(L, ttisfulluserdata(o), "full userdata expected");
+  if (cast_uint(n) - 1u < cast_uint(uvalue(o)->nuvalue) &&
+      luaC_taskuserdata(gcvalue(o)) && iscollectable(s2v(L->top.p - 1)))
+    luaC_sealtask(L);
   luaA_begin(L, gcvalue(o), &scope);
   if (!(cast_uint(n) - 1u < cast_uint(uvalue(o)->nuvalue)))
     res = 0;  /* 'n' not in [1, uvalue(o)->nuvalue] */

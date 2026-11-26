@@ -305,9 +305,18 @@ l_sinline int luaC_taskstring (const GCObject *object) {
          (__atomic_load_n(&gco2ts(object)->extra, __ATOMIC_ACQUIRE) & LSTR_TASK);
 }
 
+enum { TASK_UDATA = 1, TASK_UDATA_LIVE = 2, TASK_UDATA_OLD = 4 };
+
+l_sinline int luaC_taskuserdata (const GCObject *object) {
+  return object->tt == LUA_VUSERDATA &&
+         (__atomic_load_n(&gco2u(object)->task_flags, __ATOMIC_ACQUIRE) &
+          TASK_UDATA);
+}
+
 l_sinline int luaC_taskobject (const GCObject *object) {
-  return object->tt == LUA_VTABLE ? luaC_tasktable(gco2t(object))
-                                 : luaC_taskstring(object);
+  if (object->tt == LUA_VTABLE) return luaC_tasktable(gco2t(object));
+  if (object->tt == LUA_VUSERDATA) return luaC_taskuserdata(object);
+  return luaC_taskstring(object);
 }
 
 l_sinline int luaC_objectdead (global_State *g, const GCObject *object) {
@@ -479,6 +488,13 @@ LUAI_FUNC GCObject *luaC_trytasktable (lua_State *L, size_t size, int refill);
 LUAI_FUNC int luaC_tasktableeligible (lua_State *L, size_t bytes);
 LUAI_FUNC int luaC_taskpagefits (lua_State *L, size_t bytes);
 #define luaC_hastaskheap(L) ((L)->task_objects != NULL || (L)->task_pages != NULL)
+LUAI_FUNC GCObject *luaC_newuserdata (lua_State *L, size_t size, int leaf);
+LUAI_FUNC void luaC_publishtaskuserdata (lua_State *L, GCObject *object);
+LUAI_FUNC int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
+                                    int finalizable);
+LUAI_FUNC void luaC_runtaskfinalizers (lua_State *L);
+LUAI_FUNC int luaC_markfinalizable (lua_State *L, GCObject *object);
+LUAI_FUNC void luaC_transferfinalizer (lua_State *L, GCObject *object);
 LUAI_FUNC void luaC_sealtask (lua_State *L);
 LUAI_FUNC void luaC_sealtasks (lua_State *L);
 LUAI_FUNC void luaC_preparefull (lua_State *L);
@@ -491,6 +507,7 @@ LUAI_FUNC void luaC_taskresize (lua_State *L, Table *table, l_mem change);
 LUAI_FUNC void luaC_taskrelocate (lua_State *L, const Node *base,
                                  const Node *slot);
 LUAI_FUNC void luaC_taskstep (lua_State *L);
+LUAI_FUNC void luaC_finishtasknursery (lua_State *L, void *argument);
 LUAI_FUNC void luaC_freetaskroots (lua_State *L);
 LUAI_FUNC void luaC_collectnursery (lua_State *L);
 

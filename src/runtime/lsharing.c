@@ -79,7 +79,8 @@ static void enqueue (lua_State *L, GCObject *object, GCObject **pending) {
   owner = __atomic_load_n(state, __ATOMIC_ACQUIRE);
   if (owner & LUA_OBJECT_SHARED) return;
   lua_assert(owner == cast(uintptr_t, L));
-  if (object->tt == LUA_VTABLE && luaC_tasktable(gco2t(object)))
+  if ((object->tt == LUA_VTABLE && luaC_tasktable(gco2t(object))) ||
+      luaC_taskuserdata(object))
     luaC_sealtask(L);
   /* The queue is a temporary root even for a graph reached through weak edges.
   ** Table ownership resolves the current weak cutoff before enqueueing them. */
@@ -213,7 +214,7 @@ int luaA_bindprivateuserdata (lua_State *L, Udata *userdata, Table *mt) {
   TValue method;
   uint64_t layout;
   int ready, shared = 0;
-  int leaf = userdata->nuvalue == 0;
+  int leaf = userdata->nuvalue == 0 || luaC_taskuserdata(owner);
   if (!luaA_local(L, owner) || luaW_iscollector(L) || (g->gcstp & GCSTPCLS) ||
       !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED))
     return 0;
@@ -228,6 +229,11 @@ int luaA_bindprivateuserdata (lua_State *L, Udata *userdata, Table *mt) {
   ready = lane != NULL && luaH_readshortstr(g, L, mt, g->tmname[TM_GC], &method) &&
           (leaf || shared || ttisnil(&method));
   if (ready) {
+    if (leaf && luaC_taskuserdata(owner) &&
+        luaC_bindtaskuserdata(L, userdata, mt, !ttisnil(&method))) {
+      luaH_releasewriter(L, mt, lane);
+      return 1;
+    }
     luaC_prewriteptr(L, __atomic_load_n(&userdata->metatable, __ATOMIC_ACQUIRE), mt);
     luaA_storeudatameta(userdata, mt);
     luaC_objbarrier(L, userdata, mt);

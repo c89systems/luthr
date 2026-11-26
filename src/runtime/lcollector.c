@@ -73,7 +73,8 @@ static void advanceclosedtrace (lua_State *L) {
       break;
     }
     if (plan->next != NULL || plan->deferred != NULL || plan->pending != NULL ||
-        (plan->phase == TRACE_FINALIZERS && plan->finalizers != NULL)) break;
+        (plan->phase == TRACE_FINALIZERS &&
+         (plan->finalizers != NULL || plan->finalizer_order.unordered))) break;
     if (continueephemerons(g)) break;
     switch (plan->phase) {
       case TRACE_PENDING:

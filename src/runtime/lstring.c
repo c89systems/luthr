@@ -463,7 +463,7 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   GCObject *o;
   if (l_unlikely(s > MAX_SIZE - udatamemoffset(nuvalue)))
     luaM_toobig(L);
-  o = luaC_newobj(L, LUA_VUSERDATA, sizeudata(nuvalue, s));
+  o = luaC_newuserdata(L, sizeudata(nuvalue, s), nuvalue <= 1);
   u = gco2u(o);
   u->len = s;
   luaA_initlock(&u->access);

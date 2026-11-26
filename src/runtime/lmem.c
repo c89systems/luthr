@@ -955,8 +955,17 @@ static LuaAllocPage *takesparepage (global_State *g, unsigned pool) {
   return page;
 }
 
+l_sinline size_t finalizerbytes (unsigned blockbytes, unsigned pool) {
+  return pool < LUA_ALLOC_BINS && blockbytes >= sizeof(Table) ? sizeof(uint64_t) : 0;
+}
+
 static void preparepage (LuaAllocPage *page,
-                         unsigned blockbytes, unsigned pool, size_t bytes) {
+                         unsigned blockbytes, unsigned pool, size_t bytes,
+                         int task) {
+  unsigned stride = blockbytes + sizeof(LuaAllocBlock);
+  size_t extent = bytes - (task ? sizeof(LuaTaskPageBits) : 0);
+  unsigned slots = cast_uint((extent - LUA_ALLOC_PAGE_HEADER) /
+                             (stride + finalizerbytes(blockbytes, pool)));
   page->local = NULL;
   page->remote = 0;
   page->notified = NULL;
@@ -975,14 +984,14 @@ static void preparepage (LuaAllocPage *page,
   page->trace_next = NULL;
   memset(page->trace_slots, 0, sizeof(page->trace_slots));
   page->trace_pending = 0;
-  page->task_private = page->task_backing = page->task_dirty = 0;
-  page->task_top = page->task_capacity = 0;
+  page->task_private = task;
+  page->task_backing = page->task_dirty = 0;
+  page->task_top = 0;
+  page->task_capacity = task ? slots : 0;
+  page->slot_end = cast_uint(LUA_ALLOC_PAGE_HEADER) + slots * stride;
   page->task_mark = 0;
   page->task_bytes = 0;
-  {
-    unsigned stride = blockbytes + sizeof(LuaAllocBlock);
-    page->trace_scale = (LUA_ALLOC_PAGE_MAX + stride - 1) / stride;
-  }
+  page->trace_scale = (LUA_ALLOC_PAGE_MAX + stride - 1) / stride;
 }
 
 static size_t limitpage (const global_State *g, size_t bytes, size_t minimum) {
@@ -997,7 +1006,7 @@ static LuaAllocPage *installpage (lua_State *L, LuaAllocPage *page,
   global_State *g = G(L);
   LuaAllocationCache *cache = allocationcache(L);
   /* Participation keeps the cache lease stable during initialization. */
-  preparepage(page, blockbytes, pool, bytes);
+  preparepage(page, blockbytes, pool, bytes, 0);
   luaMP_initpage(L, page);
   luaX_checksync(pthread_mutex_lock(poolmutex(g, pool)));
   page->next = *poolpages(g, pool);
@@ -1066,10 +1075,15 @@ l_sinline int taskpageavailable (const LuaAllocPage *page) {
     (page->local != NULL || page->task_top < page->task_capacity);
 }
 
+l_sinline unsigned taskpageindex (unsigned pool) {
+  return pool < LUA_ALLOC_BINS ? pool
+    : LUA_ALLOC_BINS + pool - LUA_ALLOC_USERDATA_POOL;
+}
+
 void luaM_trimtaskpages (lua_State *L) {
   LuaAllocPage **link = &L->task_pages, *discard = NULL, *page;
   while ((page = *link) != NULL) {
-    unsigned pool = page->pool;
+    unsigned pool = taskpageindex(page->pool);
     lua_assert(!page->task_dirty);
     if (page->used == 0 && page != L->task_alloc_pages[pool]) {
       *link = page->next;
@@ -1091,16 +1105,16 @@ void luaM_trimtaskpages (lua_State *L) {
   }
 }
 
-void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
-  unsigned pool = luaMP_sizeclass(size);
-  LuaAllocPage *page = L->task_alloc_pages[pool];
+static void *trytaskpage (lua_State *L, size_t size, unsigned blockbytes,
+                          unsigned pool, int refill) {
+  unsigned index = taskpageindex(pool);
+  LuaAllocPage *page = L->task_alloc_pages[index];
   LuaAllocBlock *block;
   unsigned slot;
   uint64_t bit;
   if (!taskpageavailable(page)) {
-    unsigned blockbytes = cast_uint(luaMP_binbytes(pool));
     size_t bytes, minimum = LUA_ALLOC_PAGE_HEADER + sizeof(LuaTaskPageBits) +
-                            2 * (sizeof(LuaAllocBlock) + blockbytes);
+      2 * (sizeof(LuaAllocBlock) + blockbytes + finalizerbytes(blockbytes, pool));
     if (!refill) return NULL;
     bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8 : page->bytes * 2;
     bytes = limitpage(G(L), bytes, minimum);
@@ -1115,14 +1129,11 @@ void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
       callfrealloc(L, page, bytes, 0);
       return NULL;
     }
-    preparepage(page, blockbytes, pool, bytes);
-    page->task_private = 1;
-    page->task_capacity = cast_uint((bytes - LUA_ALLOC_PAGE_HEADER -
-      sizeof(LuaTaskPageBits)) / (sizeof(LuaAllocBlock) + page->blockbytes));
+    preparepage(page, blockbytes, pool, bytes, 1);
     memset(luaMP_taskbits(page), 0, sizeof(LuaTaskPageBits));
     page->next = L->task_pages;
     page->previous = NULL;
-    L->task_pages = L->task_alloc_pages[pool] = page;
+    L->task_pages = L->task_alloc_pages[index] = page;
     L->task_page_bytes += bytes;
   }
   if (page->local != NULL) {
@@ -1137,18 +1148,25 @@ void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
   page->used++;
   __atomic_store_n(&block->block.page, cast(uintptr_t, page) | LUA_BLOCK_COLLECTABLE,
                     __ATOMIC_RELAXED);
-  bit = UINT64_C(1) << (slot % 64);
-  lua_assert(!(page->trace_slots[slot / 64] & bit));
-  page->trace_slots[slot / 64] |= bit;
-  luaMP_taskbits(page)->young[slot / 64] |= bit;
-  if (!page->task_dirty) {
-    page->task_dirty = 1;
-    page->dirty_next = L->task_young_pages;
-    L->task_young_pages = page;
+  if (pool < LUA_ALLOC_BINS) {
+    bit = UINT64_C(1) << (slot % 64);
+    lua_assert(!(page->trace_slots[slot / 64] & bit));
+    page->trace_slots[slot / 64] |= bit;
+    luaMP_taskbits(page)->young[slot / 64] |= bit;
+    if (!page->task_dirty) {
+      page->task_dirty = 1;
+      page->dirty_next = L->task_young_pages;
+      L->task_young_pages = page;
+    }
   }
   page->task_bytes += size;
   accountprivate(L, -cast(l_mem, size));
   return block + 1;
+}
+
+void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
+  unsigned pool = luaMP_sizeclass(size);
+  return trytaskpage(L, size, cast_uint(luaMP_binbytes(pool)), pool, refill);
 }
 
 static void abandonpage (lua_State *L, unsigned pool) {
@@ -1231,7 +1249,7 @@ static LuaAllocPage *refill (lua_State *L, unsigned blockbytes, unsigned pool,
   ** chunks, not OS mappings: reserving 4 KiB per cold coroutine/class strands
   ** most of a small public heap. Always fit at least two complete blocks. */
   size_t minimum = LUA_ALLOC_PAGE_HEADER +
-    2 * (sizeof(LuaAllocBlock) + blockbytes);
+    2 * (sizeof(LuaAllocBlock) + blockbytes + finalizerbytes(blockbytes, pool));
   size_t bytes;
   if (minimum < ALLOC_PAGE_MIN) minimum = ALLOC_PAGE_MIN;
   bytes = growcache(L, allocationcache(L), pool, minimum,
@@ -1442,15 +1460,30 @@ static int prepareudatapools (lua_State *L) {
   return 1;
 }
 
-static void *allocudata (lua_State *L, size_t size) {
-  static const unsigned short sizes[LUA_ALLOC_USERDATA_BINS] =
-    {640, 768, 896, 1024, 1280, 1536, 1792, LUA_ALLOC_USERDATA_MAX};
+static const unsigned short userdata_sizes[LUA_ALLOC_USERDATA_BINS] =
+  {640, 768, 896, 1024, 1280, 1536, 1792, LUA_ALLOC_USERDATA_MAX};
+
+static unsigned udatasizeclass (size_t size) {
   unsigned bin = 0;
-  while (size > sizes[bin]) bin++;
+  while (size > userdata_sizes[bin]) bin++;
+  return bin;
+}
+
+void *luaM_trytaskuserdata (lua_State *L, size_t size) {
+  unsigned bin;
+  if (size <= LUA_ALLOC_MAX) return NULL;
+  if (udatapools(G(L)) == NULL && !prepareudatapools(L)) return NULL;
+  if (!luaC_tasktableeligible(L, size)) return NULL;
+  bin = udatasizeclass(size);
+  return trytaskpage(L, size, userdata_sizes[bin], LUA_ALLOC_USERDATA_POOL + bin, 1);
+}
+
+static void *allocudata (lua_State *L, size_t size) {
+  unsigned bin = udatasizeclass(size);
   if ((udatapools(G(L)) == NULL || udatacache(allocationcache(L)) == NULL) &&
       !prepareudatapools(L)) return NULL;
   /* An embedding allocator may accept the object but reject a page. */
-  return allocatepooled(L, size, sizes[bin], LUA_ALLOC_USERDATA_POOL + bin, 0);
+  return allocatepooled(L, size, userdata_sizes[bin], LUA_ALLOC_USERDATA_POOL + bin, 0);
 }
 
 void *luaM_malloc_ (lua_State *L, size_t size, int tag) {

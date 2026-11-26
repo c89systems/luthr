@@ -315,6 +315,17 @@ static void publishslot (lua_State *L, LuaAllocBlock *block, LuaAllocPage *page)
   luaMP_publishslot(L, page, epoch + 1);
 }
 
+void luaC_publishtaskuserdata (lua_State *L, GCObject *object) {
+  LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
+  LuaAllocPage *page = luaMP_page(block);
+  __atomic_store_n(&gco2u(object)->task_flags, 0, __ATOMIC_RELEASE);
+  if (page != NULL) {
+    if (!__atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE))
+      publishslot(L, block, page);
+  }
+  else luaC_publishobjects(L, object, object);
+}
+
 GCObject *luaC_trytasktable (lua_State *L, size_t size, int refill) {
   GCObject *o;
   if (L->task_owner == NULL || !luaC_tasktableeligible(L, size) ||
@@ -369,6 +380,9 @@ static GCObject *newobjdt (lua_State *L, lu_byte tt, size_t sz, size_t offset,
   if (tt == LUA_VUSERDATA) {
     LuaAllocBlock *block = cast(LuaAllocBlock *, p) - 1;
     LuaAllocPage *page = luaMP_page(block);
+    gco2u(o)->task_flags = 0;
+    if (tasklocal && !collector && L->task_owner != NULL &&
+        luaC_taskallocate(L, o, sz)) return o;
     if (page != NULL) {
       lua_assert(offset == 0);
       publishslot(L, block, page);
@@ -392,6 +406,25 @@ GCObject *luaC_newtable (lua_State *L, size_t size, int tasklocal) {
 
 GCObject *luaC_newresultstring (lua_State *L, size_t size) {
   return newobjdt(L, LUA_VLNGSTR, size, 0, size <= LUA_ALLOC_MAX);
+}
+
+GCObject *luaC_newuserdata (lua_State *L, size_t size, int leaf) {
+  int local = leaf && size <= LUA_ALLOC_USERDATA_MAX;
+  if (local && L->task_owner != NULL && !luaW_iscollector(L) &&
+      luaC_tasktableeligible(L, size)) {
+    GCObject *object = luaM_trytaskuserdata(L, size);
+    if (object != NULL) {
+      int owned;
+      object->tt = LUA_VUSERDATA;
+      object->next = NULL;
+      setmarked(object, luaC_newmark(G(L)));
+      owned = luaC_taskallocate(L, object, size);
+      lua_assert(owned);
+      UNUSED(owned);
+      return object;
+    }
+  }
+  return newobjdt(L, LUA_VUSERDATA, size, 0, local);
 }
 
 /*
@@ -711,6 +744,7 @@ static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   g->trace_plan.finalizer_tail = NULL;
   g->trace_plan.finalizer_new = NULL;
   g->trace_plan.finalizer_newtail = &g->trace_plan.finalizer_new;
+  g->trace_plan.finalizer_order = (LuaFinalizerOrder){0};
   g->trace_plan.base_marked = g->GCmarked;
   __atomic_store_n(&g->trace_plan.phase, TRACE_INIT, __ATOMIC_RELAXED);
   g->trace_plan.finish = finish;
@@ -1356,10 +1390,86 @@ unsigned luaC_skiplivefinalizers (global_State *g, unsigned limit) {
   return count;
 }
 
+static uint64_t *finalizerstamp (GCObject *object) {
+  LuaAllocBlock *block;
+  LuaAllocPage *page;
+  lua_assert(object->tt == LUA_VUSERDATA || object->tt == LUA_VTABLE);
+  if (object->tt == LUA_VUSERDATA) return &gco2u(object)->finalizer_order;
+  block = cast(LuaAllocBlock *, object) - 1;
+  page = luaMP_page(block);
+  lua_assert(page != NULL && page->pool < LUA_ALLOC_BINS);
+  return luaMP_finalizerstamp(page, block);
+}
+
+static void observefinalizer (LuaFinalizerOrder *order, GCObject *object) {
+  uint64_t stamp = *finalizerstamp(object);
+  if (order->first == 0) order->first = stamp;
+  else if (order->last < stamp) order->unordered = 1;
+  order->last = stamp;
+  order->varying |= stamp ^ order->first;
+}
+
+l_sinline GCObject **finalizerlink (GCObject *object, int task) {
+  return task ? &gco2u(object)->gclist : &object->next;
+}
+
+/* Merge by four ticket bits at a time. A shared pass claims at most one
+** trace batch, including when promotion introduced many old registrations. */
+static unsigned orderfinalizers (LuaFinalizerOrder *order, GCObject **head,
+                                 GCObject ***tail, unsigned limit, int task) {
+  unsigned work = 0;
+  lua_assert(order->unordered && order->varying != 0);
+  if (order->input == NULL) order->input = *head;
+  while (work < limit && order->unordered) {
+    unsigned shift = cast_uint(__builtin_ctzll(order->varying)) & ~3u;
+    while (order->input != NULL && work < limit) {
+      GCObject *object = order->input;
+      GCObject **link = finalizerlink(object, task);
+      unsigned digit = cast_uint(*finalizerstamp(object) >> shift) & 15u;
+      LuaTraceList *bucket = &order->bucket[digit];
+      order->input = *link;
+      if (bucket->head == NULL) bucket->head = object;
+      else *bucket->tail = object;
+      bucket->tail = link;
+      work++;
+    }
+    if (order->input == NULL) {
+      unsigned digit = 16;
+      GCObject **output = head;
+      while (digit != 0) {
+        LuaTraceList *bucket = &order->bucket[--digit];
+        if (bucket->head != NULL) {
+          *output = bucket->head;
+          output = bucket->tail;
+          bucket->head = NULL;
+        }
+      }
+      *output = NULL;
+      *tail = output;
+      order->varying &= ~(UINT64_C(15) << shift);
+      if (order->varying == 0) order->unordered = 0;
+      else order->input = *head;
+    }
+  }
+  return work;
+}
+
+static void sortfinalizers (GCObject **head, GCObject ***tail, int task) {
+  LuaFinalizerOrder order = {0};
+  GCObject *object;
+  *tail = head;
+  for (object = *head; object != NULL; object = **tail) {
+    observefinalizer(&order, object);
+    *tail = finalizerlink(object, task);
+  }
+  while (order.unordered) orderfinalizers(&order, head, tail, UINT_MAX, task);
+}
+
 void luaC_readytrace (global_State *g) {
   LuaTracePlan *plan = &g->trace_plan;
   unsigned ready = g->gray != NULL || luaC_pagetracepending(g) || plan->next != NULL ||
-    plan->pending != NULL || (plan->finalizers != NULL &&
+    plan->pending != NULL || plan->finalizer_order.unordered ||
+    (plan->finalizers != NULL &&
       (plan->phase == TRACE_FINALIZERS || !iswhite(g, *plan->finalizers)));
   __atomic_store_n(&g->trace_workers, ready, __ATOMIC_RELEASE);
   __atomic_store_n(&g->trace_ready,
@@ -1466,6 +1576,7 @@ static unsigned discoverfinalizers (global_State *g, unsigned limit) {
       object->next = NULL;
       *plan->finalizer_newtail = object;
       plan->finalizer_newtail = &object->next;
+      observefinalizer(&plan->finalizer_order, object);
       if (markfinalizerleaf(g, object)) continue;
       /* Discover every candidate before tracing their outgoing edges. Doing
       ** so in an earlier batch could hide another unreachable finalizable
@@ -1496,8 +1607,14 @@ void luaC_claimtrace (lua_State *L, LuaTraceWork *work, unsigned limit) {
   luaC_drainbarriers(L);
   if (plan->phase == TRACE_PENDING)
     work->scanned += pendingfinalizers(g, limit) * sizeof(GCObject);
-  else if (plan->phase == TRACE_FINALIZERS)
-    work->scanned += discoverfinalizers(g, limit) * sizeof(GCObject);
+  else if (plan->phase == TRACE_FINALIZERS) {
+    unsigned finalized = discoverfinalizers(g, limit);
+    if (plan->finalizers == NULL && plan->finalizer_order.unordered &&
+        finalized < limit)
+      finalized += orderfinalizers(&plan->finalizer_order, &plan->finalizer_new,
+                                  &plan->finalizer_newtail, limit - finalized, 0);
+    work->scanned += finalized * sizeof(GCObject);
+  }
   work->scanned += cast(lu_mem, g->GCmarked - marked);
   if (g->gray == NULL && !luaC_pagetracepending(g) && g->trace_deferred != NULL) {
     g->gray = g->trace_deferred;
@@ -1843,18 +1960,10 @@ static GCObject *takefinalizer (global_State *g) {
   return NULL;
 }
 
-static int GCTM (lua_State *L) {
-  global_State *g = G(L);
+static void callfinalizer (lua_State *L, GCObject *o) {
   LuaNativeRoot object, method;
-  GCObject *o;
-  lua_assert(!g->gcemergency);
-  if (!luaC_hasfinalizers(g)) return 0;
+  lua_assert(!G(L)->gcemergency);
   luaR_pushroot(L, &object);
-  o = takefinalizer(g);
-  if (o == NULL) {
-    luaR_poproot(L, &object);
-    return 0;
-  }
   lua_assert(tofinalize(o));
   /* Transfer the queue root before any operation that can withdraw. */
   setgcovalue(L, &object.value, o);
@@ -1883,7 +1992,40 @@ static int GCTM (lua_State *L) {
   }
   luaR_poproot(L, &method);
   luaR_poproot(L, &object);
+}
+
+static int GCTM (lua_State *L) {
+  global_State *g = G(L);
+  GCObject *object;
+  if (!luaC_hasfinalizers(g)) return 0;
+  object = takefinalizer(g);
+  if (object == NULL) return 0;
+  callfinalizer(L, object);
   return 1;
+}
+
+static void runtaskfinalizers (lua_State *L, void *argument) {
+  GCObject *object;
+  UNUSED(argument);
+  while ((object = L->task_finalizers) != NULL) {
+    Udata *userdata = gco2u(object);
+    L->task_finalizers = userdata->gclist;
+    userdata->gclist = NULL;
+    L->task_finalizable--;
+    callfinalizer(L, object);
+  }
+}
+
+void luaC_runtaskfinalizers (lua_State *L) {
+  GCObject **tail;
+  LuaGCFrame frame;
+  TStatus status;
+  if (L->task_finalizers == NULL) return;
+  sortfinalizers(&L->task_finalizers, &tail, 1);
+  luaC_entergc(L, &frame);
+  status = luaD_rawrunprotected(L, runtaskfinalizers, NULL);
+  luaC_leavegc(L, &frame);
+  if (status != LUA_OK) luaD_throw(L, status);
 }
 
 
@@ -1937,13 +2079,15 @@ static void appendfinalizers (global_State *g, GCObject *head, GCObject **tail) 
 /* Shutdown alone selects every remaining finalizer, regardless of reachability.
 ** Ordinary collection discovers candidates in admitted, bounded batches. */
 static void separateallfinalizers (global_State *g) {
-  GCObject *curr;
-  while ((curr = g->finobj) != NULL) {
-    lua_assert(tofinalize(curr));
-    g->finobj = curr->next;
-    curr->next = NULL;
-    appendfinalizers(g, curr, &curr->next);
-  }
+  uintptr_t pending = __atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED);
+  GCObject *head = finalizerhead(pending);
+  lua_assert(!(pending & FINALIZER_ROOT_SCAN));
+  if (head != NULL) *g->tobefnz_tail = g->finobj;
+  else head = g->finobj;
+  g->finobj = NULL;
+  sortfinalizers(&head, &g->tobefnz_tail, 0);
+  if (head == NULL) g->tobefnz_tail = NULL;
+  __atomic_store_n(&g->tobefnz, cast(uintptr_t, head), __ATOMIC_RELEASE);
 }
 
 
@@ -1961,11 +2105,19 @@ static void resetfinalizercursor (lua_State *L) {
 
 /* Finalization is an independent index. Registration never searches or
 ** modifies allocation membership, generation boundaries, or a sweep cursor. */
-l_sinline void __attribute__((always_inline)) registerfinalizer (lua_State *L,
-                                                                GCObject *o) {
+int luaC_markfinalizable (lua_State *L, GCObject *o) {
+  if (tofinalize(o) || (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT),
+                                        __ATOMIC_RELAXED) & bitmask(FINALIZEDBIT)))
+    return 0;
+  *finalizerstamp(o) = __atomic_add_fetch(&G(L)->finalizer_sequence, 1,
+                                       __ATOMIC_RELAXED);
+  return 1;
+}
+
+void luaC_transferfinalizer (lua_State *L, GCObject *o) {
   global_State *g = G(L);
-  if (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT), __ATOMIC_RELAXED) &
-      bitmask(FINALIZEDBIT)) return;
+  lua_assert(tofinalize(o));
+  lua_assert(__atomic_load_n(luaA_sharing(o), __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED);
   luaC_noteyoung(g);
   if (luaW_iscollector(L)) {
     o->next = g->finobj;
@@ -1980,6 +2132,10 @@ l_sinline void __attribute__((always_inline)) registerfinalizer (lua_State *L,
     __atomic_store_n(&o->next, next, __ATOMIC_RELAXED);
     if (next == NULL) g->new_finalizers_tail = o;
   }
+}
+
+static void registerfinalizer (lua_State *L, GCObject *o) {
+  if (luaC_markfinalizable(L, o)) luaC_transferfinalizer(L, o);
 }
 
 void luaC_publish (lua_State *L) {

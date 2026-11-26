@@ -52,6 +52,7 @@ struct LuaAllocPage {
   unsigned task_dirty;
   unsigned task_top;  /* first virgin slot, before any free-list reuse */
   unsigned task_capacity;  /* nonzero through the lifetime of a task page */
+  unsigned slot_end;  /* finalizer tickets and private bitmaps follow the slots */
   lu_byte task_mark;  /* inherited by task tables when the page is published */
   LuaAllocPage *sweep_next;
   LuaAllocPage **sweep_previous;  /* pool-mutex collector directory */
@@ -85,7 +86,7 @@ typedef struct LuaTaskPageBits {
 } LuaTaskPageBits;
 
 l_sinline size_t luaMP_slotend (const LuaAllocPage *page) {
-  return page->task_capacity ? page->bytes - sizeof(LuaTaskPageBits) : page->bytes;
+  return page->slot_end;
 }
 
 l_sinline LuaTaskPageBits *luaMP_taskbits (LuaAllocPage *page) {
@@ -116,6 +117,7 @@ LUAI_FUNC void luaM_freeobjectbatch (lua_State *L, LuaAllocPage *page,
                                     unsigned count, l_mem bytes, int private);
 LUAI_FUNC void luaMP_resetnotice (LuaAllocPage *page);
 LUAI_FUNC void *luaM_trytasktable (lua_State *L, size_t size, int refill);
+LUAI_FUNC void *luaM_trytaskuserdata (lua_State *L, size_t size);
 LUAI_FUNC void luaM_adopttaskpage (lua_State *L, LuaAllocPage *page,
                                  uint64_t epoch, lu_byte mark);
 LUAI_FUNC void luaM_discardtaskpage (lua_State *L, LuaAllocPage *page);
@@ -148,6 +150,12 @@ l_sinline LuaAllocBlock *luaMP_slotblock (LuaAllocPage *page, unsigned slot) {
   size_t stride = sizeof(LuaAllocBlock) + page->blockbytes;
   return cast(LuaAllocBlock *, cast_charp(page) + LUA_ALLOC_PAGE_HEADER +
                               slot * stride);
+}
+
+l_sinline uint64_t *luaMP_finalizerstamp (LuaAllocPage *page,
+                                        const LuaAllocBlock *block) {
+  return cast(uint64_t *, cast_charp(page) + luaMP_slotend(page)) +
+         luaMP_slotindex(page, block);
 }
 
 l_sinline size_t luaMP_binbytes (unsigned bin) {

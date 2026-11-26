@@ -4,6 +4,7 @@
 
 #include <string.h>
 
+#include "laccess.h"
 #include "ldebug.h"
 #include "lfunc.h"
 #include "lgc.h"
@@ -191,9 +192,9 @@ static void charge (lua_State *L, size_t bytes) {
 
 int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
   int table = o->tt == LUA_VTABLE;
-  int page = table &&
-    __atomic_load_n(&luaMP_page(cast(LuaAllocBlock *, o) - 1)->task_private,
-                    __ATOMIC_RELAXED);
+  LuaAllocPage *allocation = luaMP_page(cast(LuaAllocBlock *, o) - 1);
+  int page = allocation != NULL &&
+    __atomic_load_n(&allocation->task_private, __ATOMIC_RELAXED);
   if (!page) {
     if (!nurseryopen(L)) return 0;
     if (!taskspace(L, bytes) ||
@@ -205,11 +206,12 @@ int luaC_taskallocate (lua_State *L, GCObject *o, size_t bytes) {
   if (L->task_nursery_bytes == 0) L->task_nursery_limit = TASK_NURSERY_START;
   if (table)
     gco2t(o)->gcstate = page ? LUA_TASK_PAGE_STATE : NURSERY_TAG | NURSERY_TASK;
+  else if (o->tt == LUA_VUSERDATA) gco2u(o)->task_flags = TASK_UDATA;
   else gco2ts(o)->extra = LSTR_TASK;
-  if (!page) {
+  if (!page || !table) {
     luaC_allocnext(o) = L->task_objects;
     L->task_objects = o;
-    L->task_unpaged_bytes += cast_uint(bytes);
+    if (!page) L->task_unpaged_bytes += cast_uint(bytes);
   }
   charge(L, bytes);
   if (page) L->task_live_bytes += bytes;  /* already charged as private */
@@ -244,7 +246,7 @@ static void sealtask (lua_State *L, lua_State *thread) {
   global_State *g = G(L);
   uintptr_t flags = LUA_BLOCK_COLLECTABLE;
   uint64_t epoch;
-  GCObject *o, *next, *strings = NULL, *tail = NULL;
+  GCObject *o, *next, *strings = NULL, *tail = NULL, *finalizers = NULL;
   lu_byte mark;
   unsigned i;
   if (!luaC_hastaskheap(thread)) return;
@@ -273,9 +275,10 @@ static void sealtask (lua_State *L, lua_State *thread) {
     o->next = NULL;
   }
   for (o = thread->task_objects; o != NULL; o = next) {
+    int finalizable = o->tt == LUA_VUSERDATA && tofinalize(o);
     next = luaC_allocnext(o);
     o->next = NULL;
-    setmarked(o, mark);
+    setmarked(o, mark | (finalizable ? bitmask(FINALIZEDBIT) : 0));
     if (o->tt == LUA_VTABLE) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
       LuaAllocPage *page = luaMP_page(block);
@@ -283,6 +286,14 @@ static void sealtask (lua_State *L, lua_State *thread) {
       __atomic_store_n(&block->block.page, cast(uintptr_t, page) | flags,
                        __ATOMIC_RELEASE);
       luaMP_publishslot(L, page, epoch + 1);
+    }
+    else if (o->tt == LUA_VUSERDATA) {
+      gco2u(o)->gclist = NULL;
+      luaC_publishtaskuserdata(L, o);
+      if (finalizable) {
+        o->next = finalizers;
+        finalizers = o;
+      }
     }
     else {
       TString *s = gco2ts(o);
@@ -293,6 +304,15 @@ static void sealtask (lua_State *L, lua_State *thread) {
       if (tail == NULL) tail = o;
     }
   }
+  while (finalizers != NULL) {
+    Udata *userdata = gco2u(finalizers);
+    next = finalizers->next;
+    __atomic_store_n(&userdata->sharing, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
+    luaC_transferfinalizer(L, finalizers);
+    finalizers = next;
+  }
+  thread->task_finalizers = NULL;
+  thread->task_finalizable = 0;
   if (strings != NULL) luaC_publishobjects(L, strings, tail);
   sealtaskpages(L, thread, mark, epoch);
   thread->task_objects = NULL;
@@ -412,12 +432,15 @@ void __attribute__((cold)) luaC_preparefull (lua_State *L) {
 ** can use the header link until publication. The thread sentinel lets a
 ** non-null link identify even the last entry and deduplicate repeated writes. */
 static void remembertarget (lua_State *L, GCObject *value) {
+  int old;
   if (value->next != NULL) return;
-  if (value->tt == LUA_VTABLE
-        ? (luaC_tablestate(gco2t(value)) & NURSERY_TASKOLD) != 0
-        : (__atomic_load_n(&gco2ts(value)->extra, __ATOMIC_RELAXED) &
-           LSTR_TASKOLD) != 0)
-    return;
+  if (value->tt == LUA_VTABLE)
+    old = (luaC_tablestate(gco2t(value)) & NURSERY_TASKOLD) != 0;
+  else if (value->tt == LUA_VUSERDATA)
+    old = (gco2u(value)->task_flags & TASK_UDATA_OLD) != 0;
+  else old = (__atomic_load_n(&gco2ts(value)->extra, __ATOMIC_RELAXED) &
+              LSTR_TASKOLD) != 0;
+  if (old) return;
   value->next = L->task_remembered;
   L->task_remembered = value;
 }
@@ -445,6 +468,19 @@ l_sinline int tryretaintaskroot (lua_State *L, GCObject *value, uintptr_t flags)
     return 1;
   }
   return 0;
+}
+
+int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
+                           int finalizable) {
+  if (mt != NULL && !tryretaintaskroot(L, obj2gco(mt), 0)) {
+    luaC_sealtask(L);
+    return 0;
+  }
+  luaA_storeudatameta(userdata, mt);
+  if (finalizable && luaC_markfinalizable(L, obj2gco(userdata))) {
+    L->task_finalizable++;
+  }
+  return 1;
 }
 
 /* Immutable key layouts belong to the cohort's root directory. Only the
@@ -517,19 +553,34 @@ l_sinline void freeset (lua_State *L, GCObject *o, int allocation_links) {
   while (o != NULL) {
     LuaAllocBlock *last = cast(LuaAllocBlock *, o) - 1, *first = NULL;
     LuaAllocPage *page = luaMP_page(last);
-    int inlineonly = __atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE) &&
-                     !page->task_backing;
+    int inlineonly = page != NULL &&
+      __atomic_load_n(&page->task_private, __ATOMIC_ACQUIRE) && !page->task_backing;
     unsigned count = 0;
     l_mem bytes = 0;
+    if (page == NULL) {
+      GCObject *next = allocation_links ? luaC_allocnext(o) : o->next;
+      Udata *userdata = gco2u(o);
+      luaM_freeprivate_(L, userdata, sizeudata(userdata->nuvalue, userdata->len));
+      o = next;
+      continue;
+    }
     for (;;) {
       LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
       GCObject *next = allocation_links ? luaC_allocnext(o) : o->next;
+      if (o->tt == LUA_VUSERDATA)
+        __atomic_store_n(&block->block.page, cast(uintptr_t, page),
+                          __ATOMIC_RELAXED);
       lua_assert(luaMP_header(block) == cast(uintptr_t, page));
       if (o->tt == LUA_VTABLE) {
         Table *table = gco2t(o);
         lua_assert(luaC_tasktable(table) && luaA_lockowner(&table->access) == NULL);
         bytes += sizeof(*table) + table->inline_bytes;
         if (!inlineonly) luaH_freeparts(L, table, 1);
+      }
+      else if (o->tt == LUA_VUSERDATA) {
+        Udata *userdata = gco2u(o);
+        lua_assert(luaC_taskuserdata(o) && !tofinalize(o));
+        bytes += sizeudata(userdata->nuvalue, userdata->len);
       }
       else {
         lua_assert(luaC_taskstring(o));
@@ -571,7 +622,8 @@ void luaC_endtask (lua_State *L) {
   LuaAllocPage *pages;
   unsigned i;
   lua_assert(L->task_owner != NULL && luaC_hastaskheap(L));
-  if (!gcrunning(G(L)) || L->openupval != NULL || L->native_roots != NULL) {
+  if (!gcrunning(G(L)) || L->openupval != NULL || L->native_roots != NULL ||
+      L->task_finalizable != 0) {
     luaC_sealtask(L);
     return;
   }
@@ -635,6 +687,18 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
       *gray = object;
     }
   }
+  else if (object->tt == LUA_VUSERDATA) {
+    Udata *userdata = gco2u(object);
+    lu_byte flags = __atomic_load_n(&userdata->task_flags, __ATOMIC_RELAXED);
+    if (scan == NURSERY_CONSTRUCTION || !(flags & TASK_UDATA)) return 0;
+    if (scan == NURSERY_TASK_YOUNG && (flags & TASK_UDATA_OLD)) return 1;
+    if (!(flags & TASK_UDATA_LIVE)) {
+      __atomic_store_n(&userdata->task_flags, flags | TASK_UDATA_LIVE,
+                       __ATOMIC_RELAXED);
+      if (scan >= NURSERY_TASK_FULL && userdata->metatable != NULL)
+        visitnursery(L, obj2gco(userdata->metatable), gray, scan);
+    }
+  }
   else {
     TString *s;
     lu_byte flags;
@@ -652,7 +716,8 @@ l_sinline int marknursery (lua_State *L, GCObject *object, GCObject **gray,
 l_sinline int nurseryedge (lu_byte tag, NurseryScan scan) {
   if (scan == NURSERY_CONSTRUCTION) return tag == ctb(LUA_VTABLE);
   if (scan == NURSERY_TASK_YOUNG)
-    return tag == ctb(LUA_VTABLE) || tag == ctb(LUA_VLNGSTR);
+    return tag == ctb(LUA_VTABLE) || tag == ctb(LUA_VLNGSTR) ||
+           tag == ctb(LUA_VUSERDATA);
   return (tag & BIT_ISCOLLECTABLE) &&
     (scan == NURSERY_TASK_ROOTS || tag != ctb(LUA_VSHRSTR));
 }
@@ -798,6 +863,10 @@ static size_t sweeptaskpages (lua_State *L, NurseryScan scan, GCObject **dead) {
     LuaAllocPage *next = young ? page->dirty_next : page->next;
     LuaTaskPageBits *bits = luaMP_taskbits(page);
     unsigned word;
+    if (page->pool >= LUA_ALLOC_USERDATA_POOL) {
+      page = next;
+      continue;
+    }
     page->task_dirty = 0;
     for (word = 0; word < LUA_PAGE_TRACE_WORDS; word++) {
       uint64_t live = bits->live[word];
@@ -834,8 +903,11 @@ static size_t sweeptaskpages (lua_State *L, NurseryScan scan, GCObject **dead) {
 static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
   int task = scan != NURSERY_CONSTRUCTION;
   GCObject *end = scan == NURSERY_TASK_YOUNG ? L->task_old_objects : NULL;
-  GCObject *dead = NULL, *o;
+  GCObject *dead = NULL, *o, *finalizing = NULL;
+  GCObject **finalizers = &L->task_finalizers;
+  GCObject **finalizing_tail = &finalizing;
   size_t bytes = 0, reclaimed = task ? sweeptaskpages(L, scan, &dead) : 0;
+  size_t finalizing_bytes = 0;
   StkId slot;
   while ((o = *link) != end) {
     if (o->tt == LUA_VTABLE) {
@@ -848,6 +920,30 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
         if (task) state |= NURSERY_TASKOLD;
         luaC_settablestate(t, state);
       }
+    }
+    else if (task && o->tt == LUA_VUSERDATA) {
+      Udata *userdata = gco2u(o);
+      lu_byte flags = __atomic_load_n(&userdata->task_flags, __ATOMIC_RELAXED);
+      if (!(flags & TASK_UDATA_LIVE)) {
+        GCObject *gray = NULL;
+        if (!tofinalize(o)) goto detach;
+        *finalizers = o;
+        finalizers = &userdata->gclist;
+        if (scan >= NURSERY_TASK_FULL && userdata->metatable != NULL)
+          visitnursery(L, obj2gco(userdata->metatable), &gray, scan);
+        lua_assert(gray == NULL);
+        /* Finalizer retention lasts until the next nursery scan. Treat it
+        ** as young so dead objects cannot accumulate among old survivors. */
+        finalizing_bytes += sizeudata(userdata->nuvalue, userdata->len);
+        *link = luaC_allocnext(o);
+        *finalizing_tail = o;
+        finalizing_tail = luaC_alloclink(o);
+        __atomic_store_n(&userdata->task_flags, TASK_UDATA, __ATOMIC_RELAXED);
+        continue;
+      }
+      __atomic_store_n(&userdata->task_flags,
+                       (flags & ~TASK_UDATA_LIVE) | TASK_UDATA_OLD,
+                       __ATOMIC_RELAXED);
     }
     else if (task) {
       TString *s = gco2ts(o);
@@ -868,12 +964,23 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
         bytes = sizeof(*table) + table->inline_bytes;
         reclaimed += luaH_size(table, table);
       }
+      else if (o->tt == LUA_VUSERDATA) {
+        Udata *userdata = gco2u(o);
+        bytes = sizeudata(userdata->nuvalue, userdata->len);
+        reclaimed += bytes;
+      }
       else {
         bytes = sizestrreg(gco2ts(o)->u.lnglen);
         reclaimed += bytes;
       }
-      lua_assert(bytes <= L->task_unpaged_bytes);
-      L->task_unpaged_bytes -= cast_uint(bytes);
+      {
+        LuaAllocPage *page = luaMP_page(cast(LuaAllocBlock *, o) - 1);
+        if (page == NULL ||
+            !__atomic_load_n(&page->task_private, __ATOMIC_RELAXED)) {
+          lua_assert(bytes <= L->task_unpaged_bytes);
+          L->task_unpaged_bytes -= cast_uint(bytes);
+        }
+      }
     }
     else {
       LuaAllocBlock *block = cast(LuaAllocBlock *, o) - 1;
@@ -885,6 +992,7 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
     o->next = dead;
     dead = o;
   }
+  if (task) *finalizers = NULL;
   if (task) {
     lua_assert(reclaimed <= L->task_live_bytes);
     bytes = L->task_live_bytes - reclaimed;
@@ -892,7 +1000,11 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
       prunetaskroots(L, scan == NURSERY_TASK_ROOTS || bytes == 0);
     pacenursery(L, bytes);
     L->task_old_objects = L->task_objects;
-    L->task_old_bytes = bytes;
+    L->task_old_bytes = bytes - finalizing_bytes;
+    if (finalizing != NULL) {
+      *finalizing_tail = L->task_objects;
+      L->task_objects = finalizing;
+    }
   }
   if (dead == NULL) return bytes;
   /* A later safepoint can widen top. Discard stale registers before freeing
@@ -914,14 +1026,30 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
   return bytes;
 }
 
-void luaC_taskstep (lua_State *L) {
+static int cansteptask (lua_State *L) {
   global_State *g = G(L);
+  return gcrunning(g) && L->native_roots == NULL && L->native_depth == 0 &&
+    L->stack_peer == NULL && !L->reclaiming &&
+    g->gcparams[LUA_GCPSTEPSIZE] && g->gcparams[LUA_GCPSTEPMUL];
+}
+
+void luaC_finishtasknursery (lua_State *L, void *argument) {
+  size_t live;
+  UNUSED(argument);
+  if (!cansteptask(L) || L->task_mark_scan != 0) return;
+  /* The completed coroutine has only its return values on the stack.
+  ** Visit them before finalizing the unreachable remainder of its cohort. */
+  tracenursery(L, NULL, NURSERY_TASK_FULL);
+  live = sweepnursery(L, &L->task_objects, NURSERY_TASK_FULL);
+  if (luaC_hastaskheap(L)) L->task_nursery_bytes = live;
+  luaC_runtaskfinalizers(L);
+}
+
+void luaC_taskstep (lua_State *L) {
   size_t live, young_bytes;
   NurseryScan scan;
   L->task_nursery_pending = 0;
-  if (!gcrunning(g) || L->native_roots != NULL ||
-      L->native_depth != 0 || L->stack_peer != NULL || L->reclaiming ||
-      !g->gcparams[LUA_GCPSTEPSIZE] || !g->gcparams[LUA_GCPSTEPMUL]) {
+  if (!cansteptask(L)) {
     L->task_nursery_limit = taskcapacity(L) + 1;
     L->task_nursery_pending = L->task_mark_scan != 0;
     return;
@@ -1007,6 +1135,7 @@ void luaC_taskstep (lua_State *L) {
     }
     if (luaC_hastaskheap(L) && L->task_root_count >= rootlimit(L)) growroots(L);
   }
+  luaC_runtaskfinalizers(L);
 }
 
 /* The admitted stack owns these nursery links. Quiescence detaches them

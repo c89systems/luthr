@@ -510,7 +510,9 @@ typedef struct Udata {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   uint32_t metatable_version;  /* separate from the split user values */
+  lu_byte task_flags;
   size_t len;  /* number of bytes */
+  uint64_t finalizer_order;
   LuaObjectLock access;
   LuaObjectLock payload_access;  /* opaque native bytes, not collector edges */
   struct Table *metatable;
@@ -533,7 +535,9 @@ typedef struct Udata0 {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
   uint32_t metatable_version;
+  lu_byte task_flags;
   size_t len;  /* number of bytes */
+  uint64_t finalizer_order;
   LuaObjectLock access;
   LuaObjectLock payload_access;
   struct Table *metatable;

@@ -431,6 +431,8 @@ struct lua_State {
   LuaStringCache *strcache;  /* weak API string cache, allocated on first use */
   LuaAllocationCache allocation;
   GCObject *task_objects;  /* task stack gate owns the cohort and its roots */
+  GCObject *task_finalizers;
+  unsigned task_finalizable;
   uintptr_t task_root_inline[LUA_TASK_INLINE_ROOTS];
   size_t task_nursery_bytes;
   size_t task_live_bytes;
@@ -452,7 +454,7 @@ struct lua_State {
   unsigned task_unpaged_bytes;  /* headers and inline payload on task_objects */
   struct LuaAllocPage *task_pages;
   struct LuaAllocPage *task_young_pages;
-  struct LuaAllocPage *task_alloc_pages[LUA_ALLOC_BINS];
+  struct LuaAllocPage *task_alloc_pages[LUA_ALLOC_BINS + LUA_ALLOC_USERDATA_BINS];
   size_t task_page_bytes;
   LuaNurseryTrace task_trace;
 };
@@ -475,6 +477,13 @@ typedef struct LuaTraceList {
   GCObject **tail;
 } LuaTraceList;
 
+typedef struct LuaFinalizerOrder {
+  uint64_t first, last, varying;
+  int unordered;
+  GCObject *input;
+  LuaTraceList bucket[16];
+} LuaFinalizerOrder;
+
 /* Collection cursors belong to the VM, never to a driver's suspended C stack.
 ** A helper can therefore finish a phase while its original caller is parked. */
 typedef struct LuaTracePlan {
@@ -488,6 +497,7 @@ typedef struct LuaTracePlan {
   GCObject **finalizer_tail;
   GCObject *finalizer_new;
   GCObject **finalizer_newtail;
+  LuaFinalizerOrder finalizer_order;
   uint64_t round_changes;
   uint64_t clear_changes;
   l_mem base_marked;
@@ -647,6 +657,7 @@ typedef struct global_State {
   LX mainth;  /* main thread of this state */
   LuaPublishShard publishers[LUA_PUBLISH_SHARDS];
   GCObject *new_finalizers, *new_finalizers_tail;
+  uint64_t finalizer_sequence;
   uint64_t strcache_epoch;
   uint64_t metatable_sequence[LUA_NUMTYPES];  /* primitive metatable publication */
   TString empty_string;

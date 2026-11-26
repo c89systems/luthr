@@ -302,9 +302,21 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
     GCObject *other = mt ? obj2gco(mt) : owner;
     int pair = owner != other;
     int ownerfirst = cast(uintptr_t, owner) < cast(uintptr_t, other);
-    if (ttistable(object) && luaC_tasktable(hvalue(object))) luaC_sealtask(L);
+    if ((ttistable(object) && luaC_tasktable(hvalue(object))) ||
+        (luaC_taskuserdata(owner) && mt != NULL &&
+         !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED)))
+      luaC_sealtask(L);
     luaA_begin(L, ownerfirst ? owner : other, &first);
     if (pair) luaA_begin(L, ownerfirst ? other : owner, &second);
+    if (luaC_taskuserdata(owner)) {
+      global_State *g = G(L);
+      TValue method;
+      /* Layout contention does not make a private object escape. */
+      int finalizable = mt != NULL && !(g->gcstp & GCSTPCLS) &&
+        !tagisempty(luaH_getshortowned(mt, g->tmname[TM_GC], &method));
+      if (luaC_bindtaskuserdata(L, uvalue(object), mt, finalizable))
+        goto end;
+    }
     if (mt != NULL) luaA_publish(L, owner, &rooted_mt.value);
     luaC_prewriteptr(L, luaA_objectmeta(object), mt);
     if (ttistable(object)) {
@@ -318,6 +330,7 @@ void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt) {
       luaC_objbarrier(L, gcvalue(object), mt);
       luaC_checkfinalizer(L, gcvalue(object), mt);
     }
+  end:
     if (pair) luaA_end(L, &second);
     luaA_end(L, &first);
   }

@@ -122,6 +122,36 @@ foreach(runtime IN ITEMS upstream luthr embedded)
   endforeach()
 endforeach()
 
+foreach(runtime IN ITEMS upstream luthr)
+  foreach(collector IN ITEMS incremental generational)
+    if(runtime STREQUAL "upstream")
+      set(finalizer_slots 1)
+      set(finalizer_native 0)
+    else()
+      set(finalizer_slots 4)
+      set(finalizer_native 4)
+    endif()
+    add_test(NAME lua_scheduled_${runtime}_finalizer_order_${collector}
+      COMMAND scheduled_${runtime} "${CMAKE_CURRENT_SOURCE_DIR}/finalizers.lua"
+        native_finalizer_order "${collector}" "${finalizer_slots}"
+        "${finalizer_native}" 1 129 2 0 0)
+    set_tests_properties(lua_scheduled_${runtime}_finalizer_order_${collector}
+      PROPERTIES LABELS "runtime;memcheck" TIMEOUT 30)
+  endforeach()
+endforeach()
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME lua_scheduled_task_finalizers_${collector}
+    COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/finalizers.lua"
+      native_task_finalizers "${collector}" 4 4 8 1536 2 0 0)
+  set_tests_properties(lua_scheduled_task_finalizers_${collector}
+    PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 30)
+  add_test(NAME lua_scheduled_finalizer_blocked_${collector}
+    COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/finalizers.lua"
+      native_finalizer_blocked "${collector}" 2 2 2 1024 2 0 0)
+  set_tests_properties(lua_scheduled_finalizer_blocked_${collector}
+    PROPERTIES LABELS "runtime;parallel;memcheck" TIMEOUT 30)
+endforeach()
+
 add_test(NAME lua_scheduled_pattern_iterator COMMAND scheduled_luthr
   "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" pattern_iterator generational 4 4
   8 30000 4 1 0 default-allocator hash-seed=38407)

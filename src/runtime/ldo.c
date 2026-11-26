@@ -1311,6 +1311,8 @@ int luaD_resume (lua_State *L, l_uint32 calls, int nargs, int *nresults) {
   status = resumewith(L, resume, &nargs);
    /* continue running after recoverable errors */
   status = precover(L, status);
+  if (status == LUA_OK && L->task_finalizable != 0)
+    status = luaD_rawrunprotected(L, luaC_finishtasknursery, NULL);
   if (l_likely(!errorstatus(status)))
     lua_assert(status == L->status);  /* normal end or yield */
   else {  /* unrecoverable error */

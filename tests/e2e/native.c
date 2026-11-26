@@ -82,6 +82,52 @@ static int test_userdata(lua_State *state) {
   return 1;
 }
 
+static int finalizer_payload(lua_State *state) {
+  lua_Integer identifier = luaL_checkinteger(state, 1);
+  lua_Integer *payload = lua_newuserdatauv(state, 1200, 1);
+  *payload = identifier;
+  return 1;
+}
+
+static int bind_finalizer(lua_State *state) {
+  const char *name = luaL_checkstring(state, 2);
+  luaL_checktype(state, 1, LUA_TUSERDATA);
+  lua_settop(state, 1);
+  luaL_setmetatable(state, name);
+  return 0;
+}
+
+static int finalizer_id(lua_State *state) {
+  const lua_Integer *payload =
+      luaL_checkudata(state, 1, luaL_checkstring(state, 2));
+  luaL_argcheck(state, lua_rawlen(state, 1) >= sizeof(*payload), 1,
+                "missing finalizer payload");
+  lua_pushinteger(state, *payload);
+  return 1;
+}
+
+static unsigned finalizer_barrier;
+
+static int block_finalizer(lua_State *state) {
+  const struct timespec delay = {0, 1000000};
+  (void)state;
+  __atomic_store_n(&finalizer_barrier, 1, __ATOMIC_RELEASE);
+  while (__atomic_load_n(&finalizer_barrier, __ATOMIC_ACQUIRE) == 1)
+    nanosleep(&delay, NULL);
+  __atomic_store_n(&finalizer_barrier, 0, __ATOMIC_RELEASE);
+  return 0;
+}
+
+static int finalizer_waiting(lua_State *state) {
+  unsigned phase = __atomic_load_n(&finalizer_barrier, __ATOMIC_ACQUIRE);
+  if (lua_toboolean(state, 1)) {
+    luaL_argcheck(state, phase == 1, 1, "finalizer must be blocked");
+    __atomic_store_n(&finalizer_barrier, 2, __ATOMIC_RELEASE);
+  }
+  lua_pushboolean(state, phase == 1);
+  return 1;
+}
+
 static int pump(lua_State *state) {
   lua_Integer capacity = luaL_checkinteger(state, 3);
   lua_Integer total = 0;
@@ -124,6 +170,11 @@ int luaopen_compat_fixture(lua_State *state) {
                                        {"frame", frame},
                                        {"new_userdata", new_userdata},
                                        {"test_userdata", test_userdata},
+                                       {"finalizer_payload", finalizer_payload},
+                                       {"bind_finalizer", bind_finalizer},
+                                       {"finalizer_id", finalizer_id},
+                                       {"block_finalizer", block_finalizer},
+                                       {"finalizer_waiting", finalizer_waiting},
                                        {NULL, NULL}};
   luaL_newlib(state, functions);
   return 1;

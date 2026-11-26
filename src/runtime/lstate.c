@@ -416,6 +416,8 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->task_nursery_pending = 0;
   memset(L->task_root_inline_index, 0, sizeof(L->task_root_inline_index));
   L->task_nursery_closed = 0;
+  L->task_finalizers = NULL;
+  L->task_finalizable = 0;
   L->task_seal_requested = 0;
   L->allocation_debt.pending = 0;
   L->withdrawn_debt = 0;
@@ -749,6 +751,7 @@ lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   g->finobj = g->fixedgc = NULL;
   g->tobefnz = 0;
   g->new_finalizers = g->new_finalizers_tail = NULL;
+  g->finalizer_sequence = 0;
   g->tobefnz_tail = NULL;
   g->finalizer_drains = 0;
   g->survival = g->old1 = NULL;
