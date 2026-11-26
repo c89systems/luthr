@@ -122,6 +122,12 @@ foreach(runtime IN ITEMS upstream luthr embedded)
   endforeach()
 endforeach()
 
+add_test(NAME lua_scheduled_pattern_iterator COMMAND scheduled_luthr
+  "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" pattern_iterator generational 4 4
+  8 30000 4 1 0 default-allocator hash-seed=38407)
+set_tests_properties(lua_scheduled_pattern_iterator PROPERTIES
+  LABELS "runtime;parallel" TIMEOUT 90)
+
 foreach(collector IN ITEMS incremental generational)
   foreach(slots IN ITEMS 1 4)
     add_test(NAME lua_scheduled_retained_chain_${collector}_${slots}

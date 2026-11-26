@@ -1323,11 +1323,16 @@ static int gmatch (lua_State *L) {
   gm->next = init; gm->last = 0; gm->matched = 0; gm->version = 0;
   luaA_store(L, &owner->uv[0].uv, &roots[0].value);
   luaA_store(L, &owner->uv[1].uv, &roots[1].value);
+  luaC_barrier(L, owner, &roots[0].value);
+  luaC_barrier(L, owner, &roots[1].value);
   function = luaF_newCclosure(L, 3);
   function->f = gmatch_aux;
   function->managed = 1;
   for (index = 0; index < 3; ++index)
     luaA_store(L, &function->upvalue[index], &roots[index].value);
+  /* Allocation can cross a collector transition between the two objects. */
+  for (index = 0; index < 3; ++index)
+    luaC_barrier(L, function, &roots[index].value);
   L->top.p = L->ci->func.p + 1;
   setclCvalue(L, s2v(L->top.p), function);
   api_incr_top(L);

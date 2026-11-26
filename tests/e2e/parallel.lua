@@ -115,6 +115,20 @@ local local_native_add=kind=='native_callbacks_local' or kind=='native_direct_lo
 local native_add=kind=='native_callbacks' or kind=='native_direct' or local_native_add
 local native_identity=kind=='native_identity'
 local native_scalar=kind=='native_scalar' or kind=='native_scalar_direct' or kind=='native_protected'
+if kind=='pattern_iterator' then
+  local first, second = 'Zoë,Elsa,50', 'Elsa,Chloé,25'
+  local input = first..'\n'..second..'\n'
+  total = n * (#first + #second)
+  workloads[kind] = function()
+    local sum = 0
+    for _ = 1, n do
+      for row in input:gmatch('[^\n]+') do
+        sum = sum + #row
+      end
+    end
+    return sum
+  end
+end
 if kind=='native_records' then
   local callback=require('compat_fixture').callback
   local schema={prefix='record=',weight=3}
