@@ -254,8 +254,14 @@ add_custom_target(benchmark_scheduler
   DEPENDS scheduled_upstream scheduled_luthr scheduled_embedded VERBATIM USES_TERMINAL)
 add_custom_target(benchmark_native
   COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
-    "${CMAKE_COMMAND}" ${scheduled_arguments} -Dlonejson=ON
+    "${CMAKE_COMMAND}" ${scheduled_arguments} -Dnative_module=lonejson
     "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/native"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduled.cmake"
+  DEPENDS scheduled_upstream scheduled_luthr scheduled_embedded VERBATIM USES_TERMINAL)
+add_custom_target(benchmark_pslog
+  COMMAND "${CMAKE_COMMAND}" -E env GLIBC_TUNABLES=glibc.pthread.stack_cache_size=0
+    "${CMAKE_COMMAND}" ${scheduled_arguments} -Dnative_module=pslog
+    "-Doutput_dir=${PROJECT_BINARY_DIR}/benchmarks/pslog"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/BenchmarkScheduled.cmake"
   DEPENDS scheduled_upstream scheduled_luthr scheduled_embedded VERBATIM USES_TERMINAL)
 add_test(NAME lua_scheduled_smoke COMMAND "${CMAKE_COMMAND}" ${scheduled_arguments}
