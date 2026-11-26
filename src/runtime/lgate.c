@@ -570,10 +570,12 @@ l_sinline const Proto *scalarcallee (lua_State *L, int nargs, int nresults,
   return p;
 }
 
-carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
+carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults,
+                                TStatus *status) {
   NativeStackContext *context = luaE_resolvestack(&thread_context);
   LuaExecution *execution = context->execution;
   uintptr_t owner;
+  if (status != NULL) *status = LUA_OK;
   if (context->api_region != NULL) {
     StkId func;
     const Proto *p;
@@ -604,6 +606,10 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
       }
       context->scalar_reentry = 0;
     }
+#if !defined(HARDSTACKTESTS)
+    if (!probed && status != NULL &&
+        luaD_trynativepcall(L, context, nargs, nresults, status)) return 1;
+#endif
     /* Stack-only reservations do not delay trace arming. Promote before
     ** executing anything that needs a managed slot or table storage. */
     if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {

@@ -253,9 +253,9 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
 }
 
 
-TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
+static TStatus runprotected (lua_State *L, Pfunc f, void *ud,
+                              NativeStackContext *context) {
   l_uint32 oldnCcalls = L->nCcalls;
-  NativeStackContext *context = luaX_context(L);
   lua_longjmp lj;
   TStatus status;
   lj.status = LUA_OK;
@@ -307,6 +307,10 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   if (l_unlikely(status != LUA_OK))
     context->overflow = lj.luthr_stack_overflow;
   return status;
+}
+
+TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
+  return runprotected(L, f, ud, luaX_context(L));
 }
 
 /* Retain outer operations when a nested receiver catches an error. */
@@ -1418,11 +1422,18 @@ TStatus luaD_closeprotected (lua_State *L, ptrdiff_t level, TStatus status) {
 }
 
 
-/*
-** Call the C function 'func' in protected mode, restoring basic
-** thread information ('allowhook', etc.) and in particular
-** its stack level in case of errors.
-*/
+static TStatus recovercall (lua_State *L, CallInfo *ci, lu_byte allowhooks,
+                             ptrdiff_t top, TStatus status) {
+  L->ci = ci;
+  L->allowhook = allowhooks;
+  status = luaD_closeprotected(L, top, status);
+  luaD_seterrorobj(L, status, restorestack(L, top));
+  luaD_shrinkstack(L, L);
+  return status;
+}
+
+
+/* Restore the caller's frame and stack on an error. */
 TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
                                   ptrdiff_t ef) {
   TStatus status;
@@ -1431,17 +1442,104 @@ TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
   ptrdiff_t old_errfunc = L->errfunc;
   L->errfunc = ef;
   status = luaD_rawrunprotected(L, func, u);
-  if (l_unlikely(status != LUA_OK)) {  /* an error occurred? */
-    L->ci = old_ci;
-    L->allowhook = old_allowhooks;
-    status = luaD_closeprotected(L, old_top, status);
-    luaD_seterrorobj(L, status, restorestack(L, old_top));
-    luaD_shrinkstack(L, L);   /* restore stack size in case of overflow */
-  }
+  if (l_unlikely(status != LUA_OK))
+    status = recovercall(L, old_ci, old_allowhooks, old_top, status);
   L->errfunc = old_errfunc;
   return status;
 }
 
+
+
+#if !defined(HARDSTACKTESTS)
+struct NativeProtectedCall {
+  lua_CFunction function;
+  int managed;
+};
+
+
+/* The enclosing opaque call already owns the carrier and any native permit.
+** Publish the nested frame under a stack claim and let the callee enter
+** managed execution through the usual APIs whenever it needs it. */
+static void f_nativeprotected (lua_State *L, void *ud) {
+  struct NativeProtectedCall *call = cast(struct NativeProtectedCall *, ud);
+  int n;
+  luaX_leavebounded(L);
+  n = (*call->function)(L);
+  if (luaX_tryboundedscope(L, 0)) {
+    CallInfo *ci = L->ci;
+    int wanted = get_nresults(ci->callstatus);
+    if (l_likely(!gethookmask(L) && !(ci->callstatus & CIST_TBC) &&
+                  L->openupval == NULL && L->policy == NULL &&
+                  (wanted == LUA_MULTRET ? n : wanted) <= LUA_MINSTACK &&
+                  !luaTK_hasstops(L))) {
+      api_checknelems(L, n);
+      moveresults(L, ci->func.p, n, ci->callstatus & CIST_NRESULTS);
+      L->ci = ci->previous;
+      return;  /* keep the stack claim while retiring the error handler */
+    }
+    luaX_leavebounded(L);
+  }
+  lua_lock(L);
+  call->managed = 1;
+  api_checknelems(L, n);
+  luaD_poscall(L, L->ci, n);
+}
+
+
+int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
+                         int nargs, int nresults, TStatus *status) {
+  LuaExecution *execution = context->execution;
+  struct NativeProtectedCall call = {NULL, 0};
+  CallInfo *caller;
+  StkId func;
+  lu_byte allowhooks;
+  ptrdiff_t top, olderr;
+  if ((execution != NULL && (execution->managed_depth != 0 ||
+                             execution->scheduler == NULL ||
+                             execution->trusted != NULL)) ||
+      !luaX_tryobserve(L, 0))
+    return 0;
+  caller = L->ci;
+  if (L->errorJmp == NULL || L->errorJmp->context != context ||
+      L->errorJmp->execution != execution ||
+      !pthread_equal(L->errorJmp->carrier, pthread_self()) ||
+      L->native_depth == 0 || L->world_depth != 0 ||
+      luaW_ownsheap(L) || L->object_scopes != NULL || isLua(caller) ||
+      gethookmask(L) || L->policy != NULL ||
+      luaX_contextpolicy(context) != NULL || luaTK_hasstops(L) ||
+      caller->next == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK ||
+      getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
+      context->limit == 0 || luaD_nativeposition() <= context->limit)
+    goto unavailable;
+  api_checkpop(L, nargs + 1);
+  api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
+  api_checkresults(L, nargs, nresults);
+  func = L->top.p - (nargs + 1);
+  if (!checktag(s2v(func), LUA_VLCF)) goto unavailable;
+  luaX_invalidatearguments(&L->stack_gate);
+  call.function = fvalue(s2v(func));
+  top = savestack(L, func);
+  olderr = L->errfunc;
+  allowhooks = L->allowhook;
+  L->errfunc = 0;
+  L->nCcalls += nyci;
+  luaD_initframe(L, caller->next, func, cast_uint(nresults + 1) | CIST_C,
+                    L->top.p + LUA_MINSTACK);
+  *status = runprotected(L, f_nativeprotected, &call, context);
+  L->nCcalls -= nyci;
+  if (l_unlikely(*status != LUA_OK))
+    *status = recovercall(L, caller, allowhooks, top, *status);
+  L->errfunc = olderr;
+  adjustresults(L, nresults);
+  if (*status == LUA_OK && !call.managed) luaX_leavebounded(L);
+  else lua_unlock(L);
+  return 1;
+
+ unavailable:
+  luaX_leavebounded(L);
+  return 0;
+}
+#endif
 
 
 /*

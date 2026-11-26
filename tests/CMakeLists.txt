@@ -126,7 +126,8 @@ target_compile_options(native_lifecycle_test PRIVATE -Wall -Wextra -Werror -mtls
 target_link_libraries(native_lifecycle_test PRIVATE luthr_static)
 foreach(case IN ITEMS affinity affinity_cancel opaque_wait opaque_cancel nested wait
     shutdown revoke marshal_error oom late retained_slot foreign_fairness opaque_fairness stream
-    stream_cancel stream_shutdown coroutine_allocations)
+    stream_cancel stream_shutdown coroutine_allocations
+    protected_incremental protected_generational protected_cancel)
   add_test(NAME native_lifecycle_${case} COMMAND native_lifecycle_test ${case})
   set_tests_properties(native_lifecycle_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 15)

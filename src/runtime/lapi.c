@@ -1759,7 +1759,7 @@ LUA_API void lua_callk (lua_State *L, int nargs, int nresults,
                         lua_KContext ctx, lua_KFunction k) {
   StkId func;
   if (k == NULL) {
-    if (luaX_callenter(L, nargs, nresults)) return;
+    if (luaX_callenter(L, nargs, nresults, NULL)) return;
   }
   else lua_lock(L);
   api_check(L, k == NULL || !isLua(L->ci),
@@ -1803,7 +1803,7 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
   TStatus status;
   ptrdiff_t func;
   if (k == NULL && errfunc == 0) {
-    if (luaX_callenter(L, nargs, nresults)) return LUA_OK;
+    if (luaX_callenter(L, nargs, nresults, &status)) return APIstatus(status);
   }
   else lua_lock(L);
   api_check(L, k == NULL || !isLua(L->ci),

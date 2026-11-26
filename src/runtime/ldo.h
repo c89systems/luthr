@@ -127,6 +127,8 @@ LUAI_FUNC void luaD_hookcall (lua_State *L, CallInfo *ci);
 LUAI_FUNC NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
                                                    unsigned status);
 LUAI_FUNC void luaW_finishnativeframe (lua_State *L, NativeStackContext *context);
+LUAI_FUNC int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
+                                   int nargs, int nresults, TStatus *status);
 #endif
 LUAI_FUNC int luaD_pretailcall (lua_State *L, CallInfo *ci, StkId func,
                                               int narg1, int delta);

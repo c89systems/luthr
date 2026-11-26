@@ -690,11 +690,87 @@ static void coroutine_allocations(struct fixture *f) {
   finish(f);
 }
 
+static int protected_driver(lua_State *L) {
+  struct fixture *f = active;
+  int blocked = lua_toboolean(L, 2);
+  if (blocked) {
+    lock(f);
+    f->entered++;
+    notify(f);
+    while (!f->release[0])
+      change(f);
+    unlock(f);
+    require(lua_gettop(L) == 3);
+  }
+  lua_pushvalue(L, 1);
+  if (blocked)
+    lua_pushvalue(L, 3);
+  else
+    lua_pushnil(L);
+  lua_call(L, 1, 1);
+  return 1;
+}
+
+static int protected_outer(lua_State *L) {
+  int status;
+  lua_pushcfunction(L, protected_driver);
+  lua_pushvalue(L, 1);
+  lua_pushvalue(L, 2);
+  status = lua_pcall(L, 2, 1, 0);
+  lua_pushinteger(L, status);
+  return 2;
+}
+
+static void protected_native(struct fixture *f, int generational, int cancel) {
+  lua_State *blocked;
+  init(f);
+  if (generational)
+    lua_gc(f->main, LUA_GCGEN);
+  foreign(f, "protected_outer", protected_outer);
+  submit(f, 0,
+         "local function warm() return 17 end; "
+         "for i=1,8 do local value,status=protected_outer(warm,false); "
+         "assert(value==17 and status==0) end; "
+         "local closed=false; local value,status=protected_outer(function() "
+         "local guard <close> = setmetatable({}, {__close=function() "
+         "closed=true end}); error('nested error') end,false); "
+         "assert(status==2 and closed and value:find('nested error')); "
+         "value,status=protected_outer(function(t) return t[1]+1 end,true); "
+         "assert(status==0); return value",
+         0);
+  lock(f);
+  while (f->entered != 1)
+    change(f);
+  unlock(f);
+  /* The nested frame is still active. A separate task gets the sole managed
+   * slot, and the host can add a new root to the nested stack before GC. */
+  submit(f, 1, "return 17", 0);
+  require(collect(f, 1, LUA_OK) == 17);
+  blocked = f->tasks[0].root.thread;
+  require(lua_gettop(blocked) == 2);
+  lua_newtable(blocked);
+  lua_pushinteger(blocked, 41);
+  lua_rawseti(blocked, -2, 1);
+  lua_gc(f->main, LUA_GCCOLLECT);
+  if (cancel)
+    require(luaTK_requeststop(&f->tasks[0].root) == LUA_OK);
+  release_blockers(f);
+  if (cancel)
+    (void)collect(f, 0, LUA_ERRRUN);
+  else
+    require(collect(f, 0, LUA_OK) == 42);
+  require(f->scheduler.native_peak == 1);
+  finish(f);
+}
+
 int main(int argc, char **argv) {
   struct fixture *f = calloc(1, sizeof(*f));
   require(f != NULL && argc == 2);
   if (strcmp(argv[1], "affinity") == 0)
     affinity(f, 0, 0);
+  else if (strncmp(argv[1], "protected_", 10) == 0)
+    protected_native(f, strcmp(argv[1], "protected_incremental") != 0,
+                     strcmp(argv[1], "protected_cancel") == 0);
   else if (strcmp(argv[1], "affinity_cancel") == 0)
     affinity(f, 1, 0);
   else if (strcmp(argv[1], "opaque_wait") == 0)
