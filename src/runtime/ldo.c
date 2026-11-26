@@ -711,6 +711,12 @@ l_sinline void checkreturn (lua_State *L) {
   if (l_unlikely(L->policy != NULL)) luaCP_checklimit(L);
 }
 
+/* The open list is ordered from the highest stack slot down. Captures in
+** earlier frames cannot observe writes to this result area. */
+l_sinline int capturesfrom (lua_State *L, StkId first) {
+  return L->openupval != NULL && L->openupval->level >= savestack(L, first);
+}
+
 /*
 ** Finishes a function call: calls hook if necessary, moves current
 ** number of results to proper place, and returns to previous call
@@ -723,7 +729,7 @@ void luaD_poscall (lua_State *L, CallInfo *ci, int nres) {
     rethook(L, ci, nres);
   /* move results to proper place */
   moveresults(L, ci->func.p, nres, fwanted);
-  if (L->openupval != NULL)
+  if (capturesfrom(L, ci->func.p))
     luaF_storelocals(L, ci->func.p, cast_int(L->top.p - ci->func.p));
   /* function cannot be in any of these cases when returning */
   lua_assert(!(ci->callstatus &
@@ -818,7 +824,7 @@ int luaD_precallC (lua_State *L, StkId func,
   ci = L->ci;
   /* The frame can have moved or acquired cleanup during the call. Use the
   ** live frame after reentry, with the full return path for hooks and captures. */
-  if (ci->callstatus == (CIST_C | (1 + 1)) && L->openupval == NULL &&
+  if (ci->callstatus == (CIST_C | (1 + 1)) && !capturesfrom(L, ci->func.p) &&
       gethookmask(L) == 0) {
     moveresults(L, ci->func.p, n, 1 + 1);
     L->ci = ci->previous;
@@ -932,7 +938,7 @@ int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   TValue values[LUA_LEAF_RESULTS];
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
-      (L->openupval != NULL && L->openupval->level >= savestack(L, func)))
+      capturesfrom(L, func))
     return -1;
   n = leafresult(L, func, bcfindex(s2v(func)), nargs, values, &forward);
   if (n < 0 || l_unlikely(gethookmask(L)))
@@ -1506,7 +1512,7 @@ static void f_nativeprotected (lua_State *L, void *ud) {
     CallInfo *ci = L->ci;
     int wanted = get_nresults(ci->callstatus);
     if (l_likely(!gethookmask(L) && !(ci->callstatus & CIST_TBC) &&
-                  L->openupval == NULL && L->policy == NULL &&
+                  !capturesfrom(L, ci->func.p) && L->policy == NULL &&
                   (wanted == LUA_MULTRET ? n : wanted) <= LUA_MINSTACK &&
                   !luaTK_hasstops(L))) {
       api_checknelems(L, n);

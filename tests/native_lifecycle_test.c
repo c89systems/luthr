@@ -728,15 +728,17 @@ static void protected_native(struct fixture *f, int generational, int cancel) {
     lua_gc(f->main, LUA_GCGEN);
   foreign(f, "protected_outer", protected_outer);
   submit(f, 0,
-         "local function warm() return 17 end; "
+         "local count=0; "
+         "local function warm() count=count+1; return 17 end; "
          "for i=1,8 do local value,status=protected_outer(warm,false); "
-         "assert(value==17 and status==0) end; "
+         "assert(value==17 and status==0) end; assert(count==8); "
          "local closed=false; local value,status=protected_outer(function() "
          "local guard <close> = setmetatable({}, {__close=function() "
          "closed=true end}); error('nested error') end,false); "
          "assert(status==2 and closed and value:find('nested error')); "
-         "value,status=protected_outer(function(t) return t[1]+1 end,true); "
-         "assert(status==0); return value",
+         "value,status=protected_outer(function(t) count=count+1; "
+         "return t[1]+1 end,true); "
+         "assert(status==0 and count==9); return value",
          0);
   lock(f);
   while (f->entered != 1)
