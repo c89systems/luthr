@@ -1654,6 +1654,26 @@ static int edit_native_fields(lua_State *L) {
   return 1;
 }
 
+static int read_native_pointer_keys(lua_State *L) {
+  static const char key, absent;
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushliteral(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, -2);
+  lua_pushvalue(L, 1);
+  lua_rawsetp(L, -2, &key);
+  lua_pushvalue(L, -1);
+  lua_setglobal(L, "native_weak_table");
+  blocked_leaf(L);
+  require(lua_rawgetp(L, -1, &key) == LUA_TTABLE);
+  require(lua_rawequal(L, 1, -1));
+  require(lua_rawgetp(L, -2, &absent) == LUA_TNIL);
+  lua_pop(L, 1);
+  native_operation_done();
+  return 1;
+}
+
 static int collect_after_native_operation(lua_State *L) {
   wait_for_native_operation(L);
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
@@ -3476,6 +3496,9 @@ int main(int argc, char **argv) {
         "local row = native_table_operation({51}); "
         "assert(rawequal(row.first, row.second)); return row.first[1]",
         1);
+  else if (strcmp(argv[1], "native_pointer_lookup_without_slot") == 0)
+    native_operation_without_slot(f, read_native_pointer_keys,
+                                  "return native_table_operation({51})[1]", 0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

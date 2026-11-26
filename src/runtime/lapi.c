@@ -1440,6 +1440,21 @@ LUA_API int lua_rawgetp (lua_State *L, int idx, const void *p) {
   Table *t;
   TValue k;
   int result;
+  if (idx >= LUA_REGISTRYINDEX &&
+      luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING)) {
+    TValue registry, value;
+    const TValue *object = idx != LUA_REGISTRYINDEX ? index2addr(L, idx)
+      : luaA_tryregistry(G(L), &registry) ? &registry : NULL;
+    if (object != NULL && ttistable(object) &&
+        luaH_readsharedpointer(L, hvalue(object), cast_voidp(p), &value)) {
+      setobj2s(L, L->top.p, &value);
+      api_incr_top(L);
+      result = ttype(&value);
+      luaX_leavesharedread(L);
+      return result;
+    }
+    luaX_leavesharedread(L);
+  }
   lua_lock(L);
   t = gettable(L, idx, &indexed);
   setpvalue(&k, cast_voidp(p));

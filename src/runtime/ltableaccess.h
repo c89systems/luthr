@@ -20,6 +20,8 @@ LUAI_FUNC int luaH_trygetsharedshortstr (lua_State *, Table *, TString *,
 ** present field succeeds. */
 LUAI_FUNC int luaH_readsharedname (lua_State *, Table *, const char *, size_t,
                                    TValue *);
+/* A shared read ticket acquired outside marking also retains weak fields. */
+LUAI_FUNC int luaH_readsharedpointer (lua_State *, Table *, void *, TValue *);
 LUAI_FUNC lu_byte luaH_getinthash (Table *, lua_Integer, TValue *);
 
 l_sinline unsigned luaH_indexin (lua_Integer key, unsigned limit) {

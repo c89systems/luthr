@@ -1846,6 +1846,8 @@ l_sinline int __attribute__((always_inline)) probehash (
         match = ivalueraw(bits) == ivalue(key);
       else if (scalar == ctb(LUA_VSHRSTR))
         match = memcmp(&bits, &val_(key).gc, sizeof(bits.gc)) == 0;
+      else if (scalar == LUA_VLIGHTUSERDATA)
+        match = bits.p == pvalue(key);
       else {
         if (!samepartversion(table, layout, part, revision)) return 0;
         match = equalkeybits(key, tag, bits, deadok);
@@ -3747,6 +3749,25 @@ l_sinline int __attribute__((always_inline)) trygetshared (
   if (!locateslot(t, key, type, sequence, &slot, 0) ||
       !readslot(G(L), L, t, &slot, sequence, res, tag)) return 0;
   *tag = finishsharedread(L, t, res, *tag, sequence);
+  return 1;
+}
+
+/* The caller joins stack snapshots and storage reclamation with its ticket.
+** No read barrier is needed: any mark started since entry joins that ticket
+** before using this stack's initial roots. */
+int luaH_readsharedpointer (lua_State *L, Table *t, void *pointer,
+                            TValue *res) {
+  LuaTableSlot slot = {0};
+  TValue key;
+  uint64_t sequence;
+  lu_byte tag;
+  setpvalue(&key, pointer);
+  if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) != LUA_OBJECT_SHARED ||
+      !readsequence(L, t, &sequence) ||
+      !findhashslot(t, &key, LUA_VLIGHTUSERDATA, sequence, &slot, 0) ||
+      !readslot(G(L), L, t, &slot, sequence, res, &tag) ||
+      !luaH_samelayout(t, sequence)) return 0;
+  if (tagisempty(tag)) setnilvalue(res);
   return 1;
 }
 
