@@ -82,6 +82,8 @@ LUAI_FUNC Udata *luaS_newudata (lua_State *L, size_t s,
 LUAI_FUNC TString *luaS_newlstr (lua_State *L, const char *str, size_t l);
 LUAI_FUNC TString *luaS_cachelstr (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len);
+/* A managed caller can reuse an existing interned value without allocating. */
+LUAI_FUNC TString *luaS_findshort (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trytasklstr (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trycachedname (lua_State *L, const char *str);
 LUAI_FUNC TString *luaS_new (lua_State *L, const char *str);

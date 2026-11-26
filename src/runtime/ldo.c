@@ -894,6 +894,29 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     if (!ttisinteger(first)) return -1;
     setivalue(value, luaB_absinteger(ivalue(first)));
     return 1;
+  case LUA_LEAF_UTF8LEN:
+    return luaB_leafutf8len(func, nargs, value);
+  case LUA_LEAF_STRLEN:
+    if (!ttisstring(first)) return -1;
+    setivalue(value, cast(lua_Integer, tsslen(tsvalue(first))));
+    return 1;
+  case LUA_LEAF_MATHTOINTEGER: {
+    lua_Integer integer;
+    if (ttisstring(first)) return -1;  /* coercion uses the original frame */
+    if (tointegerns(first, &integer)) {
+      setivalue(value, integer);
+    }
+    else {
+#if defined(LUA_FAILISFALSE)
+      setbfvalue(value);
+#else
+      setnilvalue(value);
+#endif
+    }
+    return 1;
+  }
+  case LUA_LEAF_STRFIND: case LUA_LEAF_STRMATCH:
+    return luaB_leafmatch(L, func, nargs, builtin == LUA_LEAF_STRFIND, value);
   case LUA_LEAF_YIELD:
     return -1;  /* only a VM frame can suspend without a native call */
   default:
@@ -906,7 +929,7 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
 ** pending errors after publishing that frame. */
 int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
   int n, forward = 0;
-  TValue values[2];
+  TValue values[LUA_LEAF_RESULTS];
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
       (L->openupval != NULL && L->openupval->level >= savestack(L, func)))

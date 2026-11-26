@@ -381,6 +381,27 @@ do
   equal(position,#subject)
 end
 do
+  local word, digits = 'ab', '12'
+  local input = word..' '..digits
+  local a, b, pos = string.match(input,'^(%a+) (%d+)()$')
+  assert(a==word and b==digits and pos==6)
+  local first, last, text, start = string.find(input,'^(%a+) ()%d+$')
+  assert(first==1 and last==5 and text==word and start==4)
+  equal(string.match('aaa','^(a+)a$'),'aa')
+  equal(string.match(input,'^z$'),nil)
+  assert(not pcall(string.match,'a','^(a'))
+
+  local n, invalid = utf8.len('a\255b')
+  assert(n==nil and invalid==2)
+  equal(utf8.len('å中🙂',3,3),1)
+  equal(utf8.len('',1,-1),0)
+  equal(utf8.len('å','1'),1)
+  assert(not pcall(utf8.len,'abc',5))
+  equal(string.len(12),2)
+  assert(math.tointeger(42.0)==42 and math.tointeger('42')==42)
+  assert(math.tointeger(42.5)==nil and math.tointeger(false)==nil)
+end
+do
   local format = string.format
   equal(format('%d,%i,%u',0,-42,42),'0,-42,42')
   equal(format('%d/%d',math.mininteger,math.maxinteger),

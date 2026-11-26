@@ -502,6 +502,18 @@ TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len) {
   return cachedbytes(cache->entries[shortstringset(str, len)], str, len);
 }
 
+TString *luaS_findshort (lua_State *L, const char *str, size_t len) {
+  global_State *g = G(L);
+  unsigned hash;
+  TString *cached;
+  if (len <= 1 || !luaC_tracing(L)) {
+    cached = luaS_trycachedshort(L, str, len);
+    if (cached != NULL) return cached;
+  }
+  hash = luaS_hash(str, len, g->seed);
+  return tryinterned(L, stringtableof(g, hash), str, len, hash);
+}
+
 TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   uintptr_t *row;
   TString *result;

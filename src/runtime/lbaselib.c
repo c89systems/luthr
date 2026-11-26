@@ -283,6 +283,11 @@ LUAI_DDEF lua_CFunction const luaB_leafentry[LUA_LEAF_COUNT] = {
   [LUA_LEAF_TONUMBER] = luaB_tonumber,
   [LUA_LEAF_MATHABS] = luaB_mathabs,
   [LUA_LEAF_YIELD] = luaB_yield,
+  [LUA_LEAF_UTF8LEN] = luaB_utf8len,
+  [LUA_LEAF_STRLEN] = luaB_strlen,
+  [LUA_LEAF_MATHTOINTEGER] = luaB_mathtointeger,
+  [LUA_LEAF_STRFIND] = luaB_strfind,
+  [LUA_LEAF_STRMATCH] = luaB_strmatch,
 };
 
 int luaB_leafindex (lua_CFunction f) {

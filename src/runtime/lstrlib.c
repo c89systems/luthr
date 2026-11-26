@@ -134,7 +134,7 @@ static size_t findzero (lua_State *L, unsigned *work,
 }
 
 
-static int str_len (lua_State *L) {
+int luaB_strlen (lua_State *L) {
   size_t l;
   luaL_checklstring(L, 1, &l);
   lua_pushinteger(L, (lua_Integer)l);
@@ -1271,17 +1271,13 @@ static int findresult (MatchState *ms, LuaNativeRoot *roots,
 ** up to PLAN_STEPS extra tests in an anchored match. */
 enum { PATTERN_SHORT_SUBJECT = LUA_NATIVE_WORK_SLICE / 4 };
 
-static int tryanchoredmatch (lua_State *L, int find) {
-  StkId func = L->ci->func.p;
-  const char *s, *p, *end;
+static int scananchored (MatchState *ms, lua_State *L, StkId func,
+                          const char **end) {
+  const char *s, *p;
   size_t ls, lp;
-  int retry, count, results;
-  MatchState ms;
+  int retry;
   PatternPlan plan;
-  LuaNativeRoot subject;
-  if (L->top.p - func != 3 || !ttisstring(s2v(func + 1)) ||
-      !ttisstring(s2v(func + 2)) || L->ci->top.p - L->top.p < PLAN_STEPS + 2)
-    return 0;
+  if (!ttisstring(s2v(func + 1)) || !ttisstring(s2v(func + 2))) return 0;
   s = getlstr(tsvalue(s2v(func + 1)), ls);
   p = getlstr(tsvalue(s2v(func + 2)), lp);
   if (ls > PATTERN_SHORT_SUBJECT || lp == 0 || *p != '^') return 0;
@@ -1289,16 +1285,72 @@ static int tryanchoredmatch (lua_State *L, int find) {
   lp--;
   patternplan(&plan, p, lp);
   if (plan.count == 0) return 0;
-  prepstate(&ms, L, s, ls, p, lp);
-  if (l_unlikely(luaD_nativeposition() <= ms.stacklimit)) return 0;
-  end = runplan(&ms, s, p, &plan, &retry);
+  ms->L = L;
+  ms->src_init = s;
+  ms->src_end = s + ls;
+  ms->work = 0;
+  *end = runplan(ms, s, p, &plan, &retry);
   /* A shorter greedy repetition may permit a later atom to match. */
+  return *end != NULL || !retry;
+}
+
+/* Commit using existing interned values only. The entire probe is bounded
+** and cannot park, allocate, or expose a partially built result. */
+int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
+                    TValue *results) {
+  MatchState ms;
+  const char *end;
+  int count, i, positions = find ? 2 : 0;
+  if (nargs != 2 || !scananchored(&ms, L, func, &end)) return -1;
+  if (end == NULL) {
+#if defined(LUA_FAILISFALSE)
+    setbfvalue(results);
+#else
+    setnilvalue(results);
+#endif
+    return 1;
+  }
+  count = countcaptures(&ms, find ? NULL : ms.src_init);
+  if (count + positions > LUA_LEAF_RESULTS) return -1;
+  if (find) {
+    setivalue(results, 1);
+    setivalue(results + 1, ct_diff2S(end - ms.src_init));
+  }
+  for (i = 0; i < count; i++) {
+    const char *start;
+    ptrdiff_t len = get_onecapture(&ms, i, ms.src_init, end, &start, 1);
+    if (len == CAP_POSITION) {
+      setivalue(results + positions + i, ct_diff2S(start - ms.src_init) + 1);
+    }
+    else {
+      TString *value;
+      if (start == ms.src_init && start + len == ms.src_end)
+        value = tsvalue(s2v(func + 1));
+      else if (cast_sizet(len) <= LUAI_MAXSHORTLEN)
+        value = luaS_findshort(L, start, cast_sizet(len));
+      else return -1;
+      if (value == NULL) return -1;
+      setsvalue(L, results + positions + i, value);
+    }
+  }
+  return count + positions;
+}
+
+static int tryanchoredmatch (lua_State *L, int find) {
+  StkId func = L->ci->func.p;
+  const char *end;
+  int count, results;
+  MatchState ms;
+  LuaNativeRoot subject;
+  if (L->top.p - func != 3 || L->ci->top.p - L->top.p < PLAN_STEPS + 2 ||
+      l_unlikely(luaD_nativeposition() <= luaD_nativelimit(luaX_context(L))) ||
+      !scananchored(&ms, L, func, &end)) return 0;
   if (end == NULL)
-    return retry ? 0 : pushfindresult(&ms, NULL, NULL, find, 0);
-  count = countcaptures(&ms, find ? NULL : s);
+    return pushfindresult(&ms, NULL, NULL, find, 0);
+  count = countcaptures(&ms, find ? NULL : ms.src_init);
   luaR_pushroot(L, &subject);
   luaR_setroot(L, &subject, s2v(func + 1));
-  results = pushfindresult(&ms, s, end, find, count);
+  results = pushfindresult(&ms, ms.src_init, end, find, count);
   luaR_poproot(L, &subject);
   return results;
 }
@@ -1348,12 +1400,12 @@ static int str_find_aux (lua_State *L, int find) {
 }
 
 
-static int str_find (lua_State *L) {
+int luaB_strfind (lua_State *L) {
   return str_find_aux(L, 1);
 }
 
 
-static int str_match (lua_State *L) {
+int luaB_strmatch (lua_State *L) {
   return str_find_aux(L, 0);
 }
 
@@ -2706,13 +2758,13 @@ static const luaL_Reg strlib[] = {
   {"byte", luaB_strbyte},
   {"char", str_char},
   {"dump", str_dump},
-  {"find", str_find},
+  {"find", luaB_strfind},
   {"format", str_format},
   {"gmatch", gmatch},
   {"gsub", str_gsub},
-  {"len", str_len},
+  {"len", luaB_strlen},
   {"lower", str_lower},
-  {"match", str_match},
+  {"match", luaB_strmatch},
   {"rep", str_rep},
   {"reverse", str_reverse},
   {"sub", luaB_strsub},

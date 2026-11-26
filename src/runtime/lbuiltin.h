@@ -6,7 +6,12 @@
 
 LUAI_FUNC int luaB_strsub (lua_State *L);
 LUAI_FUNC int luaB_strbyte (lua_State *L);
+LUAI_FUNC int luaB_strfind (lua_State *L);
+LUAI_FUNC int luaB_strmatch (lua_State *L);
+LUAI_FUNC int luaB_strlen (lua_State *L);
+LUAI_FUNC int luaB_utf8len (lua_State *L);
 LUAI_FUNC int luaB_mathabs (lua_State *L);
+LUAI_FUNC int luaB_mathtointeger (lua_State *L);
 LUAI_FUNC int luaB_assert (lua_State *L);
 LUAI_FUNC int luaB_select (lua_State *L);
 LUAI_FUNC int luaB_rawget (lua_State *L);
@@ -17,10 +22,19 @@ LUAI_FUNC int luaB_next (lua_State *L);
 enum {
   LUA_LEAF_ASSERT, LUA_LEAF_TYPE, LUA_LEAF_STRSUB, LUA_LEAF_STRBYTE,
   LUA_LEAF_NEXT, LUA_LEAF_SELECT, LUA_LEAF_RAWGET, LUA_LEAF_RAWEQUAL,
-  LUA_LEAF_TONUMBER, LUA_LEAF_MATHABS, LUA_LEAF_YIELD, LUA_LEAF_COUNT
+  LUA_LEAF_TONUMBER, LUA_LEAF_MATHABS, LUA_LEAF_YIELD, LUA_LEAF_UTF8LEN,
+  LUA_LEAF_STRLEN, LUA_LEAF_MATHTOINTEGER, LUA_LEAF_STRFIND, LUA_LEAF_STRMATCH,
+  LUA_LEAF_COUNT
 };
 
 LUAI_FUNC int luaB_leafindex (lua_CFunction f);
+LUAI_FUNC int luaB_leafutf8len (StkId func, int nargs, TValue *results);
+LUAI_FUNC int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
+                              TValue *results);
+
+/* The direct matcher needs room for two positions and two captures,
+** or up to four captures when it returns no positions. */
+enum { LUA_LEAF_RESULTS = 4 };
 
 /*
 ** Translate a relative initial string position

@@ -21,6 +21,7 @@
 #include "llimits.h"
 #include "lexec.h"
 #include "lauxowned.h"
+#include "lbuiltin.h"
 
 
 #define MAXUNICODE	0x10FFFFu
@@ -89,7 +90,7 @@ static const char *utf8_decode (const char *s, l_uint32 *val, int strict) {
 ** start in the range [i,j], or nil + current position if 's' is not
 ** well formed in that interval
 */
-static int utflen (lua_State *L) {
+int luaB_utf8len (lua_State *L) {
   lua_Integer n = 0;  /* counter for the number of characters */
   unsigned work = 0;
   LuaNativeRoot root;
@@ -115,6 +116,48 @@ static int utflen (lua_State *L) {
   }
   lua_pushinteger(L, n);
   return luaL_rootresult(L, &root, 1, 1);
+}
+
+/* The VM owns these typed arguments. Bound the scan before taking any
+** bytes, and leave coercion and argument errors to the library frame. */
+int luaB_leafutf8len (StkId func, int nargs, TValue *results) {
+  const TValue *input = s2v(func + 1);
+  lua_Integer first = 1, last = -1, count = 0;
+  const char *bytes, *cursor, *finish;
+  size_t len;
+  int strict;
+  if (!ttisstring(input)) return -1;
+  bytes = getlstr(tsvalue(input), len);
+  if (len > LUA_NATIVE_WORK_SLICE / 4) return -1;
+  if (nargs >= 2 && !ttisnil(s2v(func + 2))) {
+    if (!ttisinteger(s2v(func + 2))) return -1;
+    first = ivalue(s2v(func + 2));
+  }
+  if (nargs >= 3 && !ttisnil(s2v(func + 3))) {
+    if (!ttisinteger(s2v(func + 3))) return -1;
+    last = ivalue(s2v(func + 3));
+  }
+  first = u_posrelat(first, len);
+  last = u_posrelat(last, len);
+  if (first <= 0 || cast_sizet(first - 1) > len ||
+      last < 0 || cast_sizet(last) > len) return -1;
+  strict = nargs < 4 || l_isfalse(s2v(func + 4));
+  finish = bytes + last;
+  for (cursor = bytes + first - 1; cursor < finish; count++) {
+    const char *next = utf8_decode(cursor, NULL, strict);
+    if (next == NULL) {
+#if defined(LUA_FAILISFALSE)
+      setbfvalue(results);
+#else
+      setnilvalue(results);
+#endif
+      setivalue(results + 1, ct_diff2S(cursor - bytes) + 1);
+      return 2;
+    }
+    cursor = next;
+  }
+  setivalue(results, count);
+  return 1;
 }
 
 
@@ -303,7 +346,7 @@ static const luaL_Reg funcs[] = {
   {"offset", byteoffset},
   {"codepoint", codepoint},
   {"char", utfchar},
-  {"len", utflen},
+  {"len", luaB_utf8len},
   {"codes", iter_codes},
   /* placeholders */
   {"charpattern", NULL},

@@ -79,7 +79,7 @@ static int math_atan (lua_State *L) {
 }
 
 
-static int math_toint (lua_State *L) {
+int luaB_mathtointeger (lua_State *L) {
   int valid;
   lua_Integer n = lua_tointegerx(L, 1, &valid);
   if (l_likely(valid))
@@ -788,7 +788,7 @@ static const luaL_Reg mathlib[] = {
   {"cos",   math_cos},
   {"deg",   math_deg},
   {"exp",   math_exp},
-  {"tointeger", math_toint},
+  {"tointeger", luaB_mathtointeger},
   {"floor", math_floor},
   {"fmod",   math_fmod},
   {"frexp", math_frexp},
