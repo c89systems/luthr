@@ -496,7 +496,7 @@ static void close_state (lua_State *L, int owns_gate) {
     luai_userstateclose(L);
   }
   for (i = 0; i < LUA_STRING_SHARDS; i++)
-    luaM_freearray(L, g->strt[i].hash, cast_sizet(g->strt[i].size));
+    luaS_freeindex(L, g->strt[i].index);
   freestack(L, L);
   if (L->strcache != NULL) luaM_free(L, L->strcache);
   luaCP_bind(L, NULL);
@@ -726,8 +726,8 @@ lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   g->seed = seed;
   g->gcstp = GCSTPGC;  /* no GC while building state */
   for (i = 0; i < LUA_STRING_SHARDS; i++) {
-    g->strt[i].size = g->strt[i].nuse = 0;
-    g->strt[i].hash = NULL;
+    g->strt[i].nuse = 0;
+    g->strt[i].index = NULL;
     luaA_initlock(&g->strt[i].access);
   }
   setnilvalue(&g->l_registry);

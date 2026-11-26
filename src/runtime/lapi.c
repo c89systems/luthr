@@ -758,7 +758,7 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
 static lua_Unsigned fixedlen (const TValue *o) {
   switch (ttypetag(o)) {
     case LUA_VSHRSTR: return tsvalue(o)->shrlen;
-    case LUA_VLNGSTR: return cast(lua_Unsigned, tsvalue(o)->u.lnglen);
+    case LUA_VLNGSTR: return cast(lua_Unsigned, tsvalue(o)->lnglen);
     case LUA_VUSERDATA: return cast(lua_Unsigned, uvalue(o)->len);
     default: return 0;
   }

@@ -422,10 +422,7 @@ typedef struct TString {
   lu_byte extra;  /* reserved short string or long-string flags */
   ls_byte shrlen;  /* length for short strings, negative for long strings */
   unsigned int hash;
-  union {
-    size_t lnglen;  /* length for long strings */
-    struct TString *hnext;  /* linked list for hash table */
-  } u;
+  size_t lnglen;  /* length for long strings */
   char *contents;  /* pointer to content in long strings */
   union {
     lua_Alloc falloc;  /* deallocation function for external strings */
@@ -451,14 +448,14 @@ typedef struct TString {
 
 /* get string length from 'TString *ts' */
 #define tsslen(ts)  \
-	(strisshr(ts) ? cast_sizet((ts)->shrlen) : (ts)->u.lnglen)
+	(strisshr(ts) ? cast_sizet((ts)->shrlen) : (ts)->lnglen)
 
 /*
 ** Get string and length */
 #define getlstr(ts, len)  \
 	(strisshr(ts) \
 	? (cast_void((len) = cast_sizet((ts)->shrlen)), rawgetshrstr(ts)) \
-	: (cast_void((len) = (ts)->u.lnglen), (ts)->contents))
+	: (cast_void((len) = (ts)->lnglen), (ts)->contents))
 
 /* }================================================================== */
 

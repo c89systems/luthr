@@ -69,8 +69,8 @@ static void freeobj (lua_State *L, GCObject *o) {
       TString *ts = gco2ts(o);
       if (ts->shrlen == LSTRMEM)
         luaAL_freeexternal(L, ts->storage.falloc, ts->ud, ts->contents,
-                          ts->u.lnglen + 1);
-      luaM_freemem(L, ts, luaS_sizelngstr(ts->u.lnglen, ts->shrlen));
+                          ts->lnglen + 1);
+      luaM_freemem(L, ts, luaS_sizelngstr(ts->lnglen, ts->shrlen));
       break;
     }
     default: lua_assert(0);

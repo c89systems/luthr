@@ -159,6 +159,11 @@ set_tests_properties(lua_scheduled_pattern_iterator PROPERTIES
   LABELS "runtime;parallel" TIMEOUT 90)
 
 foreach(collector IN ITEMS incremental generational)
+  add_test(NAME lua_scheduled_short_strings_${collector}
+    COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/short_strings.lua"
+      short_strings "${collector}" 4 0 8 1536 2 1 0)
+  set_tests_properties(lua_scheduled_short_strings_${collector} PROPERTIES
+    LABELS "runtime;parallel;memcheck" TIMEOUT 60)
   foreach(slots IN ITEMS 1 4)
     add_test(NAME lua_scheduled_retained_chain_${collector}_${slots}
       COMMAND scheduled_luthr "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua"

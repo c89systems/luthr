@@ -584,7 +584,7 @@ l_sinline void freeset (lua_State *L, GCObject *o, int allocation_links) {
       }
       else {
         lua_assert(luaC_taskstring(o));
-        bytes += sizestrreg(gco2ts(o)->u.lnglen);
+        bytes += sizestrreg(gco2ts(o)->lnglen);
       }
       o = next;
       count++;
@@ -970,7 +970,7 @@ static size_t sweepnursery (lua_State *L, GCObject **link, NurseryScan scan) {
         reclaimed += bytes;
       }
       else {
-        bytes = sizestrreg(gco2ts(o)->u.lnglen);
+        bytes = sizestrreg(gco2ts(o)->lnglen);
         reclaimed += bytes;
       }
       {

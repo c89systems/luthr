@@ -164,15 +164,16 @@ typedef struct LuaStringCache {
 #define KGC_GENMAJOR	2	/* generational in major mode */
 
 
+typedef struct LuaStringIndex LuaStringIndex;
+
 typedef struct stringtable {
   LuaObjectLock access;
-  TString **hash;  /* array of buckets (linked lists of strings) */
-  int nuse;  /* number of elements */
-  int size;  /* number of buckets */
+  LuaStringIndex *index;
+  unsigned nuse;
 } stringtable;
 
 #define LUA_STRING_SHARDS 32
-#define LUA_STRING_INITIAL_BUCKETS 4
+#define LUA_STRING_INITIAL_SLOTS 4
 
 
 /*

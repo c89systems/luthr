@@ -774,10 +774,10 @@ static void full_request_wave(lua_State *L, int generational) {
   require(g->major_completed == major + 2);
 }
 
-static unsigned string_buckets(lua_State *L) {
+static unsigned string_slots(lua_State *L) {
   unsigned i, count = 0;
   for (i = 0; i < LUA_STRING_SHARDS; i++)
-    count += G(L)->strt[i].size;
+    count += luaS_indexsize(&G(L)->strt[i]);
   return count;
 }
 
@@ -791,7 +791,7 @@ static void sweep_string_index(lua_State *L) {
     lua_pushstring(L, name);
     lua_rawseti(L, -2, i);
   }
-  grown = string_buckets(L);
+  grown = string_slots(L);
   require(grown >= 4096);
   lua_pop(L, 1);
   lua_gc(L, LUA_GCRESTART);
@@ -802,7 +802,7 @@ static void sweep_string_index(lua_State *L) {
   luaC_waittrace(L);
   require(luaC_sweeping(L));
   luaC_waitsweep(L);
-  shrunk = string_buckets(L);
+  shrunk = string_slots(L);
   require(shrunk < grown / 4);
   require(getgcbytes(G(L)) == gettotalbytes(G(L)) - G(L)->GCretired);
   lua_unlock(L);

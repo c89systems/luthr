@@ -22,16 +22,44 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "lstring.h"
+#include "ltablestorage.h"
 
 
 /*
 ** Maximum size for string table.
 */
-#define MAXSTRTB	cast_int(luaM_limitN(INT_MAX, TString*))
+#define MAXSTRTB luaM_limitN(INT_MAX, TString*)
 
-/* Low hash bits select a partition; the remaining bits select its bucket. */
+/* Low hash bits select a partition; the remaining bits select its slot. */
 #define stringtableof(g,h) (&(g)->strt[(h) % LUA_STRING_SHARDS])
-#define stringbucket(h,n) lmod((h) / LUA_STRING_SHARDS, (n))
+#define stringslot(h,n) lmod((h) / LUA_STRING_SHARDS, (n))
+
+struct LuaStringIndex {
+  unsigned size;
+  TString *slots[];
+};
+
+static size_t indexbytes (unsigned size) {
+  return sizeof(LuaStringIndex) + cast_sizet(size) * sizeof(TString *);
+}
+
+static LuaStringIndex *newindex (lua_State *L, unsigned size) {
+  LuaStringIndex *image = luaM_alloccontrol(L, indexbytes(size));
+  if (image != NULL) {
+    image->size = size;
+    memset(image->slots, 0, cast_sizet(size) * sizeof(TString *));
+  }
+  return image;
+}
+
+void luaS_freeindex (lua_State *L, LuaStringIndex *index) {
+  if (index != NULL) luaM_freemem(L, index, indexbytes(index->size));
+}
+
+unsigned luaS_indexsize (const stringtable *table) {
+  return __atomic_load_n(&table->index, __ATOMIC_ACQUIRE)->size;
+}
+
 
 
 /*
@@ -60,10 +88,10 @@ unsigned luaS_hash (const char *str, size_t l, unsigned seed) {
 unsigned luaS_computelonghash (TString *ts) {
   unsigned hash;
   if (__atomic_load_n(&ts->extra, __ATOMIC_RELAXED) & LSTR_ZEROHASH) return 0;
-  lua_assert(ts->shrlen == LSTRREG && ts->u.lnglen <= LUA_NATIVE_WORK_SLICE);
+  lua_assert(ts->shrlen == LSTRREG && ts->lnglen <= LUA_NATIVE_WORK_SLICE);
   /* Both the seed and contents are immutable. Concurrent first users may
   ** compute the same hash without waiting or reading one another's input. */
-  hash = luaS_hash(getlngstr(ts), ts->u.lnglen, ts->storage.seed);
+  hash = luaS_hash(getlngstr(ts), ts->lnglen, ts->storage.seed);
   if (hash == 0) __atomic_fetch_or(&ts->extra, LSTR_ZEROHASH, __ATOMIC_RELAXED);
   else __atomic_store_n(&ts->hash, hash, __ATOMIC_RELAXED);
   return hash;
@@ -75,10 +103,10 @@ void luaS_finishlongstr (TString *ts) {
   unsigned seed = ts->hash;
   lua_assert(ts->tt == LUA_VLNGSTR);
   if (ts->shrlen == LSTRREG) {
-    if (ts->u.lnglen <= LUA_NATIVE_WORK_SLICE) return;
+    if (ts->lnglen <= LUA_NATIVE_WORK_SLICE) return;
     seed = ts->storage.seed;
   }
-  ts->hash = luaS_hash(getlngstr(ts), ts->u.lnglen, seed);
+  ts->hash = luaS_hash(getlngstr(ts), ts->lnglen, seed);
   ts->extra = ts->hash == 0;
 }
 
@@ -87,7 +115,7 @@ void luaS_finishlongstr (TString *ts) {
 ** otherwise the caller has already filled the result in place. */
 void luaS_buildlongstr (lua_State *L, TString *ts, const char *src,
                         unsigned *work) {
-  size_t remaining = ts->u.lnglen;
+  size_t remaining = ts->lnglen;
   char *dest = getlngstr(ts);
   unsigned hash = ts->storage.seed ^ cast_uint(remaining);
   lua_assert(ts->tt == LUA_VLNGSTR && ts->shrlen == LSTRREG && ts->hash == 0);
@@ -110,45 +138,54 @@ void luaS_buildlongstr (lua_State *L, TString *ts, const char *src,
 }
 
 
-static void tablerehash (TString **vect, int osize, int nsize) {
-  int i;
-  for (i = osize; i < nsize; i++)  /* clear new elements */
-    vect[i] = NULL;
-  for (i = 0; i < osize; i++) {  /* rehash old part of the array */
-    TString *p = vect[i];
-    vect[i] = NULL;
-    while (p) {  /* for each string in the list */
-      TString *hnext = p->u.hnext;  /* save next */
-      unsigned int h = stringbucket(p->hash, nsize);  /* new position */
-      p->u.hnext = vect[h];  /* chain it into array */
-      vect[h] = p;
-      p = hnext;
+/* Retire the old layout after its last optimistic reader leaves. */
+static int resizeindex (lua_State *L, stringtable *tb, unsigned size,
+                        int stopped) {
+  LuaStringIndex *old, *image;
+  LuaTableRetirement *retired = NULL;
+  unsigned i;
+  if (!stopped) {
+    retired = luaM_realloc_(L, NULL, 0, sizeof(*retired));
+    if (retired == NULL) return 0;
+  }
+  image = newindex(L, size);
+  if (image == NULL) {
+    if (retired != NULL) luaM_free(L, retired);
+    return 0;
+  }
+  old = tb->index;
+  for (i = 0; i < old->size; i++) {
+    TString *string = old->slots[i];
+    if (string != NULL) {
+      unsigned slot = stringslot(string->hash, size);
+      while (image->slots[slot] != NULL) slot = lmod(slot + 1, size);
+      image->slots[slot] = string;
     }
   }
+  __atomic_store_n(&tb->index, image, __ATOMIC_RELEASE);
+  if (retired == NULL) luaS_freeindex(L, old);
+  else {
+    *retired = (LuaTableRetirement){
+      .nodes = old, .node_bytes = indexbytes(old->size)
+    };
+    luaHS_publish(L, retired, 0);
+  }
+  return 1;
 }
 
-
-/*
-** Resize the string table. If allocation fails, keep the current size.
-** (This can degrade performance, but any non-zero size should work
-** correctly.)
-*/
-void luaS_resize (lua_State *L, stringtable *tb, int nsize) {
-  int osize = tb->size;
-  TString **newvect;
-  if (nsize < osize)  /* shrinking table? */
-    tablerehash(tb->hash, osize, nsize);  /* depopulate shrinking part */
-  newvect = luaM_reallocvector(L, tb->hash, osize, nsize, TString*);
-  if (l_unlikely(newvect == NULL)) {  /* reallocation failed? */
-    if (nsize < osize)  /* was it shrinking table? */
-      tablerehash(tb->hash, nsize, osize);  /* restore to original size */
-    /* leave table as it was */
-  }
-  else {  /* allocation succeeded */
-    tb->hash = newvect;
-    tb->size = nsize;
-    if (nsize > osize)
-      tablerehash(newvect, osize, nsize);  /* rehash for new size */
+void luaS_shrink (lua_State *L) {
+  global_State *g = G(L);
+  unsigned i;
+  for (i = 0; i < LUA_STRING_SHARDS; i++) {
+    stringtable *tb = &g->strt[i];
+    unsigned size = luaS_indexsize(tb);
+    unsigned target = size;
+    while (target > LUA_STRING_INITIAL_SLOTS && tb->nuse < target / 4)
+      target /= 2;
+    if (target == size) continue;
+    /* A parked allocator can retain the shard across the stop. */
+    if (luaA_lockowner(&tb->access) != NULL || !resizeindex(L, tb, target, 1))
+      __atomic_store_n(&g->shrink_strings, 1, __ATOMIC_RELAXED);
   }
 }
 
@@ -215,7 +252,6 @@ static void initfixedstr (TString *ts, const char *str, size_t len,
   ts->next = NULL;
   ts->extra = 0;
   ts->hash = luaS_hash(str, len, seed);
-  ts->u.hnext = NULL;
   copyshrstr(ts, str, len);
 }
 
@@ -228,9 +264,8 @@ void luaS_init (lua_State *L) {
   int i;
   for (i = 0; i < LUA_STRING_SHARDS; i++) {
     stringtable *tb = &g->strt[i];
-    tb->hash = luaM_newvector(L, LUA_STRING_INITIAL_BUCKETS, TString*);
-    tablerehash(tb->hash, 0, LUA_STRING_INITIAL_BUCKETS);
-    tb->size = LUA_STRING_INITIAL_BUCKETS;
+    tb->index = newindex(L, LUA_STRING_INITIAL_SLOTS);
+    if (tb->index == NULL) luaM_error(L);
   }
   /* pre-create memory-error message */
   g->memerrmsg = luaS_newliteral(L, MEMERRMSG);
@@ -256,7 +291,7 @@ TString *luaS_createlngstrobj (lua_State *L, size_t l, int result) {
                   : luaC_newobj(L, LUA_VLNGSTR, sizestrreg(l));
   ts = gco2ts(object);
   ts->hash = 0;
-  ts->u.lnglen = l;
+  ts->lnglen = l;
   ts->shrlen = LSTRREG;  /* signals that it is a regular long string */
   ts->storage.seed = G(L)->seed;
   ts->contents = cast_charp(ts) + REGULAR_STRING_HEADER;
@@ -267,71 +302,116 @@ TString *luaS_createlngstrobj (lua_State *L, size_t l, int result) {
 
 void luaS_remove (lua_State *L, TString *ts) {
   stringtable *tb = stringtableof(G(L), ts->hash);
-  TString **p = &tb->hash[stringbucket(ts->hash, tb->size)];
-  while (*p != ts)  /* find previous element */
-    p = &(*p)->u.hnext;
-  *p = (*p)->u.hnext;  /* remove element from its list */
+  LuaStringIndex *index = tb->index;
+  unsigned size = index->size;
+  unsigned hole = stringslot(ts->hash, size);
+  unsigned slot;
+  while (index->slots[hole] != ts) {
+    lua_assert(index->slots[hole] != NULL);
+    hole = lmod(hole + 1, size);
+  }
+  /* Sweep owns the shard and any optimistic reader joined the weak cutoff.
+  ** Close the hole for every following key whose probe would cross it. */
+  slot = lmod(hole + 1, size);
+  while (index->slots[slot] != NULL) {
+    TString *string = index->slots[slot];
+    unsigned home = stringslot(string->hash, size);
+    if (lmod(slot - home, size) >= lmod(slot - hole, size)) {
+      __atomic_store_n(&index->slots[hole], string, __ATOMIC_RELEASE);
+      hole = slot;
+    }
+    slot = lmod(slot + 1, size);
+  }
+  __atomic_store_n(&index->slots[hole], NULL, __ATOMIC_RELEASE);
   tb->nuse--;
-  if (tb->size > LUA_STRING_INITIAL_BUCKETS && tb->nuse < tb->size / 4 &&
+  if (size > LUA_STRING_INITIAL_SLOTS && tb->nuse < size / 4 &&
       !__atomic_load_n(&G(L)->shrink_strings, __ATOMIC_RELAXED))
     __atomic_store_n(&G(L)->shrink_strings, 1, __ATOMIC_RELAXED);
 }
 
 
-static void growstrtab (lua_State *L, stringtable *tb) {
-  if (l_unlikely(tb->nuse == INT_MAX)) {  /* too many strings? */
-    luaC_fullgc(L, 1);  /* try to free some... */
-    if (tb->nuse == INT_MAX)  /* still too many? */
-      luaM_error(L);  /* cannot even create a message... */
+l_sinline int matches (const TString *ts, const char *str, size_t len,
+                       unsigned hash) {
+  return ts->hash == hash &&
+         len == cast_uint(ts->shrlen) && memcmp(str, getshrstr(ts), len) == 0;
+}
+
+/* Sweep starts at a stopped weak cutoff. Before that cutoff a borrowed
+** string stays allocated until we have converted it to a strong reference.
+** The caller holds managed admission through the lookup and return. */
+static TString *tryinterned (lua_State *L, stringtable *tb,
+                             const char *str, size_t len, unsigned hash) {
+  LuaStringIndex *index;
+  unsigned step, size, slot;
+  if (luaC_sweeping(L) || luaW_iscollector(L)) return NULL;
+  index = __atomic_load_n(&tb->index, __ATOMIC_ACQUIRE);
+  size = index->size;
+  slot = stringslot(hash, size);
+  for (step = 0; step < 8 && step < size; step++) {
+    TString *ts = __atomic_load_n(&index->slots[slot], __ATOMIC_ACQUIRE);
+    if (ts == NULL) return NULL;
+    if (matches(ts, str, len, hash)) {
+      luaC_tracepointer(L, ts);
+      return ts;
+    }
+    slot = lmod(slot + 1, size);
   }
-  if (tb->size <= MAXSTRTB / 2)  /* can grow string table? */
-    luaS_resize(L, tb, tb->size * 2);
+  return NULL;
+}
+
+/* The shard is exclusive through allocation. Recompute the insertion slot
+** afterward so it cannot refer to a retired image across a safepoint. */
+static void insertshort (stringtable *tb, TString *ts) {
+  LuaStringIndex *index = tb->index;
+  unsigned size = index->size;
+  unsigned slot = stringslot(ts->hash, size);
+  while (index->slots[slot] != NULL)
+    slot = lmod(slot + 1, size);
+  __atomic_store_n(&index->slots[slot], ts, __ATOMIC_RELEASE);
+  tb->nuse++;
 }
 
 
-/*
-** Checks whether short string exists and reuses it or creates a new one.
-*/
-static TString *internshrstr (lua_State *L, const char *str, size_t l) {
+static TString *internshrstr (lua_State *L, const char *str, size_t len) {
   TString *ts;
   global_State *g = G(L);
-  unsigned int h;
+  unsigned hash, slot, step, size;
   stringtable *tb;
-  TString **list;
+  LuaStringIndex *index;
   LuaObjectScope access;
-  if (l == 0) return &g->empty_string;
-  if (l == 1) return &g->byte_strings[cast_byte(*str)];
-  h = luaS_hash(str, l, g->seed);
-  tb = stringtableof(g, h);
+  if (len == 0) return &g->empty_string;
+  if (len == 1) return &g->byte_strings[cast_byte(*str)];
+  hash = luaS_hash(str, len, g->seed);
+  tb = stringtableof(g, hash);
+  ts = tryinterned(L, tb, str, len, hash);
+  if (ts != NULL) return ts;
   luaA_beginlock(L, &tb->access, &access);
-  list = &tb->hash[stringbucket(h, tb->size)];
-  lua_assert(str != NULL);  /* otherwise 'memcmp'/'memcpy' are undefined */
-  for (ts = *list; ts != NULL; ts = ts->u.hnext) {
-    if (l == cast_uint(ts->shrlen) &&
-        (memcmp(str, getshrstr(ts), l * sizeof(char)) == 0)) {
-      /* found! */
-      if (isdead(g, ts))  /* dead (but not collected yet)? */
-        luaC_revive(g, obj2gco(ts));
-      luaC_tracepointer(L, ts);  /* weak interning becomes a strong reference */
+  index = tb->index;
+  size = index->size;
+  slot = stringslot(hash, size);
+  for (step = 0; step < size; step++) {
+    ts = index->slots[slot];
+    if (ts == NULL) break;
+    if (matches(ts, str, len, hash)) {
+      if (isdead(g, ts)) luaC_revive(g, obj2gco(ts));
+      luaC_tracepointer(L, ts);
       luaA_end(L, &access);
       return ts;
     }
+    slot = lmod(slot + 1, size);
   }
-  /* else must create a new string */
-  if (tb->nuse >= tb->size) {  /* need to grow string table? */
-    growstrtab(L, tb);
+  if (tb->nuse >= size - size / 4) {
+    if (size <= MAXSTRTB / 2)
+      resizeindex(L, tb, size * 2, 0);
+    if (l_unlikely(tb->nuse == tb->index->size - 1)) luaM_error(L);
   }
-  ts = createstrobj(L, sizestrshr(l), LUA_VSHRSTR, h);
-  copyshrstr(ts, str, l);
-  /* Allocation may rendezvous with collection. Revalidate the bucket after
-  ** that boundary; no pointer into an old bucket array crosses the wait. */
-  list = &tb->hash[stringbucket(h, tb->size)];
-  ts->u.hnext = *list;
-  *list = ts;
-  tb->nuse++;
+  ts = createstrobj(L, sizestrshr(len), LUA_VSHRSTR, hash);
+  copyshrstr(ts, str, len);
+  insertshort(tb, ts);
   luaA_end(L, &access);
   return ts;
 }
+
 
 
 /*
@@ -512,7 +592,7 @@ TString *luaS_newextlstr (lua_State *L,
     ne.ts->ud = ud;
   }
   ne.ts->shrlen = ne.kind;
-  ne.ts->u.lnglen = len;
+  ne.ts->lnglen = len;
   ne.ts->contents = cast_charp(s);
   luaS_finishlongstr(ne.ts);
   return ne.ts;
@@ -523,7 +603,7 @@ TString *luaS_newextlstr (lua_State *L,
 ** Normalize an external string: If it is short, internalize it.
 */
 TString *luaS_normstr (lua_State *L, TString *ts) {
-  size_t len = ts->u.lnglen;
+  size_t len = ts->lnglen;
   if (len > LUAI_MAXSHORTLEN)
     return ts;  /* long string; keep the original */
   else {

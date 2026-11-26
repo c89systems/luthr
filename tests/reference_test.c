@@ -22,6 +22,7 @@ struct fixture {
   const char *mode;
   int references[WORKERS][REGISTRY_BATCH];
   size_t live;
+  size_t deny_at_least;
   unsigned deny, denied, finalized, entered, hooks;
   int facade, registry;
 };
@@ -64,7 +65,7 @@ static void *allocate(void *context, void *old, size_t old_size, size_t size) {
     free(old);
     return NULL;
   }
-  if (size > old_size && test->deny) {
+  if (size > old_size && size >= test->deny_at_least && test->deny) {
     test->deny--;
     test->denied++;
     return NULL;
@@ -299,10 +300,18 @@ static void *run(void *context) {
     lua_pushcfunction(child, marker_gc);
     lua_setfield(child, -2, "__gc");
     lua_setmetatable(child, -2);
+    /* The replacement array needs room for at least 8192 values. A small
+     * retirement descriptor can refill a page before that allocation. */
+    test->deny_at_least = 64u * 1024u;
     test->deny = 2;
     require(lua_pcall(child, 2, 1, 0) == LUA_ERRMEM);
     require(test->denied == 2 && test->entered == 2 && lua_gettop(child) == 1);
     test->deny = 0;
+    lua_getglobal(child, "references");
+    require(lua_rawgeti(child, -1, 4096) == LUA_TNUMBER &&
+            lua_tointeger(child, -1) == 4096);
+    lua_pop(child, 1);
+    require(lua_rawgeti(child, -1, 4097) == LUA_TNIL);
     lua_settop(child, 0);
     lua_gc(state, LUA_GCCOLLECT);
     lua_gc(state, LUA_GCCOLLECT);

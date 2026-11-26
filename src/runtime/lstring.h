@@ -71,7 +71,9 @@ LUAI_FUNC void luaS_finishlongstr (TString *ts);
 LUAI_FUNC void luaS_buildlongstr (lua_State *L, TString *ts, const char *src,
                                   unsigned *work);
 LUAI_FUNC int luaS_eqstr (TString *a, TString *b);
-LUAI_FUNC void luaS_resize (lua_State *L, stringtable *table, int newsize);
+LUAI_FUNC void luaS_shrink (lua_State *L);
+LUAI_FUNC void luaS_freeindex (lua_State *L, LuaStringIndex *index);
+LUAI_FUNC unsigned luaS_indexsize (const stringtable *table);
 LUAI_FUNC void luaS_clearcache (global_State *g);
 LUAI_FUNC void luaS_init (lua_State *L);
 LUAI_FUNC void luaS_remove (lua_State *L, TString *ts);

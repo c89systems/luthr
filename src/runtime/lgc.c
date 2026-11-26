@@ -150,7 +150,7 @@ l_mem luaC_objsize (GCObject *o) {
     }
     case LUA_VLNGSTR: {
       TString *ts = gco2ts(o);
-      res = luaS_sizelngstr(ts->u.lnglen, ts->shrlen);
+      res = luaS_sizelngstr(ts->lnglen, ts->shrlen);
       break;
     }
     case LUA_VUPVAL: {
@@ -1897,27 +1897,6 @@ int luaC_sweepobject (lua_State *L, GCObject *o, unsigned kind,
 ** =======================================================
 */
 
-/*
-** If possible, shrink string table.
-*/
-static void checkSizes (lua_State *L, global_State *g) {
-  int i;
-  for (i = 0; i < LUA_STRING_SHARDS; i++) {
-    stringtable *tb = &g->strt[i];
-    int target = tb->size;
-    while (target > LUA_STRING_INITIAL_BUCKETS && tb->nuse < target / 4)
-      target /= 2;
-    if (target == tb->size) continue;
-    /* A parked allocator may retain the old buckets. Retry that shard
-    ** during the next cycle if it cannot shrink here. */
-    if (luaA_lockowner(&tb->access) == NULL)
-      luaS_resize(L, tb, target);
-    if (tb->size != target)
-      __atomic_store_n(&g->shrink_strings, 1, __ATOMIC_RELAXED);
-  }
-}
-
-
 static void dothecall (lua_State *L, void *ud) {
   UNUSED(ud);
   luaD_callnoyield(L, L->top.p - 2, 0);
@@ -2563,7 +2542,7 @@ void luaC_shrinkstrings (lua_State *L) {
   if (g->gcemergency) return;
   __atomic_store_n(&g->shrink_strings, 0, __ATOMIC_RELAXED);
   g->gcstopem = 1;
-  checkSizes(L, g);
+  luaS_shrink(L);
   g->gcstopem = stopem;
 }
 
