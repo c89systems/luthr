@@ -1816,15 +1816,11 @@ static void f_call (lua_State *L, void *ud) {
 
 
 
-LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
-                        lua_KContext ctx, lua_KFunction k) {
+TStatus luaA_pcall (lua_State *L, int nargs, int nresults, int errfunc,
+                     lua_KContext ctx, lua_KFunction k) {
   struct CallS c;
   TStatus status;
   ptrdiff_t func;
-  if (k == NULL && errfunc == 0) {
-    if (luaX_callenter(L, nargs, nresults, &status)) return APIstatus(status);
-  }
-  else lua_lock(L);
   api_check(L, k == NULL || !isLua(L->ci),
     "cannot use continuations inside hooks");
   api_checkpop(L, nargs + 1);
@@ -1845,7 +1841,6 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
     if (p->scalar_ticks != 0 &&
         luaD_tryscalarcall(L, c.func, p, nargs, nresults, luaX_boundcontext(L))) {
       adjustresults(L, nresults);
-      lua_unlock(L);
       return LUA_OK;
     }
   }
@@ -1869,6 +1864,17 @@ LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
     status = LUA_OK;  /* if it is here, there were no errors */
   }
   adjustresults(L, nresults);
+  return status;
+}
+
+LUA_API int lua_pcallk (lua_State *L, int nargs, int nresults, int errfunc,
+                        lua_KContext ctx, lua_KFunction k) {
+  TStatus status;
+  if (k == NULL && errfunc == 0) {
+    if (luaX_callenter(L, nargs, nresults, &status)) return APIstatus(status);
+  }
+  else lua_lock(L);
+  status = luaA_pcall(L, nargs, nresults, errfunc, ctx, k);
   lua_unlock(L);
   return APIstatus(status);
 }

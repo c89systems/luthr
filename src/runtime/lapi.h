@@ -43,6 +43,9 @@ LUAI_FUNC void luaA_unref (lua_State *L, int idx, int ref);
 
 LUAI_FUNC int luaA_checkstack (lua_State *L, int n);
 LUAI_FUNC void luaA_move (lua_State *from, lua_State *to, int n);
+/* Caller owns the current stack reservation. */
+LUAI_FUNC TStatus luaA_pcall (lua_State *L, int nargs, int nresults, int errfunc,
+                              lua_KContext ctx, lua_KFunction k);
 
 
 

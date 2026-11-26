@@ -18,6 +18,32 @@ local a,b,c = table.unpack(packed,1,3)
 assert(a==nil and b==42 and c==nil)
 
 do
+  local token = {}
+  local callable = setmetatable({}, {__call=function(_, ...) return ... end})
+  local many = {[1]=token,[96]=42}
+  local results = table.pack(pcall(callable, table.unpack(many, 1, 96)))
+  assert(results.n == 97 and results[1] == true and results[2] == token and
+         results[3] == nil and results[97] == 42)
+
+  local thread = coroutine.create(function()
+    return xpcall(function(...)
+      coroutine.yield(...)
+      error(token, 0)
+    end, function(err) return {err} end, 41, nil, 42)
+  end)
+  local yielded = table.pack(coroutine.resume(thread))
+  assert(yielded.n == 4 and yielded[1] and yielded[2] == 41 and
+         yielded[3] == nil and yielded[4] == 42)
+  local resumed, ok, err = coroutine.resume(thread)
+  assert(resumed and ok == false and err[1] == token)
+
+  ok, err = pcall(pcall)
+  assert(not ok and err:find('value expected', 1, true))
+  ok, err = pcall(xpcall, callable)
+  assert(not ok and err:find('function expected', 1, true))
+end
+
+do
   local function fixed(first, last)
     return {first, nil, last, name='list'}
   end

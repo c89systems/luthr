@@ -527,50 +527,77 @@ int luaB_select (lua_State *L) {
 
 
 /*
-** Continuation function for 'pcall' and 'xpcall'. Both functions
-** already pushed a 'true' before doing the call, so in case of success
-** 'finishpcall' only has to return everything in the stack minus
-** 'extra' values (where 'extra' is exactly the number of items to be
-** ignored).
+** The protected call leaves the result flag before its results or error.
+** The error handler and original function are outside the returned range.
 */
-static int finishpcall (lua_State *L, int status, lua_KContext extra) {
-  lua_lock(L);
+l_sinline int protectedresults (lua_State *L, int status, lua_KContext extra) {
   luaCP_checklimit(L);
-  lua_unlock(L);
   if (l_unlikely(status != LUA_OK && status != LUA_YIELD)) {  /* error? */
-    lua_pushboolean(L, 0);  /* first result (false) */
-    lua_pushvalue(L, -2);  /* error message */
+    api_check(L, L->ci->top.p - L->top.p >= 2, "stack overflow");
+    setbfvalue(s2v(L->top.p));
+    setobjs2s(L, L->top.p + 1, L->top.p - 1);
+    L->top.p += 2;
     return 2;  /* return false, msg */
   }
-  else
-    return lua_gettop(L) - (int)extra;  /* return all results */
+  return cast_int(L->top.p - (L->ci->func.p + 1)) - cast_int(extra);
 }
 
+static int finishpcall (lua_State *L, int status, lua_KContext extra) {
+  int results;
+  lua_lock(L);
+  results = protectedresults(L, status, extra);
+  lua_unlock(L);
+  return results;
+}
 
 int luaB_pcall (lua_State *L) {
-  int status;
-  luaL_checkany(L, 1);
-  lua_pushboolean(L, 1);  /* first result if no errors */
-  lua_insert(L, 1);  /* put it in place */
-  status = lua_pcallk(L, lua_gettop(L) - 2, LUA_MULTRET, 0, 0, finishpcall);
-  return finishpcall(L, status, 0);
+  StkId base, slot;
+  int nargs, results;
+  TStatus status;
+  lua_lock(L);
+  base = L->ci->func.p + 1;
+  if (l_unlikely(L->top.p == base)) {
+    lua_unlock(L);
+    return luaL_argerror(L, 1, "value expected");
+  }
+  nargs = cast_int(L->top.p - base) - 1;
+  api_check(L, L->top.p < L->ci->top.p, "stack overflow");
+  for (slot = L->top.p; slot > base; slot--)
+    setobjs2s(L, slot, slot - 1);
+  setbtvalue(s2v(base));
+  api_incr_top(L);
+  status = luaA_pcall(L, nargs, LUA_MULTRET, 0, 0, finishpcall);
+  results = protectedresults(L, APIstatus(status), 0);
+  lua_unlock(L);
+  return results;
 }
 
 
 /*
-** Do a protected call with error handling. After 'lua_rotate', the
-** stack will have <f, err, true, f, [args...]>; so, the function passes
-** 2 to 'finishpcall' to skip the 2 first values when returning results.
+** Keep the handler and original function below the protected call.
+** The continuation can return the flag and results directly above them.
 */
 int luaB_xpcall (lua_State *L) {
-  int status;
-  int n = lua_gettop(L);
-  luaL_checktype(L, 2, LUA_TFUNCTION);  /* check error function */
-  lua_pushboolean(L, 1);  /* first result */
-  lua_pushvalue(L, 1);  /* function */
-  lua_rotate(L, 3, 2);  /* move them below function's arguments */
-  status = lua_pcallk(L, n - 2, LUA_MULTRET, 2, 2, finishpcall);
-  return finishpcall(L, status, 2);
+  StkId base, slot;
+  int nargs, results;
+  TStatus status;
+  lua_lock(L);
+  base = L->ci->func.p + 1;
+  if (l_unlikely(L->top.p - base < 2 || !ttisfunction(s2v(base + 1)))) {
+    lua_unlock(L);
+    return luaL_typeerror(L, 2, "function");
+  }
+  nargs = cast_int(L->top.p - base) - 2;
+  api_check(L, L->ci->top.p - L->top.p >= 2, "stack overflow");
+  for (slot = L->top.p; slot > base + 2; slot--)
+    setobjs2s(L, slot + 1, slot - 1);
+  setbtvalue(s2v(base + 2));
+  setobjs2s(L, base + 3, base);
+  L->top.p += 2;
+  status = luaA_pcall(L, nargs, LUA_MULTRET, 2, 2, finishpcall);
+  results = protectedresults(L, APIstatus(status), 2);
+  lua_unlock(L);
+  return results;
 }
 
 
