@@ -239,6 +239,16 @@ LUAI_FUNC void luaH_releasewriter (lua_State *, Table *, LuaTableWriter *);
 /* One grants admission, zero rejects the layout, and minus one means busy. */
 LUAI_FUNC int luaH_claimpart (lua_State *, Table *, LuaHashPart *, uint64_t);
 LUAI_FUNC void luaH_releasepart (lua_State *, Table *, LuaHashPart *);
+typedef struct LuaPartNotice {
+  LuaHashPart *part;
+  unsigned flags;
+} LuaPartNotice;
+LUAI_FUNC int luaH_tryclaimpart (lua_State *, Table *, LuaHashPart *,
+                                uint64_t, LuaPartNotice *);
+LUAI_FUNC void luaH_openpart (Table *, LuaHashPart *, LuaPartNotice *);
+LUAI_FUNC void luaH_notifypart (lua_State *, const LuaPartNotice *);
+LUAI_FUNC int luaH_tryref (lua_State *, Table *, const TValue *, LuaPartNotice *);
+LUAI_FUNC int luaH_tryunref (lua_State *, Table *, int, LuaPartNotice *);
 LUAI_FUNC void luaH_waitpart (lua_State *, LuaHashPart *);
 LUAI_FUNC int luaH_quiescewriters (lua_State *, Table *, int);
 /* Inputs remain rooted; NULL drains all rows, otherwise wait for one row. */

@@ -116,17 +116,22 @@ l_sinline void luaX_leavesharedread (lua_State *L) {
 /* Publish the epoch with the stack claim, then acquire the current control
 ** word before loading a layout. A reclaimer either sees the earlier ticket
 ** or its replacement preceded the reader's final control-word load. */
-l_sinline int luaX_trysharedread (lua_State *L) {
+l_sinline int luaX_trysharedaccess (lua_State *L, unsigned requests) {
   uint64_t control;
   if (__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
       ~LUA_GATE_OFFER_MASK) return 0;
   control = luaW_control(&G(L)->world);
-  if (control & LUA_WORLD_STORAGE_WAIT) return 0;
+  requests |= LUA_WORLD_STORAGE_WAIT;
+  if (control & requests) return 0;
   if (!luaX_claimvalues(&L->stack_gate,
                         luaW_epoch(control) | LUA_GATE_SHARED_READ)) return 0;
-  if (l_likely(luaX_boundedready(L, LUA_WORLD_STORAGE_WAIT))) return 1;
+  if (l_likely(luaX_boundedready(L, requests))) return 1;
   luaX_leavesharedread(L);
   return 0;
+}
+
+l_sinline int luaX_trysharedread (lua_State *L) {
+  return luaX_trysharedaccess(L, 0);
 }
 
 l_sinline int luaX_tryunmarked (lua_State *L) {

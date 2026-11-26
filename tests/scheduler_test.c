@@ -1387,12 +1387,16 @@ static void native_metadata_without_slot(struct fixture *f) {
 }
 
 static int read_native_registry(lua_State *L) {
+  int ref = (int)luaL_checkinteger(L, 2);
   blocked_leaf(L);
   unsigned *payload = luaL_checkudata(L, 1, "luthr.registry-read");
   require(*payload == 42);
   require(lua_getfield(L, LUA_REGISTRYINDEX, "luthr.registry-read") ==
           LUA_TTABLE);
   require(lua_getfield(L, -1, "answer") == LUA_TNUMBER);
+  luaL_unref(L, LUA_REGISTRYINDEX, ref);
+  lua_pushinteger(L, 60);
+  require(luaL_ref(L, LUA_REGISTRYINDEX) == ref);
   native_operation_done();
   return 1;
 }
@@ -1412,7 +1416,15 @@ static void native_registry_without_slot(struct fixture *f) {
   lua_pushcfunction(f->main, read_native_registry);
   lua_setglobal(f->main, "read_native_registry");
   managed(f->main, "wait_for_native_operation", wait_for_native_operation);
-  submit(f, 0, "return read_native_registry(registry_object)", 0);
+  lua_State *reader = lua_newthread(f->main);
+  lua_pushinteger(reader, 59);
+  int ref = luaL_ref(reader, LUA_REGISTRYINDEX);
+  require(luaL_loadstring(
+              reader, "return read_native_registry(registry_object, ...)") ==
+          LUA_OK);
+  lua_pushinteger(reader, ref);
+  require(luaSC_submit(&f->scheduler, &f->tasks[0], reader, 1) == 0);
+  lua_pop(f->main, 1);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
@@ -1426,6 +1438,10 @@ static void native_registry_without_slot(struct fixture *f) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   require(collect(f, 0, LUA_OK) == 51);
   require(collect(f, 1, LUA_OK) == 52);
+  require(lua_rawgeti(f->main, LUA_REGISTRYINDEX, ref) == LUA_TNUMBER);
+  require(lua_tointeger(f->main, -1) == 60);
+  lua_pop(f->main, 1);
+  luaL_unref(f->main, LUA_REGISTRYINDEX, ref);
   finish(f);
 }
 

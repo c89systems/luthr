@@ -2566,6 +2566,58 @@ int luaH_ref (lua_State *L, Table *table, TValue *value) {
   return result;
 }
 
+l_sinline void releasereference (lua_State *L, Table *table, LuaHashPart *part,
+                                  unsigned rank) {
+  if (rank <= part->refend) {
+    TValue link;
+    unsigned index = rank - 1;
+    Value *block = luaH_partslot(part->array, &index);
+    setivalue(&link, part->reffree);
+    writepartvalue(L, table, part, block, index, &link);
+    part->reffree = rank;
+  }
+}
+
+static int tryreferencepart (lua_State *L, Table *table, LuaHashPart *part,
+                              LuaPartNotice *notice) {
+  uint64_t layout;
+  if (!sharedwriteallowed(L, table)) return 0;
+  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  return !(layout & 1) && luaH_tryclaimpart(L, table, part, layout, notice);
+}
+
+int luaH_tryref (lua_State *L, Table *table, const TValue *value,
+                  LuaPartNotice *notice) {
+  LuaHashDirectory *dir = referencedirectory(table);
+  unsigned offer, lane;
+  LuaHashPart *part;
+  LuaPartSize needed;
+  int result;
+  if (dir == NULL || !published(value) ||
+      (iscollectable(value) && luaC_taskobject(gcvalue(value)))) return 0;
+  offer = cast_uint(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) >>
+                   LUA_GATE_OFFER_SHIFT);
+  lane = offer != 0 ? 1 + (offer - 1) % (LUA_HASH_PARTS - 1) : referencelane(L);
+  part = luaH_part(dir, lane);
+  if (!tryreferencepart(L, table, part, notice)) return 0;
+  result = assignreference(L, table, part, lane, value, NULL, &needed);
+  luaH_openpart(table, part, notice);
+  return result > 0 ? result : 0;
+}
+
+int luaH_tryunref (lua_State *L, Table *table, int ref, LuaPartNotice *notice) {
+  LuaHashDirectory *dir = referencedirectory(table);
+  LuaHashPart *part;
+  unsigned rank;
+  if (dir == NULL) return 0;
+  if (ref <= LUA_RIDX_LAST || (rank = partarrayindex(ref)) == 0) return 1;
+  part = luaH_part(dir, integerpart(ref));
+  if (!tryreferencepart(L, table, part, notice)) return 0;
+  releasereference(L, table, part, rank);
+  luaH_openpart(table, part, notice);
+  return 1;
+}
+
 int luaH_unref (lua_State *L, Table *table, int ref) {
   LuaHashDirectory *dir = referencedirectory(table);
   LuaObjectScope scope;
@@ -2576,14 +2628,7 @@ int luaH_unref (lua_State *L, Table *table, int ref) {
   if (ref <= LUA_RIDX_LAST || (rank = partarrayindex(ref)) == 0) return 1;
   part = luaH_part(dir, integerpart(ref));
   partition = beginreferences(L, table, part, &scope);
-  if (rank <= part->refend) {
-    TValue link;
-    unsigned index = rank - 1;
-    Value *block = luaH_partslot(part->array, &index);
-    setivalue(&link, part->reffree);
-    writepartvalue(L, table, part, block, index, &link);
-    part->reffree = rank;
-  }
+  releasereference(L, table, part, rank);
   endreferences(L, table, part, &scope, partition);
   return 1;
 }

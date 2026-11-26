@@ -43,24 +43,58 @@ static int active (global_State *g, Table *table, LuaTableWriter *writer) {
   return 0;
 }
 
-void luaH_releasepart (lua_State *L, Table *table, LuaHashPart *part) {
+enum { WAKE_PART = 1, WAKE_LAYOUT = 2 };
+
+void luaH_openpart (Table *table, LuaHashPart *part, LuaPartNotice *notice) {
   unsigned previous = __atomic_fetch_and(&part->gate,
     ~cast_uint(LUA_HASH_WRITING), __ATOMIC_SEQ_CST);
-  int watched = luaA_lockwatched(&table->access);
   lua_assert(previous & LUA_HASH_WRITING);
-  if (previous & LUA_HASH_WAITING) {
+  notice->part = part;
+  notice->flags = ((previous & LUA_HASH_WAITING) ? WAKE_PART : 0) |
+                  (luaA_lockwatched(&table->access) ? WAKE_LAYOUT : 0);
+}
+
+void luaH_notifypart (lua_State *L, const LuaPartNotice *notice) {
+  if (notice->flags & WAKE_PART) {
+    LuaHashPart *part = notice->part;
     pthread_mutex_t *mutex = partmutex(G(L), part);
     luaX_checksync(pthread_mutex_lock(mutex));
     __atomic_fetch_and(&part->gate, ~cast_uint(LUA_HASH_WAITING), __ATOMIC_SEQ_CST);
     luaQ_wake(&part->changed, &part->waiters);
     luaX_checksync(pthread_mutex_unlock(mutex));
   }
-  if (watched) {
+  if (notice->flags & WAKE_LAYOUT) {
     LuaWorld *world = &G(L)->world;
     luaX_checksync(pthread_mutex_lock(&world->mutex));
     luaQ_wake(&world->changed, &world->waiters);
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
+}
+
+void luaH_releasepart (lua_State *L, Table *table, LuaHashPart *part) {
+  LuaPartNotice notice;
+  luaH_openpart(table, part, &notice);
+  if (notice.flags != 0) luaH_notifypart(L, &notice);
+}
+
+/* Either the layout owner sees this claim or we see the closed layout
+** before modifying storage. The directory is fixed for this table. */
+l_sinline int validpart (lua_State *L, Table *table, uint64_t layout) {
+  return luaA_lockowner(&table->access) == NULL && luaH_strongaccess(L, table) &&
+    ((__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) ^ layout) &
+     ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS)) == 0;
+}
+
+int luaH_tryclaimpart (lua_State *L, Table *table, LuaHashPart *part,
+                        uint64_t layout, LuaPartNotice *notice) {
+  unsigned gate = __atomic_load_n(&part->gate, __ATOMIC_RELAXED);
+  if ((gate & LUA_HASH_WRITING) ||
+      !__atomic_compare_exchange_n(&part->gate, &gate,
+          gate | LUA_HASH_WRITING, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
+    return 0;
+  if (validpart(L, table, layout)) return 1;
+  luaH_openpart(table, part, notice);
+  return 0;
 }
 
 int luaH_claimpart (lua_State *L, Table *table, LuaHashPart *part,
@@ -77,13 +111,7 @@ int luaH_claimpart (lua_State *L, Table *table, LuaHashPart *part,
     if (spins == 32 || luaW_stopped(&G(L)->world)) return -1;
     __builtin_ia32_pause();
   }
-  /* Either the layout owner sees this claim or the claimant observes the
-  ** closed layout before touching storage. Unlike a row, the partition
-  ** exists for the rest of the table's lifetime and needs no advertisement. */
-  if (luaA_lockowner(&table->access) != NULL ||
-      !luaH_strongaccess(L, table) ||
-      ((__atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE) ^ layout) &
-       ~cast(uint64_t, LUA_TABLE_WRITER_FLAGS)) != 0) {
+  if (!validpart(L, table, layout)) {
     luaH_releasepart(L, table, part);
     return 0;
   }

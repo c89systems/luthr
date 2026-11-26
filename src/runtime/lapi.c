@@ -1190,6 +1190,35 @@ l_sinline Table *gettable (lua_State *L, int idx, LuaNativeRoot *indexed) {
   return hvalue(t);
 }
 
+static Table *tryregistryreferences (lua_State *L) {
+  TValue registry;
+  if (!luaX_trysharedaccess(L, LUA_WORLD_ARM_TRACE))
+    return NULL;
+  /* Keep an extra slot available to retain the directory through a wake
+  ** after withdrawing the storage ticket. */
+  if (!isLua(L->ci) && L->top.p < L->ci->top.p &&
+      luaA_tryregistry(G(L), &registry) && ttistable(&registry))
+    return hvalue(&registry);
+  luaX_leavesharedread(L);
+  return NULL;
+}
+
+static void finishregistryreference (lua_State *L, Table *table,
+                                      const LuaPartNotice *notice) {
+  if (notice->flags != 0) {
+    sethvalue2s(L, L->top.p, table);
+    api_incr_top(L);
+  }
+  luaX_leavesharedread(L);
+  if (l_unlikely(luaC_barriernotice(G(L)))) luaC_notifybarriers(G(L));
+  if (notice->flags != 0) {
+    luaH_notifypart(L, notice);
+    lua_lock(L);
+    L->top.p--;
+    lua_unlock(L);
+  }
+}
+
 int luaA_ref (lua_State *L, int idx) {
   LuaNativeRoot value, indexed;
   LuaObjectScope scope;
@@ -1197,6 +1226,18 @@ int luaA_ref (lua_State *L, int idx) {
   TValue link;
   lua_Integer head = 0;
   int ref;
+  if (idx == LUA_REGISTRYINDEX && (table = tryregistryreferences(L)) != NULL) {
+    LuaPartNotice notice = {0};
+    const TValue *value;
+    int nil;
+    api_checkpop(L, 1);
+    value = s2v(L->top.p - 1);
+    nil = ttisnil(value);
+    ref = nil ? 0 : luaH_tryref(L, table, value, &notice);
+    if (nil || ref != 0) L->top.p--;
+    finishregistryreference(L, table, &notice);
+    if (nil || ref != 0) return ref;
+  }
   lua_lock(L);
   api_checkpop(L, 1);
   if (ttisnil(s2v(L->top.p - 1))) {
@@ -1242,6 +1283,12 @@ void luaA_unref (lua_State *L, int idx, int ref) {
   LuaObjectScope scope;
   Table *table;
   TValue head;
+  if (idx == LUA_REGISTRYINDEX && (table = tryregistryreferences(L)) != NULL) {
+    LuaPartNotice notice = {0};
+    int released = luaH_tryunref(L, table, ref, &notice);
+    finishregistryreference(L, table, &notice);
+    if (released) return;
+  }
   lua_lock(L);
   table = gettable(L, idx, &indexed);
   if (!luaH_unref(L, table, ref)) {

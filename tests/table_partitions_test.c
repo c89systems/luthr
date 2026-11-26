@@ -25,6 +25,7 @@ static struct {
   Table *table;
   LuaHashPart *first_part;
   lua_Integer denied_key, sparse_key;
+  int first_ref, second_ref;
   unsigned deny_count;
   unsigned part, deny_after;
   int entered, release, finished, waiting, part_woken, same_done,
@@ -40,19 +41,30 @@ void *__wrap_luaM_realloc_(lua_State *L, void *old, size_t bytes, size_t size) {
   return __real_luaM_realloc_(L, old, bytes, size);
 }
 
+static void hold_partition(void) {
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  if (!probe.entered) {
+    probe.entered = 1;
+    require(pthread_cond_broadcast(&probe.changed) == 0);
+    while (!probe.release)
+      require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  }
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+}
+
 void __real_luaH_releasepart(lua_State *, Table *, LuaHashPart *);
 void __wrap_luaH_releasepart(lua_State *L, Table *table, LuaHashPart *part) {
-  if (L == probe.first && table == probe.table && part == probe.first_part) {
-    require(pthread_mutex_lock(&probe.mutex) == 0);
-    if (!probe.entered) {
-      probe.entered = 1;
-      require(pthread_cond_broadcast(&probe.changed) == 0);
-      while (!probe.release)
-        require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
-    }
-    require(pthread_mutex_unlock(&probe.mutex) == 0);
-  }
+  if (L == probe.first && table == probe.table && part == probe.first_part)
+    hold_partition();
   __real_luaH_releasepart(L, table, part);
+}
+
+void __real_luaH_openpart(Table *, LuaHashPart *, LuaPartNotice *);
+void __wrap_luaH_openpart(Table *table, LuaHashPart *part,
+                          LuaPartNotice *notice) {
+  if (probe.first_ref != 0 && table == probe.table && part == probe.first_part)
+    hold_partition();
+  __real_luaH_openpart(table, part, notice);
 }
 
 void __real_luaQ_wait(lua_State *, pthread_mutex_t *, pthread_cond_t *,
@@ -491,6 +503,57 @@ static void check_integer_keys(lua_State *L, int count, lua_Integer stride) {
   lua_pop(L, 1);
 }
 
+static void *release_reference(void *argument) {
+  lua_State *L = argument;
+  luaL_unref(L, LUA_REGISTRYINDEX,
+             L == probe.first ? probe.first_ref : probe.second_ref);
+  return NULL;
+}
+
+static void check_registry_wakes(lua_State *L) {
+  pthread_t first, same, layout;
+  unsigned lane;
+  lua_pushvalue(L, LUA_REGISTRYINDEX);
+  probe.table = (Table *)lua_topointer(L, 1);
+  probe.first = lua_newthread(L);
+  probe.same = lua_newthread(L);
+  probe.layout = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, probe.layout, 1);
+  lua_newtable(probe.first);
+  probe.first_ref = luaL_ref(probe.first, LUA_REGISTRYINDEX);
+  lua_newtable(probe.first);
+  probe.second_ref = luaL_ref(probe.first, LUA_REGISTRYINDEX);
+  require(probe.second_ref == probe.first_ref + 1);
+  lane =
+      ((unsigned)probe.first_ref - 1) / LUA_ARRAY_BLOCK % (LUA_HASH_PARTS - 1) +
+      1;
+  probe.first_part = luaH_part(luaH_hashdir(probe.table->node), lane);
+  require(pthread_create(&first, NULL, release_reference, probe.first) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!probe.entered)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_create(&same, NULL, release_reference, probe.same) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!probe.waiting)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_create(&layout, NULL, change_metatable, NULL) == 0);
+  require(pthread_mutex_lock(&probe.mutex) == 0);
+  while (!probe.layout_waiting)
+    require(pthread_cond_wait(&probe.changed, &probe.mutex) == 0);
+  probe.release = 1;
+  require(pthread_cond_broadcast(&probe.changed) == 0);
+  require(pthread_mutex_unlock(&probe.mutex) == 0);
+  require(pthread_join(first, NULL) == 0);
+  require(pthread_join(same, NULL) == 0 && probe.part_woken);
+  require(pthread_join(layout, NULL) == 0 && probe.layout_done);
+  probe.first_part = NULL;
+  require(lua_rawgeti(L, LUA_REGISTRYINDEX, probe.first_ref) == LUA_TNUMBER);
+  require(lua_rawgeti(L, LUA_REGISTRYINDEX, probe.second_ref) == LUA_TNUMBER);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   LuaHashDirectory *directory;
@@ -504,6 +567,10 @@ int main(int argc, char **argv) {
   luaL_openlibs(L);
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
+  if (strcmp(argv[1], "registry") == 0) {
+    check_registry_wakes(L);
+    goto done;
+  }
   lua_createtable(L, 0, 256);
   probe.table = (Table *)lua_topointer(L, 1);
   probe.first = lua_newthread(L);
@@ -674,6 +741,7 @@ int main(int argc, char **argv) {
   check_integer_keys(L, 256 * (LUA_HASH_PARTS - 1), 0x100000000LL);
   check_dense_allocation_failure(L);
   check_integer_blocks(L);
+done:
   lua_close(L);
   require(pthread_cond_destroy(&probe.changed) == 0);
   require(pthread_mutex_destroy(&probe.mutex) == 0);
