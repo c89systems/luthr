@@ -5,9 +5,11 @@ local input = ('{"id":42,"service":"métro","bytes":4032,"active":true,"message"
 local decode_table = mode == "lonejson_table"
 local decode_only = mode == "lonejson_decode"
 local read_fields = mode == "lonejson_fields"
+local create_records = mode == "lonejson_create"
 local reuse_record = mode == "lonejson_reuse" or decode_only or read_fields
-assert(decode_table or reuse_record or mode == "lonejson_fresh", "unknown LoneJSON workload")
-local work = iterations * (read_fields and 2 or #input)
+assert(decode_table or reuse_record or create_records or mode == "lonejson_fresh",
+       "unknown LoneJSON workload")
+local work = iterations * (create_records and 1 or read_fields and 2 or #input)
 
 local function run()
   local json = lonejson.new()
@@ -21,7 +23,11 @@ local function run()
   local record = reuse_record and schema:new_record()
   local decode_into, decode, new_record = schema.decode_into, schema.decode, schema.new_record
   local result, sum = nil, 0
-  if decode_only then
+  if create_records then
+    for _ = 1, iterations do result = new_record(schema) end
+    assert(type(result) == "userdata" and type(result.clear) == "function")
+    return work
+  elseif decode_only then
     result = record
     for _ = 1, iterations do
       assert(decode_into(schema, result, input))
