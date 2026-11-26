@@ -47,19 +47,35 @@ LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
 LUAI_FUNC uintptr_t luaX_reservevalues (lua_State *L);
 LUAI_FUNC void luaX_releasevalues (lua_State *L, uintptr_t owner);
 
-/* Each observation is one atomic word, with a payload address and either
-** its byte length or the userdata tag. Readers never dereference a Lua
-** object. A borrower still needs the corresponding live stack value. */
+/* An observation is one atomic word. It holds either a payload with its
+** length or userdata tag, or packed types for a wider argument list.
+** A payload borrower still needs the corresponding live stack value. */
 enum {
   LUA_ARGUMENT_ALIGN_SHIFT = 2,
   LUA_ARGUMENT_LENGTH_SHIFT = LUA_GATE_OFFER_SHIFT - LUA_ARGUMENT_ALIGN_SHIFT,
-  LUA_ARGUMENT_USERDATA = (1u << (64 - LUA_ARGUMENT_LENGTH_SHIFT)) - 1
+  LUA_ARGUMENT_USERDATA = (1u << (64 - LUA_ARGUMENT_LENGTH_SHIFT)) - 1,
+  LUA_ARGUMENT_TYPES = LUA_ARGUMENT_USERDATA - 1
 };
 
 l_sinline uintptr_t luaX_argument (lua_State *L, int idx) {
   unsigned slot = cast_uint(idx) - 1u;
   return slot < LUA_NATIVE_ARGUMENTS
     ? __atomic_load_n(&L->stack_gate.arguments[slot], __ATOMIC_ACQUIRE) : 0;
+}
+
+/* Only positive indices survive an append. The encoded tags carry no roots
+** and can be used without borrowing the stack or dereferencing a Lua object. */
+l_sinline int luaX_argumenttype (lua_State *L, int idx) {
+  unsigned slot = cast_uint(idx) - 1u;
+  uintptr_t first;
+  if (slot >= LUA_NATIVE_TYPES) return LUA_TNONE;
+  first = luaX_argument(L, 1);
+  if ((first >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_TYPES)
+    return cast_int((first >> (4 * slot)) & 15u) - 1;
+  if (slot != 0) first = luaX_argument(L, idx);
+  if (first == 0) return LUA_TNONE;
+  return (first >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA
+         ? LUA_TUSERDATA : LUA_TSTRING;
 }
 
 l_sinline void *luaX_argumentaddress (uintptr_t argument) {

@@ -1270,13 +1270,20 @@ static int make_argument(lua_State *L) {
 
 static int observe_arguments(lua_State *L) {
   size_t len;
+  int nargs = lua_gettop(L);
   const char *before = lua_tolstring(L, 2, &len);
   const int *value = lua_touserdata(L, 1);
   require(lua_type(L, 1) == LUA_TUSERDATA && value && *value == 41);
   require(before && len == 7 && memcmp(before, "old\0key", len) == 0);
+  require(lua_tolstring(L, 1, NULL) == NULL);
+  if (nargs > 2) {
+    require(lua_type(L, 3) == LUA_TNUMBER && lua_type(L, 8) == LUA_TBOOLEAN);
+    require(lua_checkstack(L, 3));
+  }
   lua_pushinteger(L, 17);
   require(__atomic_load_n(&L->stack_gate.arguments[0], __ATOMIC_ACQUIRE) != 0);
-  require(__atomic_load_n(&L->stack_gate.arguments[1], __ATOMIC_ACQUIRE) != 0);
+  require((__atomic_load_n(&L->stack_gate.arguments[1], __ATOMIC_ACQUIRE) !=
+           0) == (nargs == 2));
   blocked_leaf(L);
   /* The old string is now at index 1 and still roots this borrowed pointer. */
   require(lua_type(L, 1) == LUA_TSTRING && lua_touserdata(L, 1) == NULL);
@@ -1289,7 +1296,7 @@ static int observe_arguments(lua_State *L) {
   return 1;
 }
 
-static void native_argument_observation(struct fixture *f) {
+static void native_argument_observation(struct fixture *f, int wide) {
   lua_State *target;
   size_t len;
   const char *bytes;
@@ -1304,8 +1311,10 @@ static void native_argument_observation(struct fixture *f) {
                                  "assert(a=='old\\0key' and b=='next\\0key'); "
                                  "return 51 end") == LUA_OK);
   submit(f, 0,
-         "warm_native_permit(); "
-         "return observe_arguments(make_argument(),'old\\0key')",
+         wide ? "warm_native_permit(); return observe_arguments("
+                "make_argument(),'old\\0key',3,nil,nil,nil,nil,true)"
+              : "warm_native_permit(); "
+                "return observe_arguments(make_argument(),'old\\0key')",
          0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
@@ -1577,8 +1586,29 @@ static int collect_after_native_operation(lua_State *L) {
   return 0;
 }
 
-static void native_table_without_slot(struct fixture *f, lua_CFunction fn,
-                                      const char *source, int gc_after) {
+static int inspect_native_stack(lua_State *L) {
+  if (lua_gettop(L) == 0) {
+    require(lua_checkstack(L, 80));
+    return 0;
+  }
+  require(lua_type(L, 1) == LUA_TNIL && lua_type(L, 2) == LUA_TBOOLEAN);
+  require(lua_type(L, 3) == LUA_TNUMBER && lua_isstring(L, 4));
+  require(lua_type(L, 5) == LUA_TTABLE && lua_type(L, 6) == LUA_TFUNCTION);
+  require(lua_type(L, 7) == LUA_TTHREAD && lua_isuserdata(L, 8));
+  require(lua_type(L, 9) == LUA_TNUMBER && lua_type(L, 10) == LUA_TNONE);
+  blocked_leaf(L);
+  require(lua_checkstack(L, 48));
+  for (int i = 0; i < 47; i++)
+    lua_pushinteger(L, i);
+  require(lua_gettop(L) == 56 && lua_tointeger(L, 56) == 46);
+  require(lua_type(L, 1) == LUA_TNIL && lua_isuserdata(L, 8));
+  lua_pushinteger(L, 51);
+  native_operation_done();
+  return 1;
+}
+
+static void native_operation_without_slot(struct fixture *f, lua_CFunction fn,
+                                          const char *source, int gc_after) {
   init(f, 1);
   lua_pushcfunction(f->main, fn);
   lua_setglobal(f->main, "native_table_operation");
@@ -1597,8 +1627,7 @@ static void native_table_without_slot(struct fixture *f, lua_CFunction fn,
   require(pthread_mutex_unlock(&f->mutex) == 0);
   if (!gc_after)
     require(lua_gc(f->main, LUA_GCSTOP) == 0);
-  /* The peer takes the only managed slot and holds it until the native
-   * task finishes its table operations. The nursery is already populated. */
+  /* The peer holds the only managed slot until the native operation ends. */
   submit(f, 1, "wait_for_native_operation(); return 52", 0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->waiting)
@@ -3336,7 +3365,9 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
   else if (strcmp(argv[1], "native_argument_observation") == 0)
-    native_argument_observation(f);
+    native_argument_observation(f, 0);
+  else if (strcmp(argv[1], "native_argument_types") == 0)
+    native_argument_observation(f, 1);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
     native_recall_during_stack_borrow(f, 1, 0);
   else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
@@ -3347,15 +3378,23 @@ int main(int argc, char **argv) {
     native_metadata_without_slot(f);
   else if (strcmp(argv[1], "native_registry_without_slot") == 0)
     native_registry_without_slot(f);
+  else if (strcmp(argv[1], "native_stack_without_slot") == 0)
+    native_operation_without_slot(
+        f, inspect_native_stack,
+        "local noop = function() end; local co = coroutine.create(noop); "
+        "native_table_operation(); "
+        "return native_table_operation(nil, true, 2, 'key', {}, noop, co, "
+        "io.stdout, 9)",
+        0);
   else if (strcmp(argv[1], "native_array_without_slot") == 0)
-    native_table_without_slot(f, edit_native_array,
-                              "return native_table_operation({0}, {51})", 0);
+    native_operation_without_slot(
+        f, edit_native_array, "return native_table_operation({0}, {51})", 0);
   else if (strcmp(argv[1], "native_allocation_without_slot") == 0)
-    native_table_without_slot(
+    native_operation_without_slot(
         f, create_native_array,
         "return native_table_operation({51, 1, 2, 3, 4, 5})[1][1][1]", 1);
   else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
-    native_table_without_slot(
+    native_operation_without_slot(
         f, edit_native_fields,
         "local row = native_table_operation({51}); "
         "assert(rawequal(row.first, row.second)); return row.first[1]",

@@ -59,6 +59,9 @@ _Static_assert(_Alignof(NativeStackContext) > LUA_GATE_FLAGS,
                "stack gate owner tokens must leave space for the flags");
 _Static_assert(offsetof(LuaThreadContext, native) == 0,
                "host token must point to the beginning of its TLS record");
+_Static_assert(LUA_NUMTYPES <= 15, "native argument type must fit in four bits");
+_Static_assert(LUA_NATIVE_TYPES * 4 <= LUA_ARGUMENT_LENGTH_SHIFT,
+               "native argument types must fit in the payload");
 
 void luaX_initgate (LuaStackGate *gate, int dormant) {
   unsigned i;
@@ -361,7 +364,7 @@ static uintptr_t argumentvalue (const TValue *value) {
   }
   else if (ttisstring(value)) {
     address = cast(uintptr_t, getlstr(tsvalue(value), kind));
-    if (kind >= LUA_ARGUMENT_USERDATA) return 0;
+    if (kind >= LUA_ARGUMENT_TYPES) return 0;
   }
   else return 0;
   if ((address >> LUA_GATE_OFFER_SHIFT) != 0 ||
@@ -377,7 +380,16 @@ static void publisharguments (lua_State *L, StkId func) {
   StkId args = func + 1;
   ptrdiff_t count = L->top.p - args;
   uintptr_t first, second;
-  /* Only materialize complete views of small native argument lists. */
+  if (count > LUA_NATIVE_ARGUMENTS) {
+    unsigned limit = cast_uint(count < LUA_NATIVE_TYPES ? count : LUA_NATIVE_TYPES);
+    unsigned i;
+    uintptr_t types = cast(uintptr_t, LUA_ARGUMENT_TYPES) << LUA_ARGUMENT_LENGTH_SHIFT;
+    for (i = 0; i < limit; i++)
+      types |= cast(uintptr_t, ttype(s2v(args + i)) + 1) << (4 * i);
+    __atomic_store_n(&L->stack_gate.arguments[0], types, __ATOMIC_RELEASE);
+    return;
+  }
+  /* Publish payloads only when both arguments have a supported form. */
   if (count != LUA_NATIVE_ARGUMENTS || (first = argumentvalue(s2v(args))) == 0 ||
       (second = argumentvalue(s2v(args + 1))) == 0) return;
   __atomic_store_n(&L->stack_gate.arguments[0], first, __ATOMIC_RELEASE);

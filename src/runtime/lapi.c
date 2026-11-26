@@ -253,6 +253,17 @@ int luaA_checkstack (lua_State *L, int n) {
 
 LUA_API int lua_checkstack (lua_State *L, int n) {
   int result;
+  if (luaX_tryobserve(L, 0)) {
+    api_check(L, n >= 0, "negative 'n'");
+    if (L->stack_last.p - L->top.p > n) {
+      CallInfo *ci = L->ci;
+      /* Reserving existing capacity leaves published arguments intact. */
+      if (ci->top.p < L->top.p + n) ci->top.p = L->top.p + n;
+      luaX_leavebounded(L);
+      return 1;
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   result = luaA_checkstack(L, n);
   lua_unlock(L);
@@ -488,11 +499,9 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
 LUA_API int lua_type (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
-  int result;
-  uintptr_t owner, argument = luaX_argument(L, idx);
-  if (argument != 0)
-    return (argument >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA
-           ? LUA_TUSERDATA : LUA_TSTRING;
+  int result = luaX_argumenttype(L, idx);
+  uintptr_t owner;
+  if (result != LUA_TNONE) return result;
   owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = isvalid(L, o) ? ttype(o) : LUA_TNONE;
@@ -736,7 +745,7 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
   const TValue *value;
   int stackonly = !ispseudo(idx);
   uintptr_t argument = luaX_argument(L, idx);
-  if (argument != 0 && (argument >> LUA_ARGUMENT_LENGTH_SHIFT) != LUA_ARGUMENT_USERDATA) {
+  if (argument != 0 && (argument >> LUA_ARGUMENT_LENGTH_SHIFT) < LUA_ARGUMENT_TYPES) {
     if (len != NULL) *len = argument >> LUA_ARGUMENT_LENGTH_SHIFT;
     return luaX_argumentaddress(argument);
   }
@@ -814,9 +823,10 @@ LUA_API void *lua_touserdata (lua_State *L, int idx) {
   const TValue *o;
   void *result;
   uintptr_t owner, argument = luaX_argument(L, idx);
-  if (argument != 0)
-    return (argument >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA
-           ? luaX_argumentaddress(argument) : NULL;
+  if ((argument >> LUA_ARGUMENT_LENGTH_SHIFT) == LUA_ARGUMENT_USERDATA)
+    return luaX_argumentaddress(argument);
+  if (argument != 0 && (argument >> LUA_ARGUMENT_LENGTH_SHIFT) != LUA_ARGUMENT_TYPES)
+    return NULL;
   owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = luaA_udatapointer(o);

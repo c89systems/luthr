@@ -27,7 +27,7 @@ enum {
 };
 
 enum { LUA_GATE_VALUES = 1, LUA_GATE_SHARED_READ = 2 };
-enum { LUA_NATIVE_ARGUMENTS = 2 };
+enum { LUA_NATIVE_ARGUMENTS = 2, LUA_NATIVE_TYPES = 8 };
 
 /* A scheduled root can publish its inactive stack and its recallable slot
 ** in one word. Linux x86-64 userspace addresses use at most 56 bits.
