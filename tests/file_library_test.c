@@ -19,7 +19,7 @@
     }                                                                          \
   } while (0)
 struct fixture {
-  lua_State *state;
+  lua_State *state, *line_reader;
   luthr_lua_runtime *runtime;
   const char *mode, *directory;
   char *path;
@@ -94,6 +94,37 @@ static void execute(lua_State *state, const char *source) {
   if (status != LUA_OK)
     fprintf(stderr, "file library: %s\n", lua_tostring(state, -1));
   require(status == LUA_OK);
+}
+void __real_flockfile(FILE *file);
+void __wrap_flockfile(FILE *file) {
+  if (active->line_reader != NULL) {
+    lua_State *reader = active->line_reader;
+    unsigned closed = active->closed;
+    active->line_reader = NULL;
+    require(luaX_boundcontext(reader) == NULL);
+    execute(active->state,
+            "assert(debug.setupvalue(iter,1,nil)); "
+            "collectgarbage('collect'); collectgarbage('collect')");
+    require(active->closed == closed);
+  }
+  __real_flockfile(file);
+}
+static void read_lines(struct fixture *test) {
+  lua_State *state = test->state;
+  lua_State *reader;
+  unsigned closed = test->closed;
+  int results;
+  execute(state, "iter=assert(io.open(path,'rb')):lines('L')");
+  reader = lua_newthread(state);
+  require(luaL_loadstring(reader, "return iter(false)") == LUA_OK);
+  test->line_reader = reader;
+  require(lua_resume(reader, NULL, 0, &results) == LUA_OK);
+  require(test->line_reader == NULL && results == 1);
+  require(strcmp(lua_tostring(reader, -1), "return marker,42,nil,7\n") == 0);
+  lua_pop(state, 1);
+  lua_gc(state, LUA_GCCOLLECT);
+  lua_gc(state, LUA_GCCOLLECT);
+  require(test->closed == closed + 1);
 }
 static void write_file(struct fixture *test, const char *bytes, size_t size) {
   FILE *file = fopen(test->path, "wb");
@@ -386,6 +417,8 @@ static void *run(void *context) {
     execute(state, "assert(dofile(path)==42)");
   } else if (strstr(test->mode, "stdin"))
     stdin_case(test);
+  else if (strstr(test->mode, "lines"))
+    read_lines(test);
   else if (strstr(test->mode, "snapshot"))
     snapshot(test);
   else if (strstr(test->mode, "admission"))

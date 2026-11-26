@@ -19,9 +19,10 @@
 
 #include "lua.h"
 
+#include "lapiowned.h"
 #include "lauxlib.h"
-#include "lualib.h"
 #include "llimits.h"
+#include "lualib.h"
 
 
 /*
@@ -565,8 +566,7 @@ static int read_chars (lua_State *L, FILE *f, size_t n) {
 }
 
 
-static int g_read (lua_State *L, FILE *f, int first) {
-  int nargs = lua_gettop(L) - 1;
+static int g_read (lua_State *L, FILE *f, int first, int nargs) {
   int n, success;
   clearerr(f);
   errno = 0;
@@ -617,12 +617,14 @@ static int g_read (lua_State *L, FILE *f, int first) {
 
 
 static int io_read (lua_State *L) {
-  return g_read(L, getiofile(L, IO_INPUT), 1);
+  FILE *f = getiofile(L, IO_INPUT);
+  return g_read(L, f, 1, lua_gettop(L) - 1);
 }
 
 
 static int f_read (lua_State *L) {
-  return g_read(L, tofile(L), 2);
+  FILE *f = tofile(L);
+  return g_read(L, f, 2, lua_gettop(L) - 1);
 }
 
 
@@ -630,16 +632,62 @@ static int f_read (lua_State *L) {
 ** Iteration function for 'lines'.
 */
 static int io_readline (lua_State *L) {
-  LStream *p = (LStream *)lua_touserdata(L, lua_upvalueindex(1));
-  int i;
-  int n = (int)lua_tointeger(L, lua_upvalueindex(2));
-  if (isclosed(p))  /* file is already closed? */
+  LuaNativeRoot file;
+  LuaObjectScope scope;
+  CClosure *closure;
+  LStream *p;
+  lua_Integer count;
+  int i, n;
+  StkId top;
+  /* Prepare the iterator inputs in one managed scope. Read from the file
+  ** only after releasing the scope since even a single line can block. */
+  lua_lock(L);
+  luaR_pushroot(L, &file);
+  closure = clCvalue(s2v(L->ci->func.p));
+  luaA_begin(L, obj2gco(closure), &scope);
+  luaR_copyroot(L, &file, &closure->upvalue[0]);
+  n = tointeger(&closure->upvalue[1], &count) ? cast_int(count) : 0;
+  luaA_end(L, &scope);
+  p = cast(LStream *, luaA_udatapointer(&file.value));
+  if (isclosed(p)) {
+    luaR_poproot(L, &file);
+    lua_unlock(L);
     return luaL_error(L, "file is already closed");
-  lua_settop(L , 1);
-  luaL_checkstack(L, n, "too many arguments");
-  for (i = 1; i <= n; i++)  /* push arguments to 'g_read' */
-    lua_pushvalue(L, lua_upvalueindex(3 + i));
-  n = g_read(L, p->f, 2);  /* 'n' is number of results */
+  }
+  top = L->ci->func.p + 2;
+  if (L->tbclist.p >= top) {
+    lua_unlock(L);
+    lua_settop(L, 1);  /* a hook may have installed a close slot */
+    lua_lock(L);
+  }
+  else {
+    if (L->top.p < top) setnilvalue2s(top - 1);
+    L->top.p = top;
+  }
+  if (n > 0) {
+    if (n > MAXARGLINE || !luaA_checkstack(L, n + 1)) {
+      luaR_poproot(L, &file);
+      lua_unlock(L);
+      return luaL_error(L, "stack overflow (too many arguments)");
+    }
+    luaA_begin(L, obj2gco(closure), &scope);
+    for (i = 0; i < n; i++) {
+      if (i + 3 < closure->nupvalues) {
+        setobj2s(L, L->top.p, &closure->upvalue[i + 3]);
+      }
+      else
+        setnilvalue2s(L->top.p);
+      api_incr_top(L);
+    }
+    luaA_end(L, &scope);
+  }
+  /* Keep the stream reachable while blocked, even if debug replaces the
+  ** closure's upvalue. 'g_read' takes the format count explicitly. */
+  setobj2s(L, L->top.p, &file.value);
+  api_incr_top(L);
+  luaR_poproot(L, &file);
+  lua_unlock(L);
+  n = g_read(L, p->f, 2, n < 0 ? 0 : n);  /* 'n' is number of results */
   lua_assert(n > 0);  /* should return at least a nil */
   if (lua_toboolean(L, -n))  /* read at least one value? */
     return n;  /* return them */

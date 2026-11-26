@@ -811,13 +811,14 @@ luthr_test_program(file_library_test file_library_test.c)
 set_target_properties(file_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(file_library_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(file_library_test PRIVATE luthr_static)
-target_link_options(file_library_test PRIVATE -Wl,--wrap=fopen -Wl,--wrap=fopen64 -Wl,--wrap=fclose)
+target_link_options(file_library_test PRIVATE
+  -Wl,--wrap=fopen -Wl,--wrap=fopen64 -Wl,--wrap=fclose -Wl,--wrap=flockfile)
 if(LUTHR_TARGET STREQUAL "x86_64-linux-gnu" AND NOT TARGET debug_worker_stack)
   target_compile_definitions(file_library_test PRIVATE LUTHR_TEST_SMALL_NATIVE_STACK)
 endif()
 foreach(backend IN ITEMS raw facade)
   foreach(gc IN ITEMS incremental generational)
-    foreach(case IN ITEMS semantics errors binary yield bom stdin snapshot admission oom stack)
+    foreach(case IN ITEMS semantics errors binary yield bom stdin snapshot admission oom stack lines)
       add_test(NAME file_library_${backend}_${case}_${gc}
         COMMAND file_library_test ${backend}_${case}_${gc} "${CMAKE_CURRENT_BINARY_DIR}")
       set_tests_properties(file_library_${backend}_${case}_${gc}
