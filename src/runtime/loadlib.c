@@ -26,10 +26,12 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lauxowned.h"
+#include "ldo.h"
 #include "lexec.h"
 #include "lgc.h"
 #include "lstring.h"
 #include "ltable.h"
+#include "ltableaccess.h"
 #include "lvm.h"
 
 
@@ -656,28 +658,52 @@ static void getregistryroot (lua_State *L, const char *field,
   luaR_poproot(L, &registry);
 }
 
+static void pushroot (lua_State *L, const LuaNativeRoot *root) {
+  setobj2s(L, L->top.p, &root->value);
+  api_incr_top(L);
+}
+
+static void poproots (lua_State *L, LuaNativeRoot *roots, unsigned count) {
+  while (count != 0)
+    luaR_poproot(L, &roots[--count]);
+}
+
+/* The searcher and the cache use C-string keys. The loader still receives
+** the original Lua name, including any bytes after an embedded zero. */
+static TString *modulekey (lua_State *L, const LuaNativeRoot *name,
+                           size_t len) {
+  TString *string = tsvalue(&name->value);
+  const char *bytes = getstr(string);
+  if (strisinterned(string) && memchr(bytes, '\0', len) == NULL)
+    return string;
+  return luaS_new(L, bytes);
+}
+
 static int searcher_preload (lua_State *L) {
   LuaNativeRoot roots[4];  /* original name, C-string key, preload, result */
   size_t len;
-  const char *name = luaL_rootstring(L, 1, &roots[0], &len);
+  const char *name;
   unsigned index;
-  int results;
+  TString *data;
   lua_lock(L);
+  name = luaL_ownedrootstring(L, 1, &roots[0], &len);
   for (index = 1; index < 4; ++index) luaR_pushroot(L, &roots[index]);
-  setsvalue(L, &roots[1].value, luaS_new(L, name));
+  setsvalue(L, &roots[1].value, modulekey(L, &roots[0], len));
   getregistryroot(L, LUA_PRELOAD_TABLE, &roots[2]);
   getroot(L, &roots[2], &roots[1], &roots[3]);
-  lua_unlock(L);
   if (ttisnil(&roots[3].value)) {
+    lua_unlock(L);
     lua_pushfstring(L, "no field package.preload['%s']", name);
-    results = 1;
+    return luaL_rootresult(L, roots, 4, 1);
   }
-  else {
-    luaL_pushrooted(L, &roots[3]);
-    lua_pushliteral(L, ":preload:");
-    results = 2;
-  }
-  return luaL_rootresult(L, roots, 4, results);
+  pushroot(L, &roots[3]);
+  data = luaS_cachelstr(L, ":preload:", sizeof(":preload:") - 1);
+  setsvalue2s(L, L->top.p, data);
+  api_incr_top(L);
+  luaC_checkGC(L);
+  poproots(L, roots, 4);
+  lua_unlock(L);
+  return 2;
 }
 
 
@@ -687,9 +713,10 @@ enum { RNAME, RKEY, RPACKAGE, RLOADED, RSEARCHERS, RLOADER, RDATA, RVALUE,
 static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
   lua_Unsigned i;
   unsigned work = 0;
-  int top = lua_gettop(L);
+  int top;
   luaL_Buffer msg;  /* to build error message */
   lua_lock(L);
+  top = cast_int(L->top.p - (L->ci->func.p + 1));
   getfieldroot(L, &roots[RPACKAGE], "searchers", &roots[RSEARCHERS]);
   lua_unlock(L);
   if (l_unlikely(!ttistable(&roots[RSEARCHERS].value)))
@@ -703,16 +730,15 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
     tag = luaH_getint(L, hvalue(&roots[RSEARCHERS].value), cast(lua_Integer, i),
                      &roots[RLOADER].value);
     if (tagisempty(tag)) setnilvalue(&roots[RLOADER].value);
-    lua_unlock(L);
     if (l_unlikely(ttisnil(&roots[RLOADER].value) || i > LUA_MAXINTEGER)) {
+      lua_unlock(L);
       luaL_buffsub(&msg, 2);  /* remove last prefix */
       luaL_pushresult(&msg);  /* create error message */
       luaL_error(L, "module '%s' not found:%s", name, lua_tostring(L, -1));
     }
-    luaL_pushrooted(L, &roots[RLOADER]);
-    luaL_pushrooted(L, &roots[RKEY]);
-    lua_call(L, 1, 2);  /* call it */
-    lua_lock(L);
+    pushroot(L, &roots[RLOADER]);
+    pushroot(L, &roots[RKEY]);
+    luaD_callnoyield(L, L->top.p - 2, 2);
     luaR_setroot(L, &roots[RLOADER], s2v(L->top.p - 2));
     luaR_setroot(L, &roots[RDATA], s2v(L->top.p - 1));
     L->top.p -= 2;
@@ -738,38 +764,91 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
 }
 
 
+/* Consult the actual registry on every call. A raw lookup that would
+** need a metamethod or a wait is completed by the ordinary rooted path. */
+static int tryloaded (lua_State *L, TString *module, TValue *loaded,
+                       TValue *value) {
+  TString *key;
+  TValue registry;
+  lu_byte tag;
+  if (luaC_tracing(L) ||
+      (key = luaS_trycachedname(L, LUA_LOADED_TABLE)) == NULL ||
+      !luaA_tryregistry(G(L), &registry) || !ttistable(&registry) ||
+      !luaH_trygetshortstr(L, hvalue(&registry), key, loaded, &tag) ||
+      tagisempty(tag) || !ttistable(loaded))
+    return 0;
+  return luaH_trygetshortstr(L, hvalue(loaded), module, value, &tag) &&
+         !luaV_needsindex(tag);
+}
+
+
 static int ll_require (lua_State *L) {
   LuaNativeRoot roots[REQUIRE_ROOTS];
-  LuaObjectScope scope;
-  CClosure *function;
+  TValue loaded, value;
+  int lookup = 0;
   size_t len;
   unsigned index;
-  const char *name = luaL_rootstring(L, 1, &roots[RNAME], &len);
-  lua_settop(L, 1);
+  const char *name;
   lua_lock(L);
+  if (L->top.p == L->ci->func.p + 2 && ttisshrstring(s2v(L->top.p - 1))) {
+    TString *module = tsvalue(s2v(L->top.p - 1));
+    if (memchr(getshrstr(module), '\0', module->shrlen) == NULL &&
+        tryloaded(L, module, &loaded, &value)) {
+      if (!l_isfalse(&value)) {
+        setobj2s(L, L->top.p, &value);
+        api_incr_top(L);
+        lua_unlock(L);
+        return 1;
+      }
+      lookup = 1;
+    }
+  }
+  name = luaL_ownedrootstring(L, 1, &roots[RNAME], &len);
+  if (L->top.p != L->ci->func.p + 2) {
+    lua_unlock(L);
+    lua_settop(L, 1);
+    lua_lock(L);
+  }
   for (index = 1; index < REQUIRE_ROOTS; ++index)
     luaR_pushroot(L, &roots[index]);
-  setsvalue(L, &roots[RKEY].value, luaS_new(L, name));
+  if (lookup) {
+    /* The probe used the interned name and no operation has parked since. */
+    luaR_copyroot(L, &roots[RKEY], &roots[RNAME].value);
+    luaR_copyroot(L, &roots[RLOADED], &loaded);
+    luaR_copyroot(L, &roots[RVALUE], &value);
+  }
+  else
+    setsvalue(L, &roots[RKEY].value, modulekey(L, &roots[RNAME], len));
   if (ttisCclosure(s2v(L->ci->func.p))) {
-    function = clCvalue(s2v(L->ci->func.p));
-    luaA_begin(L, obj2gco(function), &scope);
-    if (function->nupvalues >= 1)
-      luaR_setroot(L, &roots[RPACKAGE], &function->upvalue[0]);
-    luaA_end(L, &scope);
+    CClosure *function = clCvalue(s2v(L->ci->func.p));
+    if (function->nupvalues >= 1) {
+      if (luaA_readslot(&function->sequence, &function->upvalue[0], &value))
+        luaR_setroot(L, &roots[RPACKAGE], &value);
+      else {
+        LuaObjectScope scope;
+        luaA_begin(L, obj2gco(function), &scope);
+        luaR_setroot(L, &roots[RPACKAGE], &function->upvalue[0]);
+        luaA_end(L, &scope);
+      }
+    }
   }
-  getregistryroot(L, LUA_LOADED_TABLE, &roots[RLOADED]);
-  getroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
-  lua_unlock(L);
+  if (!lookup) {
+    getregistryroot(L, LUA_LOADED_TABLE, &roots[RLOADED]);
+    getroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
+  }
   if (!l_isfalse(&roots[RVALUE].value)) {
-    luaL_pushrooted(L, &roots[RVALUE]);
-    return luaL_rootresult(L, roots, REQUIRE_ROOTS, 1);
+    pushroot(L, &roots[RVALUE]);
+    poproots(L, roots, REQUIRE_ROOTS);
+    lua_unlock(L);
+    return 1;
   }
+  lua_unlock(L);
   findloader(L, roots, name);
-  luaL_pushrooted(L, &roots[RLOADER]);
-  luaL_pushrooted(L, &roots[RNAME]);
-  luaL_pushrooted(L, &roots[RDATA]);
-  lua_call(L, 2, 1);  /* run loader to load module */
   lua_lock(L);
+  pushroot(L, &roots[RLOADER]);
+  pushroot(L, &roots[RNAME]);
+  pushroot(L, &roots[RDATA]);
+  luaD_callnoyield(L, L->top.p - 3, 1);
   luaR_setroot(L, &roots[RVALUE], s2v(L->top.p - 1));
   L->top.p--;
   if (!ttisnil(&roots[RVALUE].value))
@@ -779,10 +858,11 @@ static int ll_require (lua_State *L) {
     setbtvalue(&roots[RVALUE].value);
     setroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
   }
+  pushroot(L, &roots[RVALUE]);
+  pushroot(L, &roots[RDATA]);
+  poproots(L, roots, REQUIRE_ROOTS);
   lua_unlock(L);
-  luaL_pushrooted(L, &roots[RVALUE]);
-  luaL_pushrooted(L, &roots[RDATA]);
-  return luaL_rootresult(L, roots, REQUIRE_ROOTS, 2);
+  return 2;
 }
 
 /* }====================================================== */
