@@ -27,6 +27,7 @@ enum {
 };
 
 enum { LUA_GATE_VALUES = 1, LUA_GATE_SHARED_READ = 2 };
+enum { LUA_NATIVE_ARGUMENTS = 2 };
 
 /* A scheduled root can publish its inactive stack and its recallable slot
 ** in one word. Linux x86-64 userspace addresses use at most 56 bits.
@@ -40,6 +41,7 @@ typedef struct LuaStackGate {
   struct LuaGateWaiter **tail;
   int ready;
   uint64_t values;  /* bounded API scope; a shared read also carries its epoch */
+  uintptr_t arguments[LUA_NATIVE_ARGUMENTS];  /* detached argument observations */
 } LuaStackGate;
 
 l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
@@ -50,6 +52,7 @@ l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_waitvalues (LuaStackGate *gate);
+LUAI_FUNC void luaX_cleararguments (LuaStackGate *gate);
 
 /* A full claim is published before this join. A racing bounded claim must
 ** observe the full claim or finish before the full owner reads the stack. */

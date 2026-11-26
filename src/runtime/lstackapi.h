@@ -47,6 +47,37 @@ LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
 LUAI_FUNC uintptr_t luaX_reservevalues (lua_State *L);
 LUAI_FUNC void luaX_releasevalues (lua_State *L, uintptr_t owner);
 
+/* Each observation is one atomic word, with a payload address and either
+** its byte length or the userdata tag. Readers never dereference a Lua
+** object. A borrower still needs the corresponding live stack value. */
+enum {
+  LUA_ARGUMENT_ALIGN_SHIFT = 2,
+  LUA_ARGUMENT_LENGTH_SHIFT = LUA_GATE_OFFER_SHIFT - LUA_ARGUMENT_ALIGN_SHIFT,
+  LUA_ARGUMENT_USERDATA = (1u << (64 - LUA_ARGUMENT_LENGTH_SHIFT)) - 1
+};
+
+l_sinline uintptr_t luaX_argument (lua_State *L, int idx) {
+  unsigned slot = cast_uint(idx) - 1u;
+  return slot < LUA_NATIVE_ARGUMENTS
+    ? __atomic_load_n(&L->stack_gate.arguments[slot], __ATOMIC_ACQUIRE) : 0;
+}
+
+l_sinline void *luaX_argumentaddress (uintptr_t argument) {
+  const uintptr_t mask = (cast(uintptr_t, 1) << LUA_ARGUMENT_LENGTH_SHIFT) - 1;
+  return cast(void *, (argument & mask) << LUA_ARGUMENT_ALIGN_SHIFT);
+}
+
+l_sinline void luaX_invalidatearguments (LuaStackGate *gate) {
+  if (l_unlikely(__atomic_load_n(&gate->arguments[0], __ATOMIC_RELAXED)))
+    luaX_cleararguments(gate);
+}
+
+/* After reserving the gate, retire the view before touching stack slots. */
+l_sinline void luaX_claimstack (LuaStackGate *gate) {
+  luaX_joinvalues(gate);
+  luaX_invalidatearguments(gate);
+}
+
 /* Stack-only scopes can borrow stack slots, immutable payloads, and atomic
 ** snapshots from inline heap fields. Retired storage, heap mutation,
 ** allocation, parking, and other stack reservations require managed admission. */
@@ -57,7 +88,7 @@ l_sinline uintptr_t luaX_valueenter (lua_State *L, int stackonly) {
         !__atomic_compare_exchange_n(&L->stack_gate.word, &expected,
           expected | LUA_GATE_STACK, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED))
       return luaX_valueenterslow(L, 0);
-    luaX_joinvalues(&L->stack_gate);
+    luaX_claimstack(&L->stack_gate);
     /* A stop sees this reservation or precedes the control-word check. */
     if (l_likely(!(luaW_control(&G(L)->world) &
                    (LUA_WORLD_STOPPED | LUA_MARK_ACTIVE))))
@@ -94,11 +125,17 @@ l_sinline int luaX_claimvalues (LuaStackGate *gate, uint64_t ticket) {
                                       __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
 }
 
-l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
+l_sinline int luaX_tryobserve (lua_State *L, unsigned requests) {
   if (!luaX_claimvalues(&L->stack_gate, LUA_GATE_VALUES)) return 0;
   if (l_likely(luaX_boundedready(L, requests))) return 1;
   luaX_leavebounded(L);
   return 0;
+}
+
+l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
+  if (!luaX_tryobserve(L, requests)) return 0;
+  luaX_invalidatearguments(&L->stack_gate);
+  return 1;
 }
 
 l_sinline void luaX_leavesharedread (lua_State *L) {
@@ -138,12 +175,19 @@ l_sinline int luaX_tryunmarked (lua_State *L) {
   return luaX_tryboundedscope(L, LUA_MARK_ACTIVE);
 }
 
-l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
+/* Reading the frame and appending to it leave the observed slots intact. */
+l_sinline uintptr_t luaX_enterobservation (lua_State *L, int stackonly) {
   if (!stackonly || l_unlikely(__atomic_load_n(&L->stack_gate.word,
                            __ATOMIC_RELAXED) & ~LUA_GATE_OFFER_MASK))
     return luaX_valueenterslow(L, 0);
-  if (luaX_tryboundedscope(L, 0)) return LUA_VALUE_BOUNDED;
+  if (luaX_tryobserve(L, 0)) return LUA_VALUE_BOUNDED;
   return luaX_reservevalues(L);
+}
+
+l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
+  uintptr_t owner = luaX_enterobservation(L, stackonly);
+  if (owner == LUA_VALUE_BOUNDED) luaX_invalidatearguments(&L->stack_gate);
+  return owner;
 }
 
 l_sinline void luaX_valueleave (lua_State *L, uintptr_t owner) {

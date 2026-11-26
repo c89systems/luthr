@@ -61,11 +61,13 @@ _Static_assert(offsetof(LuaThreadContext, native) == 0,
                "host token must point to the beginning of its TLS record");
 
 void luaX_initgate (LuaStackGate *gate, int dormant) {
+  unsigned i;
   gate->word = dormant ? LUA_GATE_DORMANT : 0;
   gate->head = NULL;
   gate->tail = &gate->head;
   gate->ready = 1;
   gate->values = 0;
+  for (i = 0; i < LUA_NATIVE_ARGUMENTS; i++) gate->arguments[i] = 0;
 }
 
 void luaX_destroygate (LuaStackGate *gate) {
@@ -73,6 +75,7 @@ void luaX_destroygate (LuaStackGate *gate) {
     return;
   lua_assert((gate->word == 0 || gate->word == LUA_GATE_DORMANT) &&
              gate->head == NULL && gate->values == 0 &&
+             gate->arguments[0] == 0 && gate->arguments[1] == 0 &&
              gate->tail == &gate->head);
   gate->ready = 0;
 }
@@ -80,6 +83,12 @@ void luaX_destroygate (LuaStackGate *gate) {
 void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
   while (__atomic_load_n(&gate->values, __ATOMIC_SEQ_CST))
     sched_yield();
+}
+
+void luaX_cleararguments (LuaStackGate *gate) {
+  unsigned i;
+  for (i = 0; i < LUA_NATIVE_ARGUMENTS; i++)
+    __atomic_store_n(&gate->arguments[i], 0, __ATOMIC_RELEASE);
 }
 
 l_sinline int trygate (LuaStackGate *gate, uintptr_t *expected,
@@ -135,7 +144,7 @@ static void reserve (lua_State *L, NativeStackContext *context,
     }
     luaX_checksync(pthread_mutex_unlock(&world->mutex));
   }
-  luaX_joinvalues(gate);
+  luaX_claimstack(gate);
 }
 
 l_noret luaX_badrelease (void) {
@@ -155,7 +164,7 @@ carrierentry int luaX_tryreserve (lua_State *target) {
   uintptr_t expected = 0;
   uintptr_t owner = cast(uintptr_t, context);
   if (trygate(gate, &expected, owner, __ATOMIC_SEQ_CST)) {
-    luaX_joinvalues(gate);
+    luaX_claimstack(gate);
     return 1;
   }
   if (expected == LUA_GATE_DORMANT &&
@@ -308,7 +317,7 @@ l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
             (expected & LUA_GATE_WAITING);
   if (!__atomic_compare_exchange_n(&L->stack_gate.word, &expected, managed, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return 0;
-  luaX_joinvalues(&L->stack_gate);
+  luaX_claimstack(&L->stack_gate);
   task->stack_offer = 0;
   execution->allocation_cache = &task->slot->allocation;
   execution->managed_depth = 1;
@@ -343,6 +352,38 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
 }
 
 #if !defined(HARDSTACKTESTS)
+static uintptr_t argumentvalue (const TValue *value) {
+  uintptr_t address;
+  size_t kind;
+  if (ttisfulluserdata(value)) {
+    address = cast(uintptr_t, getudatamem(uvalue(value)));
+    kind = LUA_ARGUMENT_USERDATA;
+  }
+  else if (ttisstring(value)) {
+    address = cast(uintptr_t, getlstr(tsvalue(value), kind));
+    if (kind >= LUA_ARGUMENT_USERDATA) return 0;
+  }
+  else return 0;
+  if ((address >> LUA_GATE_OFFER_SHIFT) != 0 ||
+      (address & ((1u << LUA_ARGUMENT_ALIGN_SHIFT) - 1u))) return 0;
+  return (address >> LUA_ARGUMENT_ALIGN_SHIFT) |
+         (cast(uintptr_t, kind) << LUA_ARGUMENT_LENGTH_SHIFT);
+}
+
+/* The ordinary stack remains authoritative. Once it is exposed, a pure
+** observation can linearize at the read of its packed argument. Clear the
+** observations before any owner can change the corresponding stack slots. */
+static void publisharguments (lua_State *L, StkId func) {
+  StkId args = func + 1;
+  ptrdiff_t count = L->top.p - args;
+  uintptr_t first, second;
+  /* Only materialize complete views of small native argument lists. */
+  if (count != LUA_NATIVE_ARGUMENTS || (first = argumentvalue(s2v(args))) == 0 ||
+      (second = argumentvalue(s2v(args + 1))) == 0) return;
+  __atomic_store_n(&L->stack_gate.arguments[0], first, __ATOMIC_RELEASE);
+  __atomic_store_n(&L->stack_gate.arguments[1], second, __ATOMIC_RELEASE);
+}
+
 /* Ordinary embedders can reclaim a free gate directly. The claim is visible
 ** before checking for collector requests, just like any managed entry. */
 l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
@@ -351,7 +392,7 @@ l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
         cast(uintptr_t, context) | LUA_GATE_MANAGED, 0,
         __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
     uint64_t control = luaW_control(&G(L)->world);
-    luaX_joinvalues(&L->stack_gate);
+    luaX_claimstack(&L->stack_gate);
     if (l_unlikely((control & (LUA_WORLD_REQUESTS | LUA_MARK_ACTIVE)) ||
         __atomic_load_n(&L->admission->storage_epoch, __ATOMIC_RELAXED) !=
           luaW_epoch(control)))
@@ -396,6 +437,7 @@ NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
   if (l_unlikely(luaC_barriernotice(G(L))))
     luaC_notifybarriers(G(L));
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
+  publisharguments(L, func);
   L->native_depth = 1;
   if (task != NULL) {
     if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
@@ -566,7 +608,7 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults) {
     ** executing anything that needs a managed slot or table storage. */
     if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {
       int traced = 0;
-      luaX_joinvalues(&L->stack_gate);
+      luaX_claimstack(&L->stack_gate);
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         StkId func;
         const Proto *p = probed ? NULL : scalarcallee(L, nargs, nresults, &func);
@@ -729,7 +771,7 @@ int luaX_joinpair (lua_State *owner, lua_State *other) {
   /* The suspended caller is enrolled. Never wait in reverse gate order. */
   if (!trygate(gate, &expected, cast(uintptr_t, context), __ATOMIC_SEQ_CST))
     return 0;
-  luaX_joinvalues(gate);
+  luaX_claimstack(gate);
   lua_assert(other->admission == &other->participation && other->stack_peer == NULL);
   owner->stack_peer = other;
   other->stack_peer = owner;

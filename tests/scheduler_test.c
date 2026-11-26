@@ -1262,6 +1262,75 @@ static int warm_native_permit(lua_State *L) {
   return 0;
 }
 
+static int make_argument(lua_State *L) {
+  int *value = lua_newuserdatauv(L, sizeof(*value), 0);
+  *value = 41;
+  return 1;
+}
+
+static int observe_arguments(lua_State *L) {
+  size_t len;
+  const char *before = lua_tolstring(L, 2, &len);
+  const int *value = lua_touserdata(L, 1);
+  require(lua_type(L, 1) == LUA_TUSERDATA && value && *value == 41);
+  require(before && len == 7 && memcmp(before, "old\0key", len) == 0);
+  lua_pushinteger(L, 17);
+  require(__atomic_load_n(&L->stack_gate.arguments[0], __ATOMIC_ACQUIRE) != 0);
+  require(__atomic_load_n(&L->stack_gate.arguments[1], __ATOMIC_ACQUIRE) != 0);
+  blocked_leaf(L);
+  /* The old string is now at index 1 and still roots this borrowed pointer. */
+  require(lua_type(L, 1) == LUA_TSTRING && lua_touserdata(L, 1) == NULL);
+  require(memcmp(before, "old\0key", 7) == 0);
+  require(lua_tolstring(L, 1, &len) == before && len == 7);
+  lua_getglobal(L, "check_native_arguments");
+  lua_pushvalue(L, 1);
+  lua_pushvalue(L, 2);
+  require(lua_pcall(L, 2, 1, 0) == LUA_OK);
+  return 1;
+}
+
+static void native_argument_observation(struct fixture *f) {
+  lua_State *target;
+  size_t len;
+  const char *bytes;
+  init(f, 1);
+  lua_pushcfunction(f->main, warm_native_permit);
+  lua_setglobal(f->main, "warm_native_permit");
+  lua_pushcfunction(f->main, make_argument);
+  lua_setglobal(f->main, "make_argument");
+  lua_pushcfunction(f->main, observe_arguments);
+  lua_setglobal(f->main, "observe_arguments");
+  require(luaL_dostring(f->main, "function check_native_arguments(a,b) "
+                                 "assert(a=='old\\0key' and b=='next\\0key'); "
+                                 "return 51 end") == LUA_OK);
+  submit(f, 0,
+         "warm_native_permit(); "
+         "return observe_arguments(make_argument(),'old\\0key')",
+         0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  target = f->tasks[0].root.thread;
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  bytes = lua_tolstring(target, 2, &len);
+  require(bytes && len == 7 && memcmp(bytes, "old\0key", len) == 0);
+  require(lua_type(target, 1) == LUA_TUSERDATA);
+  lua_copy(target, 2, 1);
+  require(lua_type(target, 1) == LUA_TSTRING);
+  lua_pushlstring(target, "next\0key", 8);
+  lua_replace(target, 2);
+  submit(f, 1, "return 52", 0);
+  require(collect(f, 1, LUA_OK) == 52);
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  require(lua_tolstring(target, 1, &len) == bytes && len == 7);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 51);
+  finish(f);
+}
+
 static int retire_before_native(lua_State *L) {
   Table *table = (Table *)lua_topointer(L, 1);
   require(table != NULL);
@@ -3266,6 +3335,8 @@ int main(int argc, char **argv) {
     native_return_compensation(f, 1);
   else if (strcmp(argv[1], "native_leaf_return") == 0)
     native_leaf_return(f);
+  else if (strcmp(argv[1], "native_argument_observation") == 0)
+    native_argument_observation(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
     native_recall_during_stack_borrow(f, 1, 0);
   else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
