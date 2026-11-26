@@ -678,7 +678,7 @@ LUA_API int lua_closethread (lua_State *L, lua_State *from) {
 }
 
 
-LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
+lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   int i;
   lua_State *L;
   global_State *g = cast(global_State*,
@@ -703,7 +703,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     return NULL;
   }
   L->marked = luaC_newmark(g);
-  if (luaM_initpools(L) != 0) {
+  if (luaM_initpools(L, budget) != 0) {
     luaW_destroy(g);
     luaX_destroygate(&L->stack_gate);
     luaAL_destroy(&g->allocator);
@@ -798,6 +798,11 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
     L = NULL;
   }
   return L;
+}
+
+
+LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
+  return luaE_newstate(f, ud, seed, 0);
 }
 
 

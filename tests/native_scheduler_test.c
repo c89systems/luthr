@@ -1216,7 +1216,11 @@ static int exercise_callback(const char *name) {
 }
 /* Include coroutine/control metadata while staying well below the 1 MiB
  * transported payload. The pipe's retained bytes are checked separately. */
-enum { STREAM_CHUNKS = 1024, STREAM_HEAP_LIMIT = 256 * 1024 };
+enum {
+  STREAM_CHUNKS = 1024,
+  STREAM_HEAP_LIMIT = 256 * 1024,
+  STREAM_TIGHT_HEAP_LIMIT = 224 * 1024
+};
 static void *stream_allocate(void *context, void *old, size_t old_size,
                              size_t size) {
   struct pool *pool = context;
@@ -1378,6 +1382,8 @@ static int exercise_stream(const char *name) {
   int facade = strstr(name, "facade") != NULL;
   int closing_control = strstr(name, "closing") != NULL;
   int carriers, consumers, expected_done;
+  size_t heap_limit =
+      strstr(name, "_224k_") ? STREAM_TIGHT_HEAP_LIMIT : STREAM_HEAP_LIMIT;
   unsigned sum = 0;
   require(pool != NULL);
   fixture = pool;
@@ -1395,8 +1401,8 @@ static int exercise_stream(const char *name) {
   check(pthread_cond_init(&pool->changed, NULL));
   if (facade) {
     static const unsigned char capture[] = "require('fixture')";
-    require(luthr_lua_runtime_new_with_limit(
-                &pool->runtime, STREAM_HEAP_LIMIT) == LUTHR_LUA_RUNTIME_OK);
+    require(luthr_lua_runtime_new_with_limit(&pool->runtime, heap_limit) ==
+            LUTHR_LUA_RUNTIME_OK);
     require(luthr_lua_runtime_openlibs(pool->runtime) == LUTHR_LUA_RUNTIME_OK);
     require(luthr_lua_runtime_register_c_module(pool->runtime, "fixture",
                                                 open_fixture) ==
@@ -1594,8 +1600,20 @@ static int exercise_stream(const char *name) {
     require(luaCB_destroy(pool->main, &registration) == LUA_OK);
   }
   lock(pool);
-  while (pool->done != (unsigned)(expected_done - (native ? 2 : 0)))
+  while (pool->done != (unsigned)(expected_done - (native ? 2 : 0))) {
+    for (id = 2; !aborting && id < 3 + consumers; ++id) {
+      struct task *task = &pool->tasks[id];
+      if (task->finished && task->status != LUA_OK) {
+        const char *error;
+        unlock(pool);
+        error = lua_tostring(task->state, -1);
+        fprintf(stderr, "stream task %d: %s\n", id,
+                error ? error : "non-string error");
+        abort();
+      }
+    }
     wait_change(pool);
+  }
   if (native) {
     require(pool->native == NATIVE && !pool->tasks[0].finished &&
             !pool->tasks[1].finished);
@@ -1667,8 +1685,7 @@ static int exercise_stream(const char *name) {
   check(pthread_cond_destroy(&pool->changed));
   check(pthread_mutex_destroy(&pool->mutex));
   printf("chunk stream %s: %u chunks, %zu Lua-byte %s, %d owned carriers\n",
-         name, pool->consumed,
-         facade ? (size_t)STREAM_HEAP_LIMIT : pool->stream_peak,
+         name, pool->consumed, facade ? heap_limit : pool->stream_peak,
          facade ? "cap" : "peak", carriers);
   free(pool);
   return 0;

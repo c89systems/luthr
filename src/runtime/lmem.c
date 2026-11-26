@@ -271,9 +271,15 @@ pthread_mutex_t *luaMP_sweepmutex (global_State *g, unsigned pool) {
   return poolmutex(g, pool);
 }
 
-int luaM_initpools (lua_State *L) {
+int luaM_initpools (lua_State *L, size_t budget) {
   global_State *g = G(L);
   int i, status;
+  /* A VM can retain several partially occupied pages in each size class.
+  ** Keep any one page from claiming a large share of a bounded heap. */
+  g->allocation_page_target = budget == 0 ? LUA_ALLOC_PAGE_MAX : budget / 128;
+  if (g->allocation_page_target > LUA_ALLOC_PAGE_MAX)
+    g->allocation_page_target = LUA_ALLOC_PAGE_MAX;
+  g->allocation_page_target -= g->allocation_page_target % sizeof(LuaAllocBlock);
   g->userdata_pools = NULL;
   memset(g->sweep_pages, 0, sizeof(g->sweep_pages));
   g->allocation_dirty = g->allocation_pending = NULL;
@@ -979,6 +985,12 @@ static void preparepage (LuaAllocPage *page,
   }
 }
 
+static size_t limitpage (const global_State *g, size_t bytes, size_t minimum) {
+  size_t limit = g->allocation_page_target;
+  if (bytes > limit) bytes = limit;
+  return bytes < minimum ? minimum : bytes;
+}
+
 static LuaAllocPage *installpage (lua_State *L, LuaAllocPage *page,
                                  unsigned blockbytes, unsigned pool,
                                  size_t bytes) {
@@ -1086,10 +1098,12 @@ void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
   unsigned slot;
   uint64_t bit;
   if (!taskpageavailable(page)) {
-    size_t bytes;
+    unsigned blockbytes = cast_uint(luaMP_binbytes(pool));
+    size_t bytes, minimum = LUA_ALLOC_PAGE_HEADER + sizeof(LuaTaskPageBits) +
+                            2 * (sizeof(LuaAllocBlock) + blockbytes);
     if (!refill) return NULL;
     bytes = page == NULL ? LUA_ALLOC_PAGE_MAX / 8 : page->bytes * 2;
-    if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
+    bytes = limitpage(G(L), bytes, minimum);
     if (!luaC_taskpagefits(L, bytes)) {
       luaC_sealtask(L);
       return NULL;
@@ -1101,7 +1115,7 @@ void *luaM_trytasktable (lua_State *L, size_t size, int refill) {
       callfrealloc(L, page, bytes, 0);
       return NULL;
     }
-    preparepage(page, cast_uint(luaMP_binbytes(pool)), pool, bytes);
+    preparepage(page, blockbytes, pool, bytes);
     page->task_private = 1;
     page->task_capacity = cast_uint((bytes - LUA_ALLOC_PAGE_HEADER -
       sizeof(LuaTaskPageBits)) / (sizeof(LuaAllocBlock) + page->blockbytes));
@@ -1162,11 +1176,12 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
   LuaExecution *execution = luaX_execution(L);
   unsigned char *growth;
   size_t bytes;
+  requested = limitpage(cache->global, requested, minimum);
   /* Only a provided cache can be lent to another task during admission.
   ** State/task-owned caches keep this request's demand on its retained stack;
   ** carrying old parser demand into their later allocations strands storage. */
   if (execution == NULL || execution->allocation_cache != cache)
-    return requested > minimum ? requested : minimum;
+    return requested;
   if (cache->growth_epoch != luaC_traceepoch(cache->global)) {
     memset(cache->growth, 0, sizeof(cache->growth));
     if (cache->slot_pages != NULL)
@@ -1187,7 +1202,7 @@ static size_t growcache (lua_State *L, LuaAllocationCache *cache, unsigned pool,
     if (bytes > LUA_ALLOC_PAGE_MAX) bytes = LUA_ALLOC_PAGE_MAX;
     (*growth)++;
   }
-  return bytes < minimum ? minimum : bytes;
+  return limitpage(cache->global, bytes, minimum);
 }
 
 /* Either an assist or backing admission can resume on a different slot.
@@ -1199,8 +1214,7 @@ static LuaAllocPage *reusecache (lua_State *L, unsigned pool, size_t minimum,
   if (page != NULL) {
     size_t grown;
     if (page->local != NULL || luaMP_remote(page) != NULL) return page;
-    grown = page->bytes <= LUA_ALLOC_PAGE_MAX / 2
-      ? page->bytes * 2 : LUA_ALLOC_PAGE_MAX;
+    grown = limitpage(G(L), page->bytes * 2, minimum);
     if (grown > *bytes) *bytes = grown;
     abandonpage(L, pool);
   }
@@ -1220,8 +1234,8 @@ static LuaAllocPage *refill (lua_State *L, unsigned blockbytes, unsigned pool,
     2 * (sizeof(LuaAllocBlock) + blockbytes);
   size_t bytes;
   if (minimum < ALLOC_PAGE_MIN) minimum = ALLOC_PAGE_MIN;
-  bytes = growcache(L, allocationcache(L), pool, minimum, page == NULL ? 0
-    : page->bytes <= LUA_ALLOC_PAGE_MAX / 2 ? page->bytes * 2 : LUA_ALLOC_PAGE_MAX);
+  bytes = growcache(L, allocationcache(L), pool, minimum,
+                    page == NULL ? 0 : page->bytes * 2);
   if (page != NULL) abandonpage(L, pool);
   assistpages(L);  /* reuse abandoned capacity before growing backing storage */
   page = reusecache(L, pool, minimum, &bytes, epoch);

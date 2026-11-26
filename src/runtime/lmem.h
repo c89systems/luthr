@@ -33,7 +33,7 @@ LUAI_FUNC void luaM_publishdebt (lua_State *L);
 LUAI_FUNC void luaM_withdrawdebt (lua_State *L);
 /* A phase can collect a withdrawn batch without taking its stack gate. */
 LUAI_FUNC void luaM_publishwithdrawn (lua_State *L);
-LUAI_FUNC int luaM_initpools (lua_State *L);
+LUAI_FUNC int luaM_initpools (lua_State *L, size_t budget);
 LUAI_FUNC void luaM_destroypools (lua_State *L);
 /* Admitted cache owner, quiescent retirement or a finished task's retirement
 ** under world.mutex; never a safepoint. */

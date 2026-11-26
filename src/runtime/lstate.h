@@ -664,6 +664,7 @@ typedef struct global_State {
   struct LuaAllocPage *allocation_spare[LUA_ALLOC_BINS];  /* detached pages */
   struct LuaAllocPage **allocation_spare_tail[LUA_ALLOC_BINS];
   size_t allocation_spare_bytes;
+  size_t allocation_page_target;  /* preferred maximum from the backing budget */
   struct LuaAllocPage *trace_page_incoming;  /* atomic producer stack */
   struct LuaAllocPage *trace_pages;  /* imported under trace_mutex */
   struct LuaAllocPage *sweep_pages[LUA_ALLOC_BINS];  /* pool mutex */
@@ -827,6 +828,9 @@ LUAI_FUNC void luaE_incCstack (lua_State *L);
 LUAI_FUNC void luaE_warning (lua_State *L, const char *msg, int tocont);
 LUAI_FUNC void luaE_warnerror (lua_State *L, const char *where);
 LUAI_FUNC TStatus luaE_resetthread (lua_State *L, TStatus status);
+/* A known backing budget sizes allocation pages at VM construction. */
+LUAI_FUNC lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed,
+                                    size_t budget);
 /* State ownership and a protected allocation boundary are required.
 ** A nonzero entry names a function on the parent's stack. */
 LUAI_FUNC lua_State *luaE_newthread (lua_State *L, int collector,
