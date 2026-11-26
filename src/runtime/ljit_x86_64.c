@@ -50,7 +50,10 @@ static unsigned char *branch (Emitter *e, unsigned condition) {
   return patch;
 }
 
-enum { BE = 0x86, EQUAL = 0x84, NOT_EQUAL = 0x85, NONNEGATIVE = 0x89 };
+enum {
+  BE = 0x86, EQUAL = 0x84, NOT_EQUAL = 0x85,
+  NEGATIVE = 0x88, NONNEGATIVE = 0x89
+};
 
 static void linkbranch (Emitter *e, unsigned char *patch,
                         const unsigned char *target) {
@@ -329,6 +332,28 @@ static void readtable (Emitter *e, const Proto *p, OpCode op,
   }
 }
 
+static void readfield (Emitter *e, const Proto *p, unsigned pc,
+                       unsigned a, unsigned b, unsigned c) {
+  unsigned char *ordinary, *done;
+  comparetag(e, b, ctb(LUA_VUSERDATA));
+  ordinary = branch(e, NOT_EQUAL);
+  emit(e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
+  argument(e, 6, a);          /* rsi = destination */
+  argument(e, 2, b);          /* rdx = receiver */
+  immediate(e, 1, cast(uintptr_t, &p->k[c]));
+  emit(e, 0x41, 0xb8);        /* r8d = original instruction offset */
+  word(e, pc);
+  call(e, cast(uintptr_t, luaV_loopfieldmethod), 1);
+  loadbase(e);
+  opcodepc(e, pc + 1);
+  exitif(e, NEGATIVE);         /* the completed call set a trap */
+  done = branch(e, 0);
+  linkbranch(e, ordinary, e->next);
+  readtable(e, p, OP_GETFIELD, a, b, c);
+  charge(e);
+  linkbranch(e, done, e->next);
+}
+
 static void writefield (Emitter *e, const Proto *p, int pc,
                         unsigned a, unsigned b, unsigned c) {
   emit(e, 0x4c, 0x89, 0xf7);  /* rdi = thread */
@@ -431,7 +456,10 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         storetag(&e, a, rawtt(value));
         break;
       }
-      case OP_GETUPVAL: case OP_GETTABUP: case OP_GETFIELD:
+      case OP_GETFIELD:
+        readfield(&e, p, pc, a, b, c);
+        continue;
+      case OP_GETUPVAL: case OP_GETTABUP:
       case OP_GETTABLE: case OP_GETI:
         readtable(&e, p, op, a, b, c);
         break;

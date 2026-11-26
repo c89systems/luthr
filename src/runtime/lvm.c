@@ -1603,6 +1603,27 @@ int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset) {
   return !gethookmask(L) && !ci->u.l.trap;
 }
 
+/* Return zero to execute the original instruction, or a negative value
+** when the lookup completed and a newly installed trap needs dispatch. */
+int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
+                           const TValue *object, const TValue *key,
+                           unsigned offset) {
+  lua_State *L = frame->thread;
+  CallInfo *ci = frame->call;
+  const Instruction *at = frame->entry + offset;
+  TValue method;
+  lua_assert(ttisfulluserdata(object));
+  if (!luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
+      !checktag(&method, LUA_VLCF)) return 0;
+  --L->poll_remaining;
+  ci->u.l.rootpc = at;
+  ci->u.l.savedpc = at + 1;
+  L->top.p = ci->top.p;
+  luaT_callTMres(L, &method, object, key, result);
+  frame->base = ci->func.p + 1;
+  return (gethookmask(L) || ci->u.l.trap) ? -1 : 1;
+}
+
 /* No register changes until the binding and argument support a bounded call. */
 static int __attribute__((noinline)) trystringrangecall (
     lua_State *L, const TValue *receiver, TString *key, const TValue *index,

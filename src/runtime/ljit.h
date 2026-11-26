@@ -32,6 +32,9 @@ LUAI_FUNC LuaLoopSite *luaJ_loopat (const Proto *p, int pc);
 LUAI_FUNC LuaLoopCode luaJ_prepare (lua_State *L, Proto *p,
                                     LuaLoopSite *site);
 LUAI_FUNC int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset);
+LUAI_FUNC int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
+                                     const TValue *object, const TValue *key,
+                                     unsigned offset);
 LUAI_FUNC int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                         unsigned char *code, size_t capacity);
 

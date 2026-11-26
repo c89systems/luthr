@@ -30,8 +30,8 @@ static int validconstant (const Proto *p, int index, int key) {
 }
 
 /* A straight-line body keeps its real Lua registers and exits at the next
-** original instruction on a failed guard. A nested loop or an instruction
-** that can invoke Lua stays outside this tier. */
+** original instruction on a failed guard. Nested loops and explicit function
+** calls stay outside this tier. */
 static int loopentry (const Proto *p, int end) {
   Instruction branch = p->code[end];
   int span, start, pc, control;
@@ -160,12 +160,16 @@ static int reservebytes (global_State *g, size_t bytes) {
 ** edge fragments, including any allocator metadata, stay writable. */
 static uintptr_t compile (lua_State *L, const Proto *p, LuaLoopSite *site) {
   long systempage = sysconf(_SC_PAGESIZE);
-  size_t page, codesize, bytes;
+  size_t page, codesize, bytes, estimate = 256;
+  unsigned i;
   unsigned char *allocation, *code;
   uintptr_t address;
   if (systempage <= 0 || systempage > JIT_CODE_LIMIT) return LUA_LOOP_UNAVAILABLE;
   page = cast_sizet(systempage);
-  codesize = ((site->words * 112u + 256u + page - 1) / page) * page;
+  /* Field reads include both the direct and native metamethod sequences. */
+  for (i = 0; i < site->words; i++)
+    estimate += GET_OPCODE(p->code[site->pc + i]) == OP_GETFIELD ? 176u : 112u;
+  codesize = ((estimate + page - 1) / page) * page;
   bytes = codesize + page - 1;
   if (!reservebytes(G(L), bytes)) return LUA_LOOP_UNAVAILABLE;
   allocation = luaM_tryalloc(L, bytes);

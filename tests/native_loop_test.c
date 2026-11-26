@@ -193,6 +193,82 @@ static void check_cancel(lua_State *L) {
   require(G(L)->native_loop_bytes == 0);
 }
 
+static unsigned field_calls, field_ticks;
+
+static void count_field_instructions(lua_State *L, lua_Debug *debug) {
+  (void)L;
+  (void)debug;
+  field_ticks++;
+}
+
+static int resume_field(lua_State *L, int status, lua_KContext value) {
+  require(status == LUA_YIELD);
+  lua_pushinteger(L, (lua_Integer)value);
+  return 1;
+}
+
+static int userdata_field(lua_State *L) {
+  const int *value = lua_touserdata(L, 1);
+  require(value != NULL && strcmp(lua_tostring(L, 2), "amount") == 0);
+  field_calls++;
+  if (field_calls == 200) {
+    lua_Debug caller;
+    require(lua_getstack(L, 1, &caller));
+    require(lua_getinfo(L, "l", &caller) && caller.currentline == 4);
+    require(lua_checkstack(L, 2048));
+  }
+  if (field_calls == 317) {
+    lua_pushinteger(L, field_calls);
+    return lua_yieldk(L, 1, (lua_KContext)*value, resume_field);
+  }
+  if (field_calls == 419)
+    lua_sethook(L, count_field_instructions, LUA_MASKCOUNT, 1);
+  lua_pushinteger(L, *value);
+  return 1;
+}
+
+static void check_native_fields(lua_State *L) {
+  const LClosure *closure;
+  lua_State *child;
+  int *value, results;
+  require(luaL_dostring(L, "return function(row, n)\n"
+                           "  local sum = 0\n"
+                           "  for i = 1, n do\n"
+                           "    sum = sum + row.amount\n"
+                           "  end\n"
+                           "  return sum\n"
+                           "end") == LUA_OK);
+  closure = lua_topointer(L, 1);
+  require(closure != NULL && closure->p->sizeloops == 1);
+  lua_pushvalue(L, 1);
+  lua_newtable(L);
+  lua_pushinteger(L, 2);
+  lua_setfield(L, -2, "amount");
+  lua_pushinteger(L, 700);
+  require(lua_pcall(L, 2, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 1400);
+  lua_pop(L, 1);
+  require(closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+
+  child = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, child, 1);
+  value = lua_newuserdatauv(child, sizeof(*value), 0);
+  *value = 3;
+  lua_newtable(child);
+  lua_pushcfunction(child, userdata_field);
+  lua_setfield(child, -2, "__index");
+  require(lua_setmetatable(child, -2));
+  lua_pushinteger(child, 700);
+  require(lua_resume(child, L, 2, &results) == LUA_YIELD);
+  require(results == 1 && lua_tointeger(child, -1) == 317);
+  lua_pop(child, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_resume(child, L, 0, &results) == LUA_OK);
+  require(results == 1 && lua_tointeger(child, -1) == 2100);
+  require(field_calls == 700 && field_ticks > 200);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   require(argc == 2 && L != NULL);
@@ -206,6 +282,8 @@ int main(int argc, char **argv) {
     check_parallel(L);
   } else if (strcmp(argv[1], "cancel") == 0) {
     check_cancel(L);
+  } else if (strcmp(argv[1], "native_fields") == 0) {
+    check_native_fields(L);
   } else
     check_serial(L);
   lua_close(L);
