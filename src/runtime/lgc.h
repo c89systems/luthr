@@ -609,7 +609,7 @@ LUAI_FUNC void luaC_endsweep (lua_State *L);
 LUAI_FUNC void luaC_shrinkstrings (lua_State *L);
 LUAI_FUNC void luaC_runfinalizers (lua_State *L);
 l_sinline int luaC_hasfinalizers (global_State *g) {
-  return __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE) != NULL;
+  return __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE) != 0;
 }
 LUAI_FUNC int luaC_tryretire (lua_State *L, GCObject *object);
 /* Publish a complete private batch while holding world.mutex. */

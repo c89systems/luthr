@@ -193,7 +193,7 @@ int main(int argc, char **argv) {
   if (pending) {
     lua_lock(state);
     luaC_fullgc(state, 1);
-    require(finalized == 0 && G(state)->tobefnz != NULL);
+    require(finalized == 0 && luaC_hasfinalizers(G(state)));
     lua_unlock(state);
     membership(state, 1);
   }

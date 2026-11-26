@@ -622,8 +622,8 @@ typedef struct global_State {
   GCObject *weak;  /* list of tables with weak values */
   GCObject *ephemeron;  /* list of ephemeron tables (weak keys) */
   GCObject *allweak;  /* list of all-weak tables */
-  GCObject *tobefnz;  /* list of userdata to be GC */
-  GCObject **tobefnz_tail;  /* append without walking queued finalizers */
+  uintptr_t tobefnz;  /* atomic ready head, tagged while roots are being read */
+  GCObject **tobefnz_tail;  /* stopped writer's tail, valid when head is nonzero */
   GCObject *fixedgc;  /* list of objects not to be collected */
   /* fields for generational collector */
   GCObject *survival;  /* start of objects that survived one GC cycle */

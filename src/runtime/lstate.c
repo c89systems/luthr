@@ -745,9 +745,10 @@ lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   g->gckind = KGC_INC;
   g->gcstopem = 0;
   g->gcemergency = 0;
-  g->finobj = g->tobefnz = g->fixedgc = NULL;
+  g->finobj = g->fixedgc = NULL;
+  g->tobefnz = 0;
   g->new_finalizers = g->new_finalizers_tail = NULL;
-  g->tobefnz_tail = &g->tobefnz;
+  g->tobefnz_tail = NULL;
   g->survival = g->old1 = NULL;
   g->finobjsur = g->finobjold1 = NULL;
   memset(&g->sweep_plan, 0, sizeof(g->sweep_plan));

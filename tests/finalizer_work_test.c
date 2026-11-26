@@ -237,6 +237,72 @@ static void finalize_leaf_userdata(lua_State *L, int generational) {
 
 enum { PRODUCERS = 4, REGISTRATIONS = 512 };
 
+static pthread_barrier_t dequeue_start;
+static unsigned dequeue_calls[OBJECTS];
+
+static int reregister_leaf(lua_State *L) {
+  const unsigned *id = luaL_checkudata(L, 1, "finalizer_work.leaf");
+  unsigned count;
+  require(*id < OBJECTS);
+  count = __atomic_fetch_add(&dequeue_calls[*id], 1, __ATOMIC_RELAXED);
+  require(count == 0 || (count == 1 && (*id % 2 == 0)));
+  if (count == 0 && *id % 2 == 0) {
+    lua_pushvalue(L, 1);
+    luaL_setmetatable(L, "finalizer_work.leaf");
+  }
+  return 0;
+}
+
+static void *dequeue_finalizers(void *state) {
+  lua_State *L = state;
+  int ready = pthread_barrier_wait(&dequeue_start);
+  require(ready == 0 || ready == PTHREAD_BARRIER_SERIAL_THREAD);
+  lua_lock(L);
+  luaC_runfinalizers(L);
+  lua_unlock(L);
+  return NULL;
+}
+
+static void finalize_concurrent_dequeue(lua_State *L, int generational) {
+  lua_State *states[PRODUCERS];
+  pthread_t threads[PRODUCERS];
+  unsigned i;
+  lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
+  lua_gc(L, LUA_GCSTOP);
+  require(luaL_newmetatable(L, "finalizer_work.leaf"));
+  lua_pushcfunction(L, reregister_leaf);
+  lua_setfield(L, -2, "__gc");
+  lua_pop(L, 1);
+  for (i = 0; i < OBJECTS; i++) {
+    unsigned *id = lua_newuserdatauv(L, sizeof(*id), 0);
+    *id = i;
+    luaL_setmetatable(L, "finalizer_work.leaf");
+    lua_pop(L, 1);
+  }
+  for (i = 0; i < PRODUCERS; i++)
+    states[i] = lua_newthread(L);
+  lua_lock(L);
+  luaC_fullgc(L, 1); /* Fill the ready queue without dispatching callbacks. */
+  lua_unlock(L);
+  require(luaC_hasfinalizers(G(L)));
+
+  require(pthread_barrier_init(&dequeue_start, NULL, PRODUCERS) == 0);
+  for (i = 0; i < PRODUCERS; i++)
+    require(pthread_create(&threads[i], NULL, dequeue_finalizers, states[i]) ==
+            0);
+  for (i = 0; i < PRODUCERS; i++)
+    require(pthread_join(threads[i], NULL) == 0);
+  require(pthread_barrier_destroy(&dequeue_start) == 0);
+  require(!luaC_hasfinalizers(G(L)));
+  for (i = 0; i < OBJECTS; i++)
+    require(dequeue_calls[i] == 1);
+
+  lua_gc(L, LUA_GCCOLLECT);
+  for (i = 0; i < OBJECTS; i++)
+    require(dequeue_calls[i] == 1 + (unsigned)(i % 2 == 0));
+  lua_close(L);
+}
+
 struct finalizer_registrations {
   pthread_barrier_t start;
   lua_State *collector;
@@ -465,6 +531,11 @@ int main(int argc, char **argv) {
   pthread_t collector, older;
   unsigned before, i;
   require(state != NULL && argc == 2);
+  if (strncmp(argv[1], "dequeue_", 8) == 0) {
+    finalize_concurrent_dequeue(state,
+                                strcmp(argv[1], "dequeue_generational") == 0);
+    return 0;
+  }
   if (strncmp(argv[1], "binding_", 8) == 0) {
     finalize_ordered_bindings(state,
                               strcmp(argv[1], "binding_generational") == 0);
@@ -540,7 +611,7 @@ int main(int argc, char **argv) {
   if (test.phase == TRACE_PENDING && !test.overlap) {
     lua_lock(state);
     luaC_fullgc(state, 1);
-    require(G(state)->tobefnz != NULL && test.finalized == 0);
+    require(luaC_hasfinalizers(G(state)) && test.finalized == 0);
     lua_unlock(state);
   }
   require(pthread_create(&collector, NULL, collect, &test) == 0);

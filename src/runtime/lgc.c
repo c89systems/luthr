@@ -640,6 +640,27 @@ static void publishmarkstate (LuaWorld *world, unsigned mark) {
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 }
 
+enum { FINALIZER_ROOT_SCAN = 1 };
+
+static GCObject *finalizerhead (uintptr_t head) {
+  return cast(GCObject *, head & ~cast(uintptr_t, FINALIZER_ROOT_SCAN));
+}
+
+/* Close the dequeue fast path before taking a root cursor. A pop that
+** already changed the head belongs to an admitted invocation. Its root
+** is covered by the following stack rendezvous. */
+static void beginpendingfinalizers (global_State *g) {
+  uintptr_t head;
+  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+  head = __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE);
+  lua_assert(!(head & FINALIZER_ROOT_SCAN));
+  while (head != 0 &&
+         !__atomic_compare_exchange_n(&g->tobefnz, &head,
+              head | FINALIZER_ROOT_SCAN, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
+  g->trace_plan.pending = finalizerhead(head);
+  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+}
+
 static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   global_State *g = G(L);
   unsigned stamps = luaC_markstate(g) & MARKSTAMPS;
@@ -684,9 +705,7 @@ static void starttrace (lua_State *L, unsigned finish, int user_incremental) {
   g->trace_deferred = NULL;
   g->trace_plan.again = g->trace_plan.next = NULL;
   g->trace_plan.deferred = g->trace_plan.tail = NULL;
-  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
-  g->trace_plan.pending = __atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED);
-  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  beginpendingfinalizers(g);
   g->trace_plan.finalizers = g->finobj != g->finobjold1 ? &g->finobj : NULL;
   g->trace_plan.finalizer_gray = NULL;
   g->trace_plan.finalizer_tail = NULL;
@@ -1405,6 +1424,9 @@ static unsigned pendingfinalizers (global_State *g, unsigned limit) {
     plan->pending = object->next;
     markobject(g, object);
   }
+  if (count != 0 && plan->pending == NULL)
+    __atomic_fetch_and(&g->tobefnz, ~cast(uintptr_t, FINALIZER_ROOT_SCAN),
+                       __ATOMIC_RELEASE);
   return count;
 }
 
@@ -1785,6 +1807,42 @@ static void dothecall (lua_State *L, void *ud) {
 }
 
 
+/* A stopped world appends new cohorts and retires objects. An admitted
+** dequeue can therefore sample a node without a reclamation hazard or ABA.
+** Re-registration before that rendezvous can change its link, so the fast
+** path reads it atomically and follows it only if its head claim wins. */
+static GCObject *takefinalizer (global_State *g) {
+  uintptr_t head = __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE);
+  while (head != 0) {
+    GCObject *object;
+    GCObject *next;
+    if (head & FINALIZER_ROOT_SCAN) {
+      luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
+      head = __atomic_load_n(&g->tobefnz, __ATOMIC_ACQUIRE);
+      if (head & FINALIZER_ROOT_SCAN) {
+        uintptr_t updated;
+        object = finalizerhead(head);
+        next = object->next;
+        if (g->trace_plan.pending == object) g->trace_plan.pending = next;
+        updated = cast(uintptr_t, next);
+        if (g->trace_plan.pending != NULL) updated |= FINALIZER_ROOT_SCAN;
+        __atomic_store_n(&g->tobefnz, updated, __ATOMIC_RELEASE);
+        luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+        return object;
+      }
+      luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+    }
+    else {
+      object = finalizerhead(head);
+      next = __atomic_load_n(&object->next, __ATOMIC_RELAXED);
+      if (__atomic_compare_exchange_n(&g->tobefnz, &head, cast(uintptr_t, next),
+                                       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return object;
+    }
+  }
+  return NULL;
+}
+
 static int GCTM (lua_State *L) {
   global_State *g = G(L);
   LuaNativeRoot object, method;
@@ -1792,24 +1850,15 @@ static int GCTM (lua_State *L) {
   lua_assert(!g->gcemergency);
   if (!luaC_hasfinalizers(g)) return 0;
   luaR_pushroot(L, &object);
-  luaX_checksync(pthread_mutex_lock(&g->trace_mutex));
-  o = __atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED);
-  if (o != NULL) {
-    lua_assert(tofinalize(o));
-    /* Move the pending root to this admitted invocation before releasing
-    ** the link. The trace cursor can be walking the same queue. */
-    setgcovalue(L, &object.value, o);
-    if (g->trace_plan.pending == o) g->trace_plan.pending = o->next;
-    __atomic_store_n(&g->tobefnz, o->next, __ATOMIC_RELEASE);
-    if (o->next == NULL) g->tobefnz_tail = &g->tobefnz;
-    o->next = NULL;
-    resetbit(o->marked, FINALIZEDBIT);
-  }
-  luaX_checksync(pthread_mutex_unlock(&g->trace_mutex));
+  o = takefinalizer(g);
   if (o == NULL) {
     luaR_poproot(L, &object);
     return 0;
   }
+  lua_assert(tofinalize(o));
+  /* Transfer the queue root before any operation that can withdraw. */
+  setgcovalue(L, &object.value, o);
+  resetbit(o->marked, FINALIZEDBIT);
   luaC_tracepointer(L, o);
   luaR_pushroot(L, &method);
   luaT_gettmbyobj(L, &object.value, TM_GC, &method);
@@ -1856,11 +1905,13 @@ void luaC_runfinalizers (lua_State *L) {
 }
 
 
-/* Only a stopped collector appends. A concurrent read of the head is a
-** readiness hint until the claimant owns trace_mutex. */
+/* Only a stopped collector appends. The last pop can leave a stale tail
+** behind, which is ignored until a new nonempty list supplies its own tail. */
 static void appendfinalizers (global_State *g, GCObject *head, GCObject **tail) {
-  if (g->tobefnz_tail == &g->tobefnz)
-    __atomic_store_n(&g->tobefnz, head, __ATOMIC_RELEASE);
+  lua_assert(!(__atomic_load_n(&g->tobefnz, __ATOMIC_RELAXED) &
+               FINALIZER_ROOT_SCAN));
+  if (!luaC_hasfinalizers(g))
+    __atomic_store_n(&g->tobefnz, cast(uintptr_t, head), __ATOMIC_RELEASE);
   else
     *g->tobefnz_tail = head;
   g->tobefnz_tail = tail;
@@ -1909,8 +1960,9 @@ l_sinline void __attribute__((always_inline)) registerfinalizer (lua_State *L,
     /* An exchange orders concurrent registrations. Producers initialize
     ** only their own link, and publication joins all admitted producers
     ** before reading either the links or the first producer's tail. */
-    o->next = __atomic_exchange_n(&g->new_finalizers, o, __ATOMIC_RELAXED);
-    if (o->next == NULL) g->new_finalizers_tail = o;
+    GCObject *next = __atomic_exchange_n(&g->new_finalizers, o, __ATOMIC_RELAXED);
+    __atomic_store_n(&o->next, next, __ATOMIC_RELAXED);
+    if (next == NULL) g->new_finalizers_tail = o;
   }
 }
 
