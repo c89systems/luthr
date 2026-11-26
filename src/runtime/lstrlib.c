@@ -657,6 +657,14 @@ static size_t __attribute__((noinline)) matchclassrun (const char *s,
   return n;
 }
 
+static size_t simpleclassrun (const char *s, size_t len, const char *p) {
+  size_t n = 0;
+  if (*p == '.') return len;
+  if (*p == L_ESC) return matchclassrun(s, len, cast_uchar(p[1]));
+  while (n < len && s[n] == *p) n++;
+  return n;
+}
+
 #undef MATCHCLASSES
 
 
@@ -757,13 +765,7 @@ static const char *greedyprefix (MatchState *ms, const char *s,
       size_t left = ct_diff2sz(ms->src_end - s);
       size_t budget = LUA_NATIVE_WORK_SLICE - ms->work;
       size_t chunk = left < budget ? left : budget;
-      size_t n;
-      if (*p == '.') n = chunk;
-      else if (*p == L_ESC) n = matchclassrun(s, chunk, cast_uchar(p[1]));
-      else {
-        n = 0;
-        while (n < chunk && s[n] == *p) n++;
-      }
+      size_t n = simpleclassrun(s, chunk, p);
       s += n;
       luaQ_workn(ms->L, &ms->work, n);
       if (n < chunk) break;
@@ -955,6 +957,142 @@ static const char *match (MatchState *ms, const char *s, const char *p) {
 }
 
 
+/* A short greedy pattern can try its first path without recursive calls.
+** The plan never contains pointers into a Lua string or locale tables. */
+enum { PLAN_BYTES = 64, PLAN_STEPS = 16, PLAN_CACHE = 8 };
+enum { PLAN_BYTE, PLAN_STAR, PLAN_PLUS, PLAN_END,
+       PLAN_OPEN, PLAN_CLOSE, PLAN_POSITION };
+
+typedef struct PatternPlan {
+  unsigned char count, captures;
+  struct { unsigned char op, start; } step[PLAN_STEPS];
+} PatternPlan;
+
+static void compilepattern (PatternPlan *plan, const char *p, size_t len) {
+  unsigned char open[PLAN_STEPS];
+  unsigned count = 0, captures = 0, depth = 0;
+  size_t i = 0;
+  plan->count = 0;
+  while (i < len && count < PLAN_STEPS) {
+    unsigned op = PLAN_BYTE;
+    size_t start = i;
+    switch (p[i++]) {
+      case '(':
+        if (captures == LUA_MAXCAPTURES) return;
+        start = captures++;
+        if (i < len && p[i] == ')') {
+          i++;
+          op = PLAN_POSITION;
+        }
+        else {
+          open[depth++] = cast_byte(start);
+          op = PLAN_OPEN;
+        }
+        break;
+      case ')':
+        if (depth == 0) return;
+        start = open[--depth];
+        op = PLAN_CLOSE;
+        break;
+      case '$':
+        if (i == len) op = PLAN_END;
+        break;
+      case L_ESC:
+        if (i == len || p[i] == 'b' || p[i] == 'f' ||
+            ('0' <= p[i] && p[i] <= '9')) return;
+        i++;
+        break;
+      case '[':
+        if (len - i < 3 || p[i] != '^' || p[i + 1] == L_ESC ||
+            p[i + 2] != ']') return;
+        i += 3;
+        break;
+    }
+    if (op == PLAN_BYTE && i < len) {
+      if (p[i] == '+') { op = PLAN_PLUS; i++; }
+      else if (p[i] == '*') { op = PLAN_STAR; i++; }
+      else if (p[i] == '?' || p[i] == '-') return;
+    }
+    plan->step[count].op = cast_byte(op);
+    plan->step[count].start = cast_byte(start);
+    count++;
+  }
+  if (i == len && depth == 0) {
+    plan->captures = cast_byte(captures);
+    plan->count = cast_byte(count);
+  }
+}
+
+/* This leaf borrows carrier TLS only until the plan has been copied. Cache
+** the bytes themselves so neither GC nor changing Lua states needs a hook. */
+static void __attribute__((noipa)) patternplan (PatternPlan *plan,
+                                               const char *p, size_t len) {
+  static __thread struct {
+    PatternPlan plan;
+    unsigned char len;
+    char bytes[PLAN_BYTES];
+  } cache[PLAN_CACHE];
+  unsigned slot;
+  plan->count = 0;
+  if (len == 0 || len > PLAN_BYTES) return;
+  slot = (cast_uint(len) + cast_uchar(p[len / 2]) * 3u) % PLAN_CACHE;
+  if (cache[slot].len != len || memcmp(cache[slot].bytes, p, len) != 0) {
+    compilepattern(&cache[slot].plan, p, len);
+    memcpy(cache[slot].bytes, p, len);
+    cache[slot].len = cast_byte(len);
+  }
+  *plan = cache[slot].plan;
+}
+
+/* The compiler accepts only single-byte exclusions as bracket atoms. */
+static const char *planatomend (const char *s, size_t len, const char *p) {
+  if (*p == '[') {
+    const char *stop = cast(const char *, memchr(s, cast_uchar(p[2]), len));
+    return stop != NULL ? stop : s + len;
+  }
+  return s + simpleclassrun(s, len, p);
+}
+
+static const char *runplan (MatchState *ms, const char *s, const char *p,
+                            const PatternPlan *plan, int *retry) {
+  const char *cursor = s;
+  unsigned i;
+  *retry = 0;
+  for (i = 0; i < plan->count; i++) {
+    unsigned start = plan->step[i].start;
+    unsigned op = plan->step[i].op;
+    switch (op) {
+      case PLAN_BYTE:
+        if (cursor == ms->src_end || planatomend(cursor, 1, p + start) == cursor)
+          return NULL;
+        cursor++;
+        break;
+      case PLAN_STAR: case PLAN_PLUS: {
+        const char *next = planatomend(cursor, ct_diff2sz(ms->src_end - cursor),
+                                      p + start);
+        if (op == PLAN_PLUS && next == cursor) return NULL;
+        if (next - cursor > (op == PLAN_PLUS)) *retry = 1;
+        cursor = next;
+        break;
+      }
+      case PLAN_OPEN:
+        ms->capture[start].init = cursor;
+        break;
+      case PLAN_CLOSE:
+        ms->capture[start].len = cursor - ms->capture[start].init;
+        break;
+      case PLAN_POSITION:
+        ms->capture[start].init = cursor;
+        ms->capture[start].len = CAP_POSITION;
+        break;
+      case PLAN_END:
+        if (cursor != ms->src_end) return NULL;
+        break;
+    }
+  }
+  ms->level = plan->captures;
+  return cursor;
+}
 
 static const char *lmemfind (MatchState *ms, const char *s1, size_t l1,
                                const char *s2, size_t l2) {
@@ -1094,13 +1232,9 @@ static void reprepstate (MatchState *ms) {
 }
 
 
-static int findresult (MatchState *ms, LuaNativeRoot *roots,
-                        const char *start, const char *end, int find) {
+static int pushfindresult (MatchState *ms, const char *start, const char *end,
+                           int find, int count) {
   lua_State *L = ms->L;
-  int count = end != NULL ? countcaptures(ms, find ? NULL : start) : 0;
-  int results = end != NULL ? count + 2 * find : 1;
-  if (count != 0) luaL_checkstack(L, results, "too many captures");
-  lua_lock(L);
   if (end == NULL) {
 #if defined(LUA_FAILISFALSE)
     setbfvalue(s2v(L->top.p));
@@ -1116,9 +1250,56 @@ static int findresult (MatchState *ms, LuaNativeRoot *roots,
     }
     pushownedcaptures(ms, start, end, count);
   }
+  return end != NULL ? count + 2 * find : 1;
+}
+
+static int findresult (MatchState *ms, LuaNativeRoot *roots,
+                        const char *start, const char *end, int find) {
+  lua_State *L = ms->L;
+  int count = end != NULL ? countcaptures(ms, find ? NULL : start) : 0;
+  int results;
+  if (count != 0) luaL_checkstack(L, count + 2 * find, "too many captures");
+  lua_lock(L);
+  results = pushfindresult(ms, start, end, find, count);
   luaR_poproot(L, &roots[1]);
   luaR_poproot(L, &roots[0]);
   lua_unlock(L);
+  return results;
+}
+
+/* These non-polling paths consume each subject byte at most once, with
+** up to PLAN_STEPS extra tests in an anchored match. */
+enum { PATTERN_SHORT_SUBJECT = LUA_NATIVE_WORK_SLICE / 4 };
+
+static int tryanchoredmatch (lua_State *L, int find) {
+  StkId func = L->ci->func.p;
+  const char *s, *p, *end;
+  size_t ls, lp;
+  int retry, count, results;
+  MatchState ms;
+  PatternPlan plan;
+  LuaNativeRoot subject;
+  if (L->top.p - func != 3 || !ttisstring(s2v(func + 1)) ||
+      !ttisstring(s2v(func + 2)) || L->ci->top.p - L->top.p < PLAN_STEPS + 2)
+    return 0;
+  s = getlstr(tsvalue(s2v(func + 1)), ls);
+  p = getlstr(tsvalue(s2v(func + 2)), lp);
+  if (ls > PATTERN_SHORT_SUBJECT || lp == 0 || *p != '^') return 0;
+  p++;
+  lp--;
+  patternplan(&plan, p, lp);
+  if (plan.count == 0) return 0;
+  prepstate(&ms, L, s, ls, p, lp);
+  if (l_unlikely(luaD_nativeposition() <= ms.stacklimit)) return 0;
+  end = runplan(&ms, s, p, &plan, &retry);
+  /* A shorter greedy repetition may permit a later atom to match. */
+  if (end == NULL)
+    return retry ? 0 : pushfindresult(&ms, NULL, NULL, find, 0);
+  count = countcaptures(&ms, find ? NULL : s);
+  luaR_pushroot(L, &subject);
+  luaR_setroot(L, &subject, s2v(func + 1));
+  results = pushfindresult(&ms, s, end, find, count);
+  luaR_poproot(L, &subject);
   return results;
 }
 
@@ -1127,8 +1308,13 @@ static int str_find_aux (lua_State *L, int find) {
   MatchState ms;
   size_t ls, lp, init;
   const char *s, *p;
-  int plain;
+  int plain, results;
   lua_lock(L);
+  results = tryanchoredmatch(L, find);
+  if (results != 0) {
+    lua_unlock(L);
+    return results;
+  }
   s = luaL_ownedrootstring(L, 1, &roots[0], &ls);
   p = luaL_ownedrootstring(L, 2, &roots[1], &lp);
   init = luaB_firstpos(readposition(L, 3, 1, 1), ls) - 1;
@@ -1227,22 +1413,68 @@ static int gmatchresults (MatchState *ms, LuaNativeRoot *roots,
   return count;
 }
 
+/* A private one-atom iterator can consume a short token and commit its
+** cursor under one ownership. Only the input spans the result allocation. */
+static int tryprivategmatch (lua_State *L, CClosure *function, int *results) {
+  TValue *state = &function->upvalue[2];
+  Udata *owner;
+  GMatchState *gm;
+  const char *s, *p, *src, *end;
+  size_t ls, lp;
+  MatchState ms;
+  PatternPlan plan;
+  LuaNativeRoot subject;
+  if (!luaA_local(L, obj2gco(function)) || !ttisfulluserdata(state) ||
+      L->ci->top.p == L->top.p) return 0;
+  owner = uvalue(state);
+  if (!luaA_local(L, obj2gco(owner))) return 0;
+  gm = gmatch_state(owner);
+  if (gm == NULL || gm->source_len > PATTERN_SHORT_SUBJECT) return 0;
+  s = getlstr(gm->subject, ls);
+  p = getlstr(gm->pattern, lp);
+  patternplan(&plan, p, lp);
+  if (plan.count != 1 || plan.step[0].op != PLAN_PLUS) return 0;
+  prepstate(&ms, L, s, ls, p, lp);
+  if (l_unlikely(luaD_nativeposition() <= ms.stacklimit)) return 0;
+  ms.level = 0;
+  for (src = s + gm->next; src < ms.src_end; src++) {
+    end = planatomend(src, ct_diff2sz(ms.src_end - src), p + plan.step[0].start);
+    if (end != src) {
+      gm->next = gm->last = ct_diff2sz(end - s);
+      gm->matched = 1;
+      gm->version++;
+      luaR_pushroot(L, &subject);
+      luaR_setroot(L, &subject, &owner->uv[0].uv);
+      pushownedcaptures(&ms, src, end, 1);
+      luaR_poproot(L, &subject);
+      *results = 1;
+      return 1;
+    }
+  }
+  *results = 0;
+  return 1;
+}
+
 
 static int gmatch_aux (lua_State *L) {
   LuaNativeRoot roots[3];  /* selected userdata, subject and pattern */
   LuaObjectScope scope;
   CClosure *function;
   Udata *owner;
-  int local;
+  int local, results;
   unsigned index, work = 0;
   MatchState ms;
   lua_lock(L);
   if (!ttisCclosure(s2v(L->ci->func.p)) ||
       clCvalue(s2v(L->ci->func.p))->nupvalues < 3)
     return badgmatch(L, NULL);
+  function = clCvalue(s2v(L->ci->func.p));
+  if (tryprivategmatch(L, function, &results)) {
+    lua_unlock(L);
+    return results;
+  }
   for (index = 0; index < 3; ++index)
     luaR_pushroot(L, &roots[index]);
-  function = clCvalue(s2v(L->ci->func.p));
   local = luaA_local(L, obj2gco(function));
   if (!local) luaA_begin(L, obj2gco(function), &scope);
   luaR_setroot(L, &roots[0], &function->upvalue[2]);

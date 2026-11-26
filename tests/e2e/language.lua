@@ -276,6 +276,31 @@ do
 end
 equal(string.match('(a(b)c)','%b()'),'(a(b)c)')
 do
+  local left, right = ('aaaa'):match('^(a*)(a+)$')
+  equal(left,'aaa')
+  equal(right,'a')
+  local first, last, before, token, after = ('ab'):find('^()(a+)b()$')
+  equal(first,1)
+  equal(last,2)
+  equal(before,1)
+  equal(token,'a')
+  equal(after,3)
+  equal(('x'):match('^y['),nil)
+  assert(not pcall(string.match,'y','^y['))
+
+  local pieces = {}
+  for piece in ('\0x||y|\0'):gmatch('[^|]+') do
+    pieces[#pieces+1] = piece
+  end
+  equal(#pieces,3)
+  equal(pieces[1],'\0x')
+  equal(pieces[2],'y')
+  equal(pieces[3],'\0')
+  local next_run = ('^^one'):gmatch('^+')
+  equal(next_run(),'^^')
+  equal(next_run(),nil)
+end
+do
   for label in ('acdglpsuwxzACDGLPSUWXZ%'):gmatch('.') do
     local atom = '%'..label
     local members = {}
