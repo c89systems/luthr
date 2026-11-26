@@ -749,6 +749,7 @@ lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   g->tobefnz = 0;
   g->new_finalizers = g->new_finalizers_tail = NULL;
   g->tobefnz_tail = NULL;
+  g->finalizer_drains = 0;
   g->survival = g->old1 = NULL;
   g->finobjsur = g->finobjold1 = NULL;
   memset(&g->sweep_plan, 0, sizeof(g->sweep_plan));

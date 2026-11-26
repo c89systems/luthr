@@ -649,12 +649,13 @@ target_compile_options(finalizer_work_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(finalizer_work_test PRIVATE luthr_static)
 target_link_options(finalizer_work_test PRIVATE -Wl,--wrap=luaC_claimtrace
   -Wl,--wrap=luaC_tracebatch -Wl,--wrap=luaW_restore
-  -Wl,--wrap=luaC_registerfinalizer)
+  -Wl,--wrap=luaC_registerfinalizer -Wl,--wrap=luaT_gettmbyobj)
 foreach(case IN ITEMS discovery_incremental discovery_generational
     pending_incremental pending_generational promote_incremental promote_generational
     overlap_incremental overlap_pending_incremental order_incremental order_generational
     register_incremental register_generational binding_incremental binding_generational
-    leaf_incremental leaf_generational dequeue_incremental dequeue_generational)
+    leaf_incremental leaf_generational dequeue_incremental dequeue_generational
+    active_drain_pressure active_drain_explicit active_drain_unwind)
   add_test(NAME finalizer_work_${case} COMMAND finalizer_work_test ${case})
   set_tests_properties(finalizer_work_${case} PROPERTIES
     LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)

@@ -1900,8 +1900,24 @@ static l_mem drainfinalizers (lua_State *L, l_mem limit) {
   return count;
 }
 
-void luaC_runfinalizers (lua_State *L) {
+static void runfinalizers (lua_State *L, void *ud) {
+  UNUSED(ud);
   drainfinalizers(L, MAX_LMEM);
+}
+
+void luaC_runfinalizers (lua_State *L) {
+  global_State *g = G(L);
+  if (!luaC_hasfinalizers(g)) return;
+  if (luaC_kind(g) == KGC_GENMINOR && gcrunning(g)) {
+    TStatus status;
+    __atomic_fetch_add(&g->finalizer_drains, 1, __ATOMIC_RELAXED);
+    /* A finalizer's body is protected separately. A failure preparing a
+    ** callback can leave the drain, so retire its announcement on unwind. */
+    status = luaD_rawrunprotected(L, runfinalizers, NULL);
+    __atomic_fetch_sub(&g->finalizer_drains, 1, __ATOMIC_RELAXED);
+    if (status != LUA_OK) luaD_throw(L, status);
+  }
+  else drainfinalizers(L, MAX_LMEM);
 }
 
 
@@ -3058,6 +3074,16 @@ static void runstep (lua_State *L, l_mem debt, int concurrent, int user) {
 }
 
 
+l_sinline int finalizersdraining (lua_State *L) {
+  global_State *g = G(L);
+  /* A pending queue is a root in the next trace. Give its active drain
+  ** a chance to finish before tracing and aging those same objects again.
+  ** Hard pressure still starts a cycle if a callback blocks. */
+  return luaC_kind(g) == KGC_GENMINOR && luaC_hasfinalizers(g) &&
+         __atomic_load_n(&g->finalizer_drains, __ATOMIC_RELAXED) != 0 &&
+         !luaC_cyclepressure(L);
+}
+
 /*
 ** Performs a basic GC step while automatic collection is enabled.
 */
@@ -3099,6 +3125,7 @@ void luaC_step (lua_State *L) {
   if ((!gcrunning(g) && !luaC_ingc(L)) ||
       (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
   if (automatic) {
+    if (finalizersdraining(L)) return;
     luaC_collectnursery(L);
     if (!gcrunning(g) || luaC_tracing(L) || luaC_sweeping(L) ||
         (!luaC_needstep(L) && !luaC_cyclepressure(L))) return;
@@ -3137,7 +3164,8 @@ void luaC_step (lua_State *L) {
   else luaW_collectenter(L);
   /* Revalidate under metadata ownership, including unpublished local debt. */
   if (luaC_tracing(L) || luaC_sweeping(L) || (!gcrunning(g) && !luaC_ingc(L)) ||
-      (!luaC_needstep(L) && !luaC_cyclepressure(L))) {
+      (!luaC_needstep(L) && !luaC_cyclepressure(L)) ||
+      (automatic && finalizersdraining(L))) {
     if (automatic) finishrequest(g);
     luaW_heapleave(L);
     return;

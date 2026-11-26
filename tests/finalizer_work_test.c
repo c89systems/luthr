@@ -1,8 +1,11 @@
 #include <lapi.h>
 #include <lauxlib.h>
+#include <ldebug.h>
+#include <ldo.h>
 #include <lgc.h>
 #include <lstate.h>
 #include <ltableaccess.h>
+#include <ltm.h>
 #include <lualib.h>
 #include <pthread.h>
 #include <sched.h>
@@ -27,6 +30,18 @@ static struct fixture {
   unsigned old_finalized, finalizer_stops;
   int entered, release, generational, overlap, old_entered, old_release;
 } *fixture;
+
+static int fail_finalizer_lookup;
+
+void __real_luaT_gettmbyobj(lua_State *, const TValue *, TMS, LuaNativeRoot *);
+void __wrap_luaT_gettmbyobj(lua_State *L, const TValue *object, TMS event,
+                            LuaNativeRoot *root) {
+  if (event == TM_GC && fail_finalizer_lookup) {
+    fail_finalizer_lookup = 0;
+    luaG_runerror(L, "finalizer lookup failed");
+  }
+  __real_luaT_gettmbyobj(L, object, event, root);
+}
 
 void __real_luaW_restore(lua_State *, LuaWorldScope, unsigned);
 void __wrap_luaW_restore(lua_State *L, LuaWorldScope scope, unsigned native) {
@@ -132,6 +147,92 @@ static int finalize(lua_State *state) {
 static void *older_collection(void *argument) {
   lua_gc(argument, LUA_GCCOLLECT);
   return NULL;
+}
+
+static void *drain_ready_finalizers(void *argument) {
+  lua_State *L = argument;
+  lua_lock(L);
+  luaC_runfinalizers(L);
+  lua_unlock(L);
+  return NULL;
+}
+
+static void protected_drain(lua_State *L, void *argument) {
+  (void)argument;
+  luaC_runfinalizers(L);
+}
+
+static void finalizer_drain_overlap(lua_State *L, int explicit_step,
+                                    int unwind) {
+  struct fixture test = {0};
+  global_State *g = G(L);
+  lua_State *drainer;
+  pthread_t worker;
+  uint64_t epoch;
+  require(pthread_mutex_init(&test.mutex, NULL) == 0);
+  require(pthread_cond_init(&test.changed, NULL) == 0);
+  fixture = &test;
+  luaL_openlibs(L);
+  lua_gc(L, LUA_GCGEN);
+  lua_gc(L, LUA_GCSTOP);
+  lua_gc(L, LUA_GCPARAM, LUA_GCPMINORMAJOR, 0);
+  lua_pushcfunction(L, finalize);
+  lua_setglobal(L, "finalize");
+  require(luaL_dostring(L, "local mt={__gc=finalize}; "
+                           "setmetatable({id=-1},mt); "
+                           "setmetatable({id=0},mt)") == LUA_OK);
+  drainer = lua_newthread(L);
+  lua_lock(L);
+  luaC_fullgc(L, 1);
+  lua_unlock(L);
+  require(luaC_kind(g) == KGC_GENMINOR && luaC_hasfinalizers(g));
+  lua_gc(L, LUA_GCRESTART);
+  if (unwind) {
+    lua_lock(L);
+    fail_finalizer_lookup = 1;
+    require(luaD_rawrunprotected(L, protected_drain, NULL) == LUA_ERRRUN);
+    require(!fail_finalizer_lookup && luaC_hasfinalizers(g));
+    require(__atomic_load_n(&g->finalizer_drains, __ATOMIC_RELAXED) == 0);
+    lua_unlock(L);
+    lua_gc(L, LUA_GCCOLLECT);
+    require(test.old_finalized == 1);
+    goto close;
+  }
+  require(pthread_create(&worker, NULL, drain_ready_finalizers, drainer) == 0);
+  require(pthread_mutex_lock(&test.mutex) == 0);
+  while (!test.old_entered)
+    require(pthread_cond_wait(&test.changed, &test.mutex) == 0);
+  require(pthread_mutex_unlock(&test.mutex) == 0);
+
+  lua_lock(L);
+  require(luaC_hasfinalizers(g));
+  epoch = luaC_traceepoch(g);
+  __atomic_store_n(&g->pacer.hard, MAX_LMEM, __ATOMIC_RELAXED);
+  luaE_setdebt(g, 0);
+  luaC_step(L);
+  require(luaC_traceepoch(g) == epoch);
+  if (explicit_step) {
+    lua_unlock(L);
+    lua_gc(L, LUA_GCSTEP, (size_t)0);
+  } else {
+    __atomic_store_n(&g->pacer.hard, 0, __ATOMIC_RELAXED);
+    luaC_step(L);
+    lua_unlock(L);
+  }
+  require(luaC_traceepoch(g) > epoch);
+
+  require(pthread_mutex_lock(&test.mutex) == 0);
+  test.old_release = 1;
+  require(pthread_cond_broadcast(&test.changed) == 0);
+  require(pthread_mutex_unlock(&test.mutex) == 0);
+  require(pthread_join(worker, NULL) == 0);
+  require(test.old_finalized == 2 && !luaC_hasfinalizers(g));
+  require(__atomic_load_n(&g->finalizer_drains, __ATOMIC_RELAXED) == 0);
+close:
+  lua_close(L);
+  require(pthread_cond_destroy(&test.changed) == 0);
+  require(pthread_mutex_destroy(&test.mutex) == 0);
+  fixture = NULL;
 }
 
 static void *collect(void *argument) {
@@ -531,6 +632,12 @@ int main(int argc, char **argv) {
   pthread_t collector, older;
   unsigned before, i;
   require(state != NULL && argc == 2);
+  if (strncmp(argv[1], "active_drain_", 13) == 0) {
+    finalizer_drain_overlap(state,
+                            strcmp(argv[1], "active_drain_explicit") == 0,
+                            strcmp(argv[1], "active_drain_unwind") == 0);
+    return 0;
+  }
   if (strncmp(argv[1], "dequeue_", 8) == 0) {
     finalize_concurrent_dequeue(state,
                                 strcmp(argv[1], "dequeue_generational") == 0);

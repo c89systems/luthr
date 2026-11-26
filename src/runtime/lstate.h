@@ -583,6 +583,7 @@ typedef struct global_State {
   unsigned gcstep_pending;  /* atomic; automatic startup requested or in progress */
   unsigned trace_weakcutoff;  /* atomic: values, then keys, become collectible */
   unsigned young_work;  /* atomic births and remaining generational work */
+  unsigned finalizer_drains;  /* atomic count of active young finalizer drains */
   uint64_t trace_interrupt;  /* emergency takeover invalidates older requests */
   uint64_t trace_epoch;
   uint64_t full_trace_epoch;  /* atomic, announced before full preparation */
