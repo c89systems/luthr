@@ -930,6 +930,19 @@ LUA_API const char *lua_pushexternalstring (lua_State *L,
 
 
 LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
+  if (s != NULL &&
+      !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+        ~LUA_GATE_OFFER_MASK) && luaX_tryunmarked(L)) {
+    TString *ts = luaS_trycachedname(L, s);
+    if (ts != NULL) {
+      setsvalue2s(L, L->top.p, ts);
+      api_incr_top(L);
+      s = getshrstr(ts);
+      luaX_leavebounded(L);
+      return s;
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   if (s == NULL)
     setnilvalue2s(L->top.p);
@@ -1273,8 +1286,7 @@ l_sinline int localheap (lua_State *L, int idx) {
                            LUA_WORLD_ARM_TRACE);
 }
 
-l_sinline Table *localarray (lua_State *L, int idx, lua_Integer key,
-                              uint64_t *state) {
+l_sinline Table *localtable (lua_State *L, int idx, uint64_t *state) {
   const TValue *v = index2addr(L, idx);
   Table *t;
   if (!ttistable(v) || isLua(L->ci)) return NULL;
@@ -1282,7 +1294,13 @@ l_sinline Table *localarray (lua_State *L, int idx, lua_Integer key,
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) != cast(uintptr_t, L))
     return NULL;
   *state = luaC_tablestate(t);
-  return luaC_tasktablestate(t, *state) && l_castS2U(key) - 1 < t->asize ? t : NULL;
+  return luaC_tasktablestate(t, *state) ? t : NULL;
+}
+
+l_sinline Table *localarray (lua_State *L, int idx, lua_Integer key,
+                              uint64_t *state) {
+  Table *t = localtable(L, idx, state);
+  return t != NULL && l_castS2U(key) - 1 < t->asize ? t : NULL;
 }
 
 
@@ -1485,6 +1503,24 @@ LUA_API void lua_settable (lua_State *L, int idx) {
 
 LUA_API void lua_setfield (lua_State *L, int idx, const char *k) {
   LuaNativeRoot indexed;
+  if (localheap(L, idx)) {
+    uint64_t state;
+    Table *t = localtable(L, idx, &state);
+    if (t != NULL) {
+      TString *name = luaS_trycachedname(L, k);
+      if (name != NULL) {
+        TValue key;
+        api_checkpop(L, 1);
+        setsvalue(L, &key, name);
+        if (luaH_trytasksetshort(L, t, state, &key, s2v(L->top.p - 1), 0)) {
+          L->top.p--;
+          luaX_leavebounded(L);
+          return;
+        }
+      }
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   auxsetstr(L, luaA_indexvalue(L, idx, &indexed), k);
   luaR_poproot(L, &indexed);
@@ -1521,6 +1557,19 @@ static void aux_rawset (lua_State *L, int idx, TValue *key, int n) {
 
 
 LUA_API void lua_rawset (lua_State *L, int idx) {
+  if (localheap(L, idx)) {
+    uint64_t state;
+    Table *t = localtable(L, idx, &state);
+    api_checkpop(L, 2);
+    if (t != NULL && ttisshrstring(s2v(L->top.p - 2)) &&
+        luaH_trytasksetshort(L, t, state, s2v(L->top.p - 2),
+                            s2v(L->top.p - 1), 1)) {
+      L->top.p -= 2;
+      luaX_leavebounded(L);
+      return;
+    }
+    luaX_leavebounded(L);
+  }
   aux_rawset(L, idx, NULL, 2);
 }
 

@@ -2965,7 +2965,8 @@ l_sinline int assignrecord (lua_State *L, Table *table, Table *keys,
 }
 
 l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
-                               TValue *value, int raw, int tracing) {
+                               TValue *value, int raw, int tracing,
+                               int retained) {
   Table *keys = luaH_recordkeys(table->node);
   unsigned index;
   int result;
@@ -2992,7 +2993,7 @@ l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
     if (isabstkey(slot)) {
       if (ttisnil(value)) return 1;
       if (!insertat(L, table->node, key, value, position)) return 0;
-      luaC_barrierback(L, obj2gco(table), key);
+      if (!retained) luaC_barrierback(L, obj2gco(table), key);
       return 1;
     }
     /* Replacing a value leaves its key in place. Deletion removes both. */
@@ -3000,7 +3001,7 @@ l_sinline int privatestoreslot (lua_State *L, Table *table, const TValue *key,
       if (ttisnil(value)) luaC_traceobject(L, obj2gco(name));
       luaC_tracevalue(L, slot);
     }
-    if (isempty(slot) && !ttisnil(value))
+    if (!retained && isempty(slot) && !ttisnil(value))
       luaC_barrierback(L, obj2gco(table), key);
     setnodevalue(NULL, nodefromval(slot), value);
     return 1;
@@ -3040,7 +3041,7 @@ l_sinline __attribute__((always_inline)) int tryprivatewrite (
   done = key == NULL
     ? storeownedrecord(L, t, luaH_inlinerecordvalues(t) + index,
                        &t->arraydata, index, value, raw, tracing)
-    : privatestoreslot(L, t, key, value, raw, tracing);
+    : privatestoreslot(L, t, key, value, raw, tracing, 0);
   if (done) {
     settableflags(t, gettableflags(t) &
                      cast_byte(~(maskflags | LUA_TABLE_STRING_RANGES)));
@@ -3052,6 +3053,27 @@ l_sinline __attribute__((always_inline)) int tryprivatewrite (
     __atomic_store_n(&t->sequence, sequence + (done ? LUA_TABLE_VERSION_STEP : 0),
                      __ATOMIC_RELEASE);
   return done;
+}
+
+/* A C call with a bounded stack claim can fill its private table without
+** taking a managed slot. Retain both edges first, and let the managed path
+** handle refills, metatables and layout changes. */
+int luaH_trytasksetshort (lua_State *L, Table *t, uint64_t state,
+                          const TValue *key, TValue *value, int raw) {
+  Node *nodes = t->node;
+  enum { MAX_NATIVE_HASH_NODES = 16 };
+  lua_assert(ttisshrstring(key) && luaC_tasktablestate(t, state));
+  if (gettableflags(t) & LUA_TABLE_STRING_INDEX) return 0;
+  if (luaH_recordkeys(nodes) == NULL &&
+      (luaH_hashdir(nodes) != NULL ||
+       nodesteps(nodes) > MAX_NATIVE_HASH_NODES)) return 0;
+  if (!luaC_trytaskedge(L, t, state, gcvalue(key))) return 0;
+  if (iscollectable(value) &&
+      !luaC_trytaskedge(L, t, luaC_tablestate(t), gcvalue(value))) return 0;
+  if (!privatestoreslot(L, t, key, value, raw, 0, 1)) return 0;
+  settableflags(t, gettableflags(t) &
+                   cast_byte(~(maskflags | LUA_TABLE_STRING_RANGES)));
+  return 1;
 }
 
 int luaH_tryset (lua_State *L, Table *t, const TValue *key, TValue *value,

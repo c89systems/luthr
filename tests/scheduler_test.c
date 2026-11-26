@@ -1455,38 +1455,52 @@ static int create_native_array(lua_State *L) {
   return 1;
 }
 
+static int edit_native_fields(lua_State *L) {
+  static const char first[] = "first";
+  static const char second[] = "second";
+  lua_createtable(L, 0, 8);
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, first); /* warm the coroutine's C-string cache */
+  lua_pushstring(L, second);
+  lua_pop(L, 1);
+  blocked_leaf(L);
+  lua_pushvalue(L, 1);
+  lua_setfield(L, -2, first);
+  require(strcmp(lua_pushstring(L, second), second) == 0);
+  lua_pushvalue(L, 1);
+  lua_rawset(L, -3);
+  native_operation_done();
+  return 1;
+}
+
 static int collect_after_native_operation(lua_State *L) {
   wait_for_native_operation(L);
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
   return 0;
 }
 
-static void native_array_without_slot(struct fixture *f, int allocate) {
+static void native_table_without_slot(struct fixture *f, lua_CFunction fn,
+                                      const char *source, int gc_after) {
   init(f, 1);
-  lua_pushcfunction(f->main,
-                    allocate ? create_native_array : edit_native_array);
-  lua_setglobal(f->main, "native_array_operation");
+  lua_pushcfunction(f->main, fn);
+  lua_setglobal(f->main, "native_table_operation");
   managed(f->main, "wait_for_native_operation",
-          allocate ? collect_after_native_operation
+          gc_after ? collect_after_native_operation
                    : wait_for_native_operation);
-  if (allocate) {
+  if (gc_after) {
     lua_gc(f->main, LUA_GCINC);
     lua_gc(f->main, LUA_GCPARAM, LUA_GCPPAUSE, 5000);
   }
   require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
-  submit(f, 0,
-         allocate
-             ? "return native_array_operation({51, 1, 2, 3, 4, 5})[1][1][1]"
-             : "return native_array_operation({0}, {51})",
-         0);
+  submit(f, 0, source, 0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
-  if (!allocate)
+  if (!gc_after)
     require(lua_gc(f->main, LUA_GCSTOP) == 0);
   /* The peer takes the only managed slot and holds it until the native
-   * task finishes its array operations. The nursery is already populated. */
+   * task finishes its table operations. The nursery is already populated. */
   submit(f, 1, "wait_for_native_operation(); return 52", 0);
   require(pthread_mutex_lock(&f->mutex) == 0);
   while (!f->waiting)
@@ -3180,9 +3194,18 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_registry_without_slot") == 0)
     native_registry_without_slot(f);
   else if (strcmp(argv[1], "native_array_without_slot") == 0)
-    native_array_without_slot(f, 0);
+    native_table_without_slot(f, edit_native_array,
+                              "return native_table_operation({0}, {51})", 0);
   else if (strcmp(argv[1], "native_allocation_without_slot") == 0)
-    native_array_without_slot(f, 1);
+    native_table_without_slot(
+        f, create_native_array,
+        "return native_table_operation({51, 1, 2, 3, 4, 5})[1][1][1]", 1);
+  else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
+    native_table_without_slot(
+        f, edit_native_fields,
+        "local row = native_table_operation({51}); "
+        "assert(rawequal(row.first, row.second)); return row.first[1]",
+        1);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

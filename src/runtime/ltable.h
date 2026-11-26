@@ -582,6 +582,8 @@ LUAI_FUNC int luaH_assignowned (lua_State *L, Table *t, const TValue *key,
 /* Try a non-allocating write. Failure leaves the operation
 ** for ordinary rooted access; no encoded storage location escapes. */
 LUAI_FUNC int luaH_tryset (lua_State *, Table *, const TValue *, TValue *, int);
+LUAI_FUNC int luaH_trytasksetshort (lua_State *, Table *, uint64_t,
+                                     const TValue *, TValue *, int);
 LUAI_FUNC int luaH_trysetfield (lua_State *, Table *, const TValue *, TValue *, int);
 LUAI_FUNC int luaH_trysetrecord (lua_State *, Table *, TString *, unsigned,
                                  TValue *);

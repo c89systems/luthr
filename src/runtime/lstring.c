@@ -424,20 +424,33 @@ TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   return result;
 }
 
+l_sinline TString *cachedname (const uintptr_t *row, const char *str,
+                                int shortonly) {
+  int j;
+  for (j = 0; j < STRCACHE_M; j++) {
+    uintptr_t entry = row[j];
+    TString *ts = cast(TString *, entry & ~cast(uintptr_t, CACHE_BINARY));
+    if (ts != NULL && !(entry & CACHE_BINARY) &&
+        (!shortonly || strisshr(ts)) && strcmp(str, getstr(ts)) == 0)
+      return ts;
+  }
+  return NULL;
+}
+
+/* The same stack claim as luaS_trycachedshort protects the weak entries. */
+TString *luaS_trycachedname (lua_State *L, const char *str) {
+  const LuaStringCache *cache = L->strcache;
+  if (cache == NULL || cache->epoch != G(L)->strcache_epoch) return NULL;
+  return cachedname(cache->entries[point2uint(str) % STRCACHE_N], str, 1);
+}
+
 TString *luaS_new (lua_State *L, const char *str) {
   uintptr_t *row = stringcacherow(L, point2uint(str) % STRCACHE_N);
   TString *result;
-  int j;
-  if (row != NULL)
-    for (j = 0; j < STRCACHE_M; j++) {
-      uintptr_t entry = row[j];
-      if (entry != 0 && !(entry & CACHE_BINARY) &&
-          strcmp(str, getstr(cast(TString *, entry))) == 0) {
-        result = cast(TString *, entry);
-        luaC_tracepointer(L, result);
-        return result;
-      }
-    }
+  if (row != NULL && (result = cachedname(row, str, 0)) != NULL) {
+    luaC_tracepointer(L, result);
+    return result;
+  }
   result = luaS_newlstr(L, str, strlen(str));
   rememberstring(row, result, 0);
   return result;
