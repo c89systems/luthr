@@ -710,18 +710,23 @@ static int raw_context(luthr_lua_state *L) {
 static void raw_vm(struct fixture *f) {
   luthr_lua_scheduler_config config;
   luthr_lua_task_options options;
+  struct invocation call;
+  pthread_t thread;
   memset(&config, 0, sizeof(config));
   config.parallelism = 1;
-  config.native_limit = 1;
-  config.carrier_limit = 2;
+  config.native_limit = 2;
+  config.carrier_limit = 3;
   memset(&options, 0, sizeof(options));
   options.context = f;
   options.instruction_limit = 1000;
   active = f;
+  require(pthread_mutex_init(&f->mutex, NULL) == 0);
+  require(pthread_cond_init(&f->changed, NULL) == 0);
   f->state = luthr_lua_newstate(raw_allocate, f, 42);
   require(f->state != NULL);
   luthr_lua_l_openlibs(f->state);
   luthr_lua_register(f->state, "raw_context", raw_context);
+  luthr_lua_register(f->state, "block", block);
   require(luthr_lua_scheduler_new(f->state, &config, &f->scheduler) ==
           LUTHR_LUA_RUNTIME_OK);
   submit(f, 0,
@@ -730,9 +735,40 @@ static void raw_vm(struct fixture *f) {
          &options);
   (void)await(f, 0, LUTHR_LUA_RUNTIME_ERR_LIMIT);
   discard(f, 0);
+  submit(f, 0,
+         "child=coroutine.create(function() assert(debug.gethook()~=nil); "
+         "coroutine.yield(); assert(debug.gethook()==nil); local n=0; "
+         "for i=1,2000 do n=n+i end; return n end); "
+         "assert(coroutine.resume(child)); return block()",
+         &options);
+  entered(f);
+  submit(f, 1,
+         "local ok,n=coroutine.resume(child); assert(ok,n); "
+         "assert(n==2001000); return n",
+         NULL);
+  (void)await(f, 1, LUTHR_LUA_RUNTIME_OK);
+  discard(f, 1);
+  release_block(f);
+  (void)await(f, 0, LUTHR_LUA_RUNTIME_OK);
+  discard(f, 0);
+  require(luthr_lua_l_loadstring(f->state, "local n=...; return n+40") ==
+          LUTHR_LUA_OK);
+  require(luthr_lua_callback_new(f->scheduler, f->state, 1, NULL,
+                                 &f->callback) == LUTHR_LUA_RUNTIME_OK);
+  luthr_lua_pop(f->state, 1);
+  memset(&call, 0, sizeof(call));
+  call.fixture = f;
+  call.argument = 2;
+  require(pthread_create(&thread, NULL, provider, &call) == 0);
+  require(pthread_join(thread, NULL) == 0);
+  require(call.status == LUTHR_LUA_RUNTIME_OK && call.value == 42);
+  require(luthr_lua_callback_revoke(f->callback) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_callback_free(f->callback) == LUTHR_LUA_RUNTIME_OK);
   require(luthr_lua_scheduler_free(f->scheduler) == LUTHR_LUA_RUNTIME_OK);
   luthr_lua_close(f->state);
   require(f->live == 0);
+  require(pthread_cond_destroy(&f->changed) == 0);
+  require(pthread_mutex_destroy(&f->mutex) == 0);
 }
 int main(int argc, char **argv) {
   struct fixture *f = calloc(1, sizeof(*f));

@@ -56,7 +56,7 @@ set_tests_properties(native_sdk PROPERTIES LABELS "unit;runtime;memcheck" TIMEOU
 luthr_test_program(public_tasks_shared public_tasks_test.c)
 luthr_c89(public_tasks_shared)
 target_link_libraries(public_tasks_shared PRIVATE luthr_shared)
-foreach(case IN ITEMS results callback_budget pin_cancel independent_native_limits)
+foreach(case IN ITEMS results callback_budget pin_cancel independent_native_limits raw_vm)
   add_test(NAME public_tasks_shared_${case} COMMAND public_tasks_shared ${case})
   set_tests_properties(public_tasks_shared_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)

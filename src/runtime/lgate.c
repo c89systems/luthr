@@ -174,7 +174,12 @@ void luaX_endreserve (lua_State *target, int reservation) {
 
 static void preparecall (lua_State *L, NativeStackContext *context) {
   LuaPolicy *policy = luaX_contextpolicy(context);
-  if (policy != NULL || L->policy != NULL) luaCP_apply(L, policy);
+  if (policy != NULL || L->policy != NULL) {
+    LuaExecution *execution = context->execution;
+    if (policy == NULL && execution != NULL && execution->empty_policy == G(L))
+      luaCP_clear(L);
+    else luaCP_apply(L, policy);
+  }
 }
 
 l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,

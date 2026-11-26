@@ -1437,6 +1437,7 @@ static void configureexecution (LuaScheduler *s, LuaScheduledTask *task) {
   execution->context = task;
   execution->scheduler = s;
   execution->policy = task->policy;
+  execution->empty_policy = s->global->policy_factory != NULL ? s->global : NULL;
   execution->poll = poll;
   execution->request_handoff = requesthandoff;
   execution->wait = resourcewait;
@@ -1588,9 +1589,8 @@ int luaSC_callback (LuaScheduler *s, LuaCallback *callback,
   call.task.scheduler = s;
   call.task.external = 1;
   if (s->global->policy_factory != NULL) {
-    call.task.policy = s->global->policy_factory(mainthread(s->global), callback->policy_settings,
-                                                s->global->policy_context);
-    if (call.task.policy == NULL) {
+    if (!s->global->policy_factory(mainthread(s->global), callback->policy_settings,
+                                  s->global->policy_context, &call.task.policy)) {
       lock(s);
       s->callbacks_active--;
       if (s->completed != NULL) s->completed(s->completion_context);

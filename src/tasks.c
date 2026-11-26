@@ -68,9 +68,15 @@ static void completed(void *context) {
     abort();
 }
 
-static LuaPolicy *default_policy(lua_State *L, const void *settings,
-                                 void *owner) {
-  return luthr_policy_new(L, settings, owner);
+static int default_policy(lua_State *L, const void *settings, void *owner,
+                          LuaPolicy **policy) {
+  const luthr_lua_task_options *options = settings;
+  *policy = NULL;
+  if (options == NULL || (options->instruction_limit == 0 &&
+                          options->trace == NULL && options->context == NULL))
+    return 1;
+  *policy = luthr_policy_new(L, options, owner);
+  return *policy != NULL;
 }
 
 luthr_lua_runtime_status
@@ -235,8 +241,7 @@ luthr_lua_task_submit(luthr_lua_scheduler *scheduler, luthr_lua_state *thread,
   task = allocate(scheduler->host, sizeof(*task));
   if (task == NULL)
     return LUTHR_LUA_RUNTIME_ERR_ALLOC;
-  policy = G(L)->policy_factory(L, options, G(L)->policy_context);
-  if (policy == NULL) {
+  if (!G(L)->policy_factory(L, options, G(L)->policy_context, &policy)) {
     release(scheduler->host, task, sizeof(*task));
     return LUTHR_LUA_RUNTIME_ERR_ALLOC;
   }
@@ -315,7 +320,8 @@ static luthr_lua_task_result outcome(luthr_lua_task *task) {
   check(pthread_mutex_lock(&world->mutex));
   result.lua_status = root->status;
   result.result_count = root->results;
-  if (__atomic_load_n(&task->task.policy->exhausted, __ATOMIC_ACQUIRE))
+  if (task->task.policy != NULL &&
+      __atomic_load_n(&task->task.policy->exhausted, __ATOMIC_ACQUIRE))
     result.status = LUTHR_LUA_RUNTIME_ERR_LIMIT;
   else if (__atomic_load_n(&root->stop_delivered, __ATOMIC_ACQUIRE))
     result.status = LUTHR_LUA_RUNTIME_CANCELLED;

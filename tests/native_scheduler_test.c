@@ -637,9 +637,10 @@ static void init_task(struct pool *pool, struct task *task, int id,
   check(test_fiber_create(&task->fiber, task_entry, task));
   init_execution(task);
   if (pool->budget || (pool->trace && id != 2 && id != 5)) {
-    task->fiber.execution.policy =
-        G(task->state)
-            ->policy_factory(task->state, NULL, G(task->state)->policy_context);
+    require(G(task->state)
+                ->policy_factory(task->state, NULL,
+                                 G(task->state)->policy_context,
+                                 &task->fiber.execution.policy));
     require(task->fiber.execution.policy != NULL);
   }
   if (run == NULL)
@@ -1486,10 +1487,10 @@ static int exercise_stream(const char *name) {
     }
     init_task(pool, task, id, run_stream_task);
     if (facade) {
-      task->fiber.execution.policy =
-          G(task->state)
-              ->policy_factory(task->state, NULL,
-                               G(task->state)->policy_context);
+      require(G(task->state)
+                  ->policy_factory(task->state, NULL,
+                                   G(task->state)->policy_context,
+                                   &task->fiber.execution.policy));
       require(task->fiber.execution.policy != NULL);
     }
     require(luaTK_admit(task->state, &task->root, &task->fiber.execution) ==

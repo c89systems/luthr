@@ -1662,8 +1662,12 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
     return 0;
   /* Reentry with full admission would apply the invocation's policy. */
   policy = luaX_contextpolicy(context);
-  if (policy != NULL && policy != L->policy && policy->global == G(L))
-    return 0;
+  if (policy != L->policy) {
+    if (policy != NULL && policy->global == G(L)) return 0;
+    if (policy == NULL && context->execution != NULL &&
+        context->execution->empty_policy == G(L))
+      return 0;
+  }
   /* One instruction means the function returns without writing registers. */
   if (p->scalar_ticks == 1) {
     Instruction first = p->code[0];

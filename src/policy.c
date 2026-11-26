@@ -152,9 +152,7 @@ LuaPolicy *luthr_policy_current(void *owner) {
   return policy != NULL && policy->owner == owner ? policy : NULL;
 }
 LuaPolicy *luthr_policy_from_state(lua_State *L) { return L->policy; }
-void luthr_policy_set_factory(lua_State *L,
-                              LuaPolicy *(*factory)(lua_State *, const void *,
-                                                    void *),
+void luthr_policy_set_factory(lua_State *L, LuaPolicyFactory factory,
                               void *context) {
   lua_lock(L);
   G(L)->policy_factory = factory;

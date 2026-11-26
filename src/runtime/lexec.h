@@ -102,6 +102,7 @@ typedef struct LuaExecution {
   LuaAllocationCache *allocation_cache;  /* borrowed managed slot, not a task root */
   LuaCallScope *trusted;  /* runtime-owned C frames, including nested callbacks */
   struct LuaGCFrame *gc_frame;  /* execution-local collector reentrancy */
+  struct global_State *empty_policy;  /* clear inherited controls in this VM */
 } LuaExecution;
 
 enum { LUA_PIN_INVALID = -1, LUA_PIN_UNAVAILABLE = -2, LUA_PIN_OVERFLOW = -3 };

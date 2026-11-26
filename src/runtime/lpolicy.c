@@ -33,6 +33,12 @@ void luaCP_bind (lua_State *L, LuaPolicy *policy) {
   }
 }
 
+void luaCP_clear (lua_State *L) {
+  lua_assert(L->policy != NULL);
+  if (gethook(L) == L->policy->hook) lua_sethook(L, NULL, 0, 0);
+  luaCP_bind(L, NULL);
+}
+
 void luaCP_apply (lua_State *L, LuaPolicy *policy) {
   if (policy != L->policy && policy != NULL && policy->global == G(L))
     luaCP_bind(L, policy);

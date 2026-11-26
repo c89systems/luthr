@@ -636,7 +636,7 @@ typedef struct global_State {
   TString *memerrmsg;  /* message for memory-allocation errors */
   TString *stoperrmsg;  /* fixed task stop delivery; never allocates */
   TString *limiterrmsg;
-  LuaPolicy *(*policy_factory)(lua_State *, const void *, void *);
+  LuaPolicyFactory policy_factory;
   void *policy_context;
   TString *tmname[TM_N];  /* array with tag-method names */
   TString *type_names[LUA_NUMTYPES];  /* fixed names returned by type() */

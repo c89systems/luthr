@@ -563,6 +563,11 @@ static LuaPolicy *runtime_policy(lua_State *state, const void *settings,
   runtime_options(runtime, settings, &options);
   return luthr_policy_new(state, &options, runtime);
 }
+static int runtime_policy_factory(lua_State *state, const void *settings,
+                                  void *owner, LuaPolicy **policy) {
+  *policy = runtime_policy(state, settings, owner);
+  return *policy != NULL;
+}
 static void end_policy(luthr_lua_runtime *runtime, LuaPolicy *policy,
                        LuaPolicyScope *scope) {
   policy_store(policy->active, 0);
@@ -1108,7 +1113,7 @@ luthr_lua_runtime_status luthr_lua_runtime_new_with_allocator(
   }
 
   runtime->state = state;
-  luthr_policy_set_factory(state, runtime_policy, runtime);
+  luthr_policy_set_factory(state, runtime_policy_factory, runtime);
   lua_setwarnf(state, luthr_lua_runtime_native_warning, runtime);
   status = luthr_lua_runtime_protected_call(
       runtime, luthr_lua_runtime_store_state_protected, runtime, 0,
