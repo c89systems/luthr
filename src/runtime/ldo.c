@@ -890,10 +890,6 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     }
     else return -1;
     return 1;
-  case LUA_LEAF_MATHABS:
-    if (!ttisinteger(first)) return -1;
-    setivalue(value, luaB_absinteger(ivalue(first)));
-    return 1;
   case LUA_LEAF_UTF8LEN:
     return luaB_leafutf8len(func, nargs, value);
   case LUA_LEAF_STRLEN:
@@ -919,6 +915,10 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     return luaB_leafmatch(L, func, nargs, builtin == LUA_LEAF_STRFIND, value);
   case LUA_LEAF_YIELD:
     return -1;  /* only a VM frame can suspend without a native call */
+#define LUA_NUMERIC_CASE(name, expression) case LUA_LEAF_MATH_##name:
+  LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_CASE)
+#undef LUA_NUMERIC_CASE
+    return luaB_leafmath(builtin, first, value);
   default:
     lua_assert(0);
     return -1;

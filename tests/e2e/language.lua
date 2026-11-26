@@ -18,6 +18,37 @@ local a,b,c = table.unpack(packed,1,3)
 assert(a==nil and b==42 and c==nil)
 
 do
+  local floor, ceil, sqrt = math.floor, math.ceil, math.sqrt
+  assert(floor(math.maxinteger) == math.maxinteger)
+  assert(ceil(math.mininteger) == math.mininteger)
+  assert(floor(-3.25) == -4 and ceil(-3.25) == -3)
+  assert(math.type(floor(2^80)) == 'float' and floor(2^80) == 2^80)
+  assert(floor(math.huge) == math.huge and floor('42.5') == 42)
+  assert(math.type(sqrt(1)) == 'float' and sqrt('4') == 2.0)
+  assert(math.abs(math.mininteger) == math.mininteger)
+  assert(1 / math.sin(-0.0) == -math.huge and sqrt(-1) ~= sqrt(-1))
+  local whole, fraction = math.modf(-1.25)
+  assert(whole == -1 and math.type(whole) == 'integer' and fraction == -0.25)
+  whole, fraction = math.modf(math.huge)
+  assert(whole == math.huge and math.type(fraction) == 'float' and fraction == 0)
+  local fraction, exponent = math.frexp(40)
+  assert(fraction == 0.625 and exponent == 6 and math.type(exponent) == 'integer')
+  local ok, err = pcall(sqrt, {})
+  assert(not ok and err:find('number expected', 1, true))
+
+  local calls = 0
+  debug.sethook(function(event)
+    if event == 'call' and debug.getinfo(2, 'f').func == floor then
+      calls = calls + 1
+      assert(debug.setlocal(2, 1, 41.5))
+    end
+  end, 'c')
+  local observed = floor(0)
+  debug.sethook()
+  assert(observed == 41 and calls == 1)
+end
+
+do
   local token = {}
   local callable = setmetatable({}, {__call=function(_, ...) return ... end})
   local many = {[1]=token,[96]=42}

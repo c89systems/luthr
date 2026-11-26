@@ -25,50 +25,11 @@
 #include "laccess.h"
 #include "lbuiltin.h"
 #include "lexec.h"
+#include "lvm.h"
 
 
 #undef PI
 #define PI	(l_mathop(3.141592653589793238462643383279502884))
-
-
-int luaB_mathabs (lua_State *L) {
-  if (lua_isinteger(L, 1)) {
-    lua_pushinteger(L, luaB_absinteger(lua_tointeger(L, 1)));
-  }
-  else
-    lua_pushnumber(L, l_mathop(fabs)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_sin (lua_State *L) {
-  lua_pushnumber(L, l_mathop(sin)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_cos (lua_State *L) {
-  lua_pushnumber(L, l_mathop(cos)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_tan (lua_State *L) {
-  lua_pushnumber(L, l_mathop(tan)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_asin (lua_State *L) {
-  lua_pushnumber(L, l_mathop(asin)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_acos (lua_State *L) {
-  lua_pushnumber(L, l_mathop(acos)(luaL_checknumber(L, 1)));
-  return 1;
-}
 
 
 static int math_atan (lua_State *L) {
@@ -92,35 +53,91 @@ int luaB_mathtointeger (lua_State *L) {
 }
 
 
-static void pushnumint (lua_State *L, lua_Number d) {
+static void setnumint (TValue *result, lua_Number d) {
   lua_Integer n;
-  if (lua_numbertointeger(d, &n))  /* does 'd' fit in an integer? */
-    lua_pushinteger(L, n);  /* result is integer */
-  else
-    lua_pushnumber(L, d);  /* result is float */
+  if (lua_numbertointeger(d, &n)) { setivalue(result, n); }
+  else { setfltvalue(result, d); }
 }
 
-
-static int math_floor (lua_State *L) {
-  if (lua_isinteger(L, 1))
-    lua_settop(L, 1);  /* integer is its own floor */
-  else {
-    lua_Number d = l_mathop(floor)(luaL_checknumber(L, 1));
-    pushnumint(L, d);
+int luaB_leafmath (unsigned builtin, const TValue *argument, TValue *results) {
+  lua_Number x;
+  if (!tonumberns(argument, x)) return -1;
+  switch (builtin) {
+#define LUA_NUMERIC_RESULT(name, expression) \
+    case LUA_LEAF_MATH_##name: { setfltvalue(results, expression); return 1; }
+    LUA_NUMERIC_UNARY(LUA_NUMERIC_RESULT)
+#undef LUA_NUMERIC_RESULT
+    case LUA_LEAF_MATH_abs:
+      if (ttisinteger(argument)) {
+        setivalue(results, luaB_absinteger(ivalue(argument)));
+      }
+      else { setfltvalue(results, l_mathop(fabs)(x)); }
+      return 1;
+    case LUA_LEAF_MATH_floor: case LUA_LEAF_MATH_ceil:
+      if (ttisinteger(argument)) { setivalue(results, ivalue(argument)); }
+      else setnumint(results, builtin == LUA_LEAF_MATH_floor
+                             ? l_mathop(floor)(x) : l_mathop(ceil)(x));
+      return 1;
+    case LUA_LEAF_MATH_modf:
+      if (ttisinteger(argument)) {
+        setivalue(results, ivalue(argument));
+        setfltvalue(results + 1, l_mathop(0.0));
+      }
+      else {
+        lua_Number whole = x < 0 ? l_mathop(ceil)(x) : l_mathop(floor)(x);
+        setnumint(results, whole);
+        setfltvalue(results + 1, x == whole ? l_mathop(0.0) : x - whole);
+      }
+      return 2;
+    case LUA_LEAF_MATH_frexp: {
+      int exponent;
+      setfltvalue(results, l_mathop(frexp)(x, &exponent));
+      setivalue(results + 1, exponent);
+      return 2;
+    }
+    default:
+      lua_assert(0);
+      return -1;
   }
-  return 1;
 }
 
-
-static int math_ceil (lua_State *L) {
-  if (lua_isinteger(L, 1))
-    lua_settop(L, 1);  /* integer is its own ceiling */
-  else {
-    lua_Number d = l_mathop(ceil)(luaL_checknumber(L, 1));
-    pushnumint(L, d);
+static int numericunary (lua_State *L, unsigned builtin) {
+  TValue coerced, results[2];
+  const TValue *argument;
+  int n, i;
+  lua_lock(L);
+  if (L->top.p == L->ci->func.p + 1) goto typeerror;
+  argument = s2v(L->ci->func.p + 1);
+  if (!ttisnumber(argument)) {
+    lua_Number number;
+    if (!tonumber(argument, &number)) goto typeerror;
+    setfltvalue(&coerced, number);
+    argument = &coerced;
   }
-  return 1;
+  n = luaB_leafmath(builtin, argument, results);
+  lua_assert(n > 0);
+  if (ttisinteger(argument) && (builtin == LUA_LEAF_MATH_floor ||
+      builtin == LUA_LEAF_MATH_ceil || builtin == LUA_LEAF_MATH_modf)) {
+    lua_unlock(L);
+    lua_settop(L, 1);
+    if (n == 2) lua_pushnumber(L, fltvalue(results + 1));
+    return n;
+  }
+  for (i = 0; i < n; i++) {
+    setobj2s(L, L->top.p, results + i);
+    api_incr_top(L);
+  }
+  lua_unlock(L);
+  return n;
+ typeerror:
+  lua_unlock(L);
+  return luaL_typeerror(L, 1, "number");
 }
+
+#define LUA_NUMERIC_DEFINE(name, expression) \
+  int luaB_math##name (lua_State *L) { return numericunary(L, LUA_LEAF_MATH_##name); }
+LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_DEFINE)
+#undef LUA_NUMERIC_DEFINE
 
 
 static int math_fmod (lua_State *L) {
@@ -136,34 +153,6 @@ static int math_fmod (lua_State *L) {
   else
     lua_pushnumber(L, l_mathop(fmod)(luaL_checknumber(L, 1),
                                      luaL_checknumber(L, 2)));
-  return 1;
-}
-
-
-/*
-** next function does not use 'modf', avoiding problems with 'double*'
-** (which is not compatible with 'float*') when lua_Number is not
-** 'double'.
-*/
-static int math_modf (lua_State *L) {
-  if (lua_isinteger(L ,1)) {
-    lua_settop(L, 1);  /* number is its own integer part */
-    lua_pushnumber(L, 0);  /* no fractional part */
-  }
-  else {
-    lua_Number n = luaL_checknumber(L, 1);
-    /* integer part (rounds toward zero) */
-    lua_Number ip = (n < 0) ? l_mathop(ceil)(n) : l_mathop(floor)(n);
-    pushnumint(L, ip);
-    /* fractional part (test needed for inf/-inf) */
-    lua_pushnumber(L, (n == ip) ? l_mathop(0.0) : (n - ip));
-  }
-  return 2;
-}
-
-
-static int math_sqrt (lua_State *L) {
-  lua_pushnumber(L, l_mathop(sqrt)(luaL_checknumber(L, 1)));
   return 1;
 }
 
@@ -195,33 +184,6 @@ static int math_log (lua_State *L) {
   }
   lua_pushnumber(L, res);
   return 1;
-}
-
-
-static int math_exp (lua_State *L) {
-  lua_pushnumber(L, l_mathop(exp)(luaL_checknumber(L, 1)));
-  return 1;
-}
-
-
-static int math_deg (lua_State *L) {
-  lua_pushnumber(L, luaL_checknumber(L, 1) * (l_mathop(180.0) / PI));
-  return 1;
-}
-
-
-static int math_rad (lua_State *L) {
-  lua_pushnumber(L, luaL_checknumber(L, 1) * (PI / l_mathop(180.0)));
-  return 1;
-}
-
-
-static int math_frexp (lua_State *L) {
-  lua_Number x = luaL_checknumber(L, 1);
-  int ep;
-  lua_pushnumber(L, l_mathop(frexp)(x, &ep));
-  lua_pushinteger(L, ep);
-  return 2;
 }
 
 
@@ -781,27 +743,27 @@ static int math_log10 (lua_State *L) {
 
 static const luaL_Reg mathlib[] = {
   {"abs",   luaB_mathabs},
-  {"acos",  math_acos},
-  {"asin",  math_asin},
+  {"acos",  luaB_mathacos},
+  {"asin",  luaB_mathasin},
   {"atan",  math_atan},
-  {"ceil",  math_ceil},
-  {"cos",   math_cos},
-  {"deg",   math_deg},
-  {"exp",   math_exp},
+  {"ceil",  luaB_mathceil},
+  {"cos",   luaB_mathcos},
+  {"deg",   luaB_mathdeg},
+  {"exp",   luaB_mathexp},
   {"tointeger", luaB_mathtointeger},
-  {"floor", math_floor},
+  {"floor", luaB_mathfloor},
   {"fmod",   math_fmod},
-  {"frexp", math_frexp},
+  {"frexp", luaB_mathfrexp},
   {"ult",   math_ult},
   {"ldexp", math_ldexp},
   {"log",   math_log},
   {"max",   math_max},
   {"min",   math_min},
-  {"modf",   math_modf},
-  {"rad",   math_rad},
-  {"sin",   math_sin},
-  {"sqrt",  math_sqrt},
-  {"tan",   math_tan},
+  {"modf",  luaB_mathmodf},
+  {"rad",   luaB_mathrad},
+  {"sin",   luaB_mathsin},
+  {"sqrt",  luaB_mathsqrt},
+  {"tan",   luaB_mathtan},
   {"type", math_type},
 #if defined(LUA_COMPAT_MATHLIB)
   {"atan2", math_atan},

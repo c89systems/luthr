@@ -10,7 +10,6 @@ LUAI_FUNC int luaB_strfind (lua_State *L);
 LUAI_FUNC int luaB_strmatch (lua_State *L);
 LUAI_FUNC int luaB_strlen (lua_State *L);
 LUAI_FUNC int luaB_utf8len (lua_State *L);
-LUAI_FUNC int luaB_mathabs (lua_State *L);
 LUAI_FUNC int luaB_mathtointeger (lua_State *L);
 LUAI_FUNC int luaB_assert (lua_State *L);
 LUAI_FUNC int luaB_select (lua_State *L);
@@ -19,16 +18,38 @@ LUAI_FUNC int luaB_rawequal (lua_State *L);
 LUAI_FUNC int luaB_tonumber (lua_State *L);
 LUAI_FUNC int luaB_next (lua_State *L);
 
+/* The fixed-arity numeric functions share one implementation between their
+** C entries and the VM. The expression column is used by the math library. */
+#define LUA_NUMERIC_UNARY(X) \
+  X(sin, l_mathop(sin)(x)) X(cos, l_mathop(cos)(x)) \
+  X(tan, l_mathop(tan)(x)) X(asin, l_mathop(asin)(x)) \
+  X(acos, l_mathop(acos)(x)) X(exp, l_mathop(exp)(x)) \
+  X(sqrt, l_mathop(sqrt)(x)) X(deg, x * (l_mathop(180.0) / PI)) \
+  X(rad, x * (PI / l_mathop(180.0)))
+#define LUA_NUMERIC_TYPED(X) X(abs, 0) X(floor, 0) X(ceil, 0) \
+                             X(modf, 0) X(frexp, 0)
+#define LUA_NUMERIC_FUNCTIONS(X) LUA_NUMERIC_UNARY(X) LUA_NUMERIC_TYPED(X)
+
+#define LUA_NUMERIC_DECL(name, expression) \
+  LUAI_FUNC int luaB_math##name (lua_State *L);
+LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_DECL)
+#undef LUA_NUMERIC_DECL
+
 enum {
   LUA_LEAF_ASSERT, LUA_LEAF_TYPE, LUA_LEAF_STRSUB, LUA_LEAF_STRBYTE,
   LUA_LEAF_NEXT, LUA_LEAF_SELECT, LUA_LEAF_RAWGET, LUA_LEAF_RAWEQUAL,
-  LUA_LEAF_TONUMBER, LUA_LEAF_MATHABS, LUA_LEAF_YIELD, LUA_LEAF_UTF8LEN,
+  LUA_LEAF_TONUMBER, LUA_LEAF_YIELD, LUA_LEAF_UTF8LEN,
   LUA_LEAF_STRLEN, LUA_LEAF_MATHTOINTEGER, LUA_LEAF_STRFIND, LUA_LEAF_STRMATCH,
+#define LUA_NUMERIC_ENUM(name, expression) LUA_LEAF_MATH_##name,
+  LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_ENUM)
+#undef LUA_NUMERIC_ENUM
   LUA_LEAF_COUNT
 };
 
 LUAI_FUNC int luaB_leafindex (lua_CFunction f);
 LUAI_FUNC int luaB_leafutf8len (StkId func, int nargs, TValue *results);
+LUAI_FUNC int luaB_leafmath (unsigned builtin, const TValue *argument,
+                             TValue *results);
 LUAI_FUNC int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
                               TValue *results);
 
