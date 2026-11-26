@@ -57,8 +57,32 @@ LUAI_FUNC void luaF_initupvals (lua_State *L, LClosure *cl);
 LUAI_FUNC void luaF_setproto (lua_State *L, LClosure *cl, Proto *proto);
 LUAI_FUNC UpVal *luaF_findupval (lua_State *L, StkId level);
 LUAI_FUNC void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value);
-/* The caller owns the private cell or holds the shared cell's mutex. */
 LUAI_FUNC void luaF_writecell (lua_State *L, UpVal *uv, const TValue *value);
+enum { LUA_CELL_WRITING = 1, LUA_CELL_WAITERS = 2, LUA_CELL_VERSION_STEP = 4 };
+LUAI_FUNC uint64_t luaF_waitcell (UpVal *uv);
+LUAI_FUNC void luaF_wakecell (UpVal *uv);
+
+l_sinline uint64_t luaF_trylockcell (UpVal *uv) {
+  uint64_t version = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
+  uint64_t writing = version | LUA_CELL_WRITING;
+  if ((version & LUA_CELL_WRITING) ||
+      !__atomic_compare_exchange_n(&uv->sequence, &version, writing, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    return 0;
+  return writing;
+}
+
+l_sinline uint64_t luaF_lockcell (UpVal *uv) {
+  uint64_t writing = luaF_trylockcell(uv);
+  return l_likely(writing != 0) ? writing : luaF_waitcell(uv);
+}
+
+l_sinline void luaF_unlockcell (UpVal *uv, uint64_t writing) {
+  uint64_t version = writing + (LUA_CELL_VERSION_STEP - LUA_CELL_WRITING);
+  uint64_t previous = __atomic_exchange_n(&uv->sequence, version, __ATOMIC_RELEASE);
+  lua_assert((previous & ~cast(uint64_t, LUA_CELL_WAITERS)) == writing);
+  if (l_unlikely(previous & LUA_CELL_WAITERS)) luaF_wakecell(uv);
+}
 LUAI_FUNC void luaF_publishupval (lua_State *L, UpVal *uv);
 LUAI_FUNC int luaF_dropupvals (lua_State *L, int wait);
 /* Register shadows belong to the executing frame. Shared cells are authoritative;
@@ -108,7 +132,7 @@ l_sinline int luaF_tryloadshared (UpVal *uv, TValue *value) {
   uint64_t before = __atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE);
   Value payload;
   lu_byte tag;
-  if (before & 1) return 0;
+  if (before & LUA_CELL_WRITING) return 0;
   __atomic_load(&uv->value.value_, &payload, __ATOMIC_ACQUIRE);
   tag = __atomic_load_n(&uv->value.tt_, __ATOMIC_ACQUIRE);
   if (__atomic_load_n(&uv->sequence, __ATOMIC_ACQUIRE) != before) return 0;

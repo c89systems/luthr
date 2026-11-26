@@ -755,7 +755,6 @@ l_sinline lua_CFunction luaO_cfunction (lu_byte tag, Value value) {
 */
 typedef struct UpVal {
   CommonHeader;
-  lu_byte mutex_ready;
   lu_byte reg;  /* register in the binding frame, while open */
   uintptr_t sharing;
   uint64_t sequence;
@@ -766,7 +765,6 @@ typedef struct UpVal {
     struct UpVal *next;
     struct UpVal **previous;
   } open;
-  pthread_mutex_t mutex;
   lua_State *owner;
 } UpVal;
 

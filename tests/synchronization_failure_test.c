@@ -142,6 +142,9 @@ static int run_case(const char *name) {
   int main_case = pool_case || world_case || allocator_case || publisher_case ||
                   registry_case;
   int thread_case = strcmp(name, "thread_no_resources") == 0;
+  int closed_capture = strcmp(name, "closed_capture_no_resources") == 0;
+  int open_capture = strcmp(name, "open_capture_no_resources") == 0;
+  int resource_free = thread_case || closed_capture || open_capture;
   int condition_case = strstr(name, "condition") != NULL;
   if (strncmp(name, "facade_", 7) == 0)
     return facade_case(name);
@@ -179,24 +182,27 @@ static int run_case(const char *name) {
     fail_mutex = fail_condition = 1;
     status = lua_pcall(state, 0, 1, 0);
     failed |= status != LUA_OK || !lua_isthread(state, -1);
-  } else if (strcmp(name, "closed_capture") == 0) {
-    fail_mutex = 1;
-    status = luaL_loadstring(state, "return 42");
-  } else if (strcmp(name, "open_capture") == 0) {
+  } else if (closed_capture) {
+    fail_mutex = fail_condition = 1;
+    status = luaL_dostring(state, "return 42");
+    failed |= status != LUA_OK || lua_tointeger(state, -1) != 42;
+  } else if (open_capture) {
     if (luaL_loadstring(state, "local x=42; return function() return x end") !=
         LUA_OK)
       failed = 1;
     else {
-      fail_mutex = 1;
+      fail_mutex = fail_condition = 1;
       status = lua_pcall(state, 0, 1, 0);
+      if (status == LUA_OK) {
+        status = lua_pcall(state, 0, 1, 0);
+      }
+      failed |= status != LUA_OK || lua_tointeger(state, -1) != 42;
     }
   } else {
     failed = 1;
   }
   fail_mutex = fail_condition = 0;
   if (state != NULL) {
-    if (!main_case && !thread_case)
-      failed |= status != LUA_ERRMEM;
     lua_settop(state, 0);
     (void)lua_gc(state, LUA_GCCOLLECT);
     /* A handled synchronization failure must leave the VM usable. */
@@ -205,7 +211,7 @@ static int run_case(const char *name) {
     failed |= lua_tointeger(state, -1) != 42;
     lua_close(state);
   }
-  if (failures != (thread_case ? 0 : 1) || live_mutexes != 0 ||
+  if (failures != (resource_free ? 0 : 1) || live_mutexes != 0 ||
       live_conditions != 0 || live_bytes != 0) {
     fprintf(stderr, "%s: failures=%d live mutexes=%d conditions=%d bytes=%zu\n",
             name, failures, live_mutexes, live_conditions, live_bytes);

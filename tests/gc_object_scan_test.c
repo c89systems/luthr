@@ -57,15 +57,6 @@ int __wrap_luaA_tryscan(lua_State *L, GCObject *object) {
     hold();
   return result;
 }
-int __real_pthread_mutex_trylock(pthread_mutex_t *);
-int __wrap_pthread_mutex_trylock(pthread_mutex_t *mutex) {
-  int result = __real_pthread_mutex_trylock(mutex);
-  if (result == 0 && marking && probe.kind == 3 &&
-      mutex == &gco2upv(probe.target)->mutex)
-    hold();
-  return result;
-}
-
 static void *mark(void *unused) {
   unsigned i;
   (void)unused;

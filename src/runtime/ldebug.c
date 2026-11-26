@@ -694,12 +694,13 @@ static const char *getupvalname (lua_State *L, CallInfo *ci, const TValue *o,
   for (i = 0; i < c->nupvalues; i++) {
     UpVal *uv;
     int matches;
+    uint64_t writing;
     luaF_getcapture(L, c, i, &capture);
     uv = gco2upv(gcvalue(&capture.value));
-    luaX_checksync(pthread_mutex_lock(&uv->mutex));
+    writing = luaF_lockcell(uv);
     matches = &uv->value == o ||
       (uv->owner == L && s2v(restorestack(L, uv->level)) == o);
-    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    luaF_unlockcell(uv, writing);
     if (matches) {
       *name = upvalname(c->p, i);
       kind = strupval;

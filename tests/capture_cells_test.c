@@ -211,6 +211,32 @@ static int collect_shared_stack(lua_State *state) {
   return 0;
 }
 
+static void *write_contended_binding(void *argument) {
+  lua_State *state = argument;
+  run(state, "write_shared(42)");
+  return NULL;
+}
+
+static void contended_binding(lua_State *state) {
+  pthread_t writer;
+  run(state, "local value=17; "
+             "write_shared=function(next) value=next end; "
+             "read_shared=function() return value end");
+  require(lua_getglobal(state, "write_shared") == LUA_TFUNCTION);
+  LClosure *closure = (LClosure *)lua_topointer(state, -1);
+  UpVal *cell = luaF_capturecell(closure, 0);
+  lua_State *worker = lua_newthread(state);
+  uint64_t writing = luaF_lockcell(cell);
+  require(pthread_create(&writer, NULL, write_contended_binding, worker) == 0);
+  while (
+      !(__atomic_load_n(&cell->sequence, __ATOMIC_ACQUIRE) & LUA_CELL_WAITERS))
+    sched_yield();
+  luaF_unlockcell(cell, writing);
+  require(pthread_join(writer, NULL) == 0);
+  run(state, "assert(read_shared()==42)");
+  lua_pop(state, 2);
+}
+
 static void deep_snapshot(lua_State *state) {
   lua_pushcfunction(state, collect_shared_stack);
   lua_setglobal(state, "collect_shared_stack");
@@ -769,6 +795,8 @@ int main(int argc, char **argv) {
   luaL_openlibs(state);
   if (strcmp(argv[1], "independent") == 0)
     independent(state);
+  else if (strcmp(argv[1], "contended_binding") == 0)
+    contended_binding(state);
   else if (strncmp(argv[1], "mixed_", 6) == 0) {
     if (strcmp(argv[1], "mixed_generational") == 0)
       lua_gc(state, LUA_GCGEN);

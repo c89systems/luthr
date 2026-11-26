@@ -5,7 +5,6 @@
 #define lreclaim_c
 #define LUA_CORE
 #include "lprefix.h"
-#include <errno.h>
 
 #include "laccess.h"
 #include "lfunc.h"
@@ -20,8 +19,6 @@ static void unregisterreclaimer (lua_State *L, LuaWorld *world);
 
 static void freeupval (lua_State *L, UpVal *uv) {
   lua_assert(!upisopen(uv));  /* retirement has detached all stack links */
-  if (uv->mutex_ready)
-    luaX_checksync(pthread_mutex_destroy(&uv->mutex));
   luaM_free(L, uv);
 }
 
@@ -180,9 +177,8 @@ int luaC_tryretire (lua_State *L, GCObject *o) {
     UpVal *uv = gco2upv(o);
     lua_State *owner;
     int reservation = 0;
-    int status = uv->mutex_ready ? pthread_mutex_trylock(&uv->mutex) : 0;
-    if (status == EBUSY) return SWEEP_RETRY;
-    luaX_checksync(status);
+    uint64_t writing = luaF_trylockcell(uv);
+    if (!writing) return SWEEP_RETRY;
     owner = uv->owner;
     if (owner != NULL) {
       reservation = luaX_tryreserve(owner);
@@ -192,7 +188,7 @@ int luaC_tryretire (lua_State *L, GCObject *o) {
         luaX_endreserve(owner, reservation);
       }
     }
-    if (uv->mutex_ready) luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    luaF_unlockcell(uv, writing);
     if (owner != NULL && reservation == 0) return SWEEP_RETRY;
   }
   else if (o->tt == LUA_VTHREAD) {

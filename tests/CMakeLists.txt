@@ -142,7 +142,7 @@ target_link_options(capture_cells_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaA_begin -Wl,--wrap=luaA_end
   -Wl,--wrap=luaF_loadshared -Wl,--wrap=luaF_writecapture -Wl,--wrap=luaF_storelocals
   -Wl,--wrap=luaF_loadlocal -Wl,--wrap=luaF_loadrange -Wl,--wrap=luaX_pollrequests)
-foreach(case IN ITEMS independent readers access uncaptured operands semantics pair_boundaries incremental generational
+foreach(case IN ITEMS independent readers contended_binding access uncaptured operands semantics pair_boundaries incremental generational
     private_incremental private_generational mixed_incremental mixed_generational
     deep_snapshot_incremental deep_snapshot_generational
     shadow_incremental shadow_generational lowered_source_incremental lowered_source_generational
@@ -475,8 +475,7 @@ set_target_properties(gc_object_scan_test PROPERTIES C_STANDARD 99)
 target_compile_options(gc_object_scan_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gc_object_scan_test PRIVATE luthr_static)
 target_link_options(gc_object_scan_test PRIVATE -Wl,--wrap=luaC_objectchunk
-  -Wl,--wrap=luaA_tryscan -Wl,--wrap=pthread_mutex_trylock
-  -Wl,--undefined=luaC_objectchunk)
+  -Wl,--wrap=luaA_tryscan -Wl,--undefined=luaC_objectchunk)
 foreach(collector IN ITEMS incremental generational)
   foreach(kind IN ITEMS userdata userdata0 cclosure lclosure capture)
     foreach(sharing IN ITEMS private shared)
@@ -1193,7 +1192,8 @@ foreach(case IN ITEMS allocator_mutex allocator_condition world_mutex world_cond
     world_resume_condition world_rendezvous_condition world_phase_condition world_trace_condition
     registry_first_condition registry_last_condition
     publisher_mutex pool_mutex pool_last_mutex
-    thread_no_resources closed_capture open_capture facade_policy_mutex facade_backing_mutex facade_allocator_mutex
+    thread_no_resources closed_capture_no_resources open_capture_no_resources
+    facade_policy_mutex facade_backing_mutex facade_allocator_mutex
     facade_world_mutex facade_pool_mutex)
   add_test(NAME synchronization_failure_${case} COMMAND synchronization_failure_test ${case})
   set_tests_properties(synchronization_failure_${case} PROPERTIES LABELS "runtime;memcheck" TIMEOUT 10)

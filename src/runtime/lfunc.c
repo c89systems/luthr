@@ -6,14 +6,20 @@
 
 #define lfunc_c
 #define LUA_CORE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 
 #include "lprefix.h"
 
 
 #include <stddef.h>
 #include <errno.h>
-
+#include <limits.h>
+#include <linux/futex.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "lua.h"
 
@@ -64,15 +70,11 @@ static UpVal *newupvalobject (lua_State *L) {
   UpVal *uv = gco2upv(object);
   uv->owner = NULL;
   uv->gclist = NULL;
-  uv->mutex_ready = 0;
   uv->level = 0;
   uv->sequence = 0;
   luaA_initsharing(L, uv);
   uv->value.value_.gc = NULL;
   setnilvalue(&uv->value);
-  if (pthread_mutex_init(&uv->mutex, NULL) != 0)
-    luaM_error(L);
-  uv->mutex_ready = 1;
   return uv;
 }
 
@@ -127,27 +129,59 @@ static UpVal *newupval (lua_State *L, StkId level, UpVal **prev) {
   return uv;
 }
 
-/* This path follows the caller's first optimistic load. Cell mutex holders
-** never park in the runtime or invoke Lua, so waiting here retains admission. */
+/* The low word of the sequence is the futex on the supported x86-64 targets.
+** Register against the current writer so a completed unlock cannot be lost. */
+uint64_t luaF_waitcell (UpVal *uv) {
+  for (;;) {
+    uint64_t version = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
+    if (!(version & LUA_CELL_WRITING)) {
+      uint64_t writing = luaF_trylockcell(uv);
+      if (writing != 0) return writing;
+      continue;
+    }
+    if (!(version & LUA_CELL_WAITERS)) {
+      uint64_t waiting = version | LUA_CELL_WAITERS;
+      if (!__atomic_compare_exchange_n(&uv->sequence, &version, waiting, 0,
+                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        continue;
+      version = waiting;
+    }
+    if (syscall(SYS_futex, &uv->sequence, FUTEX_WAIT_PRIVATE,
+                cast(uint32_t, version), NULL, NULL, 0) < 0 &&
+        errno != EAGAIN && errno != EINTR)
+      luaX_checksync(errno);
+  }
+}
+
+void luaF_wakecell (UpVal *uv) {
+  if (syscall(SYS_futex, &uv->sequence, FUTEX_WAKE_PRIVATE, INT_MAX,
+              NULL, NULL, 0) < 0)
+    luaX_checksync(errno);
+}
+
+/* Cell holders perform only fixed-size reads, writes and binding changes.
+** Waiting here retains admission and keeps the destination stack stationary. */
 void luaF_loadshared (UpVal *uv, TValue *value) {
   unsigned attempt;
+  uint64_t writing;
   for (attempt = 0; attempt < 7; attempt++)
     if (luaF_tryloadshared(uv, value)) return;
-  luaX_checksync(pthread_mutex_lock(&uv->mutex));
+  writing = luaF_lockcell(uv);
   value->value_ = uv->value.value_;
   value->tt_ = uv->value.tt_;
-  luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+  luaF_unlockcell(uv, writing);
+}
+
+l_sinline void storecell (lua_State *L, UpVal *uv, const TValue *value) {
+  luaC_prewrite(L, &uv->value, value);
+  luaA_store(L, &uv->value, value);
+  luaC_barrier(L, uv, value);
 }
 
 void luaF_writecell (lua_State *L, UpVal *uv, const TValue *value) {
-  uint64_t sequence;
-  luaC_prewrite(L, &uv->value, value);
-  sequence = __atomic_load_n(&uv->sequence, __ATOMIC_RELAXED);
-  lua_assert((sequence & 1) == 0);
-  __atomic_store_n(&uv->sequence, sequence + 1, __ATOMIC_RELEASE);
-  luaA_store(L, &uv->value, value);
-  __atomic_store_n(&uv->sequence, sequence + 2, __ATOMIC_RELEASE);
-  luaC_barrier(L, uv, value);
+  uint64_t writing = luaF_lockcell(uv);
+  storecell(L, uv, value);
+  luaF_unlockcell(uv, writing);
 }
 
 void luaF_publishupval (lua_State *L, UpVal *uv) {
@@ -173,15 +207,18 @@ void luaF_writeupval (lua_State *L, UpVal *uv, const TValue *value) {
 
 void luaF_writecapture (lua_State *L, UpVal *uv, const TValue *value) {
   LuaNativeRoot transfer, upvalue_root;
+  /* An immediate value can be stored entirely under the current admission. */
+  if (!iscollectable(value)) {
+    luaF_writecell(L, uv, value);
+    return;
+  }
   luaR_pushroot(L, &transfer);
   luaR_setroot(L, &transfer, value);
   luaR_pushroot(L, &upvalue_root);
   setgcovalue(L, &upvalue_root.value, obj2gco(uv));
   luaC_tracepointer(L, uv);
   luaA_sharevalue(L, &transfer.value);
-  luaX_checksync(pthread_mutex_lock(&uv->mutex));
   luaF_writecell(L, uv, &transfer.value);
-  luaX_checksync(pthread_mutex_unlock(&uv->mutex));
   luaR_poproot(L, &upvalue_root);
   luaR_poproot(L, &transfer);
 }
@@ -400,12 +437,10 @@ static void unlinkbinding (UpVal *uv) {
 int luaF_dropupvals (lua_State *L, int wait) {
   UpVal *uv;
   while ((uv = L->openupval) != NULL) {
-    int status = wait ? pthread_mutex_lock(&uv->mutex)
-                      : pthread_mutex_trylock(&uv->mutex);
-    if (status == EBUSY) return 0;
-    luaX_checksync(status);
+    uint64_t writing = wait ? luaF_lockcell(uv) : luaF_trylockcell(uv);
+    if (!writing) return 0;
     unlinkbinding(uv);
-    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    luaF_unlockcell(uv, writing);
   }
   return 1;
 }
@@ -414,14 +449,14 @@ void luaF_closeupval (lua_State *L, StkId level) {
   UpVal *uv;
   while ((uv = L->openupval) != NULL && uplevel(uv) >= level) {
     TValue *slot = s2v(uplevel(uv));
-    luaX_checksync(pthread_mutex_lock(&uv->mutex));
-    if (luaF_localupval(L, uv)) luaF_writecell(L, uv, slot);
+    uint64_t writing = luaF_lockcell(uv);
+    if (luaF_localupval(L, uv)) storecell(L, uv, slot);
     else {  /* Keep to-be-closed and debug operands usable after unlink. */
       slot->value_ = uv->value.value_;
       slot->tt_ = uv->value.tt_;
     }
     unlinkbinding(uv);
-    luaX_checksync(pthread_mutex_unlock(&uv->mutex));
+    luaF_unlockcell(uv, writing);
   }
 }
 
