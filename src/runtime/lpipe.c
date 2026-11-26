@@ -100,14 +100,20 @@ static void retire (lua_State *L, Access *access) {
 static int waitforchange (lua_State *L, Access *access, unsigned *waiting) {
   Pipe *pipe = access->pipe;
   LuaWorldScope scope;
-  int stopped;
+  int sending = waiting == &pipe->sending;
+  int stopped = 0;
   (*waiting)++;
-  /* Stable userdata arguments and the detached C activation retain the owner.
-  ** Only native queue bookkeeping remains under this mutex after withdrawal. */
+  /* Withdrawal can reclaim and park. The active call and rooted argument
+  ** retain the transport while we release its mutex around that boundary. */
   luaA_end(L, &access->object);
+  luaX_checksync(pthread_mutex_unlock(&pipe->mutex));
   scope = luaW_suspendapi();
   if (scope.api_region == NULL) lua_unlock(L);
-  stopped = luaQ_waitstop(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
+  luaX_checksync(pthread_mutex_lock(&pipe->mutex));
+  /* A peer can make progress before we register a waiter. Recheck the
+  ** predicate under the same mutex so its wake cannot be lost. */
+  if (!pipe->closed && (sending ? pipe->count == pipe->capacity : pipe->count == 0))
+    stopped = luaQ_waitstop(L, &pipe->mutex, &pipe->changed, &pipe->waiters);
   (*waiting)--;
   luaX_checksync(pthread_mutex_unlock(&pipe->mutex));
   luaW_restoreapi(scope);
