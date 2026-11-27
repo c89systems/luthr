@@ -1081,7 +1081,7 @@ LUA_API const char *lua_pushfstring (lua_State *L, const char *fmt, ...) {
 
 static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
   if (n == 0) {
-    uintptr_t owner = luaX_valueenter(L, 1);
+    uintptr_t owner = luaX_enterobservation(L, 1);
     if (managed) {
       int builtin = luaB_leafindex(fn);
       if (builtin >= 0) { setbcfvalue(s2v(L->top.p), builtin); }
@@ -1089,7 +1089,7 @@ static void pushcclosure (lua_State *L, lua_CFunction fn, int n, int managed) {
     }
     else { setfvalue(s2v(L->top.p), fn); }
     api_incr_top(L);
-    luaX_valueleave(L, owner);
+    luaX_leaveboundedvalue(L, owner);
   }
   else {
     int i;

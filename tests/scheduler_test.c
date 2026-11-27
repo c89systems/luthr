@@ -1382,6 +1382,7 @@ static int observe_arguments(lua_State *L) {
     require(lua_checkstack(L, 3));
   }
   lua_pushinteger(L, 17);
+  lua_pushcfunction(L, warm_native_permit);
   require(__atomic_load_n(&L->stack_gate.arguments[0], __ATOMIC_ACQUIRE) != 0);
   require(lua_tolstring(L, 2, &len) == before && len == 7);
   blocked_leaf(L);
@@ -1429,6 +1430,7 @@ static void native_argument_observation(struct fixture *f, int wide) {
   require(pthread_mutex_unlock(&f->mutex) == 0);
   bytes = lua_tolstring(target, 2, &len);
   require(bytes && len == 7 && memcmp(bytes, "old\0key", len) == 0);
+  require(lua_tocfunction(target, -1) == warm_native_permit);
   require(lua_type(target, 1) == LUA_TUSERDATA);
   lua_copy(target, 2, 1);
   require(lua_type(target, 1) == LUA_TSTRING);
