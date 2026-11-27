@@ -1262,12 +1262,54 @@ l_sinline __attribute__((always_inline)) int callloopnative (
   return finishloopnative(frame, context, at, method, n);
 }
 
+/* Run the same bounded Lua body used for C callbacks. The managed caller
+** retains the stack and cannot acknowledge a new trace inside this body.
+** A guard can fail after a write, so resume in a real frame at that opcode. */
+static int tryloopclosure (LuaLoopFrame *frame, StkId func, StkId argtop,
+                            const Instruction *at) {
+  lua_State *L = frame->thread;
+  CallInfo *caller = frame->call;
+  LClosure *closure = clLvalue(s2v(func));
+  const Proto *p = closure->p;
+  const LuaLoopSite *site = p->nativecall;
+  StkId base, top, slot;
+  uintptr_t address;
+  const Instruction *resume;
+  OpCode op;
+  if (site == NULL || frame->detached != NULL || caller->next == NULL)
+    return 0;
+  address = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
+  if (address <= LUA_LOOP_UNAVAILABLE || L->poll_remaining <= site->words + 1 ||
+      gethookmask(L) || caller->u.l.trap || L->policy != NULL ||
+      luaTK_hasstops(L) || luaC_tracing(L) || capturesfrom(L, func)) return 0;
+  base = func + 1;
+  top = base + p->maxstacksize;
+  if (argtop - base < p->numparams || top >= L->stack_last.p) return 0;
+  for (slot = base + p->numparams; slot < top; slot++) setnilvalue2s(slot);
+  L->top.p = top;
+  --L->poll_remaining;
+  resume = p->code + cast(LuaCallCode, address)(L, base, closure);
+  op = GET_OPCODE(*resume);
+  if ((op == OP_RETURN0 || op == OP_RETURN1) && !gethookmask(L) &&
+      !caller->u.l.trap && !luaTK_hasstops(L)) {
+    --L->poll_remaining;
+    loopcallresults(L, caller, func, 0, 1);
+    return 1;
+  }
+  caller->u.l.rootpc = at;
+  caller->u.l.savedpc = at + 1;
+  frame->call = luaD_initframe(L, caller->next, func, 1, top);
+  luaD_initluaframe(frame->call, resume);
+  return -1;
+}
+
 int luaD_tryloopcall (LuaLoopFrame *frame, StkId func, unsigned offset) {
   const Instruction *at = frame->entry + offset;
   StkId top = func + GETARG_B(*at);
   NativeStackContext *context;
   lua_assert(frame->bounded && GET_OPCODE(*at) == OP_CALL &&
              GETARG_B(*at) != 0 && GETARG_C(*at) == 1);
+  if (ttisLclosure(s2v(func))) return tryloopclosure(frame, func, top, at);
   if (!checktag(s2v(func), LUA_VLCF)) return 0;
   context = loopcallcontext(frame, top);
   if (context == NULL) return 0;
@@ -1295,14 +1337,6 @@ int luaD_tryloopresults (LuaLoopFrame *frame, StkId func, unsigned offset) {
   context = loopcallcontext(frame, top);
   if (context == NULL) return 0;
   return callloopnative(frame, context, func, top, at, results, 0);
-}
-
-/* Publish code with ordinary managed admission. Subsequent detached calls
-** can execute it using only a bounded stack claim. */
-static void preparecallback (lua_State *L, CallInfo *ci, Proto *p) {
-  if (!isLua(ci->previous) && L->policy == NULL && !gethookmask(L) &&
-      !luaTK_hasstops(L) && luaJ_prepare(L, p, p->nativecall) != 0)
-    luaX_boundcontext(L)->compiled_reentry = 1;
 }
 
 /* The stack claim retains cells and operands and blocks trace arming.
@@ -1434,12 +1468,6 @@ l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,
   func = entercall(L, func, inc);
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
     ci->callstatus |= CIST_FRESH;  /* mark that it is a "fresh" execute */
-#if !defined(HARDSTACKTESTS)
-    {
-      Proto *p = ci_func(ci)->p;
-      if (p->nativecall != NULL) preparecallback(L, ci, p);
-    }
-#endif
     if (luaV_execute(L, ci) && !returnyield)
       luaD_throw(L, LUA_YIELD);  /* unwind a caller using the C API */
   }

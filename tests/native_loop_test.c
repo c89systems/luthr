@@ -676,6 +676,39 @@ static void check_native_calls(lua_State *L) {
           closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
 }
 
+static void check_lua_calls(lua_State *L) {
+  const LClosure *loop, *callee;
+  require(
+      luaL_dostring(
+          L,
+          "local count, sum = 0, 0; "
+          "local function add(value) count=count+1; sum=sum+value end; "
+          "local function repeat_add(value,n) "
+          "  local step=add; for i=1,n do step(value) end end; "
+          "repeat_add(3,700); assert(count==700 and sum==2100); "
+          "local handled=0; "
+          "local alternate=setmetatable({}, {__add=function(a,b) "
+          "  handled=handled+1; return a+5 end}); "
+          "repeat_add(alternate,10); "
+          "assert(count==710 and sum==2150 and handled==10); "
+          "local failure={}; "
+          "local bad=setmetatable({}, {__add=function() error(failure) end}); "
+          "local ok,result=pcall(repeat_add,bad,1); "
+          "assert(not ok and result==failure and count==711 and sum==2150); "
+          "collectgarbage('collect'); "
+          "local hooks=0; debug.sethook(function() "
+          "  if debug.getinfo(2,'f').func==add then hooks=hooks+1 end "
+          "end,'c'); repeat_add(4,10); debug.sethook(); "
+          "assert(count==721 and sum==2190 and hooks==10); "
+          "return repeat_add,add") == LUA_OK);
+  loop = lua_topointer(L, 1);
+  callee = lua_topointer(L, 2);
+  require(loop != NULL && loop->p->sizeloops == 1);
+  require(loop->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+  require(callee != NULL && callee->p->nativecall != NULL);
+  require(callee->p->nativecall->entry > LUA_LOOP_UNAVAILABLE);
+}
+
 static void check_native_callbacks(lua_State *L) {
   const LClosure *closure;
   lua_pushcfunction(L, call_many);
@@ -802,6 +835,11 @@ int main(int argc, char **argv) {
     check_native_capture_race(L);
   } else if (strcmp(argv[1], "native_calls") == 0) {
     check_native_calls(L);
+  } else if (strcmp(argv[1], "lua_calls_incremental") == 0 ||
+             strcmp(argv[1], "lua_calls_generational") == 0) {
+    lua_gc(L, strcmp(argv[1], "lua_calls_incremental") == 0 ? LUA_GCINC
+                                                            : LUA_GCGEN);
+    check_lua_calls(L);
   } else if (strcmp(argv[1], "native_results_incremental") == 0 ||
              strcmp(argv[1], "native_results_generational") == 0) {
     lua_gc(L, strcmp(argv[1], "native_results_incremental") == 0 ? LUA_GCINC

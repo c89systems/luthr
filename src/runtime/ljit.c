@@ -279,9 +279,9 @@ void luaJ_lower (lua_State *L, Proto *p) {
       if (flags & LUA_CALL_MANAGED) {
         p->loops = sites;
         p->sizeloops = 1;
-        p->dispatch[0].opcode = LUA_NATIVE_BODY;
       }
       else p->nativecall = sites;
+      p->dispatch[0].opcode = LUA_NATIVE_BODY;
     }
     return;
   }

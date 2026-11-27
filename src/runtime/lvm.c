@@ -1912,7 +1912,8 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
   }
 #undef VM_PAIR_RUN
   vmcase(LUA_NATIVE_BODY) {
-    LuaLoopSite *site = p->loops;
+    LuaLoopSite *callback = p->nativecall;
+    LuaLoopSite *site = callback != NULL ? callback : p->loops;
     uintptr_t address;
     unsigned resume;
     StkId slot;
@@ -1934,6 +1935,11 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
         goto ordinarybody;
     }
     if (address <= LUA_LOOP_UNAVAILABLE) goto ordinarybody;
+#if !defined(HARDSTACKTESTS)
+    /* Managed execution also prepares the body for the next detached entry. */
+    if (callback != NULL && !isLua(ci->previous))
+      luaX_boundcontext(L)->compiled_reentry = 1;
+#endif
     for (slot = base + p->numparams; slot < ci->top.p; slot++)
       setnilvalue2s(slot);
     L->top.p = ci->top.p;
@@ -1987,6 +1993,10 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
         luaX_leavesharedread(L);
         luaW_finishnativeframe(L, frame.detached);
         frame.base = ci->func.p + 1;
+      }
+      if (l_unlikely(frame.call != ci)) {
+        ci = frame.call;
+        goto startfunc;
       }
 #endif
       base = frame.base;
