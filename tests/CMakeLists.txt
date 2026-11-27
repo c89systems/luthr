@@ -229,7 +229,7 @@ target_link_options(table_read_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaH_trygetsharedshortstr -Wl,--wrap=luaH_get
   -Wl,--wrap=lua_setmetatable)
 foreach(case IN ITEMS fast length_incremental length_generational
-    primitive batching stack_grace private_resize overlap retirement pressure native_retirement failure hash_failure resume
+    primitive batching stack_grace private_resize overlap retirement pressure native_retirement native_name_changes failure hash_failure resume
     inline_overlap inline_array_failure inline_hash_failure
     primitive_reattach primitive_index primitive_incremental primitive_generational string_publication
     table_reattach userdata_reattach userdata_empty_reattach userdata_index

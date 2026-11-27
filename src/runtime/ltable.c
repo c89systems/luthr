@@ -3549,9 +3549,10 @@ int luaH_readsharedname (lua_State *L, Table *table, const char *name,
                          size_t len, TValue *result) {
   global_State *g = G(L);
   LuaHashDirectory *directory;
-  LuaHashPart *part = NULL;
-  uint64_t layout, revision = 0;
-  Node *nodes;
+  LuaHashPart *part;
+  uint64_t layout, revision, guess = 0;
+  uint64_t *hint = NULL;
+  Node *image, *nodes;
   unsigned hash, size, index, steps;
   lua_assert((__atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED) &
               LUA_GATE_SHARED_READ) ||
@@ -3562,19 +3563,31 @@ int luaH_readsharedname (lua_State *L, Table *table, const char *name,
     return 0;
   layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
   if ((layout & 1) || !luaC_strongtable(g, table)) return 0;
-  nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  if (luaH_recordkeys(nodes) != NULL) return 0;
-  hash = luaS_hash(name, len, g->seed);
-  directory = luaH_hashdir(nodes);
+  image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  if (luaH_recordkeys(image) != NULL) return 0;
+  directory = luaH_hashdir(image);
+  if (L->strcache != NULL) {
+    /* The address selects a hint. The retained table image and complete
+    ** key still have to match, including when the caller reuses a buffer. */
+    uintptr_t address = cast(uintptr_t, name);
+    unsigned set = cast_uint((address >> 3) ^ (address >> 13)) % LUA_FIELD_HINTS;
+    hint = &L->strcache->field_hints[set];
+    guess = *hint;
+  }
+  hash = guess != 0 ? cast_uint(guess >> 32) : luaS_hash(name, len, g->seed);
+ lookup:
+  nodes = image;
+  part = NULL;
+  revision = 0;
   if (directory != NULL) {
     part = luaH_part(directory, distributedpart(hash));
     revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
-    if (revision & 1) return 0;
+    if (revision & 1) goto miss;
     nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
   }
   size = nodesteps(nodes);
-  index = lmod(hash, size);
-  for (steps = 0; steps < 8; steps++) {
+  index = guess != 0 ? cast_uint(guess) - 1 : lmod(hash, size);
+  for (steps = 0; steps < 8 && index < size; steps++) {
     Node *node = nodes + index;
     int next;
     if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) ==
@@ -3583,22 +3596,31 @@ int luaH_readsharedname (lua_State *L, Table *table, const char *name,
       TValue value;
       if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value,
                          part != NULL ? 0 : layout) ||
-          !samepartversion(table, layout, part, revision)) return 0;
+          !samepartversion(table, layout, part, revision)) goto miss;
       /* A published nonempty key belongs to this strong layout. Deleting
       ** the entry shades the key, and the ticket retains the layout. */
       if (!isempty(&value)) {
         TString *str = gco2ts(key);
         if (str->hash == hash && cast_sizet(str->shrlen) == len &&
             memcmp(getshrstr(str), name, len) == 0) {
+          if (hint != NULL && guess == 0)
+            *hint = (cast(uint64_t, hash) << 32) | cast_uint(index + 1);
           setobj(L, result, &value);
           return 1;
         }
       }
     }
+    if (guess != 0) break;
     next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
     if (next == 0) return 0;
     index += cast_uint(next);
     if (index >= size) return 0;
+  }
+ miss:
+  if (guess != 0) {
+    guess = 0;
+    hash = luaS_hash(name, len, g->seed);
+    goto lookup;
   }
   return 0;
 }

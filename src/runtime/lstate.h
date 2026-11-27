@@ -154,9 +154,11 @@ typedef struct LuaResultHistory {
   unsigned count;
 } LuaResultHistory;
 
+enum { LUA_FIELD_HINTS = 8 };
 typedef struct LuaStringCache {
   uint64_t epoch;
   uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
+  uint64_t field_hints[LUA_FIELD_HINTS];  /* hash and one-based hash slot */
   LuaResultHistory *results;
 } LuaStringCache;
 

@@ -1109,6 +1109,58 @@ static void native_retirement(lua_State *L) {
   require(lua_tointeger(L, -1) == 42);
 }
 
+static void native_name_changes(lua_State *L) {
+  char name[] = "alpha";
+  static const char binary[] = "omega\0hidden";
+  lua_State *reader;
+  lua_createtable(L, 0, 2);
+  lua_pushinteger(L, 17);
+  lua_setfield(L, 1, "alpha");
+  lua_pushinteger(L, 29);
+  lua_setfield(L, 1, "omega");
+  reader = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, reader, 1);
+  lua_pushliteral(reader, "initialize the string cache");
+  lua_pop(reader, 1);
+  for (unsigned i = 0; i < 4; i++) {
+    require(lua_getfield(reader, 1, name) == LUA_TNUMBER);
+    require(lua_tointeger(reader, -1) == 17);
+    lua_pop(reader, 1);
+  }
+  memcpy(name, "omega", sizeof(name));
+  require(lua_getfield(reader, 1, name) == LUA_TNUMBER);
+  require(lua_tointeger(reader, -1) == 29);
+  lua_pop(reader, 1);
+
+  for (int i = 0; i < 512; i++) {
+    lua_pushfstring(L, "entry%d", i);
+    lua_pushinteger(L, i);
+    lua_settable(L, 1);
+  }
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_pushinteger(L, 31);
+  lua_setfield(L, 1, "omega");
+  require(lua_getfield(reader, 1, name) == LUA_TNUMBER);
+  require(lua_tointeger(reader, -1) == 31);
+  lua_pop(reader, 1);
+  lua_pushnil(L);
+  lua_setfield(L, 1, "omega");
+  lua_pushlstring(L, binary, sizeof(binary) - 1);
+  lua_pushinteger(L, 47);
+  lua_rawset(L, 1);
+  require(lua_getfield(reader, 1, name) == LUA_TNIL);
+  lua_pop(reader, 1);
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushinteger(L, 53);
+  lua_setfield(L, -2, "omega");
+  lua_setfield(L, -2, "__index");
+  lua_setmetatable(L, 1);
+  require(lua_getfield(reader, 1, name) == LUA_TNUMBER);
+  require(lua_tointeger(reader, -1) == 53);
+}
+
 static void retirement(lua_State *state, int pressure, unsigned readers,
                        int inline_storage) {
   struct fixture test;
@@ -2040,6 +2092,8 @@ int main(int argc, char **argv) {
     retirement(state, 1, 1, 0);
   else if (strcmp(argv[1], "native_retirement") == 0)
     native_retirement(state);
+  else if (strcmp(argv[1], "native_name_changes") == 0)
+    native_name_changes(state);
   else {
     require(strcmp(argv[1], "failure") == 0 ||
             strcmp(argv[1], "hash_failure") == 0 ||

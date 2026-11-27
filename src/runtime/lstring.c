@@ -460,6 +460,7 @@ static uintptr_t *stringcacherow (lua_State *L, unsigned set) {
     if (cache == NULL) return NULL;
     cache->epoch = 0;
     cache->results = NULL;
+    memset(cache->field_hints, 0, sizeof(cache->field_hints));
     L->strcache = cache;
   }
   if (l_unlikely(cache->epoch != G(L)->strcache_epoch)) {
