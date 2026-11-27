@@ -266,7 +266,9 @@ typedef struct {
 
 
 #define l_isfalse(o)	(ttisfalse(o) || ttisnil(o))
-#define tagisfalse(t)	((t) == LUA_VFALSE || novariant(t) == LUA_TNIL)
+l_sinline int tagisfalse (lu_byte tag) {
+  return tag == LUA_VFALSE || novariant(tag) == LUA_TNIL;
+}
 
 
 

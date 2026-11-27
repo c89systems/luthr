@@ -23,6 +23,23 @@ target.routed=42
 assert(rawget(target,'routed')==nil and proxy.routed==42)
 assert(target.unknown==nil)
 
+do
+  local seen, result = 0, nil
+  local mt={__eq=function()
+    seen=seen+1
+    return result
+  end}
+  local left,right=setmetatable({},mt),setmetatable({},mt)
+  assert(not rawequal(left,right) and seen==0)
+  assert(left~=right and seen==1)
+  result=true
+  assert(left==right and seen==2)
+  result=false
+  assert(left~=right and seen==3)
+  result={}
+  assert(left==right and seen==4)
+end
+
 local calls=0
 local replacement={__index=function() return 'new' end}
 local original={__index=function(self,key)
