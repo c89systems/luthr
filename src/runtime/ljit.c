@@ -32,9 +32,10 @@ static int validconstant (const Proto *p, int index, int key) {
 /* A straight-line body keeps its real Lua registers and exits at the next
 ** original instruction on a failed guard. Nested loops and explicit function
 ** calls stay outside this tier. */
-static int loopentry (const Proto *p, int end) {
+static int loopentry (const Proto *p, int end, unsigned *bounded) {
   Instruction branch = p->code[end];
   int span, start, pc, control;
+  unsigned reads = 0, stackonly = 1;
   if (GET_OPCODE(branch) != OP_FORLOOP || end + 1 >= p->sizecode) return -1;
   span = GETARG_Bx(branch);
   if (span < JIT_MIN_WORDS || span > JIT_MAX_WORDS || span > end + 1)
@@ -61,23 +62,28 @@ static int loopentry (const Proto *p, int end) {
         if (GETARG_B(ins) >= p->maxstacksize) return -1;
         break;
       case OP_GETUPVAL: case OP_GETTABUP:
+        stackonly = 0;
         if (GETARG_B(ins) >= p->sizeupvalues ||
             (op == OP_GETTABUP && !validconstant(p, GETARG_C(ins), 1)))
           return -1;
         break;
       case OP_GETFIELD: case OP_GETI: case OP_GETTABLE:
+        reads |= op == OP_GETFIELD;
+        stackonly &= op == OP_GETFIELD;
         if (GETARG_B(ins) >= p->maxstacksize ||
             (op == OP_GETFIELD && !validconstant(p, GETARG_C(ins), 1)) ||
             (op == OP_GETTABLE && GETARG_C(ins) >= p->maxstacksize))
           return -1;
         break;
       case OP_SETFIELD:
+        stackonly = 0;
         if (!validconstant(p, GETARG_B(ins), 1) ||
             (TESTARG_k(ins) ? !validconstant(p, GETARG_C(ins), 0)
                            : GETARG_C(ins) >= p->maxstacksize))
           return -1;
         break;
       case OP_NEWTABLE:
+        stackonly = 0;
         if (p->dispatch[pc].opcode != OP_NEWTABLE ||
             pc + 1 >= end || GET_OPCODE(p->code[pc + 1]) != OP_EXTRAARG)
           return -1;
@@ -107,6 +113,7 @@ static int loopentry (const Proto *p, int end) {
       }
     }
   }
+  if (bounded != NULL) *bounded = reads && stackonly;
   return start;
 }
 
@@ -180,15 +187,17 @@ void luaJ_lower (lua_State *L, Proto *p) {
     return;
   }
   for (pc = 0; pc < p->sizecode; pc++)
-    count += loopentry(p, pc) >= 0;
+    count += loopentry(p, pc, NULL) >= 0;
   if (count == 0 || luaM_testsize(count, sizeof(*sites))) return;
   sites = luaM_tryalloc(L, cast_sizet(count) * sizeof(*sites));
   if (sites == NULL) return;
   count = 0;
   for (pc = 0; pc < p->sizecode; pc++) {
-    int start = loopentry(p, pc);
+    unsigned bounded;
+    int start = loopentry(p, pc, &bounded);
     if (start < 0) continue;
-    sites[count++] = (LuaLoopSite){ .pc = start, .words = cast_uint(pc - start + 1) };
+    sites[count++] = (LuaLoopSite){ .pc = start, .words = cast_uint(pc - start + 1),
+                                   .bounded = bounded };
     p->dispatch[start].opcode = LUA_NATIVE_LOOP;
   }
   p->loops = sites;

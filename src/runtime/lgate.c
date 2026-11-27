@@ -394,6 +394,15 @@ static void publisharguments (lua_State *L, StkId func) {
                      __ATOMIC_RELEASE);
 }
 
+/* The loop owns the same stack through a storage ticket. The surrounding
+** native activation already offers its managed slot and pins this carrier. */
+void luaW_publishloopframe (lua_State *L, StkId func) {
+  luaD_initframe(L, L->ci->next, func, CIST_C | (1 + 1),
+                 L->top.p + LUA_MINSTACK);
+  publisharguments(L, func);
+  luaX_leavesharedread(L);
+}
+
 /* Ordinary embedders can reclaim a free gate directly. The claim is visible
 ** before checking for collector requests, just like any managed entry. */
 l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {

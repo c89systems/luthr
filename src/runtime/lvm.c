@@ -29,6 +29,7 @@
 #include "lobject.h"
 #include "lopcodes.h"
 #include "lpolicy.h"
+#include "lstackapi.h"
 #include "lstate.h"
 #include "lroots.h"
 #include "lstring.h"
@@ -1614,8 +1615,15 @@ int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
   TValue method;
   lua_assert(ttisfulluserdata(object));
   if (!luaA_readlightindex(L, uvalue(object), &method) &&
-      (!luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
+      (frame->detached != NULL ||
+       !luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
        !checktag(&method, LUA_VLCF))) return 0;
+#if !defined(HARDSTACKTESTS)
+  if (frame->bounded) {
+    int completed = luaD_tryloopmethod(frame, result, object, key, &method, at);
+    if (completed || frame->detached != NULL) return completed;
+  }
+#endif
   --L->poll_remaining;
   ci->u.l.rootpc = at;
   ci->u.l.savedpc = at + 1;
@@ -1950,9 +1958,21 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
     }
     else goto ordinaryloop;
     {
-      LuaLoopFrame frame = {L, ci, base, cl, ip};
+      LuaLoopFrame frame = { .thread = L, .call = ci, .base = base,
+                             .closure = cl, .entry = ip,
+                             .bounded = site->bounded };
       ++L->poll_remaining;  /* native code charges the already fetched word */
       resume = native(&frame);
+#if !defined(HARDSTACKTESTS)
+      if (frame.detached != NULL) {
+        L->top.p = ci->top.p;
+        ci->u.l.rootpc = NULL;  /* uncaptured registers are roots */
+        ci->u.l.savedpc = ip + resume;
+        luaX_leavesharedread(L);
+        luaW_finishnativeframe(L, frame.detached);
+        frame.base = ci->func.p + 1;
+      }
+#endif
       base = frame.base;
     }
     updatetrap(ci);

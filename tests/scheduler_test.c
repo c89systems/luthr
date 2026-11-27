@@ -1691,6 +1691,28 @@ static int call_without_managed_slot(lua_State *L) {
   return 1;
 }
 
+static int field_without_managed_slot(lua_State *L) {
+  unsigned *calls;
+  if (lua_gettop(L) == 0) {
+    calls = lua_newuserdatauv(L, sizeof(*calls), 0);
+    *calls = 0;
+    lua_createtable(L, 0, 1);
+    lua_pushcfunction(L, field_without_managed_slot);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, -2);
+    return 1;
+  }
+  calls = lua_touserdata(L, 1);
+  require(calls && strcmp(lua_tostring(L, 2), "amount") == 0);
+  ++*calls;
+  if (*calls == 100)
+    blocked_leaf(L);
+  else if (*calls == 101)
+    native_operation_done();
+  lua_pushinteger(L, 1);
+  return 1;
+}
+
 static int collect_after_native_operation(lua_State *L) {
   wait_for_native_operation(L);
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
@@ -3523,6 +3545,13 @@ int main(int argc, char **argv) {
                                   "local result=native_table_operation(add); "
                                   "return result",
                                   0);
+  else if (strcmp(argv[1], "native_loop_fields_without_slot") == 0 ||
+           strcmp(argv[1], "native_loop_fields_gc") == 0)
+    native_operation_without_slot(
+        f, field_without_managed_slot,
+        "local row=native_table_operation(); local sum=0; "
+        "for i=1,200 do sum=sum+row.amount end; return sum-149",
+        strcmp(argv[1], "native_loop_fields_gc") == 0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

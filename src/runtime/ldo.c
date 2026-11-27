@@ -1105,6 +1105,82 @@ l_sinline StkId entercall (lua_State *L, StkId func, l_uint32 inc) {
 }
 
 #if !defined(HARDSTACKTESTS)
+/* A scalar loop can move the result directly into its Lua register under
+** a stack ticket and continue while its managed slot remains recallable.
+** C still sees an ordinary, detached frame and may block or reenter Lua. */
+int luaD_tryloopmethod (LuaLoopFrame *frame, StkId result,
+                       const TValue *object, const TValue *key,
+                       const TValue *method, const Instruction *at) {
+  lua_State *L = frame->thread;
+  CallInfo *caller = frame->call;
+  NativeStackContext *context = frame->detached;
+  StkId func = caller->top.p;
+  ptrdiff_t destination = savestack(L, result);
+  ptrdiff_t top = savestack(L, L->top.p);
+  int n;
+  if (L->stack_last.p - func <= LUA_MINSTACK + 3 || caller->next == NULL ||
+      getCcalls(L) >= LUAI_MAXCCALLS - 1 || luaTK_hasstops(L) ||
+      L->policy != NULL) return 0;
+  if (context == NULL) {
+    context = luaX_boundcontext(L);
+    if (luaX_contextpolicy(context) != NULL || luaC_tracing(L)) return 0;
+  }
+  if (context->limit == 0 || luaD_nativeposition() <= context->limit)
+    return 0;
+
+  --L->poll_remaining;
+  L->nCcalls++;
+  caller->u.l.rootpc = at;
+  caller->u.l.savedpc = at + 1;
+  setobj2s(L, func, method);
+  setobj2s(L, func + 1, object);
+  setobj2s(L, func + 2, key);
+  L->top.p = func + 3;
+  if (frame->detached != NULL)
+    luaW_publishloopframe(L, func);
+  else {
+    context = luaW_trynativeframe(L, func, 1 + 1);
+    if (context == NULL) {
+      L->top.p = restorestack(L, top);
+      L->nCcalls--;
+      ++L->poll_remaining;
+      return 0;
+    }
+  }
+  n = (*fvalue(method))(L);
+  if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                               LUA_WORLD_ARM_TRACE)) {
+    CallInfo *call = L->ci;
+    if (call->callstatus == (CIST_C | (1 + 1)) &&
+        !capturesfrom(L, call->func.p) && !gethookmask(L) && !caller->u.l.trap &&
+        !luaTK_hasstops(L) && L->policy == NULL &&
+        luaX_contextpolicy(context) == NULL && !L->task_nursery_pending &&
+        __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) != context) {
+      StkId dst = restorestack(L, destination);
+      api_checknelems(L, n);
+      luaX_invalidatearguments(&L->stack_gate);
+      if (n == 0) setnilvalue2s(dst);
+      else { setobjs2s(L, dst, L->top.p - n); }
+      L->top.p = call->func.p;
+      L->ci = caller;
+      L->nCcalls--;
+      frame->base = caller->func.p + 1;
+      frame->detached = context;
+      return 1;
+    }
+    luaX_leavesharedread(L);
+  }
+  luaW_finishnativeframe(L, context);
+  frame->detached = NULL;
+  api_checknelems(L, n);
+  luaD_poscall(L, L->ci, n);
+  L->nCcalls--;
+  if (l_unlikely(L->task_nursery_pending)) L->poll_remaining = 1;
+  setobjs2s(L, restorestack(L, destination), --L->top.p);
+  frame->base = caller->func.p + 1;
+  return (gethookmask(L) || caller->u.l.trap) ? -1 : 1;
+}
+
 /* Publish code with ordinary managed admission. Subsequent detached calls
 ** can execute it using only a bounded storage ticket. */
 static void preparecallback (lua_State *L, CallInfo *ci, Proto *p) {
@@ -1146,7 +1222,8 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
   luaX_invalidatearguments(&L->stack_gate);
   top = func + 1 + p->maxstacksize;
   while (L->top.p < top) setnilvalue2s(L->top.p++);
-  frame = (LuaLoopFrame){L, NULL, func + 1, closure, p->code};
+  frame = (LuaLoopFrame){ .thread = L, .base = func + 1, .closure = closure,
+                         .entry = p->code };
   at = p->code + cast(LuaLoopCode, address)(&frame);
   exit = GET_OPCODE(*at);
   if ((exit == OP_RETURN0 || exit == OP_RETURN1) &&

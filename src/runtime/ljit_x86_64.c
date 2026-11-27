@@ -333,7 +333,7 @@ static void readtable (Emitter *e, const Proto *p, OpCode op,
 }
 
 static void readfield (Emitter *e, const Proto *p, unsigned pc,
-                       unsigned a, unsigned b, unsigned c) {
+                       unsigned a, unsigned b, unsigned c, unsigned bounded) {
   unsigned char *ordinary, *done;
   comparetag(e, b, ctb(LUA_VUSERDATA));
   ordinary = branch(e, NOT_EQUAL);
@@ -349,6 +349,12 @@ static void readfield (Emitter *e, const Proto *p, unsigned pc,
   exitif(e, NEGATIVE);         /* the completed call set a trap */
   done = branch(e, 0);
   linkbranch(e, ordinary, e->next);
+  if (bounded) {
+    emit(e, 0x49, 0x83, 0xbc, 0x24);  /* cmp qword [r12 + detached], 0 */
+    word(e, offsetof(LuaLoopFrame, detached));
+    emit(e, 0);
+    exitif(e, NOT_EQUAL);
+  }
   readtable(e, p, OP_GETFIELD, a, b, c);
   charge(e);
   linkbranch(e, done, e->next);
@@ -478,7 +484,7 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         moveorload(&e, p, ins);
         break;
       case OP_GETFIELD:
-        readfield(&e, p, pc, a, b, c);
+        readfield(&e, p, pc, a, b, c, site->bounded);
         continue;
       case OP_GETUPVAL: case OP_GETTABUP:
       case OP_GETTABLE: case OP_GETI:

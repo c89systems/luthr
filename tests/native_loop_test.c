@@ -241,6 +241,12 @@ static int replace_userdata_field(lua_State *L) {
   return 1;
 }
 
+static int userdata_reference(lua_State *L) {
+  require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
+  field_calls++;
+  return 1;
+}
+
 static void check_native_fields(lua_State *L) {
   const LClosure *closure;
   lua_State *child;
@@ -296,6 +302,25 @@ static void check_native_fields(lua_State *L) {
   lua_pushinteger(L, 100);
   require(lua_pcall(L, 2, 1, 0) == LUA_OK);
   require(lua_tointeger(L, -1) == 299);
+
+  /* A table read after a native result must resume at the table read,
+     retaining the returned value and the already executed C call. */
+  field_calls = 0;
+  require(luaL_dostring(L, "return function(row) "
+                           "local sum = 0; for i = 1, 700 do "
+                           "sum = sum + row.reference.amount end; return sum "
+                           "end") == LUA_OK);
+  lua_newuserdatauv(L, 1, 1);
+  lua_createtable(L, 0, 1);
+  lua_pushinteger(L, 3);
+  lua_setfield(L, -2, "amount");
+  require(lua_setiuservalue(L, -2, 1));
+  lua_createtable(L, 0, 1);
+  lua_pushcfunction(L, userdata_reference);
+  lua_setfield(L, -2, "__index");
+  require(lua_setmetatable(L, -2));
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 2100 && field_calls == 700);
 }
 
 static int call_many(lua_State *L) {

@@ -10,6 +10,8 @@ typedef struct LuaLoopFrame {
   StkId base;
   LClosure *closure;
   const Instruction *entry;
+  NativeStackContext *detached;
+  unsigned bounded;
 } LuaLoopFrame;
 
 typedef unsigned (*LuaLoopCode)(LuaLoopFrame *frame);
@@ -21,6 +23,7 @@ typedef struct LuaLoopSite {
   int pc;
   unsigned words;
   unsigned hits;
+  unsigned bounded;  /* register-only body apart from guarded field calls */
   uintptr_t entry;  /* atomic: cold, compiling, unavailable, or executable */
   void *allocation;  /* owns the executable bytes and their alignment pad */
   size_t allocsize;
@@ -36,6 +39,11 @@ LUAI_FUNC int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset);
 LUAI_FUNC int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
                                      const TValue *object, const TValue *key,
                                      unsigned offset);
+#if !defined(HARDSTACKTESTS)
+LUAI_FUNC int luaD_tryloopmethod (LuaLoopFrame *frame, StkId result,
+                                 const TValue *object, const TValue *key,
+                                 const TValue *method, const Instruction *at);
+#endif
 LUAI_FUNC int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                         unsigned char *code, size_t capacity);
 LUAI_FUNC int luaJ_emitcall (const Proto *p, unsigned char *code,
