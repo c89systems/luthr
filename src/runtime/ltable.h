@@ -641,5 +641,6 @@ LUAI_FUNC unsigned luaH_tracechunk (struct global_State *, const Table *, unsign
 /* Nonparking snapshot. NULL L is reserved for collector reads of weak mode. */
 LUAI_FUNC int luaH_readshortstr (struct global_State *, lua_State *, Table *,
                                 TString *, TValue *);
+LUAI_FUNC int luaH_readlightindex (Table *, TString *, lua_CFunction *);
 
 #endif

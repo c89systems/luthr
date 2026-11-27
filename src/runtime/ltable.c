@@ -3536,6 +3536,38 @@ l_sinline int __attribute__((always_inline)) readshortslot (
   return readshorthash(g, table, nodes, key, result, tag, *sequence, NULL, 0);
 }
 
+/* A light C method is one atomic payload. In flat nonsplit storage, a
+** different key or value tag requires a new layout or split publication.
+** The fixed __index name and a light C function are also immune to weak
+** clearing, so this lookup can return the function without a GC read barrier. */
+int luaH_readlightindex (Table *table, TString *key, lua_CFunction *result) {
+  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  const Node *nodes;
+  unsigned size, index, steps;
+  if (layout & (1 | LUA_TABLE_SPLIT_VALUES)) return 0;
+  nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  if (luaH_hashdir(nodes) != NULL || luaH_recordkeys(nodes) != NULL) return 0;
+  size = nodesteps(nodes);
+  index = lmod(key->hash, size);
+  for (steps = 0; steps < 3 && index < size; steps++) {
+    const Node *node = nodes + index;
+    int next;
+    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
+        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
+      lua_CFunction function;
+      if (__atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE) != LUA_VLCF) return 0;
+      function = __atomic_load_n(&node->u.value_.f, __ATOMIC_ACQUIRE);
+      if (!luaH_samelayout(table, layout)) return 0;
+      *result = function;
+      return 1;
+    }
+    next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
+    if (next == 0) break;
+    index += cast_uint(next);
+  }
+  return 0;
+}
+
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,
                        TValue *result) {
   lu_byte tag;

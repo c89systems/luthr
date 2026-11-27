@@ -465,6 +465,20 @@ l_sinline int readboundfield (lua_State *L, const TValue *object, TString *key,
   return luaH_readshortstr(G(L), L, mt, key, result);
 }
 
+int luaA_readlightindex (lua_State *L, Udata *object, TValue *result) {
+  uint32_t version = __atomic_load_n(&object->metatable_version, __ATOMIC_ACQUIRE);
+  Table *metatable;
+  lua_CFunction method;
+  if (version & 1) return 0;
+  metatable = __atomic_load_n(&object->metatable, __ATOMIC_ACQUIRE);
+  if (metatable == NULL ||
+      !luaH_readlightindex(metatable, G(L)->tmname[TM_INDEX], &method) ||
+      __atomic_load_n(&object->metatable_version, __ATOMIC_ACQUIRE) != version)
+    return 0;
+  setfvalue(result, method);
+  return 1;
+}
+
 int luaA_readobjectfield (lua_State *L, const TValue *object, TString *key,
                           TValue *result) {
   if (ttisfulluserdata(object)) {

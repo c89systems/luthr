@@ -227,6 +227,20 @@ static int userdata_field(lua_State *L) {
   return 1;
 }
 
+static int replacement_field(lua_State *L) {
+  lua_pushinteger(L, 3);
+  lua_pushinteger(L, 99);
+  return 2;
+}
+
+static int replace_userdata_field(lua_State *L) {
+  require(lua_getmetatable(L, 1));
+  lua_pushcfunction(L, replacement_field);
+  lua_setfield(L, -2, "__index");
+  lua_pushinteger(L, 2);
+  return 1;
+}
+
 static void check_native_fields(lua_State *L) {
   const LClosure *closure;
   lua_State *child;
@@ -267,6 +281,21 @@ static void check_native_fields(lua_State *L) {
   require(lua_resume(child, L, 0, &results) == LUA_OK);
   require(results == 1 && lua_tointeger(child, -1) == 2100);
   require(field_calls == 700 && field_ticks > 200);
+
+  lua_pushvalue(L, 1);
+  lua_newuserdatauv(L, 1, 0);
+  lua_newtable(L);
+  lua_pushcfunction(L, replace_userdata_field);
+  lua_setfield(L, -2, "__index");
+  lua_newtable(L);
+  lua_pushliteral(L, "kv");
+  lua_setfield(L, -2, "__mode");
+  require(lua_setmetatable(L, -2));
+  require(lua_setmetatable(L, -2));
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_pushinteger(L, 100);
+  require(lua_pcall(L, 2, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 299);
 }
 
 static int call_many(lua_State *L) {

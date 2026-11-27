@@ -1613,8 +1613,9 @@ int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
   const Instruction *at = frame->entry + offset;
   TValue method;
   lua_assert(ttisfulluserdata(object));
-  if (!luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
-      !checktag(&method, LUA_VLCF)) return 0;
+  if (!luaA_readlightindex(L, uvalue(object), &method) &&
+      (!luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
+       !checktag(&method, LUA_VLCF))) return 0;
   --L->poll_remaining;
   ci->u.l.rootpc = at;
   ci->u.l.savedpc = at + 1;

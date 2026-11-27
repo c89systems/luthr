@@ -134,6 +134,7 @@ LUAI_FUNC int luaA_readtypefield (lua_State *L, int type, TString *key,
                                   TValue *result);
 LUAI_FUNC int luaA_readobjectfield (lua_State *L, const TValue *object,
                                    TString *key, TValue *result);
+LUAI_FUNC int luaA_readlightindex (lua_State *L, Udata *object, TValue *result);
 /* Complete a raw hit or resolve an owned receiver's __index without a wait.
 ** A known miss was observed under this same uninterrupted stack admission. */
 LUAI_FUNC int luaA_tryindex (lua_State *L, Table *table, const TValue *key,
