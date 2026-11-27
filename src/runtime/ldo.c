@@ -546,7 +546,7 @@ void luaD_hook (lua_State *L, int event, int line,
                               int ftransfer, int ntransfer) {
   lua_Hook hook = gethook(L);
   if (hook && L->allowhook) {  /* make sure there is a hook */
-    int foreign = !luaQ_ismanagedhook(L, hook);
+    int foreign = hook != luaB_debughook && !luaQ_ismanagedhook(L, hook);
     LuaCallScope call;
     CallInfo *ci = L->ci;
     ptrdiff_t top = savestack(L, L->top.p);  /* preserve original 'top' */

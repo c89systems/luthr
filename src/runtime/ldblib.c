@@ -17,6 +17,7 @@
 #include "lua.h"
 
 #include "lauxlib.h"
+#include "lbuiltin.h"
 #include "lualib.h"
 #include "llimits.h"
 
@@ -323,7 +324,7 @@ static int db_upvaluejoin (lua_State *L) {
 ** Call hook function registered at hook table for the current
 ** thread (if there is one)
 */
-static void hookf (lua_State *L, lua_Debug *ar) {
+void luaB_debughook (lua_State *L, lua_Debug *ar) {
   static const char *const hooknames[] =
     {"call", "return", "line", "count", "tail call"};
   lua_getfield(L, LUA_REGISTRYINDEX, HOOKKEY);
@@ -377,7 +378,7 @@ static int db_sethook (lua_State *L) {
     const char *smask = luaL_checkstring(L, arg+2);
     luaL_checktype(L, arg+1, LUA_TFUNCTION);
     count = (int)luaL_optinteger(L, arg + 3, 0);
-    func = hookf; mask = makemask(smask, count);
+    func = luaB_debughook; mask = makemask(smask, count);
   }
   if (!luaL_getsubtable(L, LUA_REGISTRYINDEX, HOOKKEY)) {
     /* table just created; initialize it */
@@ -405,7 +406,7 @@ static int db_gethook (lua_State *L) {
     luaL_pushfail(L);
     return 1;
   }
-  else if (hook != hookf)  /* external hook? */
+  else if (hook != luaB_debughook)  /* external hook? */
     lua_pushliteral(L, "external hook");
   else {  /* hook table must exist */
     lua_getfield(L, LUA_REGISTRYINDEX, HOOKKEY);

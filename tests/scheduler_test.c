@@ -1219,6 +1219,42 @@ static int blocked_leaf(lua_State *L) {
   return 0;
 }
 
+static void lua_hook_without_native_slot(struct fixture *f) {
+  lua_State *observer;
+  init(f, 1);
+  lua_pushcfunction(f->main, blocked_leaf);
+  lua_setglobal(f->main, "hook_blocker");
+  observer = lua_newthread(f->main);
+  require(luaL_loadstring(observer,
+                          "local function answer() return 42 end; "
+                          "local result=answer(); "
+                          "return hook_calls>=2 and result or -1") == LUA_OK);
+  require(luaL_loadstring(f->main,
+                          "local observer=...; hook_calls=0; "
+                          "debug.sethook(observer, function() "
+                          "hook_calls=hook_calls+1 end, 'c')") == LUA_OK);
+  lua_pushvalue(f->main, -2);
+  require(lua_pcall(f->main, 1, 0, 0) == LUA_OK);
+  submit(f, 0, "hook_blocker(); return 43", 0);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->native_entered)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(luaSC_nativeactive(&f->scheduler) == 1);
+
+  require(luaSC_submit(&f->scheduler, &f->tasks[1], observer, 0) == 0);
+  lua_pop(f->main, 1);
+  require(collect(f, 1, LUA_OK) == 42);
+  require(luaSC_nativeactive(&f->scheduler) == 1);
+
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->native_release = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  require(collect(f, 0, LUA_OK) == 43);
+  finish(f);
+}
+
 static int native_index_method(lua_State *L) {
   const char *key = luaL_checkstring(L, 2);
   require(lua_type(L, 1) == LUA_TUSERDATA);
@@ -3579,6 +3615,8 @@ int main(int argc, char **argv) {
     native_argument_addresses(f);
   else if (strcmp(argv[1], "native_index_dispatch") == 0)
     native_index_dispatch(f);
+  else if (strcmp(argv[1], "lua_hook_without_native_slot") == 0)
+    lua_hook_without_native_slot(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)
     native_recall_during_stack_borrow(f, 1, 0);
   else if (strcmp(argv[1], "native_recall_without_stack_offer") == 0)
