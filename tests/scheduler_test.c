@@ -1755,6 +1755,41 @@ static int edit_native_fields(lua_State *L) {
   return 1;
 }
 
+static int construct_native_hash(lua_State *L) {
+  struct {
+    char text[512];
+    char names[5][32];
+  } input = {.names = {"count", "text", "original", "enabled", "nested"}};
+  memset(input.text, 'a', sizeof(input.text) - 1);
+  lua_createtable(L, 0, 5);
+  lua_pop(L, 1); /* warm the reservation for the next native allocation */
+  for (unsigned i = 0; i < 5; i++) {
+    lua_pushstring(L, input.names[i]);
+    lua_pop(L, 1);
+  }
+  require(strcmp(lua_pushstring(L, input.text), input.text) == 0);
+  lua_pop(L, 1);
+  input.text[0] = 'b';
+  require(strcmp(lua_pushstring(L, input.text), input.text) == 0);
+  lua_pop(L, 1);
+
+  blocked_leaf(L);
+  lua_createtable(L, 0, 5);
+  lua_pushinteger(L, 51);
+  lua_setfield(L, -2, input.names[0]);
+  lua_pushstring(L, input.text);
+  lua_setfield(L, -2, input.names[1]);
+  input.text[0] = 'a';
+  lua_pushstring(L, input.text);
+  lua_setfield(L, -2, input.names[2]);
+  lua_pushboolean(L, 1);
+  lua_setfield(L, -2, input.names[3]);
+  lua_pushvalue(L, 1);
+  lua_setfield(L, -2, input.names[4]);
+  native_operation_done();
+  return 1;
+}
+
 static int read_native_pointer_keys(lua_State *L) {
   static const char keys[4], absent;
   lua_createtable(L, 0, 4);
@@ -3710,6 +3745,16 @@ int main(int argc, char **argv) {
         f, edit_native_fields,
         "local row = native_table_operation({51}); "
         "assert(rawequal(row.first, row.second)); return row.first[1]",
+        1);
+  else if (strcmp(argv[1], "native_hash_constructor_without_slot") == 0)
+    native_operation_without_slot(
+        f, construct_native_hash,
+        "local row = native_table_operation({51}); "
+        "assert(row.text == 'b' .. ('a'):rep(510)); "
+        "assert(row.original == ('a'):rep(511) and row.enabled); "
+        "for i = 1, 32 do row[i] = i end; "
+        "assert(row[32] == 32 and row.nested[1] == row.count); "
+        "return row.count",
         1);
   else if (strcmp(argv[1], "native_pointer_lookup_without_slot") == 0)
     native_operation_without_slot(f, read_native_pointer_keys,

@@ -1085,7 +1085,7 @@ static void native_retirement(lua_State *L) {
   Table *table;
   TValue value;
   lua_gc(L, LUA_GCSTOP);
-  lua_createtable(L, 8, 2);
+  lua_createtable(L, (int)(LUA_TABLE_INLINE_LIMIT / sizeof(Value)), 2);
   lua_pushinteger(L, 42);
   lua_setfield(L, 1, "field");
   test.writer = lua_newthread(L);
@@ -1097,6 +1097,7 @@ static void native_retirement(lua_State *L) {
   require(luaX_trysharedread(L));
   require(luaX_trysharedread(other));
   table = hvalue(s2v(L->stack.p + 1));
+  require(table->inline_bytes == 0);
   watched = table->node;
   returned = 0;
   require(luaH_readsharedname(L, table, "field", 5, &value));
@@ -1187,7 +1188,9 @@ static void retirement(lua_State *state, int pressure, unsigned readers,
   lua_gc(state, LUA_GCSTOP);
   /* Keep the same two-node hash. Reserving array space forces independent
    * backing buffers for the retirement and pressure cases. */
-  lua_createtable(state, inline_storage ? 0 : 8, 2);
+  lua_createtable(
+      state, inline_storage ? 0 : (int)(LUA_TABLE_INLINE_LIMIT / sizeof(Value)),
+      2);
   memset(key, 'a', sizeof(key));
   lua_pushlstring(state, key, sizeof(key));
   luaX_lockstate(state);
@@ -1221,6 +1224,7 @@ static void retirement(lua_State *state, int pressure, unsigned readers,
   lua_xmove(state, test.writer, 1);
   luaX_lockstate(state);
   table = hvalue(s2v(state->stack.p + 1));
+  require((table->inline_bytes != 0) == inline_storage);
   watched = table->node; /* two-node hash has no Limbox */
   returned = 0;
   luaX_unlockstate(state);

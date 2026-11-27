@@ -25,7 +25,7 @@ typedef struct LuaWorldScope {
   unsigned heap;
   LuaApiRegion *api_region;  /* detached activation, restored only on attach */
 } LuaWorldScope;
-#define LUA_ALLOC_BINS 10
+#define LUA_ALLOC_BINS 11
 #define LUA_ALLOC_POOLS (2 * LUA_ALLOC_BINS)
 /* Ordinary objects, call frames, coroutine records and coroutine stacks. */
 #define LUA_ALLOC_THREAD_POOL LUA_ALLOC_POOLS

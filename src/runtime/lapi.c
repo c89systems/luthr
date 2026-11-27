@@ -1046,11 +1046,11 @@ LUA_API const char *lua_pushstring (lua_State *L, const char *s) {
   if (s != NULL &&
       !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
         ~LUA_GATE_OFFER_MASK) && luaX_tryobserve(L, LUA_MARK_ACTIVE)) {
-    TString *ts = luaS_trycachedname(L, s);
+    TString *ts = luaS_trycachedcstring(L, s);
     if (ts != NULL) {
       setsvalue2s(L, L->top.p, ts);
       api_incr_top(L);
-      s = getshrstr(ts);
+      s = getstr(ts);
       luaX_leavebounded(L);
       return s;
     }

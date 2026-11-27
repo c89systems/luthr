@@ -604,7 +604,7 @@ LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
 LUAI_FUNC Table *luaH_newtable (lua_State *, unsigned, unsigned, int);
 LUAI_FUNC Table *luaH_trycachedtable (lua_State *, unsigned, unsigned);
 LUAI_FUNC Table *luaH_newrecord (lua_State *, Table *, int);
-#define LUA_TABLE_INLINE_LIMIT 192
+#define LUA_TABLE_INLINE_LIMIT 288
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,
                                                     unsigned nhsize);
 LUAI_FUNC void luaH_resizearray (lua_State *L, Table *t, unsigned nasize);

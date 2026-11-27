@@ -161,17 +161,17 @@ l_sinline uint64_t *luaMP_finalizerstamp (LuaAllocPage *page,
 
 l_sinline size_t luaMP_binbytes (unsigned bin) {
   static const unsigned short sizes[LUA_ALLOC_BINS] =
-    {16, 32, 64, 96, 112, 128, 160, 192, 256, LUA_ALLOC_MAX};
+    {16, 32, 64, 96, 112, 128, 160, 192, 256, 288, LUA_ALLOC_MAX};
   lua_assert(bin < LUA_ALLOC_BINS);
   return sizes[bin];
 }
 
 /* Class lookup in 16-byte units. 96 and 112 fit compact records.
-** 160 and 192 keep larger inline layouts below the 256-byte class. */
+** The 288-byte class also fits eight hash nodes beside their table header. */
 l_sinline unsigned luaMP_sizeclass (size_t bytes) {
   static const unsigned char bins[LUA_ALLOC_MAX / 16 + 1] = {
     0, 0, 1, 2, 2, 3, 3, 4, 5, 6, 6, 7, 7, 8, 8, 8, 8,
-    9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9
+    9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10
   };
   lua_assert(bytes <= LUA_ALLOC_MAX);
   return bins[(bytes + 15) / 16];

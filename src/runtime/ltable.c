@@ -1086,7 +1086,10 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
 
 
 _Static_assert(sizeof(Table) <= LUA_TABLE_INLINE_LIMIT &&
-               LUA_TABLE_INLINE_LIMIT <= UCHAR_MAX, "inline table size");
+               LUA_TABLE_INLINE_LIMIT - sizeof(Table) <= UCHAR_MAX,
+               "inline table payload fits its size field");
+_Static_assert(sizeof(Table) + 8 * sizeof(Node) + sizeof(Limbox) <=
+               LUA_TABLE_INLINE_LIMIT, "eight inline hash nodes");
 _Static_assert(sizeof(Table) % _Alignof(Value) == 0 &&
                sizeof(Table) % _Alignof(Node) == 0 &&
                sizeof(Value) % _Alignof(Node) == 0, "inline table alignment");

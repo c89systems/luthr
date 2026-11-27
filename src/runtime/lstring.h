@@ -88,6 +88,7 @@ LUAI_FUNC TString *luaS_trycachedshort (lua_State *L, const char *str, size_t le
 LUAI_FUNC TString *luaS_trycapture (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trytasklstr (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trycachedname (lua_State *L, const char *str);
+LUAI_FUNC TString *luaS_trycachedcstring (lua_State *L, const char *str);
 LUAI_FUNC TString *luaS_new (lua_State *L, const char *str);
 LUAI_FUNC TString *luaS_createlngstrobj (lua_State *L, size_t l, int result);
 LUAI_FUNC TString *luaS_newextlstr (lua_State *L,

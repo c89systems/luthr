@@ -643,13 +643,14 @@ TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
 }
 
 l_sinline TString *cachedname (const uintptr_t *row, const char *str,
-                                int shortonly) {
+                                int shortonly, size_t limit) {
   int j;
   for (j = 0; j < STRCACHE_M; j++) {
     uintptr_t entry = row[j];
     TString *ts = cast(TString *, entry & ~cast(uintptr_t, CACHE_BINARY));
     if (ts != NULL && !(entry & CACHE_BINARY) &&
-        (!shortonly || strisinterned(ts)) && strcmp(str, getstr(ts)) == 0)
+        (!shortonly || strisinterned(ts)) &&
+        (limit == 0 || tsslen(ts) <= limit) && strcmp(str, getstr(ts)) == 0)
       return ts;
   }
   return NULL;
@@ -659,14 +660,22 @@ l_sinline TString *cachedname (const uintptr_t *row, const char *str,
 TString *luaS_trycachedname (lua_State *L, const char *str) {
   const LuaStringCache *cache = L->strcache;
   if (cache == NULL || cache->epoch != G(L)->strcache_epoch) return NULL;
-  return cachedname(cache->entries[point2uint(str) % STRCACHE_N], str, 1);
+  return cachedname(cache->entries[point2uint(str) % STRCACHE_N], str, 1, 0);
+}
+
+TString *luaS_trycachedcstring (lua_State *L, const char *str) {
+  const LuaStringCache *cache = L->strcache;
+  /* A match stops at the cached terminator even if the input is longer. */
+  if (cache == NULL || cache->epoch != G(L)->strcache_epoch) return NULL;
+  return cachedname(cache->entries[point2uint(str) % STRCACHE_N], str, 0,
+                    LUA_NATIVE_WORK_SLICE);
 }
 
 TString *luaS_new (lua_State *L, const char *str) {
   unsigned set = point2uint(str) % STRCACHE_N;
   uintptr_t *row = stringcacherow(L, set);
   TString *result;
-  if (row != NULL && (result = cachedname(row, str, 0)) != NULL) {
+  if (row != NULL && (result = cachedname(row, str, 0, 0)) != NULL) {
     luaC_tracepointer(L, result);
     return result;
   }
