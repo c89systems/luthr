@@ -3448,19 +3448,22 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
   return 1;
 }
 
-/* Interned keys can be compared without dereferencing candidate pointers.
-** Read the slot from the same retained image that located it. */
-l_sinline int readshorthash (global_State *g, Table *table, Node *nodes,
-    TString *key, TValue *result, lu_byte *tag, uint64_t layout,
-    const LuaHashPart *part, uint64_t revision) {
+/* Interned strings and light userdata compare by pointer identity. Read
+** the value directly from the retained image that located its key. */
+l_sinline int readidentityhash (global_State *g, Table *table, Node *nodes,
+    const void *key, lu_byte keytag, unsigned hash, TValue *result,
+    lu_byte *tag, uint64_t layout, const LuaHashPart *part, uint64_t revision) {
   unsigned size = nodesteps(nodes);
-  unsigned index = lmod(key->hash, size);
+  unsigned index = keytag == ctb(LUA_VSHRSTR) ? lmod(hash, size)
+                                               : hashmod(size, hash);
   unsigned steps;
   for (steps = 0; steps < size; steps++) {
     Node *node = nodes + index;
     int next;
-    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
-        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
+    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == keytag &&
+        (keytag == ctb(LUA_VSHRSTR)
+          ? cast(const void *, __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE))
+          : __atomic_load_n(&node->u.key_val.p, __ATOMIC_ACQUIRE)) == key) {
       TValue value;
       if (!luaH_readvalue(g, &node->u.value_, &node->u.tt_, &value,
                          part != NULL ? 0 : layout) ||
@@ -3488,7 +3491,8 @@ static int __attribute__((noinline)) readshortpart (
   Node *nodes;
   if (revision & 1) return 0;
   nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
-  return readshorthash(g, table, nodes, key, result, tag, layout, part, revision);
+  return readidentityhash(g, table, nodes, obj2gco(key), ctb(LUA_VSHRSTR),
+                          key->hash, result, tag, layout, part, revision);
 }
 
 l_sinline int __attribute__((always_inline)) readshortslot (
@@ -3538,7 +3542,8 @@ l_sinline int __attribute__((always_inline)) readshortslot (
     if (directory != NULL)
       return readshortpart(g, table, directory, key, result, tag, *sequence);
   }
-  return readshorthash(g, table, nodes, key, result, tag, *sequence, NULL, 0);
+  return readidentityhash(g, table, nodes, obj2gco(key), ctb(LUA_VSHRSTR),
+                          key->hash, result, tag, *sequence, NULL, 0);
 }
 
 /* Check the actual key and tag, even when reusing a slot after an opaque
@@ -3834,16 +3839,29 @@ l_sinline int __attribute__((always_inline)) trygetshared (
 ** before using this stack's initial roots. */
 int luaH_readsharedpointer (lua_State *L, Table *t, void *pointer,
                             TValue *res) {
-  LuaTableSlot slot = {0};
-  TValue key;
-  uint64_t sequence;
+  Node *nodes;
+  LuaHashDirectory *directory;
+  LuaHashPart *part = NULL;
+  uint64_t sequence, revision = 0;
+  unsigned hash = point2uint(pointer);
   lu_byte tag;
-  setpvalue(&key, pointer);
   if (__atomic_load_n(&t->sharing, __ATOMIC_ACQUIRE) != LUA_OBJECT_SHARED ||
-      !readsequence(L, t, &sequence) ||
-      !findhashslot(t, &key, LUA_VLIGHTUSERDATA, sequence, &slot, 0) ||
-      !readslot(G(L), L, t, &slot, sequence, res, &tag) ||
-      !luaH_samelayout(t, sequence)) return 0;
+      !readsequence(L, t, &sequence)) return 0;
+  nodes = __atomic_load_n(&t->node, __ATOMIC_ACQUIRE);
+  directory = luaH_hashdir(nodes);
+  if (directory != NULL) {
+    part = luaH_part(directory, distributedpart(hash));
+    revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
+    if (revision & 1) return 0;
+    nodes = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
+  }
+  if (luaH_recordkeys(nodes) != NULL) {
+    if (!luaH_samelayout(t, sequence)) return 0;
+    setnilvalue(res);
+    return 1;
+  }
+  if (!readidentityhash(G(L), t, nodes, pointer, LUA_VLIGHTUSERDATA, hash,
+                        res, &tag, sequence, part, revision)) return 0;
   if (tagisempty(tag)) setnilvalue(res);
   return 1;
 }

@@ -1754,18 +1754,35 @@ static int edit_native_fields(lua_State *L) {
 }
 
 static int read_native_pointer_keys(lua_State *L) {
-  static const char key, absent;
-  lua_newtable(L);
+  static const char keys[4], absent;
+  lua_createtable(L, 0, 4);
   lua_newtable(L);
   lua_pushliteral(L, "v");
   lua_setfield(L, -2, "__mode");
   lua_setmetatable(L, -2);
   lua_pushvalue(L, 1);
-  lua_rawsetp(L, -2, &key);
+  lua_rawsetp(L, -2, &keys[0]);
+  lua_pushinteger(L, 27);
+  lua_rawsetp(L, -2, &keys[3]);
+  lua_pushinteger(L, 49);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &keys[0]);
+  lua_pushinteger(L, 51);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, NULL);
   lua_pushvalue(L, -1);
   lua_setglobal(L, "native_weak_table");
   blocked_leaf(L);
-  require(lua_rawgetp(L, -1, &key) == LUA_TTABLE);
+  require(lua_rawgetp(L, -1, &keys[3]) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 27);
+  lua_pop(L, 1);
+  require(lua_rawgetp(L, LUA_REGISTRYINDEX, &keys[0]) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 49);
+  lua_pop(L, 1);
+  require(lua_rawgetp(L, LUA_REGISTRYINDEX, NULL) == LUA_TNUMBER);
+  require(lua_tointeger(L, -1) == 51);
+  lua_pop(L, 1);
+  require(lua_rawgetp(L, LUA_REGISTRYINDEX, &absent) == LUA_TNIL);
+  lua_pop(L, 1);
+  require(lua_rawgetp(L, -1, &keys[0]) == LUA_TTABLE);
   require(lua_rawequal(L, 1, -1));
   require(lua_rawgetp(L, -2, &absent) == LUA_TNIL);
   lua_pop(L, 1);
