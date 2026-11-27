@@ -1790,6 +1790,23 @@ static int call_without_managed_slot(lua_State *L) {
   return 1;
 }
 
+static int protected_branch_without_managed_slot(lua_State *L) {
+  for (int i = 0; i < 4; i++) {
+    lua_pushvalue(L, 1);
+    lua_pushinteger(L, 41);
+    require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+    require(lua_tointeger(L, -1) == 42);
+    lua_pop(L, 1);
+  }
+  blocked_leaf(L);
+  lua_pushvalue(L, 1);
+  lua_pushinteger(L, 50);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 51);
+  native_operation_done();
+  return 1;
+}
+
 static int field_without_managed_slot(lua_State *L) {
   unsigned *calls;
   if (lua_gettop(L) == 0) {
@@ -3658,6 +3675,13 @@ int main(int argc, char **argv) {
                                   "local result=native_table_operation(add); "
                                   "return result",
                                   0);
+  else if (strcmp(argv[1], "native_protected_branch_without_slot") == 0)
+    native_operation_without_slot(
+        f, protected_branch_without_managed_slot,
+        "local function add(value) if value%8==0 then error(value,0) end; "
+        "return value+1 end; local result=native_table_operation(add); "
+        "return result",
+        0);
   else if (strcmp(argv[1], "native_compiled_table_callback_without_slot") == 0)
     native_operation_without_slot(
         f, call_without_managed_slot,

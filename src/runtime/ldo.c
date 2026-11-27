@@ -1918,7 +1918,7 @@ static int scalararith (lua_State *L, const Proto *p, const TValue *registers,
     right = &immediate;
     arithmetic = LUA_OPADD;
   }
-  else if (op >= OP_ADDK && op <= OP_MULK) {
+  else if (op >= OP_ADDK && op <= OP_MODK) {
     right = p->k + GETARG_C(i);
     arithmetic = LUA_OPADD + (op - OP_ADDK);
   }
@@ -1930,6 +1930,10 @@ static int scalararith (lua_State *L, const Proto *p, const TValue *registers,
     lua_Integer a = ivalue(left), b = ivalue(right), n;
     if (arithmetic == LUA_OPADD) n = intop(+, a, b);
     else if (arithmetic == LUA_OPMUL) n = intop(*, a, b);
+    else if (arithmetic == LUA_OPMOD) {
+      if (b == 0) return 0;
+      n = b > 0 && (b & (b - 1)) == 0 ? a & (b - 1) : luaV_mod(L, a, b);
+    }
     else n = intop(-, a, b);
     setivalue(result, n);
     return 1;
@@ -1940,24 +1944,31 @@ static int scalararith (lua_State *L, const Proto *p, const TValue *registers,
 /* The original arguments and closure keep all references live while this
 ** body runs. Allocate scratch registers only when interpretation is needed. */
 static int __attribute__((noinline)) interpretscalar (lua_State *L, StkId args,
-                                                       const Proto *p, TValue *result) {
-  const Instruction *pc = p->code;
+                                                       const Proto *p,
+                                                       TValue *result,
+                                                       unsigned *ticks) {
+  unsigned pc = 0, executed = 0;
   TValue registers[LUA_SCALAR_REGISTERS];
   int i;
   for (i = 0; i < p->numparams; i++) {
     setobj(L, &registers[i], s2v(args + i));
   }
-  for (;;) {
-    Instruction ins = *pc++;
+  while (pc < LUA_SCALAR_CODE_LIMIT && (p->scalar_mask & (1u << pc))) {
+    Instruction ins = p->code[pc++];
     OpCode op = GET_OPCODE(ins);
     TValue *ra;
-    if (op == OP_RETURN0) return 0;
-    ra = registers + GETARG_A(ins);
-    if (op == OP_RETURN1) {
-      setobj(L, result, ra);
+    executed++;
+    if (op == OP_RETURN0 || op == OP_RETURN1) {
+      *ticks = executed;
+      if (op == OP_RETURN0) return 0;
+      setobj(L, result, registers + GETARG_A(ins));
       return 1;
     }
-    lua_assert(pc <= p->code + p->sizecode);
+    if (op == OP_JMP) {
+      pc += GETARG_sJ(ins);
+      continue;
+    }
+    ra = registers + GETARG_A(ins);
     switch (op) {
       case OP_MOVE: setobj(L, ra, registers + GETARG_B(ins)); break;
       case OP_LOADI: setivalue(ra, GETARG_sBx(ins)); break;
@@ -1980,25 +1991,36 @@ static int __attribute__((noinline)) interpretscalar (lua_State *L, StkId args,
         else { setbfvalue(ra); }
         break;
       case OP_ADDI:
-      case OP_ADDK: case OP_SUBK: case OP_MULK:
-      case OP_ADD: case OP_SUB: case OP_MUL:
+      case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_MODK:
+      case OP_ADD: case OP_SUB: case OP_MUL: case OP_MOD:
         if (!scalararith(L, p, registers, ins, ra)) return -1;
         pc++;  /* numeric operands made the metamethod branch unnecessary */
         break;
-      default: return -1;
+      case OP_EQI: case OP_TEST: {
+        int condition, immediate = GETARG_sB(ins);
+        if (op == OP_TEST) condition = !l_isfalse(ra);
+        else if (ttisinteger(ra)) condition = ivalue(ra) == immediate;
+        else condition = ttisfloat(ra) && luai_numeq(fltvalue(ra), cast_num(immediate));
+        if (condition == GETARG_k(ins)) pc += GETARG_sJ(p->code[pc]);
+        pc++;
+        break;
+      }
+      default: lua_assert(0); return -1;
     }
   }
+  return -1;
 }
 
 static int __attribute__((noinline)) scalarbody (lua_State *L, StkId args,
-                                                 const Proto *p, TValue *result) {
+                                                 const Proto *p, TValue *result,
+                                                 unsigned *ticks) {
   int scale = p->scalar_scale;
   if (scale != 0 && ttisinteger(s2v(args))) {
     lua_Integer scaled = intop(*, ivalue(s2v(args)), scale);
     setivalue(result, intop(+, scaled, p->scalar_bias));
     return 1;
   }
-  return interpretscalar(L, args, p, result);
+  return interpretscalar(L, args, p, result, ticks);
 }
 
 /* Until the result is committed, the ordinary call can restart with its
@@ -2008,6 +2030,7 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
   const LuaPolicy *policy;
   TValue result;
   const TValue *value = &result;
+  unsigned ticks = p->scalar_ticks;
   int i, count;
   lua_assert(p->scalar_ticks != 0);
   if (nargs < p->numparams || L->poll_remaining <= p->scalar_ticks ||
@@ -2033,7 +2056,7 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
     if (count != 0) value = s2v(func + 1 + GETARG_A(first));
   }
   else {
-    count = scalarbody(L, func + 1, p, &result);
+    count = scalarbody(L, func + 1, p, &result, &ticks);
     if (count < 0) return 0;
   }
   policy = L->policy;
@@ -2047,7 +2070,7 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
   if (wanted > 0 && count != 0) { setobj2s(L, func, value); }
   for (i = count; i < wanted; i++) setnilvalue2s(func + i);
   L->top.p = func + wanted;
-  L->poll_remaining -= p->scalar_ticks;
+  L->poll_remaining -= ticks;
   return 1;
 }
 

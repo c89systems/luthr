@@ -569,56 +569,90 @@ static int capturedoperand (Proto *p, int pc, int reg) {
   }
 }
 
-/* A scalar call reads only its arguments, constants and registers it has
-** already written. Arithmetic skips the following metamethod instruction
-** when its operands pass the same numeric checks as the VM. */
-static lu_byte scalarticks (const Proto *p, int hascaptures) {
-  unsigned live;
-  int pc, ticks = 0;
-  if (isvararg(p) || hascaptures ||
+static void scalarjoin (unsigned *live, lu_byte *depth, unsigned written,
+                         lu_byte ticks) {
+  if (*depth == 0) *live = written;
+  else *live &= written;
+  if (*depth < ticks) *depth = ticks;
+}
+
+/* Follow forward edges that only touch scratch registers. Any other edge
+** leaves the original operands intact for ordinary dispatch. At joins a
+** register is initialized only if every admitted predecessor wrote it. */
+static void lowerscalar (Proto *p) {
+  unsigned inputs[LUA_SCALAR_CODE_LIMIT] = {0};
+  lu_byte depth[LUA_SCALAR_CODE_LIMIT] = {1};
+  unsigned mask = 0;
+  int pc;
+  _Static_assert(LUA_SCALAR_CODE_LIMIT <= 16, "scalar mask covers all words");
+  if (isvararg(p) ||
       p->sizecode > LUA_SCALAR_CODE_LIMIT ||
       p->maxstacksize > LUA_SCALAR_REGISTERS || p->numparams > p->maxstacksize)
-    return 0;
-  live = (1u << p->numparams) - 1u;
+    return;
+  inputs[0] = (1u << p->numparams) - 1u;
   for (pc = 0; pc < p->sizecode; pc++) {
     Instruction i = p->code[pc];
     OpCode op = GET_OPCODE(i);
     unsigned a = GETARG_A(i);
     unsigned end = a;
+    unsigned live = inputs[pc];
+    lu_byte ticks = depth[pc];
+    int next = pc + 1;
 #define livein(r) ((r) < p->maxstacksize && (live & (1u << (r))))
-    ticks++;
-    if (op == OP_RETURN0) return cast_byte(ticks);
-    if (op == OP_RETURN1) return livein(a) ? cast_byte(ticks) : 0;
-    if (a >= p->maxstacksize) return 0;
+    if (ticks == 0) continue;
+    if (op == OP_RETURN0 || (op == OP_RETURN1 && livein(a))) {
+      if (p->scalar_ticks < ticks) p->scalar_ticks = ticks;
+      mask |= 1u << pc;
+      continue;
+    }
+    if (op == OP_JMP || op == OP_EQI || op == OP_TEST) {
+      int jumpword = op == OP_JMP ? pc : next;
+      int target;
+      if (op != OP_JMP && (!livein(a) || next >= p->sizecode ||
+                           GET_OPCODE(p->code[next]) != OP_JMP)) continue;
+      target = jumpword + 1 + GETARG_sJ(p->code[jumpword]);
+      if (target <= pc || target >= p->sizecode) continue;
+      scalarjoin(&inputs[target], &depth[target], live, cast_byte(ticks + 1));
+      if (op != OP_JMP && ++next < p->sizecode)
+        scalarjoin(&inputs[next], &depth[next], live, cast_byte(ticks + 1));
+      mask |= 1u << pc;
+      continue;
+    }
+    if (a >= p->maxstacksize) continue;
     switch (op) {
       case OP_LOADNIL:
         end += GETARG_B(i);
-        if (end >= p->maxstacksize) return 0;
+        if (end >= p->maxstacksize) continue;
         break;
       case OP_LOADK:
-        if (GETARG_Bx(i) >= p->sizek) return 0;
+        if (GETARG_Bx(i) >= p->sizek) continue;
         break;
       case OP_LOADI: case OP_LOADF: case OP_LOADFALSE: case OP_LOADTRUE:
         break;
       case OP_MOVE: case OP_UNM: case OP_NOT:
-        if (!livein(GETARG_B(i))) return 0;
+        if (!livein(GETARG_B(i))) continue;
         break;
       case OP_ADDI:
-      case OP_ADDK: case OP_SUBK: case OP_MULK:
-      case OP_ADD: case OP_SUB: case OP_MUL:
-        if (!livein(GETARG_B(i))) return 0;
-        if (op >= OP_ADD && !livein(GETARG_C(i))) return 0;
-        if (op >= OP_ADDK && op <= OP_MULK && GETARG_C(i) >= p->sizek)
-          return 0;
-        if (++pc >= p->sizecode || !testMMMode(GET_OPCODE(p->code[pc])))
-          return 0;
+      case OP_ADDK: case OP_SUBK: case OP_MULK: case OP_MODK:
+      case OP_ADD: case OP_SUB: case OP_MUL: case OP_MOD:
+        if (!livein(GETARG_B(i))) continue;
+        if (op >= OP_ADD && !livein(GETARG_C(i))) continue;
+        if (op >= OP_ADDK && op <= OP_MODK && GETARG_C(i) >= p->sizek)
+          continue;
+        if (next >= p->sizecode || !testMMMode(GET_OPCODE(p->code[next])))
+          continue;
+        next++;
         break;
-      default: return 0;
+      default: continue;
     }
     live |= ((1u << (end - a + 1)) - 1u) << a;
+    if (next < p->sizecode) {
+      scalarjoin(&inputs[next], &depth[next], live, cast_byte(ticks + 1));
+      mask |= 1u << pc;
+    }
 #undef livein
   }
-  return 0;
+  p->scalar_mask = cast(uint16_t, mask);
 }
 
 typedef struct IntegerExpr {
@@ -1003,7 +1037,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       }
     }
   }
-  p->scalar_ticks = scalarticks(p, count != 0);
+  if (count == 0) lowerscalar(p);
   scalaraffine(p);
   lowerrecords(L, p);
   luaJ_lower(L, p);
@@ -1038,6 +1072,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->maxstacksize = 0;
   f->scalar_ticks = 0;
   f->scalar_scale = 0;
+  f->scalar_mask = 0;
   f->scalar_bias = 0;
   f->locvars = NULL;
   f->sizelocvars = 0;

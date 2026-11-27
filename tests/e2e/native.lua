@@ -245,4 +245,48 @@ do
   assert(calls==1 and returns==1)
 end
 
+do
+  local rejects = 0
+  local function reject()
+    rejects = rejects + 1
+    error(marker, 0)
+  end
+  local function guarded(value, divisor)
+    local remainder = value % divisor
+    if remainder == 0 then reject() end
+    return remainder
+  end
+  local function choose(condition, left, right)
+    local result
+    if condition then result = left else result = right end
+    return result
+  end
+  local copied = assert(load(string.dump(choose, true), '=branch', 'b'))
+  for i = 1, 128 do
+    local passed, result = pcall(guarded, -i * 8 - 3, 8)
+    assert(passed and result == 5)
+    assert(native.call(1, guarded, i * 8 + 1, -8) == -7)
+    assert(native.call(1, choose, true, marker, nil) == marker)
+    assert(native.call(1, copied, false, nil, i) == i)
+  end
+  local passed, result = pcall(guarded, 16, 8)
+  assert(not passed and result == marker and rejects == 1)
+  assert(not pcall(guarded, 8, 0) and rejects == 1)
+  assert(native.call(1, guarded, 5.5, 4) == 1.5)
+  assert(native.call(1, guarded, math.mininteger + 1, 8) == 1)
+  local calls = 0
+  local operand = setmetatable({}, {__mod=function(_, divisor)
+    calls = calls + 1
+    return divisor - 1
+  end})
+  assert(native.call(1, guarded, operand, 8) == 7 and calls == 1)
+  debug.sethook(function(event)
+    if event == 'call' and debug.getinfo(2, 'f').func == choose then
+      assert(debug.setlocal(2, 1, false))
+    end
+  end, 'c')
+  assert(native.call(1, choose, true, 1, 2) == 2)
+  debug.sethook()
+end
+
 print('native: nested callbacks, references, original errors, bounded 1 MiB stream passed')
