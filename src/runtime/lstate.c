@@ -486,6 +486,19 @@ static void freestrcache (lua_State *L, LuaStringCache *cache) {
   }
 }
 
+/* The emergency collector has joined managed owners and bounded readers.
+** The enrollment list excludes threads already queued for destruction. */
+void luaE_trimstringcaches (lua_State *L) {
+  LuaParticipation *part;
+  lua_assert(luaW_iscollector(L));
+  for (part = G(L)->world.participants; part != NULL; part = part->next) {
+    lua_State *thread = part->thread;
+    LuaStringCache *cache = thread->strcache;
+    thread->strcache = NULL;
+    freestrcache(L, cache);
+  }
+}
+
 
 static void close_state (lua_State *L, int owns_gate) {
   global_State *g = G(L);

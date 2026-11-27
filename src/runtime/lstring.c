@@ -470,11 +470,13 @@ static uintptr_t *stringcacherow (lua_State *L, unsigned set) {
   return cache->entries[set];
 }
 
-l_sinline void rememberstring (uintptr_t *row, TString *str, int binary) {
-  int j;
-  /* An interning miss may have crossed a collection. The current epoch
-  ** remains invalid until the next row lookup clears the old entries. */
-  if (row != NULL) {
+l_sinline void rememberstring (lua_State *L, unsigned set, TString *str,
+                                int binary) {
+  LuaStringCache *cache = L->strcache;
+  /* Constructor allocation can expire the weak entries or discard the cache. */
+  if (cache != NULL && cache->epoch == G(L)->strcache_epoch) {
+    uintptr_t *row = cache->entries[set];
+    int j;
     for (j = STRCACHE_M - 1; j > 0; j--)
       row[j] = row[j - 1];
     row[0] = cast(uintptr_t, str) | cast_uint(binary);
@@ -519,15 +521,17 @@ TString *luaS_findshort (lua_State *L, const char *str, size_t len) {
 TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   uintptr_t *row;
   TString *result;
+  unsigned set;
   if (len > LUAI_MAXSHORTLEN) return copylong(L, str, len, 1);
   if (len <= 1) return internshrstr(L, str, len);
-  row = stringcacherow(L, shortstringset(str, len));
+  set = shortstringset(str, len);
+  row = stringcacherow(L, set);
   if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
     luaC_tracepointer(L, result);
     return result;
   }
   result = luaS_newlstr(L, str, len);
-  rememberstring(row, result, memchr(getshrstr(result), '\0', len) != NULL);
+  rememberstring(L, set, result, memchr(getshrstr(result), '\0', len) != NULL);
   return result;
 }
 
@@ -541,6 +545,10 @@ static int recentresult (lua_State *L, unsigned hash) {
   if (history == NULL) {
     history = cast(LuaResultHistory *, luaM_tryalloc(L, sizeof(*history)));
     if (history == NULL) return 1;  /* use interning if the cache cannot grow */
+    if (L->strcache == NULL) {  /* backing allocator admission can park */
+      luaM_free(L, history);
+      return 1;
+    }
     memset(history, 0, sizeof(*history));
     L->strcache->results = history;
   }
@@ -563,10 +571,11 @@ TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
   global_State *g = G(L);
   TString *result;
   uintptr_t *row;
-  unsigned hash;
+  unsigned hash, set;
   if (len > LUAI_MAXSHORTLEN) return copylong(L, str, len, 1);
   if (len <= 1) return internshrstr(L, str, len);
-  row = stringcacherow(L, shortstringset(str, len));
+  set = shortstringset(str, len);
+  row = stringcacherow(L, set);
   if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
     luaC_tracepointer(L, result);
     return result;
@@ -587,7 +596,7 @@ TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
       return result;
     }
   }
-  rememberstring(row, result, memchr(getshrstr(result), '\0', len) != NULL);
+  rememberstring(L, set, result, memchr(getshrstr(result), '\0', len) != NULL);
   return result;
 }
 
@@ -612,14 +621,15 @@ TString *luaS_trycachedname (lua_State *L, const char *str) {
 }
 
 TString *luaS_new (lua_State *L, const char *str) {
-  uintptr_t *row = stringcacherow(L, point2uint(str) % STRCACHE_N);
+  unsigned set = point2uint(str) % STRCACHE_N;
+  uintptr_t *row = stringcacherow(L, set);
   TString *result;
   if (row != NULL && (result = cachedname(row, str, 0)) != NULL) {
     luaC_tracepointer(L, result);
     return result;
   }
   result = luaS_newlstr(L, str, strlen(str));
-  rememberstring(row, result, 0);
+  rememberstring(L, set, result, 0);
   return result;
 }
 

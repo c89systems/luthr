@@ -28,7 +28,7 @@ struct collection {
   pthread_mutex_t mutex;
   pthread_cond_t changed;
   lua_State *main, *collector, *worker;
-  size_t live;
+  size_t live, limit;
   unsigned allocating, failures, fail, assisted, stops, sweep_stops;
   int entered, release, done, emergency, minor, help;
 };
@@ -200,8 +200,10 @@ static void *backing(void *context, void *pointer, size_t old, size_t size) {
   if (pointer == NULL)
     old = 0;
   require(collection->live >= old);
-  if (size >= 1024 * 1024 &&
-      __atomic_exchange_n(&collection->fail, 0, __ATOMIC_ACQ_REL)) {
+  if ((size >= 1024 * 1024 &&
+       __atomic_exchange_n(&collection->fail, 0, __ATOMIC_ACQ_REL)) ||
+      (collection->limit != 0 && size > old &&
+       size - old > collection->limit - collection->live)) {
     collection->failures++;
     replacement = NULL;
   } else if (size == 0) {
@@ -1057,6 +1059,35 @@ static void string_lookup(int cache) {
   finish(L);
 }
 
+static void emergency_string_cache(void) {
+  struct collection collection = {0};
+  const size_t bytes = 1024 * 1024;
+  char *input = malloc(bytes + 1);
+  lua_State *L = lua_newstate(backing, &collection, 0);
+  lua_State *child;
+  require(input != NULL && L != NULL);
+  memset(input, 'a', bytes);
+  input[bytes] = '\0';
+  child = lua_newthread(L);
+  lua_pushliteral(L, "rooted in the caller");
+  lua_pushliteral(child, "rooted in the child");
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_gc(L, LUA_GCCOLLECT);
+
+  /* The string payload fits in the remaining budget. Its allocation
+   * header also fits once the optional string caches have been freed. */
+  collection.limit = collection.live + bytes;
+  require(strlen(lua_pushstring(L, input)) == bytes);
+  require(collection.failures != 0);
+  require(strcmp(lua_tostring(L, 2), "rooted in the caller") == 0);
+  require(strcmp(lua_tostring(child, 1), "rooted in the child") == 0);
+  lua_pop(L, 1);
+  require(strcmp(lua_pushstring(L, "after emergency"), "after emergency") == 0);
+  lua_close(L);
+  require(collection.live == 0);
+  free(input);
+}
+
 static void *collect_graph(void *context) {
   struct collection *collection = context;
   if (collection->minor) {
@@ -1468,6 +1499,8 @@ int main(int argc, char **argv) {
     resurrected_weak();
   else if (strcmp(argv[1], "intern") == 0 || strcmp(argv[1], "cache") == 0)
     string_lookup(strcmp(argv[1], "cache") == 0);
+  else if (strcmp(argv[1], "emergency_string_cache") == 0)
+    emergency_string_cache();
   else if (strncmp(argv[1], "concurrent", 10) == 0 ||
            strncmp(argv[1], "emergency", 9) == 0 ||
            strncmp(argv[1], "help", 4) == 0)

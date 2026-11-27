@@ -428,7 +428,7 @@ target_link_options(gc_tracing_test PRIVATE -Wl,--wrap=luaQ_poll
   -Wl,--wrap=luaM_malloc_ -Wl,--wrap=luaM_allocstack -Wl,--wrap=luaC_scanstrong
   -Wl,--wrap=luaW_waitcollector -Wl,--wrap=luaX_valueenterslow)
 foreach(case IN ITEMS array hash userdata metatable cclosure capture stack stack_bounded stack_wait_snapshot stack_wait_release stack_wait_offer stack_wait_reopen stack_wait_collect stack_wait_park busy parser closure_builder thread_builder thread_builder_error weakvalues weakkeys weakarray resurrected_weak weak_retry weak_stamp_wrap intern cache
-    concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues
+    concurrent_incremental concurrent_generational concurrent_minor emergency_incremental emergency_minor emergency_string_cache help_incremental help_minor help_to_generational help_to_incremental ephemerons parallel_mark parallel_ephemerons parallel_weakvalues
     capture_read userdata_read metatable_read cclosure_read native_shared_field
     weaken_array_after_read weaken_hash_after_read page_frontier)
   add_test(NAME gc_tracing_${case} COMMAND gc_tracing_test ${case})

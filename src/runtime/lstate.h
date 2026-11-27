@@ -783,6 +783,7 @@ l_sinline l_mem luaP_debt (const global_State *g) {
 LUAI_FUNC void luaE_setdebt (global_State *g, l_mem debt);
 LUAI_FUNC void luaE_freethread (lua_State *L, lua_State *L1);
 LUAI_FUNC void luaE_retirethread (lua_State *L, lua_State *thread);
+LUAI_FUNC void luaE_trimstringcaches (lua_State *L);
 LUAI_FUNC lu_mem luaE_threadsize (lua_State *L);
 LUAI_FUNC CallInfo *luaE_extendCI (lua_State *L, int err);
 LUAI_FUNC int luaE_cantrimCI (lua_State *L);
