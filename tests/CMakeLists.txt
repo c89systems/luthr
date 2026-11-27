@@ -67,7 +67,7 @@ set_target_properties(native_loop_test PROPERTIES C_STANDARD 99)
 target_compile_options(native_loop_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(native_loop_test PRIVATE luthr_static)
 target_link_options(native_loop_test PRIVATE -Wl,--wrap=mprotect)
-foreach(case IN ITEMS serial denied incremental generational cancel native_fields native_callbacks native_calls native_capture_race)
+foreach(case IN ITEMS serial denied incremental generational cancel native_fields native_callbacks native_calls native_capture_race native_append_incremental native_append_generational)
   add_test(NAME native_loop_${case} COMMAND native_loop_test ${case})
   set_tests_properties(native_loop_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)

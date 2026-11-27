@@ -4,11 +4,18 @@
 */
 #define lgate_c
 #define LUA_CORE
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "lprefix.h"
 
+#include <errno.h>
+#include <linux/membarrier.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include "laccess.h"
 #include "lapi.h"
 #include "ldebug.h"
@@ -26,6 +33,19 @@
 ** carrier. Inlining or IPA could preserve its address across fiber migration. */
 #define carrierentry __attribute__((noipa))
 static __thread LuaThreadContext thread_context;
+static pthread_once_t append_once = PTHREAD_ONCE_INIT;
+static int append_supported;
+
+static void registerappend (void) {
+  int saved = errno;
+  append_supported = syscall(SYS_membarrier,
+    MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0) == 0;
+  errno = saved;
+}
+
+void luaX_initappend (void) {
+  luaX_checksync(pthread_once(&append_once, registerappend));
+}
 
 carrierentry LuaThreadContext *luaE_threadcontext (void) {
   return &thread_context;
@@ -81,8 +101,31 @@ void luaX_destroygate (LuaStackGate *gate) {
 }
 
 void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
-  while (__atomic_load_n(&gate->values, __ATOMIC_SEQ_CST))
+  uint64_t values;
+  while ((values = __atomic_load_n(&gate->values, __ATOMIC_SEQ_CST)) != 0) {
+    if (values & LUA_GATE_APPEND) {
+      if (values == luaX_appendlease()) {
+        luaX_endappend(gate);
+        return;
+      }
+      /* Our gate or collector request is already published. The lease holder
+      ** either sees that request or publishes its active append before we
+      ** examine it. An idle native call can remain blocked indefinitely. */
+      {
+        int saved = errno;
+        while (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+                       0, 0) != 0) {
+          if (errno != EINTR) luaX_checksync(errno);
+        }
+        errno = saved;
+      }
+      while ((values = __atomic_load_n(&gate->values, __ATOMIC_ACQUIRE)) != 0 &&
+             (values & (LUA_GATE_APPEND | LUA_GATE_VALUES)) != LUA_GATE_APPEND)
+        sched_yield();
+      return;
+    }
     sched_yield();
+  }
 }
 
 void luaX_clearargumenttail (LuaStackGate *gate) {
@@ -422,7 +465,7 @@ void luaW_publishloopframe (lua_State *L, StkId func, int method) {
         argumentshortstring(tsvalue(s2v(func + 2))), __ATOMIC_RELEASE);
   }
   else luaW_publishnativearguments(L, func);
-  luaX_leavesharedread(L);
+  luaX_releaseread(L, method && append_supported ? luaX_appendlease() : 0);
 }
 
 /* Ordinary embedders can reclaim a free gate directly. The claim is visible

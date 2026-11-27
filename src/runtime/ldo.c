@@ -1219,6 +1219,7 @@ l_sinline __attribute__((always_inline)) int callloopnative (
     if (context == NULL) return 0;
   }
   n = (*function)(L);
+  if (method) luaX_endappend(&L->stack_gate);
   if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
                                LUA_WORLD_ARM_TRACE)) {
     CallInfo *call = L->ci;

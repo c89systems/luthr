@@ -26,7 +26,7 @@ enum {
   LUA_GATE_FLAGS = LUA_GATE_ACTIVE | LUA_GATE_WAITING | LUA_GATE_DORMANT
 };
 
-enum { LUA_GATE_VALUES = 1, LUA_GATE_SHARED_READ = 2 };
+enum { LUA_GATE_VALUES = 1, LUA_GATE_SHARED_READ = 2, LUA_GATE_APPEND = 4 };
 enum { LUA_NATIVE_ARGUMENTS = 8 };
 
 /* A scheduled root can publish its inactive stack and its recallable slot
@@ -53,6 +53,21 @@ LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_waitvalues (LuaStackGate *gate);
 LUAI_FUNC void luaX_clearargumenttail (LuaStackGate *gate);
+LUAI_FUNC void luaX_initappend (void);
+
+/* An idle append lease identifies the pinned carrier until it is consumed. */
+l_sinline uint64_t luaX_appendlease (void) {
+  uintptr_t carrier = cast(uintptr_t, __builtin_thread_pointer());
+  lua_assert(!(carrier & (LUA_GATE_VALUES | LUA_GATE_SHARED_READ |
+                          LUA_GATE_APPEND)));
+  return carrier | LUA_GATE_APPEND;
+}
+
+l_sinline void luaX_endappend (LuaStackGate *gate) {
+  uint64_t values = __atomic_load_n(&gate->values, __ATOMIC_RELAXED);
+  if ((values & LUA_GATE_APPEND) && values == luaX_appendlease())
+    __atomic_store_n(&gate->values, 0, __ATOMIC_RELEASE);
+}
 
 /* A full claim is published before this join. A racing bounded claim must
 ** observe the full claim or finish before the full owner reads the stack. */

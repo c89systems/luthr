@@ -58,6 +58,7 @@ static void grantheap (LuaWorld *world, lua_State *L) {
 int luaW_init (global_State *g) {
   LuaWorld *world = &g->world;
   int status, i;
+  luaX_initappend();
   world->control = bitmask(MAJOR0BIT);
   world->entry_waiting = 0;
   world->stop_slots = 0;

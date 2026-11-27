@@ -345,6 +345,99 @@ static void check_native_fields(lua_State *L) {
   require(lua_tointeger(L, -1) == 2100 && field_calls == 700);
 }
 
+enum { APPEND_BLOCK_AT = 160, APPEND_RACE_ROUNDS = 64 };
+static unsigned append_calls, append_stage;
+static pthread_barrier_t append_race;
+
+static void wait_for_append_stage(unsigned stage) {
+  while (__atomic_load_n(&append_stage, __ATOMIC_ACQUIRE) != stage)
+    sched_yield();
+}
+
+static void meet_append_race(void) {
+  int status = pthread_barrier_wait(&append_race);
+  require(status == 0 || status == PTHREAD_BARRIER_SERIAL_THREAD);
+}
+
+static int blocking_field_result(lua_State *L) {
+  ++append_calls;
+  if (append_calls == APPEND_BLOCK_AT) {
+    __atomic_store_n(&append_stage, 1, __ATOMIC_RELEASE);
+    wait_for_append_stage(2);
+    lua_pushinteger(L, 7);
+    __atomic_store_n(&append_stage, 3, __ATOMIC_RELEASE);
+    wait_for_append_stage(4);
+  } else {
+    if (append_calls > APPEND_BLOCK_AT &&
+        append_calls <= APPEND_BLOCK_AT + APPEND_RACE_ROUNDS) {
+      lua_Integer first, second;
+      meet_append_race();
+      lua_pushinteger(L, 7);
+      meet_append_race();
+      require(lua_gettop(L) == 4);
+      first = lua_tointeger(L, 3);
+      second = lua_tointeger(L, 4);
+      require((first == 7 && second == 9) || (first == 9 && second == 7));
+    }
+    lua_pushinteger(L, 3);
+  }
+  return 1;
+}
+
+static void check_native_append(lua_State *L) {
+  LuaSchedulerConfig config = {
+      .slots = 1, .carriers = 2, .native_limit = 1, .callback_limit = 1};
+  LuaScheduler scheduler = {0};
+  LuaScheduledTask task = {0};
+  lua_State *child;
+  const LClosure *closure;
+  int status, results;
+  require(luaL_dostring(L, "return function(row) "
+                           "  local sum = 0; for i = 1, 700 do "
+                           "    sum = sum + row.amount "
+                           "  end; return sum "
+                           "end") == LUA_OK);
+  closure = lua_topointer(L, 1);
+  child = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, child, 1);
+  lua_newuserdatauv(child, 1, 0);
+  lua_newtable(child);
+  lua_pushcfunction(child, blocking_field_result);
+  lua_setfield(child, -2, "__index");
+  require(lua_setmetatable(child, -2));
+  require(pthread_barrier_init(&append_race, NULL, 2) == 0);
+  require(luaSC_init(L, &scheduler, &config) == 0);
+  require(luaSC_submit(&scheduler, &task, child, 1) == 0);
+
+  wait_for_append_stage(1);
+  require(closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+  require(lua_gettop(child) == 2 && lua_checkstack(child, 8192));
+  lua_pushliteral(child, "foreign root");
+  lua_gc(L, LUA_GCCOLLECT);
+  require(strcmp(lua_tostring(child, -1), "foreign root") == 0);
+  __atomic_store_n(&append_stage, 2, __ATOMIC_RELEASE);
+
+  wait_for_append_stage(3);
+  require(lua_gettop(child) == 4 && lua_tointeger(child, -1) == 7);
+  lua_pushinteger(child, 53);
+  lua_replace(child, -2);
+  lua_gc(L, LUA_GCCOLLECT);
+  __atomic_store_n(&append_stage, 4, __ATOMIC_RELEASE);
+  for (unsigned round = 0; round < APPEND_RACE_ROUNDS; round++) {
+    meet_append_race();
+    lua_pushinteger(child, 9);
+    meet_append_race();
+  }
+
+  luaSC_wait(&task);
+  require(luaSC_collect(L, &task, &status, &results) == LUA_OK);
+  require(status == LUA_OK && results == 1 && append_calls == 700);
+  require(lua_tointeger(L, -1) == 699 * 3 + 53);
+  require(luaSC_destroy(L, &scheduler) == 0);
+  require(pthread_barrier_destroy(&append_race) == 0);
+}
+
 static int call_many(lua_State *L) {
   lua_Integer n = luaL_checkinteger(L, 3);
   for (lua_Integer i = 0; i < n; i++) {
@@ -552,6 +645,11 @@ int main(int argc, char **argv) {
     check_cancel(L);
   } else if (strcmp(argv[1], "native_fields") == 0) {
     check_native_fields(L);
+  } else if (strcmp(argv[1], "native_append_incremental") == 0 ||
+             strcmp(argv[1], "native_append_generational") == 0) {
+    lua_gc(L, strcmp(argv[1], "native_append_incremental") == 0 ? LUA_GCINC
+                                                                : LUA_GCGEN);
+    check_native_append(L);
   } else if (strcmp(argv[1], "native_callbacks") == 0) {
     check_native_callbacks(L);
   } else if (strcmp(argv[1], "native_capture_race") == 0) {

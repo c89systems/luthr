@@ -962,7 +962,22 @@ LUA_API void lua_pushnumber (lua_State *L, lua_Number n) {
 
 
 LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
-  uintptr_t owner = luaX_enterobservation(L, 1);
+  uintptr_t owner;
+  uint64_t values = __atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED);
+  if ((values & LUA_GATE_APPEND) && values == luaX_appendlease()) {
+    __atomic_store_n(&L->stack_gate.values, values | LUA_GATE_VALUES,
+                     __ATOMIC_RELAXED);
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    /* A competing full owner fences after publishing its gate reservation. */
+    if (luaX_boundedready(L, 0)) {
+      setivalue(s2v(L->top.p), n);
+      api_incr_top(L);
+      luaX_leavebounded(L);
+      return;
+    }
+    luaX_leavebounded(L);
+  }
+  owner = luaX_enterobservation(L, 1);
   setivalue(s2v(L->top.p), n);
   api_incr_top(L);
   luaX_leaveboundedvalue(L, owner);

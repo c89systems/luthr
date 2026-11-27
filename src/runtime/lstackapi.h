@@ -178,15 +178,19 @@ l_sinline int luaX_tryboundedscope (lua_State *L, unsigned requests) {
   return 1;
 }
 
-l_sinline void luaX_leavesharedread (lua_State *L) {
+l_sinline void luaX_releaseread (lua_State *L, uint64_t idle) {
   global_State *g = G(L);
   uint64_t control;
   uintptr_t stack = cast(uintptr_t, L);
   /* The drain checks bounded readers itself, so this wake can be advisory. */
-  luaX_leavebounded(L);
+  __atomic_store_n(&L->stack_gate.values, idle, __ATOMIC_RELEASE);
   control = luaW_control(&g->world);
   if (l_unlikely(control & LUA_WORLD_STORAGE_WAIT))
     luaW_leave(g, stack, 0, control);
+}
+
+l_sinline void luaX_leavesharedread (lua_State *L) {
+  luaX_releaseread(L, 0);
 }
 
 /* Publish the epoch with the stack claim, then acquire the current control
