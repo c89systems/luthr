@@ -1980,6 +1980,30 @@ static int protected_branch_without_managed_slot(lua_State *L) {
   return 1;
 }
 
+static int protected_trampoline(lua_State *L) {
+  lua_pushinteger(L, 50);
+  lua_call(L, 1, 1);
+  return 1;
+}
+
+static void call_protected_trampoline(lua_State *L) {
+  lua_pushcfunction(L, protected_trampoline);
+  lua_pushvalue(L, 1);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 51);
+}
+
+static int protected_trampoline_without_managed_slot(lua_State *L) {
+  for (int i = 0; i < 4; i++) {
+    call_protected_trampoline(L);
+    lua_pop(L, 1);
+  }
+  blocked_leaf(L);
+  call_protected_trampoline(L);
+  native_operation_done();
+  return 1;
+}
+
 static int field_without_managed_slot(lua_State *L) {
   unsigned *calls;
   if (lua_gettop(L) == 0) {
@@ -3906,6 +3930,12 @@ int main(int argc, char **argv) {
         "local function add(value) if value%8==0 then error(value,0) end; "
         "return value+1 end; local result=native_table_operation(add); "
         "return result",
+        0);
+  else if (strcmp(argv[1], "native_protected_trampoline_without_slot") == 0)
+    native_operation_without_slot(
+        f, protected_trampoline_without_managed_slot,
+        "local function add(value) return value+1 end; "
+        "local result=native_table_operation(add); return result",
         0);
   else if (strcmp(argv[1], "native_compiled_table_callback_without_slot") == 0)
     native_operation_without_slot(

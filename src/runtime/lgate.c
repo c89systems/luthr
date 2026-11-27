@@ -673,45 +673,57 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults,
     return 0;
   }
   if (execution == NULL || execution->native_depth != 0) {
-    int probed = 0;
+    int bounded = 0, probed = 0;
     uintptr_t expected;
 #if !defined(HARDSTACKTESTS)
     if (context->compiled_reentry && status == NULL) {
       /* Compiled callbacks touch stack registers and stable upvalue cells. */
-      if (luaX_tryobserve(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
-                            LUA_WORLD_ARM_TRACE)) {
-        if (luaD_trycompiledstack(L, context, nargs, nresults)) return 1;
-        luaX_leavebounded(L);
-      }
+      bounded = luaX_tryobserve(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                                   LUA_WORLD_ARM_TRACE);
+      if (bounded && luaD_trycompiledstack(L, context, nargs, nresults)) return 1;
       context->compiled_reentry = 0;
     }
+    /* Classify a protected C trampoline before acting on the scalar hint.
+    ** Its last nested Lua call may have set that hint on the same carrier. */
+    if (status != NULL && (execution == NULL ||
+        (execution->managed_depth == 0 && execution->scheduler != NULL &&
+         execution->trusted == NULL))) {
+      bounded = luaX_tryobserve(L, 0);
+      if (bounded && luaD_trynativepcall(L, context, nargs, nresults, status))
+        return 1;
+    }
 #endif
-    expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
-    /* Use the cheaper reservation for repeated scalar reentry. Calls that
-    ** normally need managed admission avoid a speculative reservation. */
-    if (context->scalar_reentry) {
-      if ((expected & ~LUA_GATE_OFFER_MASK) == 0 && luaX_tryunmarked(L)) {
+    /* Reuse the existing ticket for a scalar callee. On ordinary unprotected
+    ** entry, spend a bounded ticket only after a previous scalar success. */
+    if (bounded || context->scalar_reentry) {
+      if (bounded ? !luaC_tracing(L) : luaX_tryobserve(L, LUA_MARK_ACTIVE)) {
         StkId func;
         const Proto *p = scalarcallee(L, nargs, nresults, &func);
-        int complete = p != NULL &&
-                       luaD_tryscalarcall(L, func, p, nargs, nresults, context);
-        if (complete) adjustresults(L, nresults);
-        luaX_leavebounded(L);
-        if (complete) return 1;
-        expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+        bounded = 1;
+        if (p != NULL) {
+          luaX_invalidatearguments(&L->stack_gate);
+          if (luaD_tryscalarcall(L, func, p, nargs, nresults, context)) {
+            adjustresults(L, nresults);
+            context->scalar_reentry = 1;
+            luaX_leavebounded(L);
+            return 1;
+          }
+        }
         probed = 1;
       }
       context->scalar_reentry = 0;
     }
-#if !defined(HARDSTACKTESTS)
-    if (!probed && status != NULL &&
-        luaD_trynativepcall(L, context, nargs, nresults, status)) return 1;
-#endif
     /* Stack-only reservations do not delay trace arming. Promote before
     ** executing anything that needs a managed slot or table storage. */
+    expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
     if (trygate(&L->stack_gate, &expected, LUA_GATE_STACK, __ATOMIC_SEQ_CST)) {
       int traced = 0;
-      luaX_claimstack(&L->stack_gate);
+      if (bounded) {
+        /* Advertise the full claim before retiring our bounded ticket. */
+        luaX_invalidatearguments(&L->stack_gate);
+        luaX_leavebounded(L);
+      }
+      else luaX_claimstack(&L->stack_gate);
       if (l_likely(!luaW_stopped(&G(L)->world))) {
         StkId func;
         const Proto *p = probed ? NULL : scalarcallee(L, nargs, nresults, &func);
@@ -731,6 +743,7 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults,
       if (l_unlikely(traced)) releaseaftertrace(L, LUA_GATE_STACK);
       else luaX_releasegate(L, LUA_GATE_STACK);
     }
+    else if (bounded) luaX_leavebounded(L);  /* a competing owner joins it */
   }
   owner = apienter(L, context);
   if (owner != 0) preparecall(L, cast(NativeStackContext *, owner));

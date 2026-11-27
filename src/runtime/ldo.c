@@ -1938,6 +1938,7 @@ static TStatus runnativeprotected (lua_State *L, struct NativeProtectedCall *cal
 }
 
 
+/* The caller already has a bounded claim. A rejected call leaves it held. */
 int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
                          int nargs, int nresults, TStatus *status) {
   LuaExecution *execution = context->execution;
@@ -1946,11 +1947,11 @@ int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
   StkId func;
   lu_byte allowhooks;
   ptrdiff_t top, olderr;
-  if ((execution != NULL && (execution->managed_depth != 0 ||
-                             execution->scheduler == NULL ||
-                             execution->trusted != NULL)) ||
-      !luaX_tryobserve(L, 0))
-    return 0;
+  lua_assert(execution == NULL || (execution->managed_depth == 0 &&
+             execution->scheduler != NULL && execution->trusted == NULL));
+  api_checkpop(L, nargs + 1);
+  func = L->top.p - (nargs + 1);
+  if (!checktag(s2v(func), LUA_VLCF)) return 0;
   caller = L->ci;
   if (L->errorJmp == NULL || L->errorJmp->context != context ||
       L->errorJmp->execution != execution ||
@@ -1962,12 +1963,9 @@ int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
       caller->next == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK ||
       getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
       context->limit == 0 || luaD_nativeposition() <= context->limit)
-    goto unavailable;
-  api_checkpop(L, nargs + 1);
+    return 0;
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
   api_checkresults(L, nargs, nresults);
-  func = L->top.p - (nargs + 1);
-  if (!checktag(s2v(func), LUA_VLCF)) goto unavailable;
   luaX_invalidatearguments(&L->stack_gate);
   call.function = fvalue(s2v(func));
   top = savestack(L, func);
@@ -1986,10 +1984,6 @@ int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
   if (*status == LUA_OK && !call.managed) luaX_leavebounded(L);
   else lua_unlock(L);
   return 1;
-
- unavailable:
-  luaX_leavebounded(L);
-  return 0;
 }
 #endif
 
