@@ -3536,36 +3536,54 @@ l_sinline int __attribute__((always_inline)) readshortslot (
   return readshorthash(g, table, nodes, key, result, tag, *sequence, NULL, 0);
 }
 
-/* A light C method is one atomic payload. In flat nonsplit storage, a
-** different key or value tag requires a new layout or split publication.
-** The fixed __index name and a light C function are also immune to weak
-** clearing, so this lookup can return the function without a GC read barrier. */
-int luaH_readlightindex (Table *table, TString *key, lua_CFunction *result) {
-  uint64_t layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+/* Check the actual key and tag, even when reusing a slot after an opaque
+** call. The hint carries no object or function pointer across that call. */
+l_sinline lua_CFunction lightindexslot (const Node *node, TString *key) {
+  if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) != ctb(LUA_VSHRSTR) ||
+      __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) != obj2gco(key) ||
+      __atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE) != LUA_VLCF) return NULL;
+  return __atomic_load_n(&node->u.value_.f, __ATOMIC_ACQUIRE);
+}
+
+/* A light C method is one atomic payload. Validate its flat nonsplit
+** layout and the receiver's binding after the load. The fixed key and a
+** light C function are immune to weak clearing. */
+lua_CFunction luaH_readlightindex (lua_State *L, Udata *object, unsigned *hint) {
+  uint32_t version = __atomic_load_n(&object->metatable_version, __ATOMIC_ACQUIRE);
+  Table *table;
+  TString *key;
+  uint64_t layout;
   const Node *nodes;
+  lua_CFunction function;
   unsigned size, index, steps;
-  if (layout & (1 | LUA_TABLE_SPLIT_VALUES)) return 0;
+  if (version & 1) return NULL;
+  table = __atomic_load_n(&object->metatable, __ATOMIC_ACQUIRE);
+  if (table == NULL) return NULL;
+  layout = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
+  if (layout & (1 | LUA_TABLE_SPLIT_VALUES)) return NULL;
   nodes = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
-  if (luaH_hashdir(nodes) != NULL || luaH_recordkeys(nodes) != NULL) return 0;
+  if (luaH_hashdir(nodes) != NULL || luaH_recordkeys(nodes) != NULL) return NULL;
+  key = G(L)->tmname[TM_INDEX];
   size = nodesteps(nodes);
+  index = *hint;
+  if (index < size && (function = lightindexslot(nodes + index, key)) != NULL)
+    goto found;
   index = lmod(key->hash, size);
   for (steps = 0; steps < 3 && index < size; steps++) {
     const Node *node = nodes + index;
     int next;
-    if (__atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE) == ctb(LUA_VSHRSTR) &&
-        __atomic_load_n(&node->u.key_val.gc, __ATOMIC_ACQUIRE) == obj2gco(key)) {
-      lua_CFunction function;
-      if (__atomic_load_n(&node->u.tt_, __ATOMIC_ACQUIRE) != LUA_VLCF) return 0;
-      function = __atomic_load_n(&node->u.value_.f, __ATOMIC_ACQUIRE);
-      if (!luaH_samelayout(table, layout)) return 0;
-      *result = function;
-      return 1;
-    }
+    if ((function = lightindexslot(node, key)) != NULL) goto found;
     next = __atomic_load_n(&node->u.next, __ATOMIC_ACQUIRE);
     if (next == 0) break;
     index += cast_uint(next);
   }
-  return 0;
+  return NULL;
+ found:
+  if (!luaH_samelayout(table, layout) ||
+      __atomic_load_n(&object->metatable_version, __ATOMIC_ACQUIRE) != version)
+    return NULL;
+  if (*hint != index) *hint = index;
+  return function;
 }
 
 int luaH_readshortstr (global_State *g, lua_State *L, Table *table, TString *key,

@@ -12,6 +12,7 @@ typedef struct LuaLoopFrame {
   const Instruction *entry;
   NativeStackContext *detached;
   unsigned bounded;
+  unsigned index_hint;
 } LuaLoopFrame;
 
 typedef unsigned (*LuaLoopCode)(LuaLoopFrame *frame);
@@ -36,15 +37,12 @@ LUAI_FUNC LuaLoopSite *luaJ_loopat (const Proto *p, int pc);
 LUAI_FUNC LuaLoopCode luaJ_prepare (lua_State *L, Proto *p,
                                     LuaLoopSite *site);
 LUAI_FUNC int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset);
-LUAI_FUNC int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
+LUAI_FUNC int luaD_loopfieldmethod (LuaLoopFrame *frame, StkId result,
                                      const TValue *object, const TValue *key,
                                      unsigned offset);
 #if !defined(HARDSTACKTESTS)
 LUAI_FUNC int luaD_tryloopcall (LuaLoopFrame *frame, StkId function,
                                unsigned offset);
-LUAI_FUNC int luaD_tryloopmethod (LuaLoopFrame *frame, StkId result,
-                                 const TValue *object, const TValue *key,
-                                 const TValue *method, const Instruction *at);
 #endif
 LUAI_FUNC int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                         unsigned char *code, size_t capacity);

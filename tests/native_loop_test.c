@@ -241,6 +241,17 @@ static int replace_userdata_field(lua_State *L) {
   return 1;
 }
 
+static int replace_userdata_metatable(lua_State *L) {
+  lua_createtable(L, 0, 32);
+  lua_pushcfunction(L, replacement_field);
+  lua_setfield(L, -2, "__index");
+  lua_pushboolean(L, 1);
+  lua_setfield(L, -2, "unrelated");
+  require(lua_setmetatable(L, 1));
+  lua_pushinteger(L, 2);
+  return 1;
+}
+
 static int userdata_reference(lua_State *L) {
   require(lua_getiuservalue(L, 1, 1) == LUA_TTABLE);
   field_calls++;
@@ -299,6 +310,16 @@ static void check_native_fields(lua_State *L) {
   require(lua_setmetatable(L, -2));
   require(lua_setmetatable(L, -2));
   lua_gc(L, LUA_GCCOLLECT);
+  lua_pushinteger(L, 100);
+  require(lua_pcall(L, 2, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == 299);
+
+  lua_pushvalue(L, 1);
+  lua_newuserdatauv(L, 1, 0);
+  lua_createtable(L, 0, 1);
+  lua_pushcfunction(L, replace_userdata_metatable);
+  lua_setfield(L, -2, "__index");
+  require(lua_setmetatable(L, -2));
   lua_pushinteger(L, 100);
   require(lua_pcall(L, 2, 1, 0) == LUA_OK);
   require(lua_tointeger(L, -1) == 299);

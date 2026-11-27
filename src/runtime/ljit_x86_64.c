@@ -343,7 +343,7 @@ static void readfield (Emitter *e, const Proto *p, unsigned pc,
   immediate(e, 1, cast(uintptr_t, &p->k[c]));
   emit(e, 0x41, 0xb8);        /* r8d = original instruction offset */
   word(e, pc);
-  call(e, cast(uintptr_t, luaV_loopfieldmethod), 1);
+  call(e, cast(uintptr_t, luaD_loopfieldmethod), 1);
   loadbase(e);
   opcodepc(e, pc + 1);
   exitif(e, NEGATIVE);         /* the completed call set a trap */
