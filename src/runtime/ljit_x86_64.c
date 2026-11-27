@@ -433,6 +433,9 @@ static void moveorload (Emitter *e, const Proto *p, Instruction ins) {
       storevalue(e, a);
       storetag(e, a, LUA_VNUMINT);
       break;
+    case OP_LOADTRUE: case OP_LOADFALSE:
+      storetag(e, a, GET_OPCODE(ins) == OP_LOADTRUE ? LUA_VTRUE : LUA_VFALSE);
+      break;
     case OP_LOADF: {
       double value = cast_num(GETARG_sBx(ins));
       uint64_t bits;
@@ -481,11 +484,23 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         backedge(&e, control, site->words, loop);
         continue;
       case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
+      case OP_LOADTRUE: case OP_LOADFALSE:
         moveorload(&e, p, ins);
         break;
       case OP_GETFIELD:
         readfield(&e, p, pc, a, b, c, site->bounded);
         continue;
+#if !defined(HARDSTACKTESTS)
+      case OP_CALL:
+        emit(&e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
+        argument(&e, 6, a);
+        indexarg(&e, 2, pc);
+        call(&e, cast(uintptr_t, luaD_tryloopcall), 1);
+        loadbase(&e);
+        opcodepc(&e, pc + 1);
+        exitif(&e, NEGATIVE);
+        continue;
+#endif
       case OP_GETUPVAL: case OP_GETTABUP:
       case OP_GETTABLE: case OP_GETI:
         readtable(&e, p, op, a, b, c);

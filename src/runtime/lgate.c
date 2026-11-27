@@ -396,8 +396,8 @@ static void publisharguments (lua_State *L, StkId func) {
 
 /* The loop owns the same stack through a storage ticket. The surrounding
 ** native activation already offers its managed slot and pins this carrier. */
-void luaW_publishloopframe (lua_State *L, StkId func) {
-  luaD_initframe(L, L->ci->next, func, CIST_C | (1 + 1),
+void luaW_publishloopframe (lua_State *L, StkId func, unsigned status) {
+  luaD_initframe(L, L->ci->next, func, CIST_C | status,
                  L->top.p + LUA_MINSTACK);
   publisharguments(L, func);
   luaX_leavesharedread(L);

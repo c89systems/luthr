@@ -333,6 +333,62 @@ static int call_many(lua_State *L) {
   return 0;
 }
 
+static int finish_loop_call(lua_State *L, int status, lua_KContext value) {
+  require(status == LUA_OK || status == LUA_YIELD);
+  lua_pushvalue(L, 1);
+  lua_pushinteger(L, (lua_Integer)value);
+  lua_call(L, 1, 0);
+  return 0;
+}
+
+static int loop_call(lua_State *L) {
+  lua_Integer value = luaL_checkinteger(L, 2);
+  require(lua_toboolean(L, 3));
+  if (value == 317 && lua_isyieldable(L)) {
+    lua_pushinteger(L, value);
+    return lua_yieldk(L, 1, (lua_KContext)value, finish_loop_call);
+  }
+  return finish_loop_call(L, LUA_OK, (lua_KContext)value);
+}
+
+static void check_native_calls(lua_State *L) {
+  static const lua_Integer expected_sum = 700 * 701 / 2;
+  const LClosure *closure;
+  lua_State *child;
+  int results;
+  require(luaL_dostring(L, "return function(call) "
+                           "local sum = 0; "
+                           "local function add(n) sum = sum + n end; "
+                           "for i=1,700 do call(add, i, true) end; "
+                           "return sum end") == LUA_OK);
+  closure = lua_topointer(L, 1);
+  require(closure != NULL && closure->p->sizeloops == 1);
+  lua_pushvalue(L, 1);
+  lua_pushcfunction(L, loop_call);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == expected_sum);
+  lua_pop(L, 1);
+  require(closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+
+  lua_pushvalue(L, 1);
+  require(luaL_dostring(
+              L, "return function(add,i,ok) assert(ok); add(i) end") == LUA_OK);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_tointeger(L, -1) == expected_sum);
+  lua_pop(L, 1);
+
+  child = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, child, 1);
+  lua_pushcfunction(child, loop_call);
+  require(lua_resume(child, L, 1, &results) == LUA_YIELD);
+  require(results == 1 && lua_tointeger(child, -1) == 317);
+  lua_pop(child, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_resume(child, L, 0, &results) == LUA_OK);
+  require(results == 1 && lua_tointeger(child, -1) == expected_sum);
+}
+
 static void check_native_callbacks(lua_State *L) {
   const LClosure *closure;
   lua_pushcfunction(L, call_many);
@@ -376,6 +432,8 @@ int main(int argc, char **argv) {
     check_native_fields(L);
   } else if (strcmp(argv[1], "native_callbacks") == 0) {
     check_native_callbacks(L);
+  } else if (strcmp(argv[1], "native_calls") == 0) {
+    check_native_calls(L);
   } else
     check_serial(L);
   lua_close(L);

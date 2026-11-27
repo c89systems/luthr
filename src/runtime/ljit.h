@@ -40,6 +40,8 @@ LUAI_FUNC int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
                                      const TValue *object, const TValue *key,
                                      unsigned offset);
 #if !defined(HARDSTACKTESTS)
+LUAI_FUNC int luaD_tryloopcall (LuaLoopFrame *frame, StkId function,
+                               unsigned offset);
 LUAI_FUNC int luaD_tryloopmethod (LuaLoopFrame *frame, StkId result,
                                  const TValue *object, const TValue *key,
                                  const TValue *method, const Instruction *at);

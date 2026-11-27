@@ -1938,7 +1938,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
     LuaLoopCode native;
     uintptr_t address;
     unsigned resume, control;
-    if (l_unlikely(trap || gethookmask(L) || ci->u.l.captures != 0))
+    if (l_unlikely(trap || gethookmask(L)))
       goto ordinaryloop;
     site = luaJ_loopat(p, cast_int(ip - code));
     control = GETARG_A(ip[site->words - 1]);

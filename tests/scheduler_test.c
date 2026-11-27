@@ -1713,6 +1713,16 @@ static int field_without_managed_slot(lua_State *L) {
   return 1;
 }
 
+static int call_loop_without_managed_slot(lua_State *L) {
+  lua_Integer index = luaL_checkinteger(L, 1);
+  require(lua_toboolean(L, 2));
+  if (index == 100)
+    blocked_leaf(L);
+  else if (index == 101)
+    native_operation_done();
+  return 0;
+}
+
 static int collect_after_native_operation(lua_State *L) {
   wait_for_native_operation(L);
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
@@ -3552,6 +3562,11 @@ int main(int argc, char **argv) {
         "local row=native_table_operation(); local sum=0; "
         "for i=1,200 do sum=sum+row.amount end; return sum-149",
         strcmp(argv[1], "native_loop_fields_gc") == 0);
+  else if (strcmp(argv[1], "native_loop_calls_without_slot") == 0)
+    native_operation_without_slot(f, call_loop_without_managed_slot,
+                                  "local call = native_table_operation; "
+                                  "for i=1,200 do call(i, true) end; return 51",
+                                  0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
