@@ -122,6 +122,36 @@ do
   assert(not ok and err:find('value expected', 1, true))
   ok, err = pcall(xpcall, callable)
   assert(not ok and err:find('function expected', 1, true))
+
+  local guarded_call = xpcall
+  local handled, closed = 0, 0
+  local function handler(value)
+    assert(value == token)
+    handled = handled + 1
+    return {value}
+  end
+  local function guarded()
+    local resource <close> = setmetatable({}, {__close=function(_, failure)
+      assert(failure ~= nil)
+      closed = closed + 1
+    end})
+    assert(debug.getinfo(2, 'f').func == guarded_call)
+    coroutine.yield(token)
+    error(token, 0)
+  end
+  thread = coroutine.create(function()
+    for _ = 1, 3 do
+      local succeeded, failure = guarded_call(guarded, handler)
+      assert(not succeeded and failure[1] == token)
+    end
+    return handled, closed
+  end)
+  for _ = 1, 3 do
+    local resumed, value = coroutine.resume(thread)
+    assert(resumed and value == token)
+  end
+  local completed, calls, cleanups = coroutine.resume(thread)
+  assert(completed and calls == 3 and cleanups == 3)
 end
 
 do

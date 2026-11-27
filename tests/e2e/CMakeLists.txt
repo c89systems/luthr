@@ -315,6 +315,14 @@ foreach(collector IN ITEMS incremental generational)
     "${collector}" 4 4 8 2048 1 0 0 default-allocator hash-seed=21)
   set_tests_properties(lua_scheduled_calendar_${collector}
     PROPERTIES LABELS "runtime;compatibility;parallel;memcheck" TIMEOUT 60)
+  foreach(workload IN ITEMS protected_scalar protected_state)
+    set(test lua_scheduled_${workload}_${collector})
+    add_test(NAME ${test} COMMAND scheduled_luthr
+      "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" "${workload}"
+      "${collector}" 4 4 8 2048 1 0 0 default-allocator hash-seed=21)
+    set_tests_properties(${test}
+      PROPERTIES LABELS "runtime;compatibility;parallel;memcheck" TIMEOUT 60)
+  endforeach()
 endforeach()
 
 set(parallel_arguments

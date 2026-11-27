@@ -1012,6 +1012,9 @@ int luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
   return 0;
 }
 
+static int tryvmprotected (lua_State *L, StkId func, unsigned status,
+                            int handler);
+
 l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
   if (checktag(s2v(func), LUA_VBCF)) {
     int n = luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1,
@@ -1020,6 +1023,13 @@ l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
       luaTK_checkstop(L);
       luaCP_checklimit(L);
       return n;
+    }
+  }
+  else {
+    lua_CFunction f = fvalue(s2v(func));
+    if (f == luaB_pcall || f == luaB_xpcall) {
+      int n = tryvmprotected(L, func, status, f == luaB_xpcall);
+      if (n >= 0) return n;
     }
   }
   return luaD_precallC(L, func, status, fvalue(s2v(func)), 1);
@@ -2201,13 +2211,89 @@ static int __attribute__((noinline)) scalarbody (lua_State *L, StkId args,
   return interpretscalar(L, args, p, result, ticks);
 }
 
+/* A one-instruction return can read its operand without a scratch frame. */
+l_sinline int runscalar (lua_State *L, StkId args, const Proto *p,
+                         TValue *scratch, const TValue **value,
+                         unsigned *ticks) {
+  *value = scratch;
+  if (p->scalar_ticks == 1) {
+    Instruction first = p->code[0];
+    if (GET_OPCODE(first) == OP_RETURN0) return 0;
+    *value = s2v(args + GETARG_A(first));
+    return 1;
+  }
+  return scalarbody(L, args, p, scratch, ticks);
+}
+
+/* No arguments move and no protection record is needed until the function
+** takes a path that can call, raise or yield. */
+static int scalarprotected (lua_State *L, StkId func, int nargs, int handler,
+                             TValue *values, unsigned *ticks) {
+  StkId callee = func + 1;
+  const Proto *p;
+  const TValue *value;
+  unsigned work;
+  int count;
+  if ((handler && (nargs < 2 || !ttisfunction(s2v(callee + 1)))) ||
+      !ttisLclosure(s2v(callee)) || L->policy != NULL || luaTK_hasstops(L) ||
+      getCcalls(L) >= LUAI_MAXCCALLS - 1)
+    return -1;
+  p = clLvalue(s2v(callee))->p;
+  work = p->scalar_ticks;
+  if (work == 0 || L->poll_remaining <= work ||
+      nargs - (1 + handler) < p->numparams ||
+      L->ci->next == NULL || L->ci->next->next == NULL ||
+      L->stack_last.p - (callee + nargs + 1 + handler) <=
+          (p->maxstacksize > LUA_MINSTACK ? p->maxstacksize : LUA_MINSTACK))
+    return -1;
+  count = runscalar(L, callee + 1 + handler, p, values + 1, &value, &work);
+  if (count < 0) return -1;
+  setbtvalue(values);
+  if (count != 0 && value != values + 1) setobj(L, values + 1, value);
+  *ticks = work;
+  return count + 1;
+}
+
+static int tryvmprotected (lua_State *L, StkId func, unsigned status,
+                            int handler) {
+  CallInfo *caller = L->ci;
+  StkId top = L->top.p;
+  int nargs = cast_int(top - func) - 1;
+  int n;
+  unsigned ticks;
+  TValue values[2];
+  if (!isLuacode(caller) || gethookmask(L) || capturesfrom(L, func) ||
+      nargs < 1 + handler ||
+      (handler && !ttisfunction(s2v(func + 2))) || caller->next == NULL ||
+      L->stack_last.p - top <= LUA_MINSTACK || luaW_ownsheap(L))
+    return -1;
+  n = scalarprotected(L, func, nargs, handler, values, &ticks);
+  if (n >= 0) {
+    int i, wanted = get_nresults(status);
+    if (l_unlikely(gethookmask(L))) return -1;
+    if (wanted == LUA_MULTRET) wanted = n;
+    for (i = 0; i < n && i < wanted; i++) setobj2s(L, func + i, values + i);
+    for (; i < wanted; i++) setnilvalue2s(func + i);
+    L->top.p = func + wanted;
+    L->poll_remaining -= ticks;
+    checkreturn(L);
+    return n;
+  }
+  /* Keep the logical frame for debug inspection, errors and yields.
+  ** Interpreter admission already owns the stack for the builtin body. */
+  luaD_initframe(L, caller->next, func, CIST_C | status, top + LUA_MINSTACK);
+  n = luaB_protectedowned(L, handler);
+  luaD_poscall(L, L->ci, n);
+  return n;
+}
+
 /* Until the result is committed, the ordinary call can restart with its
 ** stack untouched. */
 int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
                         int wanted, NativeStackContext *context) {
   const LuaPolicy *policy;
   TValue result;
-  const TValue *value = &result;
+  const TValue *value;
   unsigned ticks = p->scalar_ticks;
   int i, count;
   lua_assert(p->scalar_ticks != 0);
@@ -2227,16 +2313,8 @@ int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p, int nargs,
         context->execution->empty_policy == G(L))
       return 0;
   }
-  /* One instruction means the function returns without writing registers. */
-  if (p->scalar_ticks == 1) {
-    Instruction first = p->code[0];
-    count = GET_OPCODE(first) == OP_RETURN1;
-    if (count != 0) value = s2v(func + 1 + GETARG_A(first));
-  }
-  else {
-    count = scalarbody(L, func + 1, p, &result, &ticks);
-    if (count < 0) return 0;
-  }
+  count = runscalar(L, func + 1, p, &result, &value, &ticks);
+  if (count < 0) return 0;
   policy = L->policy;
   if (gethookmask(L) ||
       (policy != NULL &&

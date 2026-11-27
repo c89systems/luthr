@@ -55,6 +55,36 @@ local workloads={
     shared[id]=first
     return sum
   end,
+  protected_scalar=function()
+    local sum=0
+    local function read(value)
+      if value%8==0 then error(value,0) end
+      return value
+    end
+    for i=1,n do
+      local ok,value=pcall(read,i)
+      assert(ok==(i%8~=0))
+      sum=sum+value
+    end
+    return sum
+  end,
+  protected_state=function()
+    local state={calls=0}
+    local function update(value)
+      state.calls=state.calls+1
+      if value%8==0 then error(value,0) end
+      return value
+    end
+    local function handle(value) return -value end
+    local sum=0
+    for i=1,n do
+      local ok,value=xpcall(update,handle,i)
+      assert(ok==(i%8~=0))
+      sum=sum+(ok and value or -value)
+    end
+    assert(state.calls==n)
+    return sum
+  end,
   mixed_records=function(id)
     local row=shared[id]
     local sum=0

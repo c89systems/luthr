@@ -13,6 +13,8 @@ LUAI_FUNC int luaB_strlen (lua_State *L);
 LUAI_FUNC int luaB_utf8len (lua_State *L);
 LUAI_FUNC int luaB_mathtointeger (lua_State *L);
 LUAI_FUNC int luaB_osdifftime (lua_State *L);
+LUAI_FUNC int luaB_pcall (lua_State *L);
+LUAI_FUNC int luaB_xpcall (lua_State *L);
 LUAI_FUNC int luaB_assert (lua_State *L);
 LUAI_FUNC int luaB_select (lua_State *L);
 LUAI_FUNC int luaB_rawget (lua_State *L);
@@ -56,6 +58,7 @@ LUAI_FUNC int luaB_leafmath (unsigned builtin, const TValue *argument,
                              TValue *results);
 LUAI_FUNC int luaB_leafdifftime (const TValue *first, const TValue *second,
                                  TValue *result);
+LUAI_FUNC int luaB_protectedowned (lua_State *L, int handler);
 LUAI_FUNC int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
                               TValue *results, int wanted,
                               const Instruction *at, int *returned);

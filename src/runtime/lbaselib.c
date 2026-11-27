@@ -555,26 +555,17 @@ static int finishpcall (lua_State *L, int status, lua_KContext extra) {
   return results;
 }
 
-int luaB_pcall (lua_State *L) {
-  StkId base, slot;
-  int nargs, results;
+static int pcallowned (lua_State *L) {
+  StkId base = L->ci->func.p + 1, slot;
+  int nargs = cast_int(L->top.p - base) - 1;
   TStatus status;
-  lua_lock(L);
-  base = L->ci->func.p + 1;
-  if (l_unlikely(L->top.p == base)) {
-    lua_unlock(L);
-    return luaL_argerror(L, 1, "value expected");
-  }
-  nargs = cast_int(L->top.p - base) - 1;
   api_check(L, L->top.p < L->ci->top.p, "stack overflow");
   for (slot = L->top.p; slot > base; slot--)
     setobjs2s(L, slot, slot - 1);
   setbtvalue(s2v(base));
   api_incr_top(L);
   status = luaA_pcall(L, nargs, LUA_MULTRET, 0, 0, finishpcall);
-  results = protectedresults(L, APIstatus(status), 0);
-  lua_unlock(L);
-  return results;
+  return protectedresults(L, APIstatus(status), 0);
 }
 
 
@@ -582,17 +573,10 @@ int luaB_pcall (lua_State *L) {
 ** Keep the handler and original function below the protected call.
 ** The continuation can return the flag and results directly above them.
 */
-int luaB_xpcall (lua_State *L) {
-  StkId base, slot;
-  int nargs, results;
+static int xpcallowned (lua_State *L) {
+  StkId base = L->ci->func.p + 1, slot;
+  int nargs = cast_int(L->top.p - base) - 2;
   TStatus status;
-  lua_lock(L);
-  base = L->ci->func.p + 1;
-  if (l_unlikely(L->top.p - base < 2 || !ttisfunction(s2v(base + 1)))) {
-    lua_unlock(L);
-    return luaL_typeerror(L, 2, "function");
-  }
-  nargs = cast_int(L->top.p - base) - 2;
   api_check(L, L->ci->top.p - L->top.p >= 2, "stack overflow");
   for (slot = L->top.p; slot > base + 2; slot--)
     setobjs2s(L, slot + 1, slot - 1);
@@ -600,9 +584,37 @@ int luaB_xpcall (lua_State *L) {
   setobjs2s(L, base + 3, base);
   L->top.p += 2;
   status = luaA_pcall(L, nargs, LUA_MULTRET, 2, 2, finishpcall);
-  results = protectedresults(L, APIstatus(status), 2);
+  return protectedresults(L, APIstatus(status), 2);
+}
+
+int luaB_pcall (lua_State *L) {
+  int results;
+  lua_lock(L);
+  if (l_unlikely(L->top.p == L->ci->func.p + 1)) {
+    lua_unlock(L);
+    return luaL_argerror(L, 1, "value expected");
+  }
+  results = pcallowned(L);
   lua_unlock(L);
   return results;
+}
+
+int luaB_xpcall (lua_State *L) {
+  int results;
+  StkId base;
+  lua_lock(L);
+  base = L->ci->func.p + 1;
+  if (l_unlikely(L->top.p - base < 2 || !ttisfunction(s2v(base + 1)))) {
+    lua_unlock(L);
+    return luaL_typeerror(L, 2, "function");
+  }
+  results = xpcallowned(L);
+  lua_unlock(L);
+  return results;
+}
+
+int luaB_protectedowned (lua_State *L, int handler) {
+  return handler ? xpcallowned(L) : pcallowned(L);
 }
 
 
