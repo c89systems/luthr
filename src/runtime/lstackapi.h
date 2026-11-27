@@ -165,9 +165,8 @@ l_sinline void luaX_leavesharedread (lua_State *L) {
   global_State *g = G(L);
   uint64_t control;
   uintptr_t stack = cast(uintptr_t, L);
-  /* A waiter registers before testing the ticket. It must observe our
-  ** withdrawal or we must observe its request and wake it. */
-  __atomic_store_n(&L->stack_gate.values, 0, __ATOMIC_SEQ_CST);
+  /* The drain checks bounded readers itself, so this wake can be advisory. */
+  luaX_leavebounded(L);
   control = luaW_control(&g->world);
   if (l_unlikely(control & LUA_WORLD_STORAGE_WAIT))
     luaW_leave(g, stack, 0, control);

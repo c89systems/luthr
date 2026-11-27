@@ -1081,6 +1081,7 @@ static void *drain_native_retirement(void *argument) {
 static void native_retirement(lua_State *L) {
   struct fixture test = {0};
   pthread_t writer;
+  lua_State *other;
   Table *table;
   TValue value;
   lua_gc(L, LUA_GCSTOP);
@@ -1090,7 +1091,11 @@ static void native_retirement(lua_State *L) {
   test.writer = lua_newthread(L);
   lua_pushvalue(L, 1);
   lua_xmove(L, test.writer, 1);
+  other = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, other, 1);
   require(luaX_trysharedread(L));
+  require(luaX_trysharedread(other));
   table = hvalue(s2v(L->stack.p + 1));
   watched = table->node;
   returned = 0;
@@ -1101,7 +1106,12 @@ static void native_retirement(lua_State *L) {
     sched_yield();
   require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
   require(__atomic_load_n(&test.writer_done, __ATOMIC_ACQUIRE) == 0);
-  luaX_leavesharedread(L);
+  luaX_leavebounded(L);
+  require(!luaX_trysharedread(L));
+  require(luaH_readsharedname(other, table, "field", 5, &value));
+  require(ttisinteger(&value) && ivalue(&value) == 42);
+  require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 0);
+  luaX_leavebounded(other);
   require(pthread_join(writer, NULL) == 0);
   require(__atomic_load_n(&returned, __ATOMIC_RELAXED) == 1);
   watched = NULL;

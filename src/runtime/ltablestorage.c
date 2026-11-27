@@ -1,6 +1,7 @@
 /* Table buffers outlive every optimistic read that could see them. See lua.h. */
 #define LUA_CORE
 #include "lprefix.h"
+#include <sched.h>
 #include "ltablestorage.h"
 #include "lgc.h"
 #include "lmem.h"
@@ -144,9 +145,11 @@ void luaHS_report (LuaWorld *world, LuaParticipation *participant,
 
 /* world.mutex keeps the directory alive. Bounded reads can borrow shared
 ** layouts. Only collector payload work can borrow private layouts. */
-static uint64_t minimum (LuaWorld *world, int collector_only) {
+static uint64_t minimum (LuaWorld *world, int collector_only,
+                         uint64_t *shared) {
   LuaParticipation *participant;
   uint64_t result = luaW_epoch(luaW_control(world));
+  uint64_t readers = result;
   uint64_t grace = __atomic_load_n(&world->storage_grace, __ATOMIC_ACQUIRE);
   for (participant = world->participants; participant != NULL;
        participant = participant->next) {
@@ -160,8 +163,8 @@ static uint64_t minimum (LuaWorld *world, int collector_only) {
       LuaStackGate *stack = &participant->thread->stack_gate;
       uintptr_t gate = __atomic_load_n(&stack->word, __ATOMIC_SEQ_CST);
       uint64_t ticket = __atomic_load_n(&stack->values, __ATOMIC_SEQ_CST);
-      if ((ticket & LUA_GATE_SHARED_READ) && after(result, luaW_epoch(ticket)))
-        result = luaW_epoch(ticket);
+      if ((ticket & LUA_GATE_SHARED_READ) && after(readers, luaW_epoch(ticket)))
+        readers = luaW_epoch(ticket);
       if (gate & LUA_GATE_MANAGED) {
         uint64_t epoch = __atomic_load_n(&participant->storage_epoch,
                                          __ATOMIC_SEQ_CST);
@@ -170,6 +173,8 @@ static uint64_t minimum (LuaWorld *world, int collector_only) {
       }
     }
   }
+  if (shared != NULL) *shared = readers;
+  else if (after(result, readers)) result = readers;
   return result;
 }
 
@@ -208,8 +213,23 @@ static int canwait (lua_State *L) {
   return L->world_depth == 0 && luaW_scope(L).heap == 0;
 }
 
-/* Registration precedes the final atomic predicate scan. A publisher either
-** observes this waiter or its change is visible to that scan. */
+/* A drain blocks new shared scopes. Once only their bounded work holds up
+** reclamation, poll their tickets without keeping the world mutex held.
+** They can then withdraw with a release store and no mandatory wake. */
+static int waitgrace (LuaWorld *world, const LuaTableRetirement *block) {
+  for (;;) {
+    uint64_t shared;
+    uint64_t remaining = minimum(world, block->collector_only, &shared);
+    if (!after(remaining, block->epoch)) return 1;
+    if (after(shared, block->epoch)) return 0;
+    luaX_checksync(pthread_mutex_unlock(&world->mutex));
+    sched_yield();
+    luaX_checksync(pthread_mutex_lock(&world->mutex));
+  }
+}
+
+/* Managed participants and storage producers can park. Registration precedes
+** the final predicate scan so their notifications cannot be lost. */
 static void waitstorage (lua_State *L, const LuaTableRetirement *block) {
   LuaWorld *world = &G(L)->world;
   int collector_only = block != NULL && block->collector_only;
@@ -224,7 +244,7 @@ static void waitstorage (lua_State *L, const LuaTableRetirement *block) {
   luaW_deactivate(L);
   luaQ_wake(&world->changed, &world->waiters);
   if (block != NULL)
-    wait = !after(minimum(world, collector_only), block->epoch);
+    wait = waitgrace(world, block);
   else {
     wait = __atomic_load_n(&world->storage_busy, __ATOMIC_SEQ_CST) ||
       __atomic_load_n(&world->storage_workers, __ATOMIC_SEQ_CST) ||
@@ -258,7 +278,7 @@ static void destroywork (lua_State *L, LuaTableRetirement *head, int all) {
     if (!(checked & (1u << domain))) {
       luaHS_quiescent(L);
       luaX_checksync(pthread_mutex_lock(&world->mutex));
-      safe[domain] = minimum(world, block->collector_only);
+      safe[domain] = minimum(world, block->collector_only, NULL);
       luaX_checksync(pthread_mutex_unlock(&world->mutex));
       checked |= 1u << domain;
     }
