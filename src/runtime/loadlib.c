@@ -622,28 +622,55 @@ static int searcher_Croot (lua_State *L) {
 }
 
 
+static TString *packagekey (lua_State *L, unsigned index) {
+  return __atomic_load_n(&G(L)->package_keys[index], __ATOMIC_ACQUIRE);
+}
+
+static void initpackagekeys (lua_State *L) {
+  static const char *const names[LUA_PACKAGE_KEYS] = {
+    [LUA_PACKAGE_LOADED] = LUA_LOADED_TABLE,
+    [LUA_PACKAGE_PRELOAD] = LUA_PRELOAD_TABLE,
+    [LUA_PACKAGE_SEARCHERS] = "searchers",
+    [LUA_PACKAGE_PRELOAD_ORIGIN] = ":preload:"
+  };
+  unsigned i;
+  lua_lock(L);
+  for (i = 0; i < LUA_PACKAGE_KEYS; i++) {
+    if (packagekey(L, i) == NULL) {
+      LuaNativeRoot root;
+      TString *key, *expected = NULL;
+      luaR_pushroot(L, &root);
+      key = luaS_new(L, names[i]);
+      setsvalue(L, &root.value, key);
+      luaC_tracepointer(L, key);
+      __atomic_compare_exchange_n(&G(L)->package_keys[i], &expected, key, 0,
+                                  __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+      luaR_poproot(L, &root);
+    }
+  }
+  lua_unlock(L);
+}
+
 /* These lookups use private snapshots, not debug-visible stack temporaries.
 ** The caller owns the state; slow paths retain the ordinary metamethod rules. */
 static void getroot (lua_State *L, const LuaNativeRoot *object,
-                     LuaNativeRoot *key, LuaNativeRoot *result) {
+                     TValue *key, LuaNativeRoot *result) {
   lu_byte tag;
-  luaV_fastget(&object->value, &key->value, &result->value, luaH_get, tag);
+  luaV_fastget(&object->value, key, &result->value, luaH_get, tag);
   if (luaV_needsindex(tag)) {
     setnilvalue2s(L->top.p);
     api_incr_top(L);
-    luaV_finishget(L, &object->value, &key->value, L->top.p - 1);
+    luaV_finishget(L, &object->value, key, L->top.p - 1);
     luaR_setroot(L, result, s2v(L->top.p - 1));
     L->top.p--;
   }
 }
 
 static void getfieldroot (lua_State *L, const LuaNativeRoot *object,
-                          const char *field, LuaNativeRoot *result) {
-  LuaNativeRoot key;
-  luaR_pushroot(L, &key);
-  setsvalue(L, &key.value, luaS_new(L, field));
+                          TString *field, LuaNativeRoot *result) {
+  TValue key;
+  setsvalue(L, &key, field);  /* the VM retains all package keys */
   getroot(L, object, &key, result);
-  luaR_poproot(L, &key);
 }
 
 static void setroot (lua_State *L, const LuaNativeRoot *object,
@@ -651,7 +678,7 @@ static void setroot (lua_State *L, const LuaNativeRoot *object,
   luaV_settable(L, &object->value, &key->value, &value->value);
 }
 
-static void getregistryroot (lua_State *L, const char *field,
+static void getregistryroot (lua_State *L, TString *field,
                              LuaNativeRoot *result) {
   LuaNativeRoot registry;
   luaR_pushroot(L, &registry);
@@ -686,21 +713,19 @@ static int searcher_preload (lua_State *L) {
   size_t len;
   const char *name;
   unsigned index;
-  TString *data;
   lua_lock(L);
   name = luaL_ownedrootstring(L, 1, &roots[0], &len);
   for (index = 1; index < 4; ++index) luaR_pushroot(L, &roots[index]);
   setsvalue(L, &roots[1].value, modulekey(L, &roots[0], len));
-  getregistryroot(L, LUA_PRELOAD_TABLE, &roots[2]);
-  getroot(L, &roots[2], &roots[1], &roots[3]);
+  getregistryroot(L, packagekey(L, LUA_PACKAGE_PRELOAD), &roots[2]);
+  getroot(L, &roots[2], &roots[1].value, &roots[3]);
   if (ttisnil(&roots[3].value)) {
     lua_unlock(L);
     lua_pushfstring(L, "no field package.preload['%s']", name);
     return luaL_rootresult(L, roots, 4, 1);
   }
   pushroot(L, &roots[3]);
-  data = luaS_cachelstr(L, ":preload:", sizeof(":preload:") - 1);
-  setsvalue2s(L, L->top.p, data);
+  setsvalue2s(L, L->top.p, packagekey(L, LUA_PACKAGE_PRELOAD_ORIGIN));
   api_incr_top(L);
   luaC_checkGC(L);
   poproots(L, roots, 4);
@@ -712,11 +737,10 @@ static int searcher_preload (lua_State *L) {
 enum { RNAME, RKEY, RPACKAGE, RLOADED, RSEARCHERS, RLOADER, RDATA, RVALUE,
        REQUIRE_ROOTS };
 
-static int tryregistryfield (lua_State *L, const char *field, TValue *value) {
-  TString *key = luaS_trycachedname(L, field);
+static int tryregistryfield (lua_State *L, TString *key, TValue *value) {
   TValue registry;
   lu_byte tag;
-  return key != NULL && luaA_tryregistry(G(L), &registry) && ttistable(&registry) &&
+  return luaA_tryregistry(G(L), &registry) && ttistable(&registry) &&
          luaH_trygetshortstr(L, hvalue(&registry), key, value, &tag) &&
          !tagisempty(tag);
 }
@@ -728,7 +752,6 @@ static int tryregistryfield (lua_State *L, const char *field, TValue *value) {
 static int trypreload (lua_State *L, LuaNativeRoot *roots) {
   TValue *searcher = &roots[RLOADER].value;
   TValue preload, loader;
-  TString *data;
   lu_byte tag;
   if (!ttisCclosure(searcher) || !clCvalue(searcher)->managed ||
       clCvalue(searcher)->f != searcher_preload || !ttisshrstring(&roots[RKEY].value) ||
@@ -736,29 +759,29 @@ static int trypreload (lua_State *L, LuaNativeRoot *roots) {
       L->ci->next == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK + 2 ||
       L->policy != NULL || luaTK_hasstops(L) || luaW_ownsheap(L) || luaC_tracing(L))
     return 0;
-  if (!tryregistryfield(L, LUA_PRELOAD_TABLE, &preload) || !ttistable(&preload) ||
+  if (!tryregistryfield(L, packagekey(L, LUA_PACKAGE_PRELOAD), &preload) ||
+      !ttistable(&preload) ||
       !luaH_trygetshortstr(L, hvalue(&preload), tsvalue(&roots[RKEY].value),
                            &loader, &tag) || tagisempty(tag) || !ttisfunction(&loader))
     return 0;
-  data = luaS_trycachedshort(L, ":preload:", sizeof(":preload:") - 1);
-  if (data == NULL) return 0;
   luaC_condGC(L, return 0, (void)0);
   luaD_checknativestack(L);
   luaR_copyroot(L, &roots[RLOADER], &loader);
-  setsvalue(L, &roots[RDATA].value, data);
+  setsvalue(L, &roots[RDATA].value, packagekey(L, LUA_PACKAGE_PRELOAD_ORIGIN));
   return 1;
 }
 #endif
 
+/* Take the caller's stack ownership through a successful search. */
 static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
   lua_Unsigned i;
   unsigned work = 0;
   int top;
   int hasmessage = 0;
   luaL_Buffer msg;  /* to build error message */
-  lua_lock(L);
   top = cast_int(L->top.p - (L->ci->func.p + 1));
-  getfieldroot(L, &roots[RPACKAGE], "searchers", &roots[RSEARCHERS]);
+  getfieldroot(L, &roots[RPACKAGE], packagekey(L, LUA_PACKAGE_SEARCHERS),
+               &roots[RSEARCHERS]);
   if (l_unlikely(!ttistable(&roots[RSEARCHERS].value))) {
     lua_unlock(L);
     luaL_error(L, "'package.searchers' must be a table");
@@ -777,10 +800,8 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
       luaL_error(L, "module '%s' not found:%s", name, lua_tostring(L, -1));
     }
 #if !defined(HARDSTACKTESTS)
-    if (i == 1 && trypreload(L, roots)) {
-      lua_unlock(L);
+    if (i == 1 && trypreload(L, roots))
       return;
-    }
 #endif
     pushroot(L, &roots[RLOADER]);
     pushroot(L, &roots[RKEY]);
@@ -788,13 +809,16 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
     luaR_setroot(L, &roots[RLOADER], s2v(L->top.p - 2));
     luaR_setroot(L, &roots[RDATA], s2v(L->top.p - 1));
     L->top.p -= 2;
-    lua_unlock(L);
     if (ttisfunction(&roots[RLOADER].value)) {
-      if (hasmessage) lua_settop(L, top);  /* close the message buffer */
+      if (hasmessage) {
+        lua_unlock(L);
+        lua_settop(L, top);  /* close the message buffer */
+        lua_lock(L);
+      }
       return;
     }
-    else if (ttisstring(&roots[RLOADER].value) ||
-             cvt2str(&roots[RLOADER].value)) {
+    lua_unlock(L);
+    if (ttisstring(&roots[RLOADER].value) || cvt2str(&roots[RLOADER].value)) {
       size_t len;
       const char *s = luaL_roottostring(L, &roots[RLOADER], &len);
       if (!hasmessage) {
@@ -821,7 +845,8 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
 static int tryloaded (lua_State *L, TString *module, TValue *loaded,
                        TValue *value) {
   lu_byte tag;
-  if (luaC_tracing(L) || !tryregistryfield(L, LUA_LOADED_TABLE, loaded) ||
+  if (luaC_tracing(L) ||
+      !tryregistryfield(L, packagekey(L, LUA_PACKAGE_LOADED), loaded) ||
       !ttistable(loaded))
     return 0;
   return luaH_trygetshortstr(L, hvalue(loaded), module, value, &tag) &&
@@ -880,8 +905,8 @@ static int ll_require (lua_State *L) {
     }
   }
   if (!lookup) {
-    getregistryroot(L, LUA_LOADED_TABLE, &roots[RLOADED]);
-    getroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
+    getregistryroot(L, packagekey(L, LUA_PACKAGE_LOADED), &roots[RLOADED]);
+    getroot(L, &roots[RLOADED], &roots[RKEY].value, &roots[RVALUE]);
   }
   if (!l_isfalse(&roots[RVALUE].value)) {
     pushroot(L, &roots[RVALUE]);
@@ -889,9 +914,7 @@ static int ll_require (lua_State *L) {
     lua_unlock(L);
     return 1;
   }
-  lua_unlock(L);
   findloader(L, roots, name);
-  lua_lock(L);
   pushroot(L, &roots[RLOADER]);
   pushroot(L, &roots[RNAME]);
   pushroot(L, &roots[RDATA]);
@@ -900,7 +923,7 @@ static int ll_require (lua_State *L) {
   L->top.p--;
   if (!ttisnil(&roots[RVALUE].value))
     setroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
-  getroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
+  getroot(L, &roots[RLOADED], &roots[RKEY].value, &roots[RVALUE]);
   if (ttisnil(&roots[RVALUE].value)) {
     setbtvalue(&roots[RVALUE].value);
     setroot(L, &roots[RLOADED], &roots[RKEY], &roots[RVALUE]);
@@ -954,6 +977,7 @@ static void createsearcherstable (lua_State *L) {
 
 
 LUAMOD_API int luaopen_package (lua_State *L) {
+  initpackagekeys(L);
   luaL_getsubtable(L, LUA_REGISTRYINDEX, CLIBS);  /* create CLIBS table */
   lua_pop(L, 1);  /* will not use it now */
   luaL_newlib(L, pk_funcs);  /* create 'package' table */

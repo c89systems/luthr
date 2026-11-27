@@ -102,6 +102,7 @@ assert(hooked=='original preload' and calls==1 and returns==1)
 local lookups=0
 registry._PRELOAD=setmetatable({}, {__index=function(_,key)
   assert(key==name)
+  collectgarbage('collect')
   lookups=lookups+1
   return function(n,origin)
     assert(n==name and origin==':preload:')

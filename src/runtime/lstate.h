@@ -155,6 +155,10 @@ typedef struct LuaResultHistory {
 } LuaResultHistory;
 
 enum { LUA_FIELD_HINTS = 8 };
+enum {
+  LUA_PACKAGE_LOADED, LUA_PACKAGE_PRELOAD, LUA_PACKAGE_SEARCHERS,
+  LUA_PACKAGE_PRELOAD_ORIGIN, LUA_PACKAGE_KEYS
+};
 typedef struct LuaStringCache {
   uint64_t epoch;
   uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
@@ -694,6 +698,7 @@ typedef struct global_State {
   struct LuaAllocPage *trace_pages;  /* imported under trace_mutex */
   struct LuaAllocPage *sweep_pages[LUA_ALLOC_BINS];  /* pool mutex */
   struct LuaUserdataPools *userdata_pools;  /* published on first medium allocation */
+  TString *package_keys[LUA_PACKAGE_KEYS];  /* published when package opens */
 } global_State;
 
 

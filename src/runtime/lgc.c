@@ -615,9 +615,9 @@ void luaC_finishstrong (LuaTraceWork *work, GCObject *object,
 
 
 /*
-** mark metamethods for basic types
+** mark the VM's shared roots
 */
-static void markmt (global_State *g) {
+static void markglobalroots (global_State *g) {
   int i;
   LuaTaskRoot *task;
   LuaParticipation *participant;
@@ -640,6 +640,10 @@ static void markmt (global_State *g) {
   for (i=0; i < LUA_NUMTYPES; i++) {
     Table *mt = __atomic_load_n(&g->mt[i], __ATOMIC_ACQUIRE);
     markobjectN(g, mt);
+  }
+  for (i = 0; i < LUA_PACKAGE_KEYS; i++) {
+    TString *key = __atomic_load_n(&g->package_keys[i], __ATOMIC_ACQUIRE);
+    markobjectN(g, key);
   }
 }
 
@@ -838,7 +842,7 @@ static void restartcollection (lua_State *L, global_State *g, unsigned finish) {
   markobject(g, mainthread(g));
   marknativeframes(g);
   markvalue(g, &g->l_registry);
-  markmt(g);
+  markglobalroots(g);
 }
 
 /* }====================================================== */
@@ -2762,7 +2766,7 @@ void luaC_initialtrace (lua_State *L) {
     TValue registry;
     if (luaA_tryregistry(g, &registry)) markvalue(g, &registry);
   }
-  markmt(g);  /* mark global metatables */
+  markglobalroots(g);
 }
 
 /* Close roots whose owners can be paused across startup before making any

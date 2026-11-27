@@ -764,6 +764,7 @@ lua_State *luaE_newstate (lua_Alloc f, void *ud, unsigned seed, size_t budget) {
   g->managed_hook = NULL;
   g->callbacks = NULL;
   g->pipe_meta = NULL;
+  memset(g->package_keys, 0, sizeof(g->package_keys));
   luaA_initlock(&g->registry_access);
   luaA_initlock(&g->warning_access);
   luaA_initlock(&g->panic_access);
