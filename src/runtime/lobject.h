@@ -34,6 +34,7 @@ l_sinline void *luaA_lockowner (const LuaObjectLock *lock) {
 #define LUA_TUPVAL	LUA_NUMTYPES  /* upvalues */
 #define LUA_TPROTO	(LUA_NUMTYPES+1)  /* function prototypes */
 #define LUA_TDEADKEY	(LUA_NUMTYPES+2)  /* removed keys in tables */
+#define LUA_TDEADSTR	(LUA_NUMTYPES+3)  /* removed short key with its hash */
 
 
 
@@ -915,13 +916,16 @@ typedef struct Table {
 
 
 /*
-** Dead keys in tables have the tag DEADKEY but keep their original
-** gcvalue. This distinguishes them from regular keys but allows them to
+** Dead keys keep their original pointer bits without retaining the object.
+** This distinguishes them from regular keys but allows them to
 ** be found when searched in a special way. ('next' needs that to find
 ** keys removed from a table during a traversal.)
 */
 #define setdeadkey(node) __atomic_store_n(&(node)->u.key_tt, LUA_TDEADKEY, __ATOMIC_RELEASE)
-#define keyisdead(node)		(keytt(node) == LUA_TDEADKEY)
+l_sinline int keytagisdead (lu_byte tag) {
+  return tag == LUA_TDEADKEY || tag == LUA_TDEADSTR;
+}
+#define keyisdead(node)		keytagisdead(keytt(node))
 
 /* }================================================================== */
 

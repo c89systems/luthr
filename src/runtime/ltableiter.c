@@ -114,7 +114,7 @@ static int nexthashview (lua_State *L, Table *t, TValue *key, TValue *result,
         isempty(&value)) return -1;
     keytag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
     __atomic_load(&node->u.key_val, &val_(&nextkey), __ATOMIC_ACQUIRE);
-    if (keytag == LUA_TDEADKEY || keytag == LUA_VNIL || !cursorvalid(cursor) ||
+    if (keytagisdead(keytag) || keytag == LUA_VNIL || !cursorvalid(cursor) ||
         !luaH_samelayout(t, layout))
       return -1;
     settt_(&nextkey, keytag);

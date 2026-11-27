@@ -393,6 +393,124 @@ static void check_backed_transition(lua_State *L, int graph) {
   require(lua_rawgeti(L, 1, 1) == LUA_TNUMBER && lua_tointeger(L, -1) == 17);
 }
 
+static int reinsert_newindex(lua_State *L) {
+  require(lua_type(L, 1) == LUA_TTABLE && lua_type(L, 2) == LUA_TSTRING);
+  require(lua_tointeger(L, 3) == 41);
+  lua_pushvalue(L, 2);
+  lua_pushinteger(L, 42);
+  lua_rawset(L, 1);
+  return 0;
+}
+
+static void *reinsert_writer(void *argument) {
+  lua_State *L = argument;
+  for (unsigned i = 0; i < 1024; ++i) {
+    int type;
+    lua_pushnil(L);
+    lua_setfield(L, 1, "turnover");
+    lua_pushinteger(L, 42);
+    lua_setfield(L, 1, "turnover");
+    type = lua_getfield(L, 1, "turnover");
+    require(type == LUA_TNIL ||
+            (type == LUA_TNUMBER && lua_tointeger(L, -1) == 42));
+    lua_pop(L, 1);
+  }
+  return NULL;
+}
+
+static void check_hash_reinsert(lua_State *L) {
+  lua_State *first, *second;
+  pthread_t a, b;
+  Table *table;
+  Node *image;
+  uint64_t layout;
+  TString *key;
+  const TValue *slot;
+  unsigned mask, bucket, seen = 0;
+  char sibling[32];
+  lua_createtable(L, 0, 64);
+  table = (Table *)lua_topointer(L, 1);
+  mask = sizenode(table) - 1;
+  lua_pushliteral(L, "turnover");
+  key = tsvalue(s2v(L->top.p - 1));
+  bucket = key->hash & mask;
+  for (unsigned i = 0;; ++i) {
+    snprintf(sibling, sizeof(sibling), "sibling-%u", i);
+    lua_pushstring(L, sibling);
+    unsigned candidate = tsvalue(s2v(L->top.p - 1))->hash & mask;
+    lua_pop(L, 1);
+    if (candidate == bucket)
+      break;
+    require(i < 10000);
+  }
+  lua_pushinteger(L, 17);
+  lua_setfield(L, 1, "turnover");
+  lua_pushinteger(L, 23);
+  lua_setfield(L, 1, sibling);
+  first = lua_newthread(L);
+  second = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, first, 1);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, second, 1);
+  image = table->node;
+  slot = luaH_shortslot(image + bucket, key);
+  require(ttisinteger(slot) && ivalue(slot) == 17);
+  lua_pushnil(L);
+  lua_setfield(L, 1, "turnover");
+  require(lua_getfield(first, 1, "turnover") == LUA_TNIL);
+  lua_pop(first, 1);
+  /* A traversal can resume at the deleted key while the other colliding
+   * entry remains live. Reusing the key keeps the same hash layout. */
+  lua_pushvalue(L, 2);
+  if (lua_next(L, 1)) {
+    require(lua_tointeger(L, -1) == 23);
+    lua_pop(L, 2);
+  }
+  layout = table->sequence;
+  lua_createtable(L, 1, 0);
+  lua_pushinteger(L, 42);
+  lua_rawseti(L, -2, 1);
+  lua_setfield(L, 1, "turnover");
+  require(table->node == image && luaH_samelayout(table, layout));
+  require(luaH_shortslot(image + bucket, key) == slot);
+  require(lua_getfield(first, 1, "turnover") == LUA_TTABLE);
+  require(lua_rawgeti(first, -1, 1) == LUA_TNUMBER &&
+          lua_tointeger(first, -1) == 42);
+  lua_pop(first, 2);
+
+  lua_pushnil(L);
+  lua_setfield(L, 1, "turnover");
+  lua_createtable(L, 0, 1);
+  lua_pushcfunction(L, reinsert_newindex);
+  lua_setfield(L, -2, "__newindex");
+  lua_setmetatable(L, 1);
+  lua_pushinteger(L, 41);
+  lua_setfield(L, 1, "turnover");
+  require(lua_getfield(first, 1, "turnover") == LUA_TNUMBER &&
+          lua_tointeger(first, -1) == 42);
+  lua_pop(first, 1);
+  lua_pushnil(L);
+  lua_setmetatable(L, 1);
+
+  require(pthread_create(&a, NULL, reinsert_writer, first) == 0);
+  require(pthread_create(&b, NULL, reinsert_writer, second) == 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(pthread_join(a, NULL) == 0 && pthread_join(b, NULL) == 0);
+  lua_gc(L, LUA_GCCOLLECT);
+  lua_pushnil(L);
+  while (lua_next(L, 1)) {
+    require(++seen <= 2);
+    lua_pop(L, 1);
+  }
+  require(seen == 2);
+  require(lua_getfield(L, 1, sibling) == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 23);
+  lua_pop(L, 1);
+  require(lua_getfield(L, 1, "turnover") == LUA_TNUMBER &&
+          lua_tointeger(L, -1) == 42);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   pthread_t a, b, c;
@@ -412,6 +530,13 @@ int main(int argc, char **argv) {
   probe.second_parent = 1;
   lua_gc(L, strcmp(argv[1], "generational") == 0 ? LUA_GCGEN : LUA_GCINC);
   lua_gc(L, LUA_GCSTOP);
+  if (strcmp(argv[2], "hash_reinsert") == 0) {
+    check_hash_reinsert(L);
+    lua_close(L);
+    require(pthread_cond_destroy(&probe.changed) == 0);
+    require(pthread_mutex_destroy(&probe.mutex) == 0);
+    return 0;
+  }
   if (backed || strcmp(argv[2], "record_packed") == 0) {
     if (backed)
       check_backed_transition(L, probe.graph);

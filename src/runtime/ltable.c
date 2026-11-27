@@ -297,7 +297,7 @@ static int equalkeybits (const TValue *k1, lu_byte tag, Value bits, int deadok) 
     }
     else if (tagislcf(tag) && ttislcf(k1))
       return fvalue(k1) == luaO_cfunction(tag, bits);
-    else if (deadok && tag == LUA_TDEADKEY && iscollectable(k1)) {
+    else if (deadok && keytagisdead(tag) && iscollectable(k1)) {
       /* a collectable value can be equal to a dead key */
       return gcvalue(k1) == gcvalueraw(bits);
    }
@@ -1484,13 +1484,39 @@ static void newcheckedkey (Table *t, const TValue *key, TValue *value) {
 }
 
 
+/* A retired short key keeps its full hash in the empty payload. Even if
+** allocation reuses the old string address, matching the hash guarantees
+** that the new key belongs to the same chain. Never dereference the old key. */
+l_sinline int reusableshortkey (const Node *node, const TValue *key) {
+  return keytt(node) == LUA_TDEADSTR && ttisshrstring(key) &&
+         gckey(node) == gcvalue(key) && node->u.value_.bits == tsvalue(key)->hash;
+}
+
+static int restoreshortkey (Table *t, const TValue *key, TValue *value) {
+  Node *node = luaH_shortposition(t->node, tsvalue(key));
+  for (;;) {
+    int next;
+    if (reusableshortkey(node, key)) {
+      lua_assert(isempty(gval(node)));
+      __atomic_store_n(&node->u.key_tt, ctb(LUA_VSHRSTR), __ATOMIC_RELEASE);
+      setobj2t(cast(lua_State *, NULL), gval(node), value);
+      return 1;
+    }
+    next = gnext(node);
+    if (next == 0) return 0;
+    node += next;
+  }
+}
+
 static void luaH_newkey (lua_State *L, Table *t, const TValue *key,
                                                  TValue *value) {
   lua_assert(luaH_hashdir(t->node) == NULL);
   luaC_tracevalue(L, key);
   luaC_tracevalue(L, value);
   if (!ttisnil(value)) {  /* do not insert nil values */
-    int done = insertkey(L, t->node, key, value);
+    int done = (ttisshrstring(key) &&
+                (__atomic_load_n(&t->sharing, __ATOMIC_RELAXED) & LUA_OBJECT_SHARED) &&
+                restoreshortkey(t, key, value)) || insertkey(L, t->node, key, value);
     if (!done) {  /* could not find a free place? */
       rehash(L, t, key);  /* grow table */
       newcheckedkey(t, key, value);  /* insert key in grown table */
@@ -1821,24 +1847,28 @@ l_sinline int samepartversion (Table *table, uint64_t layout,
     __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) == revision);
 }
 
+enum { HASH_LIVE, HASH_CURSOR, HASH_WRITE };
+
 /* Admission retains the image and its immutable capacity. Compare scalar
 ** and interned keys as raw bits. Validate before comparing a candidate that
 ** might require dereferencing it, and bound every link to the retained image. */
 l_sinline int __attribute__((always_inline)) probehash (
     Table *table, Node *base, const TValue *key, lu_byte scalar, uint64_t layout,
-    LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision, int deadok) {
+    LuaTableSlot *slot, const LuaHashPart *part, uint64_t revision, int mode) {
   unsigned size = nodesteps(base);
   unsigned index, steps;
   if (scalar == LUA_VNUMINT) index = hashint(size, ivalue(key), part != NULL);
   else if (scalar == ctb(LUA_VSHRSTR)) index = lmod(tsvalue(key)->hash, size);
   else index = mainindex(base, size, key);
-  for (steps = 0; steps < size && (!deadok || steps < LUA_NEXT_PROBE_LIMIT);
+  for (steps = 0; steps < size &&
+       (mode != HASH_CURSOR || steps < LUA_NEXT_PROBE_LIMIT);
        steps++) {
     Node *node = base + index;
     lu_byte tag = __atomic_load_n(&node->u.key_tt, __ATOMIC_ACQUIRE);
     int next;
-    if (!scalar || tag == scalar ||
-        (deadok && scalar == ctb(LUA_VSHRSTR) && tag == LUA_TDEADKEY)) {
+    if (!scalar || tag == scalar || (scalar == ctb(LUA_VSHRSTR) &&
+        ((mode == HASH_CURSOR && keytagisdead(tag)) ||
+         (mode == HASH_WRITE && tag == LUA_TDEADSTR)))) {
       Value bits;
       int match;
       __atomic_load(&node->u.key_val, &bits, __ATOMIC_ACQUIRE);
@@ -1850,7 +1880,7 @@ l_sinline int __attribute__((always_inline)) probehash (
         match = bits.p == pvalue(key);
       else {
         if (!samepartversion(table, layout, part, revision)) return 0;
-        match = equalkeybits(key, tag, bits, deadok);
+        match = equalkeybits(key, tag, bits, mode == HASH_CURSOR);
       }
       if (match) {
         /* The result is an address in retained storage. Its caller checks
@@ -1919,7 +1949,8 @@ l_sinline int __attribute__((always_inline)) findhashslot (
     }
     base = __atomic_load_n(&part->nodes, __ATOMIC_ACQUIRE);
   }
-  return probehash(table, base, key, scalar, layout, slot, slot->part, revision, 0);
+  return probehash(table, base, key, scalar, layout, slot, slot->part, revision,
+                   writing ? HASH_WRITE : HASH_LIVE);
 }
 
 /* Storage admission retains the backing image until both the slot and the
@@ -2762,7 +2793,7 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   Node *node;
   lu_byte oldtag;
   uint64_t layout = sharedlayout(L, table, key);
-  int publish;
+  int publish, revive;
   if (layout & 1) return 0;
   publish = !published(value);
   if (publish && !ttistable(value)) return 0;
@@ -2793,17 +2824,26 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   node = slot.node;
   writer = claimslot(L, table, slot.payload, layout, retry);
   if (writer == NULL) return 0;
-  /* A different writer can retire the key between the lookup and our claim.
-  ** A dead key needs insertion through the layout path. A missing value
-  ** may also invoke __newindex under ordered metatable ownership. */
+  /* Revalidate a retired key under the row claim. A missing value can still
+  ** invoke __newindex under ordered metatable ownership. */
   oldtag = *slot.tag;
+  revive = node != NULL && keyisdead(node);
   if ((!raw && tagisempty(oldtag) && table->metatable != NULL) ||
-      (node != NULL && keyisdead(node)) ||
+      (revive && !reusableshortkey(node, key)) ||
       (publish && !luaA_tryshareleaf(L, hvalue(value))) ||
       (oldtag != rawtt(value) && (slot.part == NULL || !tagisempty(oldtag)) &&
        !luaH_beginsplit(table, writer, slot.payload, layout))) {
     luaH_releasewriter(L, table, writer);
     return 0;
+  }
+  if (l_unlikely(revive)) {
+    if (ttisnil(value)) {
+      luaH_releasewriter(L, table, writer);
+      return 1;
+    }
+    lua_assert(tagisempty(oldtag));
+    luaC_barrierback(L, obj2gco(table), key);
+    __atomic_store_n(&node->u.key_tt, ctb(LUA_VSHRSTR), __ATOMIC_RELEASE);
   }
   if (node != NULL) {
     luaC_tracevalue(L, key);
@@ -2820,10 +2860,17 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   else if (node == NULL && iscollectable(value))
     luaH_dirtyarray(table, cast_uint(luaH_array(table) - 1 - slot.payload), value);
   if (node != NULL) {
-    if (keyisshrstr(node)) invalidatemethod(L, table, keystrval(node));
     /* The row protects the value and tombstone publication. Leave the
     ** key bits and collision chain in place for an existing next cursor. */
-    if (ttisnil(value) && keyiscollectable(node)) setdeadkey(node);
+    if (keyisshrstr(node)) {
+      TString *name = keystrval(node);
+      invalidatemethod(L, table, name);
+      if (ttisnil(value)) {
+        __atomic_store_n(&node->u.value_.bits, name->hash, __ATOMIC_RELEASE);
+        __atomic_store_n(&node->u.key_tt, LUA_TDEADSTR, __ATOMIC_RELEASE);
+      }
+    }
+    else if (ttisnil(value) && keyiscollectable(node)) setdeadkey(node);
   }
   luaH_releasewriter(L, table, writer);
   return 1;
@@ -4105,7 +4152,7 @@ int luaH_hashresume (Table *t, const LuaHashDirectory *dir, const TValue *key,
   scalar = ttisshrstring(key) ? ctb(LUA_VSHRSTR) :
     ttisinteger(key) ? LUA_VNUMINT : 0;
   if (!probehash(t, cursor->nodes, key, scalar, layout, &slot, cursor->part,
-                 cursor->version, 1) || slot.node == NULL)
+                 cursor->version, HASH_CURSOR) || slot.node == NULL)
     return 0;
   cursor->index = capacity + cast_uint(slot.node - cursor->nodes) + 1;
   return 1;
