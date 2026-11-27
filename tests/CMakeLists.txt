@@ -509,7 +509,7 @@ target_link_options(table_writers_test PRIVATE -Wl,--wrap=luaA_begin
   -Wl,--wrap=luaH_elementstore -Wl,--undefined=luaH_elementstore
   -Wl,--wrap=luaH_recordstore -Wl,--wrap=luaQ_wait)
 foreach(collector IN ITEMS incremental generational)
-  foreach(kind IN ITEMS array hash array_graph hash_graph record record_graph
+  foreach(kind IN ITEMS array hash array_graph hash_graph hash_delete record record_graph
                         record_backed record_backed_graph record_packed collision length)
     add_test(NAME table_writers_${kind}_${collector}
       COMMAND table_writers_test ${collector} ${kind})

@@ -25,7 +25,7 @@ static struct {
   lua_State *first, *second, *layout;
   Table *table;
   int entered, release, second_done, layout_waiting, layout_done;
-  int hash, record, graph, collision, second_parent, length;
+  int hash, record, graph, deleting, collision, second_parent, length;
   lua_Integer second_key;
   unsigned first_slot;
   char hash_second[32];
@@ -83,7 +83,10 @@ void __wrap_luaQ_wait(lua_State *L, pthread_mutex_t *mutex,
 static void *first(void *name) {
   if (probe.graph)
     lua_createtable(probe.first, 1, 0);
-  lua_pushinteger(probe.first, 11);
+  if (probe.deleting)
+    lua_pushnil(probe.first);
+  else
+    lua_pushinteger(probe.first, 11);
   if (probe.graph)
     lua_rawseti(probe.first, -2, 1);
   if (probe.hash)
@@ -395,11 +398,13 @@ int main(int argc, char **argv) {
   pthread_t a, b, c;
   struct timespec deadline;
   unsigned i;
-  int backed;
+  int backed, changes_tag;
   require(argc == 3 && L != NULL);
   probe.record = strstr(argv[2], "record") != NULL;
   probe.hash = probe.record || strstr(argv[2], "hash") != NULL;
   probe.graph = strstr(argv[2], "graph") != NULL;
+  probe.deleting = strcmp(argv[2], "hash_delete") == 0;
+  changes_tag = probe.graph || probe.deleting;
   backed = strstr(argv[2], "backed") != NULL;
   probe.collision = strcmp(argv[2], "collision") == 0;
   probe.length = strcmp(argv[2], "length") == 0;
@@ -517,7 +522,7 @@ int main(int argc, char **argv) {
     require(lua_rawlen(L, 1) == 1024);
     check_length(L, 1, 1024);
   }
-  if (!probe.graph) {
+  if (!changes_tag) {
     /* A paused same-type store leaves the previous atomic payload readable. */
     require((probe.hash ? lua_getfield(L, 1, "field-1")
                         : lua_rawgeti(L, 1, 1)) == LUA_TNUMBER);
@@ -534,7 +539,7 @@ int main(int argc, char **argv) {
      * if a writer can change both its tag and payload. */
     require(!(probe.table->sequence & 1));
     require(probe.table->sequence & LUA_TABLE_WRITER_GROUP_MASK);
-    require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == probe.graph);
+    require(!!(probe.table->sequence & LUA_TABLE_SPLIT_VALUES) == changes_tag);
     if (probe.record) {
       TValue value;
       uintptr_t image = probe.table->arraydata;
@@ -547,9 +552,9 @@ int main(int argc, char **argv) {
                               probe.table->sequence));
       require(probe.graph ? ttistable(&value) : ttisinteger(&value));
     } else {
-      found = luaH_tracechunk(probe.graph ? G(L) : NULL, probe.table,
+      found = luaH_tracechunk(changes_tag ? G(L) : NULL, probe.table,
                               probe.first_slot, 1, probe.hash, edges);
-      if (probe.graph)
+      if (changes_tag)
         require(found == UINT_MAX);
       else if (probe.hash) {
         require(found == 1);
@@ -575,12 +580,23 @@ int main(int argc, char **argv) {
   require(!(probe.table->sequence & LUA_TABLE_WRITER_FLAGS));
   lua_gc(L, LUA_GCCOLLECT);
   lua_gc(L, LUA_GCCOLLECT);
-  require((probe.hash ? lua_getfield(L, 1, "field-1") : lua_rawgeti(L, 1, 1)) ==
-          (probe.graph ? LUA_TTABLE : LUA_TNUMBER));
-  if (probe.graph)
-    require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
-  require(lua_tointeger(L, -1) == 11);
-  lua_pop(L, probe.graph ? 2 : 1);
+  if (probe.deleting) {
+    require(lua_getfield(L, 1, "field-1") == LUA_TNIL);
+    lua_pop(L, 1);
+    lua_pushinteger(L, 11);
+    lua_setfield(L, 1, "field-1");
+    require(lua_getfield(L, 1, "field-1") == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 11);
+    lua_pop(L, 1);
+  } else {
+    require(
+        (probe.hash ? lua_getfield(L, 1, "field-1") : lua_rawgeti(L, 1, 1)) ==
+        (probe.graph ? LUA_TTABLE : LUA_TNUMBER));
+    if (probe.graph)
+      require(lua_rawgeti(L, -1, 1) == LUA_TNUMBER);
+    require(lua_tointeger(L, -1) == 11);
+    lua_pop(L, probe.graph ? 2 : 1);
+  }
   require((probe.hash
                ? lua_getfield(L, probe.second_parent, probe.hash_second)
                : lua_rawgeti(L, probe.second_parent, probe.second_key)) ==

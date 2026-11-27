@@ -2793,11 +2793,12 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   node = slot.node;
   writer = claimslot(L, table, slot.payload, layout, retry);
   if (writer == NULL) return 0;
-  /* Key retirement is a layout operation. A missing value may also invoke
-  ** __newindex; resolve that under ordinary ordered metatable ownership. */
+  /* A different writer can retire the key between the lookup and our claim.
+  ** A dead key needs insertion through the layout path. A missing value
+  ** may also invoke __newindex under ordered metatable ownership. */
   oldtag = *slot.tag;
   if ((!raw && tagisempty(oldtag) && table->metatable != NULL) ||
-      (node != NULL && ttisnil(value) && keyiscollectable(node)) ||
+      (node != NULL && keyisdead(node)) ||
       (publish && !luaA_tryshareleaf(L, hvalue(value))) ||
       (oldtag != rawtt(value) && (slot.part == NULL || !tagisempty(oldtag)) &&
        !luaH_beginsplit(table, writer, slot.payload, layout))) {
@@ -2818,8 +2819,12 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   }
   else if (node == NULL && iscollectable(value))
     luaH_dirtyarray(table, cast_uint(luaH_array(table) - 1 - slot.payload), value);
-  if (node != NULL && keyisshrstr(node))
-    invalidatemethod(L, table, keystrval(node));
+  if (node != NULL) {
+    if (keyisshrstr(node)) invalidatemethod(L, table, keystrval(node));
+    /* The row protects the value and tombstone publication. Leave the
+    ** key bits and collision chain in place for an existing next cursor. */
+    if (ttisnil(value) && keyiscollectable(node)) setdeadkey(node);
+  }
   luaH_releasewriter(L, table, writer);
   return 1;
 }

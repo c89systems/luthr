@@ -210,12 +210,14 @@ do
   local ordinary = {}
   ordinary.word, ordinary[{}], ordinary[-12] = 10, 11, 21
   ordinary[string.rep('k',96)] = 1
+  _G.deleted_iteration_table = ordinary
   sum = 0
   for key, value in next,ordinary do
     sum = sum + value
     ordinary[key] = nil
   end
   assert(sum == 43 and next(ordinary) == nil)
+  _G.deleted_iteration_table = nil
   local sparse = {}
   for i=1,400 do sparse[i]=i end
   for i=1,399 do sparse[i]=nil end
