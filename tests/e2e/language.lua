@@ -49,6 +49,22 @@ do
 end
 
 do
+  local expected = {
+    year = 1970, month = 1, day = 1, hour = 0, min = 0, sec = 0,
+    yday = 1, wday = 5, isdst = false,
+  }
+  local first, second = os.date('!*t', 0), os.date('!*t', 0)
+  assert(first ~= second and getmetatable(first) == nil)
+  first.year = 2000
+  collectgarbage('collect')
+  for key, value in pairs(expected) do
+    assert(rawget(second, key) == value)
+  end
+  for key in pairs(second) do assert(expected[key] ~= nil) end
+  assert(first.year == 2000 and second.year == 1970)
+end
+
+do
   local token = {}
   local callable = setmetatable({}, {__call=function(_, ...) return ... end})
   local many = {[1]=token,[96]=42}
