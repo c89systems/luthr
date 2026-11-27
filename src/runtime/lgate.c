@@ -353,33 +353,44 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
 }
 
 #if !defined(HARDSTACKTESTS)
-static uintptr_t argumentvalue (const TValue *value) {
-  uintptr_t address;
-  size_t kind;
-  if (ttisfulluserdata(value)) {
-    address = cast(uintptr_t, getudatamem(uvalue(value)));
-    kind = LUA_ARGUMENT_USERDATA;
-  }
-  else if (ttisstring(value)) {
-    address = cast(uintptr_t, getlstr(tsvalue(value), kind));
-    if (kind >= LUA_ARGUMENT_TAG) goto tag;
-  }
-  else {
-    if (ttisinteger(value)) {
-      lua_Unsigned n = l_castS2U(ivalue(value));
-      if (n + LUA_ARGUMENT_SIGN <= LUA_ARGUMENT_MASK)
-        return (cast(uintptr_t, LUA_ARGUMENT_INTEGER) << LUA_ARGUMENT_LENGTH_SHIFT) |
-               (n & LUA_ARGUMENT_MASK);
-    }
-    goto tag;
-  }
+l_sinline uintptr_t argumenttag (lu_byte tag) {
+  return (cast(uintptr_t, LUA_ARGUMENT_TAG) << LUA_ARGUMENT_LENGTH_SHIFT) | tag;
+}
+
+l_sinline uintptr_t argumentaddress (uintptr_t address, size_t kind,
+                                      lu_byte tag) {
   if ((address >> LUA_GATE_OFFER_SHIFT) != 0 ||
-      (address & ((1u << LUA_ARGUMENT_ALIGN_SHIFT) - 1u))) goto tag;
+      (address & ((1u << LUA_ARGUMENT_ALIGN_SHIFT) - 1u))) return argumenttag(tag);
   return (address >> LUA_ARGUMENT_ALIGN_SHIFT) |
          (cast(uintptr_t, kind) << LUA_ARGUMENT_LENGTH_SHIFT);
- tag:
-  return (cast(uintptr_t, LUA_ARGUMENT_TAG) << LUA_ARGUMENT_LENGTH_SHIFT) |
-         rawtt(value);
+}
+
+l_sinline uintptr_t argumentuserdata (Udata *object) {
+  return argumentaddress(cast(uintptr_t, getudatamem(object)),
+                         LUA_ARGUMENT_USERDATA, ctb(LUA_VUSERDATA));
+}
+
+l_sinline uintptr_t argumentshortstring (TString *string) {
+  return argumentaddress(cast(uintptr_t, getshrstr(string)), string->shrlen,
+                         ctb(LUA_VSHRSTR));
+}
+
+static uintptr_t argumentvalue (const TValue *value) {
+  if (ttisfulluserdata(value)) return argumentuserdata(uvalue(value));
+  if (ttisshrstring(value)) return argumentshortstring(tsvalue(value));
+  if (ttisstring(value)) {
+    size_t length;
+    uintptr_t address = cast(uintptr_t, getlstr(tsvalue(value), length));
+    if (length < LUA_ARGUMENT_TAG)
+      return argumentaddress(address, length, rawtt(value));
+  }
+  else if (ttisinteger(value)) {
+    lua_Unsigned n = l_castS2U(ivalue(value));
+    if (n + LUA_ARGUMENT_SIGN <= LUA_ARGUMENT_MASK)
+      return (cast(uintptr_t, LUA_ARGUMENT_INTEGER) << LUA_ARGUMENT_LENGTH_SHIFT) |
+             (n & LUA_ARGUMENT_MASK);
+  }
+  return argumenttag(rawtt(value));
 }
 
 /* The ordinary stack remains authoritative. Once it is exposed, a pure
@@ -396,10 +407,19 @@ static void publisharguments (lua_State *L, StkId func) {
 
 /* The loop owns the same stack through a storage ticket. The surrounding
 ** native activation already offers its managed slot and pins this carrier. */
-void luaW_publishloopframe (lua_State *L, StkId func, unsigned status) {
-  luaD_initframe(L, L->ci->next, func, CIST_C | status,
+void luaW_publishloopframe (lua_State *L, StkId func, int method) {
+  luaD_initframe(L, L->ci->next, func, CIST_C | (method + 1u),
                  L->top.p + LUA_MINSTACK);
-  publisharguments(L, func);
+  if (method) {
+    /* The generated field call has exactly these two published operands. */
+    lua_assert(L->top.p == func + 3 && ttisfulluserdata(s2v(func + 1)) &&
+               ttisshrstring(s2v(func + 2)));
+    __atomic_store_n(&L->stack_gate.arguments[0],
+        argumentuserdata(uvalue(s2v(func + 1))), __ATOMIC_RELEASE);
+    __atomic_store_n(&L->stack_gate.arguments[1],
+        argumentshortstring(tsvalue(s2v(func + 2))), __ATOMIC_RELEASE);
+  }
+  else publisharguments(L, func);
   luaX_leavesharedread(L);
 }
 

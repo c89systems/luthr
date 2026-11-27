@@ -1138,7 +1138,7 @@ l_sinline __attribute__((always_inline)) int callloopnative (
   caller->u.l.savedpc = at + 1;
   L->top.p = argtop;
   if (frame->detached != NULL)
-    luaW_publishloopframe(L, func, status);
+    luaW_publishloopframe(L, func, method);
   else {
     context = luaW_trynativeframe(L, func, status);
     if (context == NULL) {

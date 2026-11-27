@@ -129,7 +129,7 @@ LUAI_FUNC void luaD_calllightmethod (lua_State *L, StkId func,
 LUAI_FUNC NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
                                                    unsigned status);
 LUAI_FUNC void luaW_finishnativeframe (lua_State *L, NativeStackContext *context);
-LUAI_FUNC void luaW_publishloopframe (lua_State *L, StkId func, unsigned status);
+LUAI_FUNC void luaW_publishloopframe (lua_State *L, StkId func, int method);
 LUAI_FUNC int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
                                    int nargs, int nresults, TStatus *status);
 #endif
