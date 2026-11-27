@@ -540,6 +540,25 @@ do
   collectgarbage('collect')
   equal(assert(load('return 19'))(), 19)
 end
+do
+  local payload = ('reader-\0-boundary'):rep(361)
+  local source = ('--%s\nreturn %q'):format(('padding-'):rep(407), payload)
+  local compiled = assert(load(source, 'input-windows', 't'))
+  local function read_chunks(input, width, mode)
+    local i = 1
+    return assert(load(function()
+      if i > #input then return nil end
+      local chunk = input:sub(i, i + width - 1)
+      i = i + width
+      return chunk
+    end, 'input-windows', mode))
+  end
+  local binary = string.dump(compiled, true)
+  for _, width in ipairs({1023, 1024, 1025, 2051}) do
+    equal(read_chunks(source, width, 't')(), payload)
+    equal(read_chunks(binary, width, 'b')(), payload)
+  end
+end
 local hooks=0
 debug.sethook(function() hooks=hooks+1 end,'',7)
 local sum=0

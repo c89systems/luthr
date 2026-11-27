@@ -22,7 +22,9 @@
 #include "lzio.h"
 
 
-int luaZ_fill (ZIO *z) {
+enum { INPUT_POLL_BYTES = 1024 };
+
+static int readchunk (ZIO *z) {
   size_t size;
   lua_State *L = z->L;
   const char *buff;
@@ -31,13 +33,10 @@ int luaZ_fill (ZIO *z) {
   luaQ_entercall(L, &call);
   buff = z->reader(L, z->data, &size);
   luaQ_leavecall(L, &call);
-  if (buff == NULL || size == 0) {
-    z->n = 0; z->p = NULL;
-    return EOZ;
-  }
-  z->n = size - 1;  /* discount char being returned */
+  if (buff == NULL || size == 0) return 0;
+  z->remaining = size;
   z->p = buff;
-  return cast_uchar(*(z->p++));
+  return 1;
 }
 
 
@@ -46,60 +45,53 @@ void luaZ_init (lua_State *L, ZIO *z, lua_Reader reader, void *data, int managed
   z->reader = reader;
   z->data = data;
   z->n = 0;
+  z->remaining = 0;
   z->p = NULL;
   z->managed = managed;
-  z->work = 0;
+  z->budget = INPUT_POLL_BYTES;
 }
 
-/* Constructor state is visible to GC before a consumed-byte checkpoint parks. */
-static void readwork (ZIO *z, size_t size) {
-  while (size >= 1024u - z->work) {
-    size -= 1024u - z->work;
-    z->work = 0;
-    luaX_poll(z->L);
-  }
-  z->work += cast_uint(size);
-}
-
-int luaZ_getc (ZIO *z) {
+/* Expose only bytes before the next checkpoint. The checkpoint byte uses
+** the refill path, even when it is the last byte a parser consumes. */
+int luaZ_fill (ZIO *z) {
+  size_t count;
   int c;
-  if (z->n != 0) {
-    z->n--;
-    c = cast_uchar(*(z->p++));
+  lua_assert(z->n == 0);
+  if (z->remaining == 0 && !readchunk(z)) return EOZ;
+  c = cast_uchar(*z->p++);
+  if (z->budget == 1) {
+    --z->remaining;
+    z->budget = INPUT_POLL_BYTES;
+    luaX_poll(z->L);
+    return c;
   }
-  else c = luaZ_fill(z);
-  if (c != EOZ) readwork(z, 1);
+  count = z->budget - 1;
+  if (count > z->remaining) count = z->remaining;
+  z->n = count - 1;  /* first byte is the return value */
+  z->remaining -= count;
+  z->budget -= cast_uint(count);
   return c;
 }
 
 /* --------------------------------------------------------------- read --- */
 
-static int checkbuffer (ZIO *z) {
-  if (z->n == 0) {  /* no bytes in buffer? */
-    if (luaZ_fill(z) == EOZ)  /* try to read more */
-      return 0;  /* no more input */
-    else {
-      z->n++;  /* luaZ_fill consumed first byte; put it back */
-      z->p--;
-    }
-  }
-  return 1;  /* now buffer has something */
-}
-
-
 size_t luaZ_read (ZIO *z, void *b, size_t n) {
   while (n) {
     size_t m;
-    if (!checkbuffer(z))
-      return n;  /* no more input; return number of missing bytes */
+    if (z->n == 0) {
+      int c = luaZ_fill(z);
+      if (c == EOZ) return n;
+      *(unsigned char *)b = cast_uchar(c);
+      b = (char *)b + 1;
+      --n;
+      continue;
+    }
     m = (n <= z->n) ? n : z->n;  /* min. between n and z->n */
-    if (m > 1024u) m = 1024u;
     memcpy(b, z->p, m);
     z->n -= m;
     z->p += m;
     b = (char *)b + m;
     n -= m;
-    readwork(z, m);
   }
   return 0;
 }
@@ -107,12 +99,18 @@ size_t luaZ_read (ZIO *z, void *b, size_t n) {
 
 const void *luaZ_getaddr (ZIO* z, size_t n) {
   const void *res;
-  if (!checkbuffer(z))
+  size_t window;
+  if (z->n == 0 && z->remaining == 0 && !readchunk(z))
     return NULL;  /* no more input */
-  if (z->n < n)  /* not enough bytes? */
+  if (z->n + z->remaining < n)
     return NULL;  /* block not whole; cannot give an address */
   res = z->p;  /* get block address */
-  z->n -= n;  /* consume these bytes */
+  /* Fixed buffer slices do not contribute parser work. Refund any bytes
+  ** that had already been issued to the current read window. */
+  window = n < z->n ? n : z->n;
+  z->n -= window;
+  z->remaining -= n - window;
+  z->budget += cast_uint(window);
   z->p += n;
   return res;
 }

@@ -596,13 +596,21 @@ static const char *read_chunk(lua_State *L, void *context, size_t *size) {
 }
 
 static void borrowed_storage(int generational) {
+  static const char prefix[] = "local payload=[[";
+  static const char suffix[] =
+      "]]; local function add(x) return x+40 end; return add(2),payload";
+  enum { PAYLOAD_SIZE = 4097 };
+  char source[sizeof(prefix) - 1 + PAYLOAD_SIZE + sizeof(suffix) - 1];
   struct chunk dumped = {0}, image = {0};
   lua_State *L = luaL_newstate();
   unsigned pass;
   require(L != NULL);
   lua_gc(L, generational ? LUA_GCGEN : LUA_GCINC);
-  require(luaL_loadstring(L, "local function add(x) return x+40 end; "
-                             "return add(2)") == LUA_OK);
+  memcpy(source, prefix, sizeof(prefix) - 1);
+  memset(source + sizeof(prefix) - 1, 'a', PAYLOAD_SIZE);
+  memcpy(source + sizeof(prefix) - 1 + PAYLOAD_SIZE, suffix,
+         sizeof(suffix) - 1);
+  require(luaL_loadbuffer(L, source, sizeof(source), "=borrowed") == LUA_OK);
   require(lua_dump(L, save_chunk, &dumped, 0) == 0 && dumped.size != 0);
   lua_pop(L, 1);
   image.size = dumped.size;
@@ -612,14 +620,21 @@ static void borrowed_storage(int generational) {
   memcpy(image.bytes, dumped.bytes, image.size);
   require(mprotect(image.bytes, image.size, PROT_READ) == 0);
   for (pass = 0; pass < 2; pass++) {
+    const char *payload;
+    size_t len;
     image.read = 0;
     require(lua_load(L, read_chunk, &image, "=borrowed", "B") == LUA_OK);
     lua_lock(L);
     require(clLvalue(s2v(L->top.p - 1))->p->flag & PF_FIXED);
     lua_unlock(L);
-    require(lua_pcall(L, 0, 1, 0) == LUA_OK);
-    require(lua_tointeger(L, -1) == 42);
-    lua_pop(L, 1);
+    require(lua_pcall(L, 0, 2, 0) == LUA_OK);
+    require(lua_tointeger(L, -2) == 42);
+    payload = lua_tolstring(L, -1, &len);
+    require(payload != NULL && len == PAYLOAD_SIZE && len < image.size);
+    require((uintptr_t)payload >= (uintptr_t)image.bytes &&
+            (uintptr_t)payload - (uintptr_t)image.bytes <= image.size - len);
+    require(memcmp(payload, source + sizeof(prefix) - 1, len) == 0);
+    lua_pop(L, 2);
     lua_gc(L, LUA_GCCOLLECT);
     require(G(L)->GCretired == 0);
     /* Reloading the same read-only mapping also proves that retirement did
