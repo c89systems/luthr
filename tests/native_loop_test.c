@@ -480,6 +480,152 @@ static int loop_argument_width(lua_State *L) {
   return 0;
 }
 
+static unsigned result_calls;
+
+static int resume_loop_result(lua_State *L, int status,
+                              lua_KContext iteration) {
+  require(status == LUA_YIELD);
+  lua_pushinteger(L, (lua_Integer)iteration + 1);
+  return 1;
+}
+
+static int produce_loop_results(lua_State *L) {
+  int count = (int)luaL_checkinteger(L, 1);
+  lua_Integer iteration = luaL_checkinteger(L, 2);
+  result_calls++;
+  if (iteration == 257)
+    require(lua_checkstack(L, 256));
+  if (iteration == 401) {
+    if (count == -1) {
+      lua_pushnil(L);
+      lua_pushliteral(L, "native result rejected");
+      return 2;
+    }
+    if (count == -2) {
+      lua_pushinteger(L, iteration);
+      return lua_yieldk(L, 1, (lua_KContext)iteration, resume_loop_result);
+    }
+  }
+  if (count < 0)
+    count = 1;
+  require(lua_checkstack(L, count + 1));
+  for (int i = 1; i <= count; i++) {
+    if (i == count && count > LUA_MINSTACK) {
+      lua_createtable(L, 0, 1);
+      lua_pushinteger(L, iteration + i);
+      lua_setfield(L, -2, "value");
+      break;
+    }
+    lua_pushinteger(L, iteration + i);
+  }
+  return count;
+}
+
+static int consume_loop_results(lua_State *L) {
+  int count = lua_gettop(L) - 1;
+  lua_Integer iteration = luaL_checkinteger(L, 1);
+  if (iteration == 353 && count > LUA_MINSTACK)
+    lua_gc(L, LUA_GCCOLLECT);
+  for (int i = 1; i <= count; i++) {
+    if (i == count && count > LUA_MINSTACK) {
+      require(lua_getfield(L, i + 1, "value") == LUA_TNUMBER);
+      require(lua_tointeger(L, -1) == iteration + i);
+      lua_pop(L, 1);
+    } else {
+      require(lua_tointeger(L, i + 1) == iteration + i);
+    }
+  }
+  lua_pushinteger(L, count);
+  lua_pushinteger(L, iteration + count);
+  return 2;
+}
+
+static void check_native_results(lua_State *L) {
+  static const int widths[] = {0, 1, 3, LUA_MINSTACK + 5};
+  static const lua_Integer series = 600 * 601 / 2;
+  const LClosure *loop;
+  lua_State *child;
+  int results;
+  require(luaL_dostring(L, "return function(produce,consume,branch,count) "
+                           "local total = 0 "
+                           "for i=1,600 do "
+                           "  if branch then "
+                           "    local a,b = consume(i,produce(count,i)) "
+                           "    total = total+a+(b or 0) "
+                           "  else "
+                           "    local first,second = produce(count,i) "
+                           "    total = total+(second or i) "
+                           "  end "
+                           "end "
+                           "return total end") == LUA_OK);
+  loop = lua_topointer(L, 1);
+  require(loop != NULL && loop->p->sizeloops == 1);
+  for (unsigned w = 0; w < sizeof(widths) / sizeof(*widths); w++) {
+    int width = widths[w];
+    for (int consumer = 0; consumer < 4; consumer++) {
+      lua_Integer expected = series + 1200 * width;
+      result_calls = 0;
+      lua_pushvalue(L, 1);
+      lua_pushcfunction(L, produce_loop_results);
+      if (consumer == 1) {
+        require(luaL_dostring(L, "return function(i,...) "
+                                 "local n = select('#',...) "
+                                 "for j=1,n do "
+                                 "  local v=select(j,...) "
+                                 "  if type(v)=='table' then v=v.value end "
+                                 "  assert(v == i+j) "
+                                 "end "
+                                 "return n,i+n end") == LUA_OK);
+      } else if (consumer == 2) {
+        lua_getglobal(L, "assert");
+        expected = width == 0 ? series : 2 * series + 600;
+      } else if (consumer == 3) {
+        lua_pushnil(L);
+        expected = series + (width >= 2 ? 1200 : 0);
+      } else {
+        lua_pushcfunction(L, consume_loop_results);
+      }
+      lua_pushboolean(L, consumer != 3);
+      lua_pushinteger(L, width);
+      require(lua_pcall(L, 4, 1, 0) == LUA_OK);
+      require(result_calls == 600 && lua_tointeger(L, -1) == expected);
+      lua_pop(L, 1);
+    }
+  }
+  require(loop->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+
+  child = lua_newthread(L);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, child, 1);
+  lua_pushcfunction(child, produce_loop_results);
+  lua_pushcfunction(child, consume_loop_results);
+  lua_pushboolean(child, 1);
+  lua_pushinteger(child, -2);
+  result_calls = 0;
+  require(lua_resume(child, L, 4, &results) == LUA_YIELD);
+  require(results == 1 && lua_tointeger(child, -1) == 401);
+  lua_pop(child, 1);
+  lua_gc(L, LUA_GCCOLLECT);
+  require(lua_resume(child, L, 0, &results) == LUA_OK);
+  require(results == 1 && lua_tointeger(child, -1) == series + 1200);
+  require(result_calls == 600);
+  lua_pop(L, 1);
+
+  require(luaL_dostring(L, "return function(produce) "
+                           "local sum = 0 "
+                           "for i=1,600 do sum=sum+assert(produce(-1,i)) end "
+                           "return sum end") == LUA_OK);
+  loop = lua_topointer(L, -1);
+  require(loop != NULL && loop->p->sizeloops == 1);
+  lua_pushvalue(L, -1);
+  lua_pushcfunction(L, produce_loop_results);
+  result_calls = 0;
+  require(lua_pcall(L, 1, 1, 0) == LUA_ERRRUN);
+  require(result_calls == 401 && lua_isstring(L, -1));
+  require(strstr(lua_tostring(L, -1), "native result rejected") != NULL);
+  require(loop->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+}
+
 static void check_native_calls(lua_State *L) {
   static const lua_Integer expected_sum = 700 * 701 / 2;
   const LClosure *closure;
@@ -656,6 +802,11 @@ int main(int argc, char **argv) {
     check_native_capture_race(L);
   } else if (strcmp(argv[1], "native_calls") == 0) {
     check_native_calls(L);
+  } else if (strcmp(argv[1], "native_results_incremental") == 0 ||
+             strcmp(argv[1], "native_results_generational") == 0) {
+    lua_gc(L, strcmp(argv[1], "native_results_incremental") == 0 ? LUA_GCINC
+                                                                 : LUA_GCGEN);
+    check_native_results(L);
   } else
     check_serial(L);
   lua_close(L);

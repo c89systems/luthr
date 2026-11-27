@@ -452,8 +452,9 @@ void luaW_publishnativearguments (lua_State *L, StkId func) {
 
 /* The loop owns the same stack through a storage ticket. The surrounding
 ** native activation already offers its managed slot and pins this carrier. */
-void luaW_publishloopframe (lua_State *L, StkId func, int method) {
-  luaD_initframe(L, L->ci->next, func, CIST_C | (method + 1u),
+void luaW_publishloopframe (lua_State *L, StkId func, unsigned status,
+                             int method) {
+  luaD_initframe(L, L->ci->next, func, CIST_C | status,
                  L->top.p + LUA_MINSTACK);
   if (method) {
     /* The generated field call has exactly these two published operands. */

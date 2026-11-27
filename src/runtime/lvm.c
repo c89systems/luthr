@@ -1974,7 +1974,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
       resume = native(&frame);
 #if !defined(HARDSTACKTESTS)
       if (frame.detached != NULL) {
-        L->top.p = ci->top.p;
+        if (!luaP_isIT(ip[resume])) L->top.p = ci->top.p;
         ci->u.l.rootpc = NULL;  /* uncaptured registers are roots */
         ci->u.l.savedpc = ip + resume;
         luaX_leavesharedread(L);

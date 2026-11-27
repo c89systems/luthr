@@ -24,6 +24,11 @@ typedef struct Emitter {
   int failed;
 } Emitter;
 
+typedef struct NativeJump {
+  unsigned char *patch;
+  unsigned target;
+} NativeJump;
+
 static void writebytes (Emitter *e, const void *bytes, size_t count) {
   if (count > cast_sizet(e->end - e->next)) e->failed = 1;
   if (!e->failed) {
@@ -252,7 +257,8 @@ static int getfieldormethod (LuaLoopFrame *frame, TValue *dst,
     setobj(L, dst, &result);
     return 1;
   }
-  if (gethookmask(L) || luaTK_hasstops(L) || L->policy != NULL ||
+  if (frame->detached != NULL || gethookmask(L) ||
+      luaTK_hasstops(L) || L->policy != NULL ||
       luaC_tracing(L) || getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
       !luaA_tryindex(L, hvalue(receiver), key, &result, &method, &tag, 1) ||
       !ttisLclosure(&method))
@@ -314,15 +320,21 @@ static int getinteger (lua_State *L, TValue *dst, const TValue *table,
   return 1;
 }
 
+static int readcapture (lua_State *L, LClosure *closure, TValue *result,
+                         unsigned index);
+
+static int getupval (LuaLoopFrame *frame, TValue *dst, unsigned index) {
+  if (frame->detached != NULL)
+    return readcapture(frame->thread, frame->closure, dst, index);
+  luaF_loadupval(frame->thread, luaF_capturecell(frame->closure, index), dst);
+  return 1;
+}
+
 static int gettabup (LuaLoopFrame *frame, TValue *dst, unsigned index,
                      const TValue *key) {
   TValue table;
-  luaF_loadupval(frame->thread, luaF_capturecell(frame->closure, index), &table);
-  return getfield(frame->thread, dst, &table, key);
-}
-
-static void getupval (LuaLoopFrame *frame, TValue *dst, unsigned index) {
-  luaF_loadupval(frame->thread, luaF_capturecell(frame->closure, index), dst);
+  return getupval(frame, &table, index) &&
+         getfield(frame->thread, dst, &table, key);
 }
 
 /* A write may request a nursery poll. Charge the instruction first and
@@ -373,7 +385,7 @@ static void readtable (Emitter *e, const Proto *p, OpCode op,
       emit(e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
       argument(e, 6, a);          /* rsi = destination */
       indexarg(e, 2, b);          /* edx = upvalue number */
-      if (op == OP_GETUPVAL) call(e, cast(uintptr_t, getupval), 0);
+      if (op == OP_GETUPVAL) call(e, cast(uintptr_t, getupval), 1);
       else {
         immediate(e, 1, cast(uintptr_t, &p->k[c]));  /* rcx = key */
         call(e, cast(uintptr_t, gettabup), 1);
@@ -399,7 +411,7 @@ static void readtable (Emitter *e, const Proto *p, OpCode op,
 }
 
 static void readfield (Emitter *e, const Proto *p, unsigned pc,
-                       unsigned a, unsigned b, unsigned c, unsigned bounded) {
+                       unsigned a, unsigned b, unsigned c) {
   unsigned char *ordinary, *done;
   comparetag(e, b, ctb(LUA_VUSERDATA));
   ordinary = branch(e, NOT_EQUAL);
@@ -413,12 +425,6 @@ static void readfield (Emitter *e, const Proto *p, unsigned pc,
   exitif(e, NEGATIVE);         /* the completed call set a trap */
   done = branch(e, 0);
   linkbranch(e, ordinary, e->next);
-  if (bounded) {
-    emit(e, 0x49, 0x83, 0xbc, 0x24);  /* cmp qword [r12 + detached], 0 */
-    word(e, offsetof(LuaLoopFrame, detached));
-    emit(e, 0);
-    exitif(e, NOT_EQUAL);
-  }
   emit(e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
   argument(e, 6, a);          /* rsi = destination */
   argument(e, 2, b);          /* rdx = receiver */
@@ -490,7 +496,7 @@ static void leaveframe (Emitter *e) {
 static void moveorload (Emitter *e, const Proto *p, Instruction ins) {
   unsigned a = GETARG_A(ins);
   switch (GET_OPCODE(ins)) {
-    case OP_MOVE: {
+    case OP_MOVE: case OP_TESTSET: {
       unsigned b = GETARG_B(ins);
       loadvalue(e, b);
       emit(e, 0x41, 0x0f, 0xb6, 0x95);  /* movzx edx, byte [tag] */
@@ -536,6 +542,9 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
   const Instruction *body = p->code + site->pc;
   unsigned pc, last = site->words - 1, control = GETARG_A(body[last]);
   unsigned char *loop;
+  unsigned char *positions[LUA_LOOP_MAX_WORDS] = {NULL};
+  NativeJump jumps[LUA_LOOP_MAX_WORDS];
+  unsigned njumps = 0;
   _Static_assert(sizeof(lua_Integer) == 8 && sizeof(lua_Number) == 8,
                  "x86 loop primitives implement the 64-bit Lua number model");
   entryframe(&e);
@@ -550,6 +559,7 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
     unsigned a = GETARG_A(ins);
     /* Some instructions use the same bit positions in a different format. */
     unsigned b = getarg(ins, POS_B, SIZE_B), c = getarg(ins, POS_C, SIZE_C);
+    positions[pc] = e.next;
     beginstep(&e, pc);
     switch (op) {
       case OP_FORLOOP:
@@ -560,14 +570,39 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         moveorload(&e, p, ins);
         break;
       case OP_GETFIELD:
-        readfield(&e, p, pc, a, b, c, (site->flags & LUA_LOOP_BOUNDED) != 0);
+        readfield(&e, p, pc, a, b, c);
+        continue;
+      case OP_TEST: case OP_TESTSET: {
+        unsigned source = op == OP_TESTSET ? b : a;
+        int truthy = GETARG_k(ins);
+        unsigned char *nil, *skip;
+        comparetag(&e, source, LUA_VNIL);
+        nil = branch(&e, EQUAL);
+        comparetag(&e, source, LUA_VFALSE);
+        skip = branch(&e, truthy ? EQUAL : NOT_EQUAL);
+        if (!truthy) linkbranch(&e, nil, e.next);
+        if (op == OP_TESTSET) moveorload(&e, p, ins);
+        charge(&e);
+        ++pc;  /* the conditional's following JMP */
+        jumps[njumps++] = (NativeJump){branch(&e, 0),
+          cast_uint(cast_int(pc) + 1 + GETARG_sJ(body[pc]))};
+        if (truthy) linkbranch(&e, nil, e.next);
+        linkbranch(&e, skip, e.next);
+        charge(&e);
+        continue;
+      }
+      case OP_JMP:
+        charge(&e);
+        jumps[njumps++] = (NativeJump){branch(&e, 0),
+          cast_uint(cast_int(pc) + 1 + GETARG_sJ(ins))};
         continue;
 #if !defined(HARDSTACKTESTS)
       case OP_CALL:
         emit(&e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
         argument(&e, 6, a);
         indexarg(&e, 2, pc);
-        call(&e, cast(uintptr_t, luaD_tryloopcall), 1);
+        call(&e, cast(uintptr_t, b != 0 && c == 1 ? luaD_tryloopcall
+                                                 : luaD_tryloopresults), 1);
         loadbase(&e);
         opcodepc(&e, pc + 1);
         exitif(&e, NEGATIVE);
@@ -609,6 +644,10 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         return 0;
     }
     charge(&e);
+  }
+  for (pc = 0; pc < njumps; pc++) {
+    lua_assert(jumps[pc].target <= last && positions[jumps[pc].target] != NULL);
+    linkbranch(&e, jumps[pc].patch, positions[jumps[pc].target]);
   }
   for (pc = 0; pc < e.nexits; pc++)
     linkbranch(&e, e.exits[pc], e.next);
@@ -671,11 +710,6 @@ static int stringlength (TValue *result, const TValue *value) {
   setivalue(result, cast(lua_Integer, tsslen(tsvalue(value))));
   return 1;
 }
-
-typedef struct NativeJump {
-  unsigned char *patch;
-  unsigned target;
-} NativeJump;
 
 /* The call reserves a whole straight-line body's poll budget. Charge actual
 ** instructions in r15d and publish it when the still-live frame returns. */

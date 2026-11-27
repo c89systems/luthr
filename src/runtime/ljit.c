@@ -13,7 +13,6 @@
 
 enum {
   JIT_MIN_WORDS = 3,
-  JIT_MAX_WORDS = 64,
   JIT_HOT = 64,
   JIT_CODE_LIMIT = 2 * 1024 * 1024
 };
@@ -35,10 +34,11 @@ static int validconstant (const Proto *p, int index, int key) {
 static int loopentry (const Proto *p, int end, unsigned *bounded) {
   Instruction branch = p->code[end];
   int span, start, pc, control;
-  unsigned fields = 0, calls = 0, stackonly = 1;
+  unsigned fields = 0, calls = 0, results = 0, computes = 0, stackonly = 1;
+  uint64_t entries = 0, targets = 0, openinputs = 0;
   if (GET_OPCODE(branch) != OP_FORLOOP || end + 1 >= p->sizecode) return -1;
   span = GETARG_Bx(branch);
-  if (span < JIT_MIN_WORDS || span > JIT_MAX_WORDS || span > end + 1)
+  if (span < JIT_MIN_WORDS || span > LUA_LOOP_MAX_WORDS || span > end + 1)
     return -1;
   start = end + 1 - span;
   control = GETARG_A(branch);
@@ -53,9 +53,11 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
     OpCode op = GET_OPCODE(ins);
     int a = GETARG_A(ins);
     unsigned dispatch = p->dispatch[pc].opcode;
-    if (a >= p->maxstacksize ||
+    entries |= UINT64_C(1) << (pc - start);
+    if ((op != OP_JMP && a >= p->maxstacksize) ||
         (dispatch >= NUM_OPCODES && dispatch <= LUA_DISPATCH_BEFORE_PAIRS) ||
-        (op != OP_SETFIELD && a >= control && a <= control + 2))
+        (op != OP_SETFIELD && op != OP_JMP &&
+         a >= control && a <= control + 2))
       return -1;
     switch (op) {
       case OP_LOADI: case OP_LOADF: case OP_LOADTRUE: case OP_LOADFALSE:
@@ -67,7 +69,6 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
         if (GETARG_B(ins) >= p->maxstacksize) return -1;
         break;
       case OP_GETUPVAL: case OP_GETTABUP:
-        stackonly = 0;
         if (GETARG_B(ins) >= p->sizeupvalues ||
             (op == OP_GETTABUP && !validconstant(p, GETARG_C(ins), 1)))
           return -1;
@@ -84,12 +85,38 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
 #if defined(HARDSTACKTESTS)
         return -1;
 #else
-        if (GETARG_B(ins) == 0 || GETARG_C(ins) != 1 ||
-            a <= control + 2 || a + GETARG_B(ins) > p->maxstacksize)
+        if (a <= control + 2 || a + GETARG_B(ins) > p->maxstacksize ||
+            a + GETARG_C(ins) > p->maxstacksize + 1 ||
+            GETARG_C(ins) > LUA_MINSTACK + 1)
           return -1;
-        calls = 1;
+        if (GETARG_B(ins) == 0) {
+          Instruction producer;
+          if (pc == start) return -1;
+          producer = p->code[pc - 1];
+          if (GET_OPCODE(producer) != OP_CALL || GETARG_C(producer) != 0 ||
+              GETARG_A(producer) <= a) return -1;
+          openinputs |= UINT64_C(1) << (pc - start);
+        }
+        if (GETARG_C(ins) == 0 &&
+            (pc + 1 == end || GET_OPCODE(p->code[pc + 1]) != OP_CALL ||
+             GETARG_B(p->code[pc + 1]) != 0)) return -1;
+        calls++;
+        results |= GETARG_C(ins) != 1;
         break;
 #endif
+      case OP_TEST: case OP_TESTSET: case OP_JMP: {
+        int target;
+        if (op != OP_JMP) {
+          if ((op == OP_TESTSET && GETARG_B(ins) >= p->maxstacksize) ||
+              ++pc >= end || GET_OPCODE(p->code[pc]) != OP_JMP) return -1;
+          targets |= UINT64_C(1) << (pc + 1 - start);
+          ins = p->code[pc];
+        }
+        target = pc + 1 + GETARG_sJ(ins);
+        if (target <= pc || target > end) return -1;
+        targets |= UINT64_C(1) << (target - start);
+        break;
+      }
       case OP_SETFIELD:
         stackonly = 0;
         if (!validconstant(p, GETARG_B(ins), 1) ||
@@ -124,11 +151,17 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
               (!ttisinteger(value) || ivalue(value) <= 0))
             return -1;
         }
+        computes = 1;
         pc++;  /* arithmetic reaches this instruction only on a side exit */
       }
     }
   }
+  entries |= UINT64_C(1) << (end - start);  /* the FORLOOP back edge */
+  if (targets & (~entries | openinputs)) return -1;
   if (calls && !stackonly) return -1;
+  /* A loop that just forwards one native result adds a native transition
+  ** without doing any computation between calls. */
+  if (results && calls == 1 && !fields && !computes) return -1;
   if (bounded != NULL) *bounded = (fields || calls) && stackonly;
   return start;
 }

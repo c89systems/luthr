@@ -1903,7 +1903,8 @@ static int call_loop_without_managed_slot(lua_State *L) {
     require(lua_gettop(L) == 2 && lua_tointeger(L, 1) == index);
   } else if (index == 101)
     native_operation_done();
-  return 0;
+  lua_settop(L, 1);
+  return 1;
 }
 
 static int collect_after_native_operation(lua_State *L) {
@@ -3789,12 +3790,17 @@ int main(int argc, char **argv) {
         "for i=1,200 do sum=sum+row.amount end; return sum-149",
         strcmp(argv[1], "native_loop_fields_gc") == 0);
   else if (strcmp(argv[1], "native_loop_calls_without_slot") == 0 ||
-           strcmp(argv[1], "native_loop_calls_gc") == 0)
-    native_operation_without_slot(f, call_loop_without_managed_slot,
-                                  "local call = native_table_operation; "
-                                  "for i=1,200 do call(i, true) end; return 51",
-                                  strcmp(argv[1], "native_loop_calls_gc") == 0);
-  else if (strcmp(argv[1], "yield") == 0)
+           strcmp(argv[1], "native_loop_calls_gc") == 0) {
+    int gc = strcmp(argv[1], "native_loop_calls_gc") == 0;
+    const char *source =
+        gc ? "local call = native_table_operation; local sum=0; "
+             "for i=1,200 do sum=sum+assert(call(i,true)) end; "
+             "return sum == 20100 and 51 or 0"
+           : "local call = native_table_operation; "
+             "for i=1,200 do call(i, true) end; return 51";
+    native_operation_without_slot(f, call_loop_without_managed_slot, source,
+                                  gc);
+  } else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
     native_saturation(f, 0, 0);

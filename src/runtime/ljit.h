@@ -19,6 +19,7 @@ typedef unsigned (*LuaLoopCode)(LuaLoopFrame *frame);
 typedef unsigned (*LuaCallCode)(lua_State *L, StkId base, LClosure *closure);
 
 enum { LUA_LOOP_COLD, LUA_LOOP_BUILDING, LUA_LOOP_UNAVAILABLE };
+enum { LUA_LOOP_MAX_WORDS = 64 };
 enum { LUA_NATIVE_CALL_WORDS = 32 };
 /* Managed call bodies can be replayed because they only read shared state. */
 enum { LUA_LOOP_BOUNDED = 1, LUA_CALL_READS_STORAGE = 2, LUA_CALL_MANAGED = 4 };
@@ -44,6 +45,8 @@ LUAI_FUNC int luaD_loopfieldmethod (LuaLoopFrame *frame, const TValue *object,
 #if !defined(HARDSTACKTESTS)
 LUAI_FUNC int luaD_tryloopcall (LuaLoopFrame *frame, StkId function,
                                unsigned offset);
+LUAI_FUNC int luaD_tryloopresults (LuaLoopFrame *frame, StkId function,
+                                  unsigned offset);
 #endif
 LUAI_FUNC int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                         unsigned char *code, size_t capacity);
