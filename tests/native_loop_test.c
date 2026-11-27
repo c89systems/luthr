@@ -4,6 +4,7 @@
 #include "lualib.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -434,6 +435,80 @@ static void check_native_callbacks(lua_State *L) {
   closure = lua_topointer(L, -1);
   require(closure != NULL && closure->p->nativecall != NULL);
   require(closure->p->nativecall->entry > LUA_LOOP_UNAVAILABLE);
+  require(luaL_dostring(L,
+                        "collectgarbage('stop'); "
+                        "local value, calls = 0, 0; "
+                        "function overwrite(nextvalue) "
+                        "  calls=calls+1; value=nextvalue "
+                        "end; "
+                        "call_many(overwrite, 31, 400); "
+                        "local weak=setmetatable({}, {__mode='v'}); "
+                        "do local old={}; value=old; weak[1]=old end; "
+                        "call_many(overwrite, 41, 1); "
+                        "collectgarbage('collect'); "
+                        "assert(value==41 and calls==401 and weak[1]==nil)") ==
+          LUA_OK);
+}
+
+static pthread_barrier_t capture_start;
+
+static int start_capture_race(lua_State *L) {
+  (void)L;
+  int status = pthread_barrier_wait(&capture_start);
+  require(status == 0 || status == PTHREAD_BARRIER_SERIAL_THREAD);
+  return 0;
+}
+
+static void check_native_capture_race(lua_State *L) {
+  LuaSchedulerConfig config = {
+      .slots = 2, .carriers = 4, .native_limit = 2, .callback_limit = 2};
+  LuaScheduler scheduler = {0};
+  LuaScheduledTask tasks[2] = {0};
+  const LClosure *overwrite;
+  require(pthread_barrier_init(&capture_start, NULL, 3) == 0);
+  lua_pushcfunction(L, start_capture_race);
+  lua_setglobal(L, "start_capture_race");
+  lua_pushcfunction(L, call_many);
+  lua_setglobal(L, "call_many");
+  require(luaL_dostring(
+              L, "local value,calls=41,0; "
+                 "local function overwrite(n) calls=calls+1; value=n end; "
+                 "call_many(overwrite,41,400); "
+                 "return function(native) "
+                 "  start_capture_race(); "
+                 "  if native then "
+                 "    call_many(overwrite,41,4000); assert(calls==4400) "
+                 "  else "
+                 "    local marker={}; "
+                 "    for i=1,4000 do "
+                 "      value=marker; local seen=value; "
+                 "      assert(rawequal(seen,marker) or seen==41) "
+                 "    end "
+                 "  end; return 51 "
+                 "end, overwrite") == LUA_OK);
+  overwrite = lua_topointer(L, 2);
+  require(overwrite != NULL && overwrite->p->nativecall != NULL);
+  require(overwrite->p->nativecall->entry > LUA_LOOP_UNAVAILABLE);
+  require(luaSC_init(L, &scheduler, &config) == 0);
+  for (unsigned i = 0; i < 2; i++) {
+    lua_State *child = lua_newthread(L);
+    lua_pushvalue(L, 1);
+    lua_xmove(L, child, 1);
+    lua_pushboolean(child, i == 0);
+    require(luaSC_submit(&scheduler, &tasks[i], child, 1) == 0);
+    lua_pop(L, 1);
+  }
+  start_capture_race(L);
+  lua_gc(L, LUA_GCCOLLECT);
+  for (unsigned i = 0; i < 2; i++) {
+    int status, results;
+    luaSC_wait(&tasks[i]);
+    require(luaSC_collect(L, &tasks[i], &status, &results) == LUA_OK);
+    require(status == LUA_OK && results == 1 && lua_tointeger(L, -1) == 51);
+    lua_pop(L, 1);
+  }
+  require(luaSC_destroy(L, &scheduler) == 0);
+  require(pthread_barrier_destroy(&capture_start) == 0);
 }
 
 int main(int argc, char **argv) {
@@ -453,6 +528,8 @@ int main(int argc, char **argv) {
     check_native_fields(L);
   } else if (strcmp(argv[1], "native_callbacks") == 0) {
     check_native_callbacks(L);
+  } else if (strcmp(argv[1], "native_capture_race") == 0) {
+    check_native_capture_race(L);
   } else if (strcmp(argv[1], "native_calls") == 0) {
     check_native_calls(L);
   } else

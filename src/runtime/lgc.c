@@ -1148,7 +1148,11 @@ unsigned luaC_objectchunk (GCObject *object, unsigned first, unsigned count,
     for (i = first; i < first + count; i++)
       capturevalue(&userdata->uv[i].uv, edges, &n);
   }
-  else capturevalue(&gco2upv(object)->value, edges, &n);
+  else {
+    UpVal *cell = gco2upv(object);
+    if (__atomic_load_n(&cell->integer, __ATOMIC_ACQUIRE) == 0)
+      capturevalue(&cell->value, edges, &n);
+  }
   return n;
 }
 
@@ -1277,7 +1281,7 @@ static int scantrace (lua_State *L, LuaTraceWork *work, GCObject *o,
   if (o->tt == LUA_VUPVAL) {
     UpVal *upvalue = gco2upv(o);
     lua_assert(quiescent);
-    tracevalue(work, &upvalue->value);
+    if (upvalue->integer == 0) tracevalue(work, &upvalue->value);
     work->marked += sizeof(UpVal);
     blacken(work, o);
     genlink(work, o);

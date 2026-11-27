@@ -696,7 +696,7 @@ LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
   int isnum;
   uintptr_t argument = luaX_argument(L, idx);
   uintptr_t owner;
-  if (luaX_argumentkind(argument) == LUA_ARGUMENT_INTEGER) {
+  if (luaX_inlineinteger(argument)) {
     if (pisnum) *pisnum = 1;
     return cast_num(luaX_argumentinteger(argument));
   }
@@ -717,7 +717,7 @@ LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
   int isnum;
   uintptr_t argument = luaX_argument(L, idx);
   uintptr_t owner;
-  if (luaX_argumentkind(argument) == LUA_ARGUMENT_INTEGER) {
+  if (luaX_inlineinteger(argument)) {
     if (pisnum) *pisnum = 1;
     return luaX_argumentinteger(argument);
   }
@@ -763,10 +763,11 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
   const TValue *value;
   int stackonly = !ispseudo(idx);
   uintptr_t argument = luaX_argument(L, idx);
-  unsigned kind = luaX_argumentkind(argument);
-  if (argument != 0 && kind < LUA_ARGUMENT_TAG) {
-    if (len != NULL) *len = kind;
-    return luaX_argumentaddress(argument);
+  const char *bytes = luaX_argumentaddress(argument);
+  if (bytes != NULL && novariant(luaX_argumenttag(argument)) == LUA_TSTRING) {
+    if (len != NULL)
+      *len = (argument >> LUA_ARGUMENT_LENGTH_SHIFT) & LUA_ARGUMENT_MAX_LENGTH;
+    return bytes;
   }
  retry:
   owner = luaX_enterobservation(L, stackonly);
@@ -843,11 +844,10 @@ LUA_API void *lua_touserdata (lua_State *L, int idx) {
   void *result;
   uintptr_t owner, argument = luaX_argument(L, idx);
   int tag = luaX_argumenttag(argument);
-  if (luaX_argumentkind(argument) == LUA_ARGUMENT_USERDATA)
-    return luaX_argumentaddress(argument);
-  if (tag != LUA_TNONE && novariant(tag) != LUA_TUSERDATA &&
-      novariant(tag) != LUA_TLIGHTUSERDATA)
-    return NULL;
+  if (tag == LUA_VUSERDATA || tag == LUA_VLIGHTUSERDATA) {
+    if (argument & LUA_ARGUMENT_INLINE) return luaX_argumentaddress(argument);
+  }
+  else if (tag != LUA_TNONE) return NULL;
   owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = luaA_udatapointer(o);

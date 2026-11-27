@@ -1205,23 +1205,22 @@ int luaD_tryloopcall (LuaLoopFrame *frame, StkId func, unsigned offset) {
 }
 
 /* Publish code with ordinary managed admission. Subsequent detached calls
-** can execute it using only a bounded storage ticket. */
+** can execute it using only a bounded stack claim. */
 static void preparecallback (lua_State *L, CallInfo *ci, Proto *p) {
   if (!isLua(ci->previous) && L->policy == NULL && !gethookmask(L) &&
-      !luaTK_hasstops(L) && luaJ_prepare(L, p, p->nativecall) != NULL)
+      !luaTK_hasstops(L) && luaJ_prepare(L, p, p->nativecall) != 0)
     luaX_boundcontext(L)->compiled_reentry = 1;
 }
 
-/* The storage ticket retains cells and operands and blocks trace arming.
-** On a guard exit, publish a regular Lua frame before releasing the ticket.
+/* The stack claim retains cells and operands and blocks trace arming.
+** On a guard exit, publish a regular Lua frame before releasing the claim.
 ** Its written registers and capture assignments remain visible on reentry. */
 int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
                            int nargs, int wanted) {
   CallInfo *ci = L->ci;
-  StkId func, top;
+  StkId func, base, top;
   LClosure *closure;
   Proto *p;
-  LuaLoopFrame frame;
   uintptr_t address;
   const Instruction *at;
   OpCode exit;
@@ -1243,27 +1242,26 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
   api_checkresults(L, nargs, wanted);
   luaX_invalidatearguments(&L->stack_gate);
-  top = func + 1 + p->maxstacksize;
+  base = func + 1;
+  top = base + p->maxstacksize;
   while (L->top.p < top) setnilvalue2s(L->top.p++);
-  frame = (LuaLoopFrame){ .thread = L, .base = func + 1, .closure = closure,
-                         .entry = p->code };
-  at = p->code + cast(LuaLoopCode, address)(&frame);
+  at = p->code + cast(LuaCallCode, address)(L, base, closure);
   exit = GET_OPCODE(*at);
   if ((exit == OP_RETURN0 || exit == OP_RETURN1) &&
       !gethookmask(L) && !luaTK_hasstops(L)) {
     int count = exit == OP_RETURN1;
     --L->poll_remaining;
-    L->top.p = frame.base + (count ? GETARG_A(*at) + 1 : 0);
+    L->top.p = base + (count ? GETARG_A(*at) + 1 : 0);
     moveresults(L, func, count, cast_uint(wanted + 1));
     adjustresults(L, wanted);
-    luaX_leavesharedread(L);
+    luaX_leavebounded(L);
     return 1;
   }
   L->nCcalls += nyci;
   ci = luaD_initframe(L, ci->next, func, cast_uint(wanted + 1), top);
   ci->callstatus |= CIST_FRESH;
   luaD_initluaframe(ci, at);
-  luaX_leavesharedread(L);
+  luaX_leavebounded(L);
   lua_lock(L);
   if (luaV_execute(L, L->ci)) luaD_throw(L, LUA_YIELD);
   L->nCcalls -= nyci;
@@ -1725,6 +1723,7 @@ struct NativeProtectedCall {
 static void f_nativeprotected (lua_State *L, void *ud) {
   struct NativeProtectedCall *call = cast(struct NativeProtectedCall *, ud);
   int n;
+  luaW_publishnativearguments(L, L->ci->func.p);
   luaX_leavebounded(L);
   n = (*call->function)(L);
   if (luaX_tryboundedscope(L, 0)) {

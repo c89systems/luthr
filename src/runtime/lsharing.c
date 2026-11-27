@@ -127,7 +127,9 @@ void luaA_share (lua_State *L, GCObject *object) {
     __atomic_store_n(state, LUA_OBJECT_SHARED, __ATOMIC_RELEASE);
     if (current->tt == LUA_VUPVAL) {
       /* Enqueue materialized an open binding before switching its storage. */
-      value(L, &gco2upv(current)->value, &roots.pending);
+      TValue edge;
+      luaF_loadshared(gco2upv(current), &edge);
+      value(L, &edge, &roots.pending);
     }
     else {
       LuaObjectScope scope;

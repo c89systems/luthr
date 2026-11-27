@@ -282,13 +282,13 @@ static uintptr_t compile (lua_State *L, const Proto *p, LuaLoopSite *site) {
 }
 
 
-LuaLoopCode luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site) {
+uintptr_t luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site) {
   uintptr_t code = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
   if (code == LUA_LOOP_COLD) {
     unsigned hits = __atomic_load_n(&site->hits, __ATOMIC_RELAXED);
     if (hits < JIT_HOT) {
       __atomic_store_n(&site->hits, hits + 1, __ATOMIC_RELAXED);
-      return NULL;
+      return 0;
     }
     if (__atomic_compare_exchange_n(&site->entry, &code, LUA_LOOP_BUILDING, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
@@ -300,7 +300,7 @@ LuaLoopCode luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site) {
       __atomic_store_n(&site->entry, code, __ATOMIC_RELEASE);
     }
   }
-  return code > LUA_LOOP_UNAVAILABLE ? cast(LuaLoopCode, code) : NULL;
+  return code > LUA_LOOP_UNAVAILABLE ? code : 0;
 }
 
 

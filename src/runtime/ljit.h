@@ -16,6 +16,7 @@ typedef struct LuaLoopFrame {
 } LuaLoopFrame;
 
 typedef unsigned (*LuaLoopCode)(LuaLoopFrame *frame);
+typedef unsigned (*LuaCallCode)(lua_State *L, StkId base, LClosure *closure);
 
 enum { LUA_LOOP_COLD, LUA_LOOP_BUILDING, LUA_LOOP_UNAVAILABLE };
 enum { LUA_NATIVE_CALL_WORDS = 32 };
@@ -34,8 +35,7 @@ typedef struct LuaLoopSite {
 LUAI_FUNC void luaJ_lower (lua_State *L, Proto *p);
 LUAI_FUNC void luaJ_freeloops (lua_State *L, Proto *p, int retire);
 LUAI_FUNC LuaLoopSite *luaJ_loopat (const Proto *p, int pc);
-LUAI_FUNC LuaLoopCode luaJ_prepare (lua_State *L, Proto *p,
-                                    LuaLoopSite *site);
+LUAI_FUNC uintptr_t luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site);
 LUAI_FUNC int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset);
 LUAI_FUNC int luaD_loopfieldmethod (LuaLoopFrame *frame, StkId result,
                                      const TValue *object, const TValue *key,

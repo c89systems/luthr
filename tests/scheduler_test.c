@@ -1414,6 +1414,69 @@ static void native_argument_observation(struct fixture *f, int wide) {
   finish(f);
 }
 
+static unsigned char light_argument[2];
+
+static int make_light_argument(lua_State *L) {
+  lua_pushlightuserdata(L, lua_toboolean(L, 1) ? NULL : light_argument + 1);
+  return 1;
+}
+
+static int protected_argument_addresses(lua_State *L) {
+  require(lua_type(L, 1) == LUA_TLIGHTUSERDATA &&
+          lua_touserdata(L, 1) == light_argument + 1);
+  require(lua_type(L, 2) == LUA_TLIGHTUSERDATA && lua_touserdata(L, 2) == NULL);
+  lua_pushinteger(L, 53);
+  return 1;
+}
+
+static int observe_argument_addresses(lua_State *L) {
+  const char *bytes;
+  size_t len;
+  lua_Integer cutoff = (lua_Integer)1 << 56;
+  require(lua_type(L, 1) == LUA_TLIGHTUSERDATA &&
+          lua_touserdata(L, 1) == light_argument + 1);
+  require(lua_type(L, 2) == LUA_TLIGHTUSERDATA && lua_touserdata(L, 2) == NULL);
+  bytes = lua_tolstring(L, 3, &len);
+  require(bytes != NULL && len == 0);
+  bytes = lua_tolstring(L, 4, &len);
+  require(bytes != NULL && len == 1023 && bytes[0] == 'a' &&
+          bytes[len - 1] == 'a');
+  bytes = lua_tolstring(L, 5, &len);
+  require(bytes != NULL && len == 1024 && bytes[0] == 'b' &&
+          bytes[len - 1] == 'b');
+  require(lua_isinteger(L, 6) && lua_tointeger(L, 6) == -cutoff);
+  require(lua_isinteger(L, 7) && lua_tointeger(L, 7) == cutoff - 1);
+  require(lua_isinteger(L, 8) && lua_tointeger(L, 8) == cutoff);
+  for (int i = 0; i < 4; i++) {
+    lua_pushcfunction(L, protected_argument_addresses);
+    lua_pushvalue(L, 1);
+    lua_pushvalue(L, 2);
+    require(lua_pcall(L, 2, 1, 0) == LUA_OK);
+    require(lua_tointeger(L, -1) == 53);
+    lua_pop(L, 1);
+  }
+  lua_pushinteger(L, 53);
+  return 1;
+}
+
+static void native_argument_addresses(struct fixture *f) {
+  init(f, 1);
+  lua_pushcfunction(f->main, warm_native_permit);
+  lua_setglobal(f->main, "warm_native_permit");
+  lua_pushcfunction(f->main, make_light_argument);
+  lua_setglobal(f->main, "make_light_argument");
+  lua_pushcfunction(f->main, observe_argument_addresses);
+  lua_setglobal(f->main, "observe_argument_addresses");
+  submit(f, 0,
+         "warm_native_permit(); "
+         "local a,b=make_light_argument(false),make_light_argument(true); "
+         "local p=1<<56; return observe_argument_addresses(a,b,'',"
+         "('a'):rep(1023), ('b'):rep(1024), -p, p-1, p)",
+         0);
+  require(collect(f, 0, LUA_OK) == 53);
+  finish(f);
+}
+
 static int retire_before_native(lua_State *L) {
   Table *table = (Table *)lua_topointer(L, 1);
   require(table != NULL);
@@ -3512,6 +3575,8 @@ int main(int argc, char **argv) {
     native_argument_observation(f, 0);
   else if (strcmp(argv[1], "native_argument_types") == 0)
     native_argument_observation(f, 1);
+  else if (strcmp(argv[1], "native_argument_addresses") == 0)
+    native_argument_addresses(f);
   else if (strcmp(argv[1], "native_index_dispatch") == 0)
     native_index_dispatch(f);
   else if (strcmp(argv[1], "native_recall_during_stack_borrow") == 0)

@@ -401,9 +401,13 @@ static void backedge (Emitter *e, unsigned control, unsigned words,
   linkbranch(e, again, loop);
 }
 
-static void entryframe (Emitter *e) {
+static void preserveregisters (Emitter *e) {
   emit(e, 0xf3, 0x0f, 0x1e, 0xfa);  /* endbr64 */
   emit(e, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57);
+}
+
+static void entryframe (Emitter *e) {
+  preserveregisters(e);
   emit(e, 0x49, 0x89, 0xfc);        /* r12 = frame */
   emit(e, 0x4d, 0x8b, 0xb4, 0x24);  /* mov r14, [r12 + thread] */
   word(e, offsetof(LuaLoopFrame, thread));
@@ -544,23 +548,32 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
   return !e.failed;
 }
 
-static int readcapture (LuaLoopFrame *frame, TValue *result, unsigned index) {
-  UpVal *cell = luaF_capturecell(frame->closure, index);
-  if (!luaF_localupval(frame->thread, cell))
+static int readcapture (lua_State *L, LClosure *closure,
+                        TValue *result, unsigned index) {
+  UpVal *cell = luaF_capturecell(closure, index);
+  if (!luaF_localupval(L, cell))
     return luaF_tryloadshared(cell, result);
-  setobj(frame->thread, result, luaF_privateslot(frame->thread, cell));
+  setobj(L, result, luaF_privateslot(L, cell));
   return 1;
 }
 
-static int writecapture (LuaLoopFrame *frame, const TValue *value,
-                         unsigned index) {
-  UpVal *cell = luaF_capturecell(frame->closure, index);
-  if (luaF_localupval(frame->thread, cell)) {
+static int writecapture (lua_State *L, LClosure *closure,
+                         const TValue *value, unsigned index) {
+  UpVal *cell = luaF_capturecell(closure, index);
+  uintptr_t sharing = __atomic_load_n(&cell->sharing, __ATOMIC_ACQUIRE);
+  lua_Unsigned integer;
+  if (sharing == cast(uintptr_t, L)) {
     if (!upisopen(cell) || iscollectable(value)) return 0;
-    setobj(frame->thread, luaF_privateslot(frame->thread, cell), value);
+    setobj(L, luaF_privateslot(L, cell), value);
     return 1;
   }
-  return luaF_trystoreinteger(cell, value);
+  if (sharing != LUA_OBJECT_SHARED) return luaF_trystoreinteger(cell, value);
+  integer = luaF_packinteger(value);
+  if (integer == 0) return 0;
+  /* This body excludes trace arming. The immediate word supersedes the
+  ** general slot; the next wide writer publishes its slot with zero. */
+  __atomic_store_n(&cell->integer, integer, __ATOMIC_RELEASE);
+  return 1;
 }
 
 static int stringlength (TValue *result, const TValue *value) {
@@ -581,7 +594,10 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
   const unsigned char *labels[LUA_NATIVE_CALL_WORDS] = {NULL};
   NativeJump jumps[3 * LUA_NATIVE_CALL_WORDS];
   unsigned pc, njumps = 0;
-  entryframe(&e);
+  preserveregisters(&e);
+  emit(&e, 0x49, 0x89, 0xfe);  /* r14 = thread */
+  emit(&e, 0x49, 0x89, 0xf5);  /* r13 = base */
+  emit(&e, 0x49, 0x89, 0xd4);  /* r12 = closure */
   emit(&e, 0x45, 0x8b, 0xbe);  /* mov r15d, [r14 + poll_remaining] */
   word(&e, offsetof(lua_State, poll_remaining));
   for (pc = 0; pc < cast_uint(p->sizecode); pc++) {
@@ -599,9 +615,10 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
         moveorload(&e, p, ins);
         break;
       case OP_GETUPVAL: case OP_SETUPVAL:
-        emit(&e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
-        argument(&e, 6, a);          /* rsi = register */
-        indexarg(&e, 2, b);          /* edx = capture index */
+        emit(&e, 0x4c, 0x89, 0xf7);  /* rdi = thread */
+        emit(&e, 0x4c, 0x89, 0xe6);  /* rsi = closure */
+        argument(&e, 2, a);          /* rdx = register */
+        indexarg(&e, 1, b);          /* ecx = capture index */
         call(&e, op == OP_GETUPVAL
           ? cast(uintptr_t, readcapture) : cast(uintptr_t, writecapture), 1);
         break;

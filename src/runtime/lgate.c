@@ -353,50 +353,53 @@ void luaW_returnnative (lua_State *L, LuaWorldScope scope,
 }
 
 #if !defined(HARDSTACKTESTS)
-l_sinline uintptr_t argumenttag (lu_byte tag) {
-  return (cast(uintptr_t, LUA_ARGUMENT_TAG) << LUA_ARGUMENT_LENGTH_SHIFT) | tag;
+l_sinline uintptr_t argumentpointer (void *pointer, int tag) {
+  uintptr_t address = cast(uintptr_t, pointer);
+  return LUA_ARGUMENT_TAG(tag) |
+    (address <= LUA_ARGUMENT_ADDRESS ? LUA_ARGUMENT_INLINE | address : 0);
 }
 
-l_sinline uintptr_t argumentaddress (uintptr_t address, size_t kind,
-                                      lu_byte tag) {
-  if ((address >> LUA_GATE_OFFER_SHIFT) != 0 ||
-      (address & ((1u << LUA_ARGUMENT_ALIGN_SHIFT) - 1u))) return argumenttag(tag);
-  return (address >> LUA_ARGUMENT_ALIGN_SHIFT) |
-         (cast(uintptr_t, kind) << LUA_ARGUMENT_LENGTH_SHIFT);
+l_sinline uintptr_t argumentstring (const char *bytes, size_t length, int tag) {
+  uintptr_t address = cast(uintptr_t, bytes);
+  return LUA_ARGUMENT_TAG(tag) |
+    (address <= LUA_ARGUMENT_ADDRESS && length <= LUA_ARGUMENT_MAX_LENGTH
+      ? (cast(uintptr_t, length) << LUA_ARGUMENT_LENGTH_SHIFT) | address : 0);
 }
 
 l_sinline uintptr_t argumentuserdata (Udata *object) {
-  return argumentaddress(cast(uintptr_t, getudatamem(object)),
-                         LUA_ARGUMENT_USERDATA, ctb(LUA_VUSERDATA));
+  return argumentpointer(getudatamem(object), LUA_VUSERDATA);
 }
 
 l_sinline uintptr_t argumentshortstring (TString *string) {
-  return argumentaddress(cast(uintptr_t, getshrstr(string)), string->shrlen,
-                         ctb(LUA_VSHRSTR));
+  return argumentstring(getshrstr(string), string->shrlen, LUA_VSHRSTR);
 }
 
 static uintptr_t argumentvalue (const TValue *value) {
-  if (ttisfulluserdata(value)) return argumentuserdata(uvalue(value));
-  if (ttisshrstring(value)) return argumentshortstring(tsvalue(value));
-  if (ttisstring(value)) {
-    size_t length;
-    uintptr_t address = cast(uintptr_t, getlstr(tsvalue(value), length));
-    if (length < LUA_ARGUMENT_TAG)
-      return argumentaddress(address, length, rawtt(value));
+  int tag = ttypetag(value);
+  switch (tag) {
+    case LUA_VUSERDATA: return argumentuserdata(uvalue(value));
+    case LUA_VLIGHTUSERDATA: return argumentpointer(pvalue(value), tag);
+    case LUA_VSHRSTR: return argumentshortstring(tsvalue(value));
+    case LUA_VLNGSTR: {
+      size_t length;
+      const char *bytes = getlstr(tsvalue(value), length);
+      return argumentstring(bytes, length, tag);
+    }
+    case LUA_VNUMINT: {
+      lua_Unsigned n = l_castS2U(ivalue(value));
+      if (n + LUA_ARGUMENT_SIGN <= LUA_ARGUMENT_INTEGER)
+        return LUA_ARGUMENT_TAG(tag) | LUA_ARGUMENT_INLINE |
+               (n & LUA_ARGUMENT_INTEGER);
+      break;
+    }
   }
-  else if (ttisinteger(value)) {
-    lua_Unsigned n = l_castS2U(ivalue(value));
-    if (n + LUA_ARGUMENT_SIGN <= LUA_ARGUMENT_MASK)
-      return (cast(uintptr_t, LUA_ARGUMENT_INTEGER) << LUA_ARGUMENT_LENGTH_SHIFT) |
-             (n & LUA_ARGUMENT_MASK);
-  }
-  return argumenttag(rawtt(value));
+  return LUA_ARGUMENT_TAG(tag);
 }
 
 /* The ordinary stack remains authoritative. Once it is exposed, a pure
 ** observation can linearize at the read of its packed argument. Clear the
 ** observations before any owner can change the corresponding stack slots. */
-static void publisharguments (lua_State *L, StkId func) {
+void luaW_publishnativearguments (lua_State *L, StkId func) {
   StkId args = func + 1;
   ptrdiff_t count = L->top.p - args;
   ptrdiff_t i, limit = count < LUA_NATIVE_ARGUMENTS ? count : LUA_NATIVE_ARGUMENTS;
@@ -419,7 +422,7 @@ void luaW_publishloopframe (lua_State *L, StkId func, int method) {
     __atomic_store_n(&L->stack_gate.arguments[1],
         argumentshortstring(tsvalue(s2v(func + 2))), __ATOMIC_RELEASE);
   }
-  else publisharguments(L, func);
+  else luaW_publishnativearguments(L, func);
   luaX_leavesharedread(L);
 }
 
@@ -476,7 +479,7 @@ NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
   if (l_unlikely(luaC_barriernotice(G(L))))
     luaC_notifybarriers(G(L));
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
-  publisharguments(L, func);
+  luaW_publishnativearguments(L, func);
   L->native_depth = 1;
   if (task != NULL) {
     if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
@@ -628,18 +631,19 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults,
   }
   if (execution == NULL || execution->native_depth != 0) {
     int probed = 0;
-    uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+    uintptr_t expected;
 #if !defined(HARDSTACKTESTS)
     if (context->compiled_reentry && status == NULL) {
-      if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
-                                  LUA_WORLD_ARM_TRACE)) {
+      /* Compiled callbacks touch stack registers and stable upvalue cells. */
+      if (luaX_tryobserve(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                            LUA_WORLD_ARM_TRACE)) {
         if (luaD_trycompiledstack(L, context, nargs, nresults)) return 1;
-        luaX_leavesharedread(L);
-        expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+        luaX_leavebounded(L);
       }
       context->compiled_reentry = 0;
     }
 #endif
+    expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
     /* Use the cheaper reservation for repeated scalar reentry. Calls that
     ** normally need managed admission avoid a speculative reservation. */
     if (context->scalar_reentry) {

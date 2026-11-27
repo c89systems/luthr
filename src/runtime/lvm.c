@@ -1921,7 +1921,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
       ci->u.l.rootpc = NULL;
       ci->u.l.savedpc = ip;
       if (L->top.p < ci->top.p) L->top.p = ci->top.p;
-      native = luaJ_prepare(L, cl->p, site);
+      native = cast(LuaLoopCode, luaJ_prepare(L, cl->p, site));
       updatebase(ci);
       L->top.p = restorestack(L, top);
       updatetrap(ci);

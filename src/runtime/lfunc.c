@@ -182,6 +182,8 @@ l_sinline void storecell (lua_State *L, UpVal *uv, const TValue *value) {
 void luaF_writecell (lua_State *L, UpVal *uv, const TValue *value) {
   uint64_t writing = luaF_lockcell(uv);
   storecell(L, uv, value);
+  /* This publishes the wide slot after any intervening immediate store. */
+  __atomic_store_n(&uv->integer, 0, __ATOMIC_RELEASE);
   luaF_unlockcell(uv, writing);
 }
 
