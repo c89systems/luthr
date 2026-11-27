@@ -10,7 +10,6 @@
 #include <pthread.h>
 #include "lobject.h"
 
-
 #define gnode(t,i)	(&(t)->node[i])
 #define gval(n)		(&(n)->i_val)
 #define gnext(n)	((n)->u.next)
@@ -603,6 +602,9 @@ LUAI_FUNC void luaH_set (lua_State *L, Table *t, const TValue *key,
 #define luaH_new(L,asize,hsize) luaH_newtable(L, asize, hsize, 1)
 LUAI_FUNC Table *luaH_newtable (lua_State *, unsigned, unsigned, int);
 LUAI_FUNC Table *luaH_trycachedtable (lua_State *, unsigned, unsigned);
+/* Fill an unpublished flat hash from distinct, permanent VM roots and scalars. */
+LUAI_FUNC void luaH_initfields (lua_State *, Table *, TString *const *,
+                                 TValue *, unsigned);
 LUAI_FUNC Table *luaH_newrecord (lua_State *, Table *, int);
 #define LUA_TABLE_INLINE_LIMIT 288
 LUAI_FUNC void luaH_resize (lua_State *L, Table *t, unsigned nasize,

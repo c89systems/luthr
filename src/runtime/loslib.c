@@ -21,6 +21,8 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "lapi.h"
+#include "lbuiltin.h"
+#include "lexec.h"
 #include "lgc.h"
 #include "llimits.h"
 #include "lstate.h"
@@ -214,66 +216,62 @@ static int os_clock (lua_State *L) {
 ** time 0x1.e1853b0d184f6p+55 would cause an overflow when adding 1900
 ** to compute the year.
 */
-static void setfield (lua_State *L, Table *fresh, const char *key, int value,
-                      int delta) {
+static lua_Integer dateinteger (lua_State *L, const char *key, int value,
+                                 int delta) {
   #if (defined(LUA_NUMTIME) && LUA_MAXINTEGER <= INT_MAX)
     if (l_unlikely(value > LUA_MAXINTEGER - delta))
       luaL_error(L, "field '%s' is out-of-bound", key);
+  #else
+    UNUSED(L);
+    UNUSED(key);
   #endif
-  if (fresh != NULL) {
-    TValue name, field;
-    setsvalue(L, &name, luaS_new(L, key));
-    setivalue(&field, (lua_Integer)value + delta);
-    luaH_set(L, fresh, &name, &field);
-  }
-  else {
-    lua_pushinteger(L, (lua_Integer)value + delta);
-    lua_setfield(L, -2, key);
-  }
+  return (lua_Integer)value + delta;
 }
 
 
-static void setboolfield (lua_State *L, Table *fresh, const char *key, int value) {
-  if (value < 0)  /* undefined? */
-    return;  /* does not set field */
-  if (fresh != NULL) {
-    TValue name, field;
-    setsvalue(L, &name, luaS_new(L, key));
-    if (value) setbtvalue(&field);
-    else setbfvalue(&field);
-    luaH_set(L, fresh, &name, &field);
+static const char *const datenames[LUA_DATE_FIELDS] = {
+  "year", "month", "day", "hour", "min", "sec", "yday", "wday", "isdst"
+};
+
+
+static unsigned datevalues (lua_State *L, const struct tm *stm, TValue *out) {
+  static const int deltas[LUA_DATE_INTEGER_FIELDS] = {1900, 1, 0, 0, 0, 0, 1, 1};
+  const int values[LUA_DATE_INTEGER_FIELDS] = {stm->tm_year, stm->tm_mon, stm->tm_mday,
+    stm->tm_hour, stm->tm_min, stm->tm_sec, stm->tm_yday, stm->tm_wday};
+  unsigned i;
+  for (i = 0; i < LUA_DATE_INTEGER_FIELDS; i++)
+    setivalue(&out[i], dateinteger(L, datenames[i], values[i], deltas[i]));
+  if (stm->tm_isdst < 0) return LUA_DATE_INTEGER_FIELDS;
+  if (stm->tm_isdst != 0) setbtvalue(&out[i]);
+  else setbfvalue(&out[i]);
+  return LUA_DATE_FIELDS;
+}
+
+/* Normalize an existing user table through ordinary assignment semantics. */
+static void setallfields (lua_State *L, const struct tm *stm) {
+  TValue values[LUA_DATE_FIELDS];
+  unsigned i, count = datevalues(L, stm, values);
+  for (i = 0; i < LUA_DATE_INTEGER_FIELDS; i++) {
+    lua_pushinteger(L, ivalue(&values[i]));
+    lua_setfield(L, -2, datenames[i]);
   }
-  else {
-    lua_pushboolean(L, value);
-    lua_setfield(L, -2, key);
+  if (count == LUA_DATE_FIELDS) {
+    lua_pushboolean(L, ttistrue(&values[LUA_DATE_INTEGER_FIELDS]));
+    lua_setfield(L, -2, datenames[LUA_DATE_INTEGER_FIELDS]);
   }
 }
 
-
-/*
-** Set all fields from structure 'tm' in the table on top of the stack
-*/
-static void setallfields (lua_State *L, Table *fresh, struct tm *stm) {
-  setfield(L, fresh, "year", stm->tm_year, 1900);
-  setfield(L, fresh, "month", stm->tm_mon, 1);
-  setfield(L, fresh, "day", stm->tm_mday, 0);
-  setfield(L, fresh, "hour", stm->tm_hour, 0);
-  setfield(L, fresh, "min", stm->tm_min, 0);
-  setfield(L, fresh, "sec", stm->tm_sec, 0);
-  setfield(L, fresh, "yday", stm->tm_yday, 1);
-  setfield(L, fresh, "wday", stm->tm_wday, 1);
-  setboolfield(L, fresh, "isdst", stm->tm_isdst);
-}
-
-/* A new date table has no __newindex and still belongs to this activation.
-** Keep it rooted while filling the available hash slots in one scope. */
-static void pushdatetable (lua_State *L, struct tm *stm) {
+/* The library roots its keys for the lifetime of the VM. Initialize the
+** private hash before exposing the result on the stack. */
+static void pushdatetable (lua_State *L, const struct tm *stm) {
+  TValue values[LUA_DATE_FIELDS];
+  unsigned count = datevalues(L, stm, values);
   Table *date;
   lua_lock(L);
-  date = luaH_new(L, 0, 9);
+  date = luaH_new(L, 0, count);
+  luaH_initfields(L, date, G(L)->date_keys, values, count);
   sethvalue2s(L, L->top.p, date);
   api_incr_top(L);
-  setallfields(L, date, stm);
   luaC_checkGC(L);
   lua_unlock(L);
 }
@@ -396,7 +394,7 @@ static int os_time (lua_State *L) {
     ts.tm_sec = getfield(L, "sec", 0, 0);
     ts.tm_isdst = getboolfield(L, "isdst");
     t = mktime(&ts);
-    setallfields(L, NULL, &ts);  /* update fields with normalized values */
+    setallfields(L, &ts);  /* update fields with normalized values */
   }
   if (t != (time_t)(l_timet)t || t == (time_t)(-1))
     return luaL_error(L,
@@ -406,11 +404,31 @@ static int os_time (lua_State *L) {
 }
 
 
-static int os_difftime (lua_State *L) {
+int luaB_osdifftime (lua_State *L) {
   time_t t1 = l_checktime(L, 1);
   time_t t2 = l_checktime(L, 2);
   lua_pushnumber(L, (lua_Number)difftime(t1, t2));
   return 1;
+}
+
+
+int luaB_leafdifftime (const TValue *first, const TValue *second,
+                       TValue *result) {
+#if !defined(LUA_NUMTIME)
+  if (ttisinteger(first) && ttisinteger(second)) {
+    lua_Integer a = ivalue(first), b = ivalue(second);
+    time_t t1 = (time_t)a, t2 = (time_t)b;
+    if (t1 == a && t2 == b) {
+      setfltvalue(result, (lua_Number)difftime(t1, t2));
+      return 1;
+    }
+  }
+#else
+  UNUSED(first);
+  UNUSED(second);
+  UNUSED(result);
+#endif
+  return -1;
 }
 
 /* }====================================================== */
@@ -444,7 +462,6 @@ static int os_exit (lua_State *L) {
 static const luaL_Reg syslib[] = {
   {"clock",     os_clock},
   {"date",      os_date},
-  {"difftime",  os_difftime},
   {"execute",   os_execute},
   {"exit",      os_exit},
   {"getenv",    os_getenv},
@@ -461,7 +478,14 @@ static const luaL_Reg syslib[] = {
 
 
 LUAMOD_API int luaopen_os (lua_State *L) {
+  unsigned i;
+  lua_lock(L);
+  for (i = 0; i < LUA_DATE_FIELDS; i++)
+    luaS_anchorkey(L, &G(L)->date_keys[i], datenames[i]);
+  lua_unlock(L);
   luaL_newlib(L, syslib);
+  luaQ_pushmanaged(L, luaB_osdifftime, 0);
+  lua_setfield(L, -2, "difftime");
   return 1;
 }
 

@@ -92,6 +92,8 @@ LUAI_FUNC TString *luaS_trytasklstr (lua_State *L, const char *str, size_t len);
 LUAI_FUNC TString *luaS_trycachedname (lua_State *L, const char *str);
 LUAI_FUNC TString *luaS_trycachedcstring (lua_State *L, const char *str);
 LUAI_FUNC TString *luaS_new (lua_State *L, const char *str);
+/* Initialize a permanent string root while holding managed stack access. */
+LUAI_FUNC void luaS_anchorkey (lua_State *L, TString **root, const char *name);
 LUAI_FUNC TString *luaS_createlngstrobj (lua_State *L, size_t l, int result);
 LUAI_FUNC TString *luaS_newextlstr (lua_State *L,
 		const char *s, size_t len, lua_Alloc falloc, void *ud);

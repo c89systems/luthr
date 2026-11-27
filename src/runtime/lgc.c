@@ -670,6 +670,10 @@ static void markglobalroots (global_State *g) {
     TString *key = __atomic_load_n(&g->package_keys[i], __ATOMIC_ACQUIRE);
     markobjectN(g, key);
   }
+  for (i = 0; i < LUA_DATE_FIELDS; i++) {
+    TString *key = __atomic_load_n(&g->date_keys[i], __ATOMIC_ACQUIRE);
+    markobjectN(g, key);
+  }
 }
 
 

@@ -292,6 +292,7 @@ LUAI_DDEF lua_CFunction const luaB_leafentry[LUA_LEAF_COUNT] = {
   LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_ENTRY)
 #undef LUA_NUMERIC_ENTRY
   [LUA_LEAF_STRFORMAT] = luaB_strformat,
+  [LUA_LEAF_OSDIFFTIME] = luaB_osdifftime,
 };
 
 int luaB_leafindex (lua_CFunction f) {

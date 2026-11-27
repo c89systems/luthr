@@ -635,19 +635,8 @@ static void initpackagekeys (lua_State *L) {
   };
   unsigned i;
   lua_lock(L);
-  for (i = 0; i < LUA_PACKAGE_KEYS; i++) {
-    if (packagekey(L, i) == NULL) {
-      LuaNativeRoot root;
-      TString *key, *expected = NULL;
-      luaR_pushroot(L, &root);
-      key = luaS_new(L, names[i]);
-      setsvalue(L, &root.value, key);
-      luaC_tracepointer(L, key);
-      __atomic_compare_exchange_n(&G(L)->package_keys[i], &expected, key, 0,
-                                  __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-      luaR_poproot(L, &root);
-    }
-  }
+  for (i = 0; i < LUA_PACKAGE_KEYS; i++)
+    luaS_anchorkey(L, &G(L)->package_keys[i], names[i]);
   lua_unlock(L);
 }
 

@@ -20,6 +20,7 @@
 #include "lexec.h"
 #include "lmem.h"
 #include "lobject.h"
+#include "lroots.h"
 #include "lstate.h"
 #include "lstring.h"
 #include "ltablestorage.h"
@@ -241,6 +242,21 @@ static void copyshrstr (TString *ts, const char *str, size_t len) {
   ts->shrlen = cast(ls_byte, len);
   memcpy(getshrstr(ts), str, len);
   getshrstr(ts)[len] = '\0';
+}
+
+
+void luaS_anchorkey (lua_State *L, TString **root, const char *name) {
+  if (__atomic_load_n(root, __ATOMIC_ACQUIRE) == NULL) {
+    LuaNativeRoot temporary;
+    TString *key, *expected = NULL;
+    luaR_pushroot(L, &temporary);
+    key = luaS_new(L, name);
+    setsvalue(L, &temporary.value, key);
+    luaC_tracepointer(L, key);
+    __atomic_compare_exchange_n(root, &expected, key, 0,
+                                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    luaR_poproot(L, &temporary);
+  }
 }
 
 

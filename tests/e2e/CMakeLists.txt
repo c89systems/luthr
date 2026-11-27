@@ -309,6 +309,14 @@ add_test(NAME lua_scheduled_arguments COMMAND "${CMAKE_COMMAND}" ${scheduled_arg
 set_tests_properties(lua_scheduled_smoke lua_scheduled_arguments
   PROPERTIES LABELS "runtime;benchmark" TIMEOUT 60)
 
+foreach(collector IN ITEMS incremental generational)
+  add_test(NAME lua_scheduled_calendar_${collector} COMMAND scheduled_luthr
+    "${CMAKE_CURRENT_SOURCE_DIR}/parallel.lua" calendar_records
+    "${collector}" 4 4 8 2048 1 0 0 default-allocator hash-seed=21)
+  set_tests_properties(lua_scheduled_calendar_${collector}
+    PROPERTIES LABELS "runtime;compatibility;parallel;memcheck" TIMEOUT 60)
+endforeach()
+
 set(parallel_arguments
   "-Dupstream=$<TARGET_FILE:parallel_upstream>" "-Dluthr=$<TARGET_FILE:parallel_luthr>"
   "-Dlibrary=$<TARGET_FILE:luthr_shared>" "-Dsource_dir=${PROJECT_SOURCE_DIR}"

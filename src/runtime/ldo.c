@@ -955,6 +955,9 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     if (returned) *kind = LEAF_RETURNED;
     return n;
   }
+  case LUA_LEAF_OSDIFFTIME:
+    if (nargs < 2) return -1;
+    return luaB_leafdifftime(first, s2v(func + 2), value);
   case LUA_LEAF_YIELD:
     return -1;  /* only a VM frame can suspend without a native call */
 #define LUA_NUMERIC_CASE(name, expression) case LUA_LEAF_MATH_##name:

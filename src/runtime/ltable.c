@@ -1403,6 +1403,25 @@ static int insertkey (lua_State *L, Node *nodes, const TValue *key, TValue *valu
   return insertat(L, nodes, key, value, mainpositionTV(nodes, key));
 }
 
+void luaH_initfields (lua_State *L, Table *t, TString *const *keys,
+                      TValue *values, unsigned count) {
+  unsigned i;
+  UNUSED(L);
+  lua_assert(luaA_localtable(L, t) && t->metatable == NULL && t->asize == 0 &&
+             luaH_hashdir(t->node) == NULL && count <= luaH_nodesize(t->node));
+  for (i = 0; i < count; i++) {
+    TString *name = __atomic_load_n(&keys[i], __ATOMIC_ACQUIRE);
+    TValue key;
+    int inserted;
+    lua_assert(strisshr(name) && !iscollectable(&values[i]) &&
+               !ttisnil(&values[i]));
+    setsvalue(L, &key, name);
+    inserted = insertkey(NULL, t->node, &key, &values[i]);
+    lua_assert(inserted);
+    UNUSED(inserted);
+  }
+}
+
 /* Stop stale atomic writers at the old address. Any writer winning before
 ** the exchange contributes its value to the replacement. All allocation
 ** must be complete before the first exchange. */

@@ -21,6 +21,12 @@ local function grow(id)
   end
   return sum
 end
+local leap_day = 951782400
+local function checkdate(date, second)
+  assert(date.year==2000 and date.month==2 and date.day==29 and
+         date.hour==0 and date.min==0 and date.sec==second and
+         date.yday==60 and date.wday==3 and date.isdst==false)
+end
 local workloads={
   integers=function()
     local sum=0
@@ -32,6 +38,21 @@ local workloads={
     for i=1,n do rows[i]={key=i,value=i*2} end
     local sum=0
     for i=1,n do sum=sum+rows[i].key+rows[i].value end
+    return sum
+  end,
+  calendar_records=function(id)
+    local second=id%60
+    local first=os.date('!*t',leap_day+second)
+    local sum=0
+    for i=1,n do
+      local timestamp=leap_day+i
+      local date=os.date('!*t',timestamp)
+      assert(date~=first and date.sec==i%60)
+      sum=sum+math.tointeger(os.difftime(timestamp,leap_day))
+      if i%127==0 then collectgarbage('step',0) end
+    end
+    checkdate(first,second)
+    shared[id]=first
     return sum
   end,
   mixed_records=function(id)
@@ -237,7 +258,9 @@ local function prepare()
   end
 end
 local function verify()
-  if kind=='shared_table' then
+  if kind=='calendar_records' then
+    for id=1,tasks do checkdate(shared[id],id%60) end
+  elseif kind=='shared_table' then
     for id=1,tasks do
       for i=1,n do assert(shared[(id-1)*n+i]==i) end
     end

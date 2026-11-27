@@ -62,6 +62,40 @@ do
   end
   for key in pairs(second) do assert(expected[key] ~= nil) end
   assert(first.year == 2000 and second.year == 1970)
+
+  local input = {year=2000, month=2, day=29}
+  local normalized = {}
+  local proxy = setmetatable({}, {__index=input, __newindex=function(_, key, value)
+    normalized[key] = value
+  end})
+  assert(os.time(proxy))
+  assert(next(proxy) == nil and normalized.year == 2000 and
+         normalized.month == 2 and normalized.day == 29 and
+         normalized.hour == 12 and normalized.min == 0 and normalized.sec == 0 and
+         normalized.yday == 60 and normalized.wday == 3)
+end
+
+do
+  local difftime = os.difftime
+  assert(difftime(19, 20) == -1 and math.type(difftime(20, 19)) == 'float')
+  assert(difftime('20', 19.0) == 1 and select('#', difftime(20, 19, false)) == 1)
+  local ok, err = pcall(difftime, 1)
+  assert(not ok and err:find('#2', 1, true))
+  ok, err = pcall(difftime, 1.5, 1)
+  assert(not ok and err:find('integer', 1, true))
+  ok, err = pcall(difftime, math.maxinteger, math.mininteger)
+  if ok then assert(difftime(math.maxinteger, math.mininteger) == err) end
+
+  local calls = 0
+  debug.sethook(function(event)
+    if event == 'call' and debug.getinfo(2, 'f').func == difftime then
+      calls = calls + 1
+      assert(debug.setlocal(2, 1, 21))
+    end
+  end, 'c')
+  local elapsed = difftime(18, 19)
+  debug.sethook()
+  assert(elapsed == 2 and calls == 1)
 end
 
 do

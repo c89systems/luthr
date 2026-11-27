@@ -159,6 +159,7 @@ enum {
   LUA_PACKAGE_LOADED, LUA_PACKAGE_PRELOAD, LUA_PACKAGE_SEARCHERS,
   LUA_PACKAGE_PRELOAD_ORIGIN, LUA_PACKAGE_KEYS
 };
+enum { LUA_DATE_INTEGER_FIELDS = 8, LUA_DATE_FIELDS = 9 };
 typedef struct LuaStringCache {
   uint64_t epoch;
   uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
@@ -699,6 +700,7 @@ typedef struct global_State {
   struct LuaAllocPage *sweep_pages[LUA_ALLOC_BINS];  /* pool mutex */
   struct LuaUserdataPools *userdata_pools;  /* published on first medium allocation */
   TString *package_keys[LUA_PACKAGE_KEYS];  /* published when package opens */
+  TString *date_keys[LUA_DATE_FIELDS];  /* published when os opens */
 } global_State;
 
 
