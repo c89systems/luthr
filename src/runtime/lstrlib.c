@@ -2152,7 +2152,56 @@ static lua_Integer formatinteger (lua_State *L, int arg, const TValue *value) {
   return ttisinteger(value) ? ivalue(value) : luaL_checkinteger(L, arg);
 }
 
-static int str_format (lua_State *L) {
+/* Render bounded integer formats directly from the VM's owned arguments.
+** Install the result frame only after every conversion has succeeded. */
+int luaB_leafformat (lua_State *L, StkId func, int nargs, TValue *value,
+                      int wanted, const Instruction *at, int *returned) {
+  enum { LIMIT = 128 };
+  char result[LIMIT + LUA_N2SBUFFSZ];
+  size_t len, used = 0;
+  const char *p, *end;
+  int arg = 1;
+  TString *ts;
+  if (!ttisstring(s2v(func + 1))) return -1;
+  p = getlstr(tsvalue(s2v(func + 1)), len);
+  if (len > LIMIT) return -1;
+  end = p + len;
+  while (p < end && used < LIMIT) {
+    int spec = cast_uchar(*p++);
+    if (spec == L_ESC) {
+      lua_Integer n;
+      if (p == end) return -1;
+      spec = cast_uchar(*p++);
+      if (spec != L_ESC) {
+        if (++arg > nargs || !tointegerns(s2v(func + arg), &n)) return -1;
+        if (spec == 'd' || spec == 'i' || spec == 'u') {
+          used += luaO_todecimal(result + used, l_castS2U(n),
+                                 n < 0 && spec != 'u');
+          continue;
+        }
+        if (spec != 'c') return -1;
+        spec = cast_uchar(n);
+      }
+    }
+    result[used++] = cast_char(spec);
+  }
+  if (p != end || used > LIMIT) return -1;
+  ts = luaS_tryresultlstr(L, result, used);
+  if (ts != NULL) {
+    setsvalue(L, value, ts);
+    return 1;
+  }
+  if (luaD_beginleafresult(L, func, nargs, wanted, at) == NULL) return -1;
+  ts = luaS_resultlstr(L, result, used);
+  setsvalue2s(L, L->top.p, ts);
+  api_incr_top(L);
+  luaC_checkGC(L);
+  luaD_poscall(L, L->ci, 1);
+  *returned = 1;
+  return 1;
+}
+
+int luaB_strformat (lua_State *L) {
   LuaNativeRoot format;
   unsigned work = 0;
   int top = lua_gettop(L);
@@ -2779,7 +2828,7 @@ static const luaL_Reg strlib[] = {
   {"char", str_char},
   {"dump", str_dump},
   {"find", luaB_strfind},
-  {"format", str_format},
+  {"format", luaB_strformat},
   {"gmatch", gmatch},
   {"gsub", str_gsub},
   {"len", luaB_strlen},

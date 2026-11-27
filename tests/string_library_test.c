@@ -398,6 +398,15 @@ static void *run(void *context) {
         "1.25 % hi'); "
         "assert(s.format('%c:%u:%o:%X:%e:%g',65,12,8,255,1,2)=='A:12:10:FF:1."
         "000000e+00:2'); "
+        "local expected='%:-9223372036854775808:18446744073709551615'.."
+        "':'..z..z; "
+        "local actual,extra=s.format('%%:%i:%u:%c\\0',math.mininteger,-1,256); "
+        "assert(actual==expected and extra==nil); "
+        "assert(s.format('%d:%d',4.0,'5')=='4:5'); "
+        "for _,size in ipairs({126,127,128,129}) do "
+        "local prefix=s.rep('a',size); "
+        "assert(s.format(prefix..'%d',-9)==prefix..'-9'); "
+        "assert(s.format(prefix..'%d',-99)==prefix..'-99') end; "
         "assert(s.format('%s', 'a'..z..'b')=='a'..z..'b'); "
         "assert(s.format('%5s:%.2s','a','abcd')=='    a:ab'); "
         "assert(s.format('%99s',s.rep('a',100))==s.rep('a',100)); "
@@ -529,19 +538,22 @@ static void *run(void *context) {
                    "reopen()");
     if (!facade)
       execute(state,
-              "local sub,byte,abs=string.sub,string.byte,math.abs; "
+              "local sub,byte,abs,fmt=string.sub,string.byte,math.abs,"
+              "string.format; "
               "local calls,returns=0,0; "
               "debug.sethook(function(e) "
               "local f=debug.getinfo(2,'f').func; "
-              "if f==sub or f==byte or f==abs then "
+              "if f==sub or f==byte or f==abs or f==fmt then "
               "if e=='call' then calls=calls+1 else returns=returns+1 end end "
               "end,'cr'); "
               "local s,k,m=sub('aaa',1,1),byte('b'),abs(-3); "
               "local function pair(s,i) "
               "local b=s:byte(i); local c=s:sub(i,i); return b,c end; "
               "local b,c=pair('ab',2); assert(b==98 and c=='b'); "
+              "local text=fmt('%d',3); "
               "debug.sethook(); "
-              "assert(s=='a' and k==98 and m==3 and calls==5 and returns==5)");
+              "assert(s=='a' and k==98 and m==3 and text=='3'); "
+              "assert(calls==6 and returns==6)");
   } else if (strstr(test->mode, "snapshot") != NULL)
     snapshot(test);
   else if (strstr(test->mode, "slice") != NULL)

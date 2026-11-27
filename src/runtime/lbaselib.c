@@ -291,6 +291,7 @@ LUAI_DDEF lua_CFunction const luaB_leafentry[LUA_LEAF_COUNT] = {
   [LUA_LEAF_MATH_##name] = luaB_math##name,
   LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_ENTRY)
 #undef LUA_NUMERIC_ENTRY
+  [LUA_LEAF_STRFORMAT] = luaB_strformat,
 };
 
 int luaB_leafindex (lua_CFunction f) {

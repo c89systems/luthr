@@ -949,6 +949,12 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     if (returned) *kind = LEAF_RETURNED;
     return n;
   }
+  case LUA_LEAF_STRFORMAT: {
+    int returned = 0;
+    int n = luaB_leafformat(L, func, nargs, value, wanted, at, &returned);
+    if (returned) *kind = LEAF_RETURNED;
+    return n;
+  }
   case LUA_LEAF_YIELD:
     return -1;  /* only a VM frame can suspend without a native call */
 #define LUA_NUMERIC_CASE(name, expression) case LUA_LEAF_MATH_##name:

@@ -8,6 +8,7 @@ LUAI_FUNC int luaB_strsub (lua_State *L);
 LUAI_FUNC int luaB_strbyte (lua_State *L);
 LUAI_FUNC int luaB_strfind (lua_State *L);
 LUAI_FUNC int luaB_strmatch (lua_State *L);
+LUAI_FUNC int luaB_strformat (lua_State *L);
 LUAI_FUNC int luaB_strlen (lua_State *L);
 LUAI_FUNC int luaB_utf8len (lua_State *L);
 LUAI_FUNC int luaB_mathtointeger (lua_State *L);
@@ -44,6 +45,7 @@ enum {
 #define LUA_NUMERIC_ENUM(name, expression) LUA_LEAF_MATH_##name,
   LUA_NUMERIC_FUNCTIONS(LUA_NUMERIC_ENUM)
 #undef LUA_NUMERIC_ENUM
+  LUA_LEAF_STRFORMAT,
   LUA_LEAF_COUNT
 };
 
@@ -54,6 +56,9 @@ LUAI_FUNC int luaB_leafmath (unsigned builtin, const TValue *argument,
 LUAI_FUNC int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
                               TValue *results, int wanted,
                               const Instruction *at, int *returned);
+LUAI_FUNC int luaB_leafformat (lua_State *L, StkId func, int nargs, TValue *value,
+                               int wanted, const Instruction *at,
+                               int *returned);
 
 /* The direct matcher needs room for two positions and two captures,
 ** or up to four captures when it returns no positions. */

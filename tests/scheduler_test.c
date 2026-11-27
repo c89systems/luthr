@@ -3152,7 +3152,8 @@ static void nursery_retained_roots(struct fixture *f, int generational) {
          "for i=1,20 do "
          "  for j=1,1024 do end; "
          /* Intern through table insertion before counting outgoing edges. */
-         "  local label=next({[('next-%05d'):format(i)]=true}); "
+         "  local text=('next-%d'):format(10000+i); "
+         "  local label=next({[text]=true}); assert(label==text); "
          "  local suffix=next({[label..'x']=true}); local row={label,suffix}; "
          "  private,edges=nursery_inspect(row); assert(private and edges==2); "
          "  nursery_export=row; nursery_export=nil; "

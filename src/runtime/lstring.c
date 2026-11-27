@@ -565,6 +565,29 @@ static int recentresult (lua_State *L, unsigned hash) {
   return 0;
 }
 
+static TString *resultshort (GCObject *object, const char *str, size_t len,
+                              unsigned hash) {
+  TString *result = gco2ts(object);
+  result->hash = hash;
+  if (hash == 0) result->extra |= LSTR_ZEROHASH;
+  copyshrstr(result, str, len);
+  return result;
+}
+
+/* The caller owns the arguments until it publishes the result. Use only
+** existing nursery capacity, so construction cannot park or throw. */
+TString *luaS_tryresultlstr (lua_State *L, const char *str, size_t len) {
+  GCObject *object;
+  if (len > LUAI_MAXSHORTLEN) return luaS_trytasklstr(L, str, len);
+  if (len <= 1 || !luaC_tracing(L)) {
+    TString *cached = luaS_trycachedshort(L, str, len);
+    if (cached != NULL) return cached;
+  }
+  object = luaC_trytaskstring(L, sizestrshr(len), 0);
+  if (object == NULL) return NULL;
+  return resultshort(object, str, len, luaS_hash(str, len, G(L)->seed));
+}
+
 /* Fresh library results compare by contents. Short keys are canonicalized
 ** on insertion. A repeated result can enter the interned string cache. */
 TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
@@ -588,12 +611,8 @@ TString *luaS_resultlstr (lua_State *L, const char *str, size_t len) {
     if (result == NULL) {
       /* The regular value tag still compares by contents. The bytes use
       ** the compact short layout and the hash is already available. */
-      GCObject *object = luaC_newresultstring(L, sizestrshr(len));
-      result = gco2ts(object);
-      result->hash = hash;
-      if (hash == 0) result->extra |= LSTR_ZEROHASH;
-      copyshrstr(result, str, len);
-      return result;
+      return resultshort(luaC_newresultstring(L, sizestrshr(len)),
+                         str, len, hash);
     }
   }
   rememberstring(L, set, result, memchr(getshrstr(result), '\0', len) != NULL);
