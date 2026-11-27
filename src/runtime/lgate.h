@@ -52,7 +52,7 @@ l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_waitvalues (LuaStackGate *gate);
-LUAI_FUNC void luaX_cleararguments (LuaStackGate *gate);
+LUAI_FUNC void luaX_clearargumenttail (LuaStackGate *gate);
 
 /* A full claim is published before this join. A racing bounded claim must
 ** observe the full claim or finish before the full owner reads the stack. */

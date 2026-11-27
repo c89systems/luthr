@@ -87,8 +87,14 @@ l_sinline lua_Integer luaX_argumentinteger (uintptr_t argument) {
 }
 
 l_sinline void luaX_invalidatearguments (LuaStackGate *gate) {
-  if (l_unlikely(__atomic_load_n(&gate->arguments[0], __ATOMIC_RELAXED)))
-    luaX_cleararguments(gate);
+  if (l_unlikely(__atomic_load_n(&gate->arguments[0], __ATOMIC_RELAXED))) {
+    /* Published arguments occupy a contiguous prefix. Field calls use
+    ** only the receiver and key, so the rest of the array is already idle. */
+    __atomic_store_n(&gate->arguments[0], 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&gate->arguments[1], 0, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&gate->arguments[2], __ATOMIC_RELAXED))
+      luaX_clearargumenttail(gate);
+  }
 }
 
 /* After reserving the gate, retire the view before touching stack slots. */

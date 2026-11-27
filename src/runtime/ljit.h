@@ -39,9 +39,8 @@ LUAI_FUNC void luaJ_freeloops (lua_State *L, Proto *p, int retire);
 LUAI_FUNC LuaLoopSite *luaJ_loopat (const Proto *p, int pc);
 LUAI_FUNC uintptr_t luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site);
 LUAI_FUNC int luaV_loopnewtable (LuaLoopFrame *frame, unsigned offset);
-LUAI_FUNC int luaD_loopfieldmethod (LuaLoopFrame *frame, StkId result,
-                                     const TValue *object, const TValue *key,
-                                     unsigned offset);
+LUAI_FUNC int luaD_loopfieldmethod (LuaLoopFrame *frame, const TValue *object,
+                                     const TValue *key, unsigned offset);
 #if !defined(HARDSTACKTESTS)
 LUAI_FUNC int luaD_tryloopcall (LuaLoopFrame *frame, StkId function,
                                unsigned offset);

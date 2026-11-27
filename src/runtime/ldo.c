@@ -1136,32 +1136,67 @@ l_sinline StkId entercall (lua_State *L, StkId func, l_uint32 inc) {
 }
 
 #if !defined(HARDSTACKTESTS)
-static NativeStackContext *loopcallcontext (LuaLoopFrame *frame, StkId top) {
+static __attribute__((noinline)) NativeStackContext *initialloopcontext (
+    LuaLoopFrame *frame) {
+  lua_State *L = frame->thread;
+  NativeStackContext *context;
+  if (frame->call->next == NULL || L->policy != NULL) return NULL;
+  context = luaX_boundcontext(L);
+  if (luaX_contextpolicy(context) != NULL || luaC_tracing(L)) return NULL;
+  return context;
+}
+
+l_sinline NativeStackContext *loopcallcontext (LuaLoopFrame *frame, StkId top) {
   lua_State *L = frame->thread;
   NativeStackContext *context = frame->detached;
   if (L->stack_last.p - top <= LUA_MINSTACK ||
       getCcalls(L) >= LUAI_MAXCCALLS - 1 || luaTK_hasstops(L)) return NULL;
-  if (context == NULL) {
-    if (frame->call->next == NULL || L->policy != NULL) return NULL;
-    context = luaX_boundcontext(L);
-    if (luaX_contextpolicy(context) != NULL || luaC_tracing(L)) return NULL;
-  }
-  /* The previous return validated these under the still-held ticket. */
+  if (context == NULL) context = initialloopcontext(frame);
   else lua_assert(frame->call->next != NULL && L->policy == NULL);
-  if (context->limit == 0 || luaD_nativeposition() <= context->limit)
+  if (context == NULL || context->limit == 0 ||
+      luaD_nativeposition() <= context->limit)
     return NULL;
   return context;
+}
+
+/* Only an initial withdrawal can fail to install the C frame. */
+static __attribute__((noinline)) NativeStackContext *startloopnative (
+    lua_State *L, StkId func, StkId argtop, int method) {
+  StkId top = L->top.p;
+  NativeStackContext *context;
+  L->top.p = argtop;
+  context = luaW_trynativeframe(L, func, method + 1u);
+  if (context == NULL) {
+    L->top.p = top;
+    L->nCcalls -= method;
+    ++L->poll_remaining;
+  }
+  return context;
+}
+
+static __attribute__((noinline)) int finishloopnative (
+    LuaLoopFrame *frame, NativeStackContext *context, const Instruction *at,
+    int method, int n) {
+  lua_State *L = frame->thread;
+  CallInfo *caller = frame->call;
+  luaW_finishnativeframe(L, context);
+  frame->detached = NULL;
+  api_checknelems(L, n);
+  luaD_poscall(L, L->ci, n);
+  L->nCcalls -= method;
+  if (l_unlikely(L->task_nursery_pending)) L->poll_remaining = 1;
+  frame->base = caller->func.p + 1;
+  if (method) setobjs2s(L, frame->base + GETARG_A(*at), --L->top.p);
+  return (!method || gethookmask(L) || caller->u.l.trap) ? -1 : 1;
 }
 
 /* A scalar loop continues under a stack ticket while its managed slot
 ** remains recallable. Each C call can block or reenter through the usual ABI. */
 l_sinline __attribute__((always_inline)) int callloopnative (
     LuaLoopFrame *frame, NativeStackContext *context, StkId func,
-    StkId argtop, StkId result, const Instruction *at, int method) {
+    StkId argtop, const Instruction *at, int method) {
   lua_State *L = frame->thread;
   CallInfo *caller = frame->call;
-  ptrdiff_t top = savestack(L, L->top.p);
-  ptrdiff_t destination = method ? savestack(L, result) : 0;
   unsigned status = method + 1u;
   lua_CFunction function = fvalue(s2v(func));
   int n;
@@ -1169,17 +1204,13 @@ l_sinline __attribute__((always_inline)) int callloopnative (
   L->nCcalls += method;
   caller->u.l.rootpc = at;
   caller->u.l.savedpc = at + 1;
-  L->top.p = argtop;
-  if (frame->detached != NULL)
+  if (frame->detached != NULL) {
+    L->top.p = argtop;
     luaW_publishloopframe(L, func, method);
+  }
   else {
-    context = luaW_trynativeframe(L, func, status);
-    if (context == NULL) {
-      L->top.p = restorestack(L, top);
-      L->nCcalls -= method;
-      ++L->poll_remaining;
-      return 0;
-    }
+    context = startloopnative(L, func, argtop, method);
+    if (context == NULL) return 0;
   }
   n = (*function)(L);
   if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
@@ -1191,10 +1222,13 @@ l_sinline __attribute__((always_inline)) int callloopnative (
         luaX_contextpolicy(context) == NULL && !L->task_nursery_pending &&
         __atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) != context) {
       StkId above = call->func.p;
+      StkId base = caller->func.p + 1;
       api_checknelems(L, n);
       luaX_invalidatearguments(&L->stack_gate);
       if (method) {
-        StkId dst = restorestack(L, destination);
+        /* Native code may relocate the stack. The current caller frame and
+        ** instruction give the result slot after either kind of return. */
+        StkId dst = base + GETARG_A(*at);
         if (n == 0) setnilvalue2s(dst);
         else { setobjs2s(L, dst, L->top.p - n); }
       }
@@ -1206,21 +1240,13 @@ l_sinline __attribute__((always_inline)) int callloopnative (
       L->top.p = above;
       L->ci = caller;
       L->nCcalls -= method;
-      frame->base = caller->func.p + 1;
+      frame->base = base;
       frame->detached = context;
       return 1;
     }
     luaX_leavesharedread(L);
   }
-  luaW_finishnativeframe(L, context);
-  frame->detached = NULL;
-  api_checknelems(L, n);
-  luaD_poscall(L, L->ci, n);
-  L->nCcalls -= method;
-  if (l_unlikely(L->task_nursery_pending)) L->poll_remaining = 1;
-  frame->base = caller->func.p + 1;
-  if (method) setobjs2s(L, restorestack(L, destination), --L->top.p);
-  return (!method || gethookmask(L) || caller->u.l.trap) ? -1 : 1;
+  return finishloopnative(frame, context, at, method, n);
 }
 
 int luaD_tryloopcall (LuaLoopFrame *frame, StkId func, unsigned offset) {
@@ -1232,7 +1258,7 @@ int luaD_tryloopcall (LuaLoopFrame *frame, StkId func, unsigned offset) {
   if (!checktag(s2v(func), LUA_VLCF)) return 0;
   context = loopcallcontext(frame, top);
   if (context == NULL) return 0;
-  return callloopnative(frame, context, func, top, NULL, at, 0);
+  return callloopnative(frame, context, func, top, at, 0);
 }
 
 /* Publish code with ordinary managed admission. Subsequent detached calls
@@ -1309,47 +1335,61 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
 }
 #endif
 
-/* Return zero to execute the original instruction, or a negative value
-** when the field call completed and a newly installed trap needs dispatch. */
-int luaD_loopfieldmethod (LuaLoopFrame *frame, StkId result,
-                           const TValue *object, const TValue *key,
-                           unsigned offset) {
+static __attribute__((noinline)) lua_CFunction loopfieldindex (
+    lua_State *L, const TValue *object) {
+  TValue method;
+  if (luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) &&
+      checktag(&method, LUA_VLCF))
+    return fvalue(&method);
+  return NULL;
+}
+
+static __attribute__((noinline)) int loopfieldfallback (
+    LuaLoopFrame *frame, const TValue *object, const TValue *key,
+    const Instruction *at, lua_CFunction function) {
   lua_State *L = frame->thread;
   CallInfo *ci = frame->call;
+  TValue method;
+  --L->poll_remaining;
+  ci->u.l.rootpc = at;
+  ci->u.l.savedpc = at + 1;
+  L->top.p = ci->top.p;
+  setfvalue(&method, function);
+  luaT_callTMres(L, &method, object, key, frame->base + GETARG_A(*at));
+  frame->base = ci->func.p + 1;
+  return (gethookmask(L) || ci->u.l.trap) ? -1 : 1;
+}
+
+/* Return zero to execute the original instruction, or a negative value
+** when the field call completed and a newly installed trap needs dispatch. */
+int luaD_loopfieldmethod (LuaLoopFrame *frame, const TValue *object,
+                           const TValue *key, unsigned offset) {
+  lua_State *L = frame->thread;
   const Instruction *at = frame->entry + offset;
   lua_CFunction function;
-  TValue method;
   lua_assert(ttisfulluserdata(object));
   function = luaH_readlightindex(L, uvalue(object), &frame->index_hint);
   if (function == NULL) {
-    if (frame->detached != NULL ||
-        !luaA_readobjectfield(L, object, G(L)->tmname[TM_INDEX], &method) ||
-        !checktag(&method, LUA_VLCF)) return 0;
-    function = fvalue(&method);
+    if (frame->detached != NULL) return 0;
+    function = loopfieldindex(L, object);
+    if (function == NULL) return 0;
   }
 #if !defined(HARDSTACKTESTS)
   if (frame->bounded) {
-    StkId func = ci->top.p;
+    StkId func = frame->call->top.p;
     NativeStackContext *context = loopcallcontext(frame, func + 3);
     if (context != NULL) {
       int completed;
       setfvalue(s2v(func), function);
       setobj2s(L, func + 1, object);
       setobj2s(L, func + 2, key);
-      completed = callloopnative(frame, context, func, func + 3, result, at, 1);
+      completed = callloopnative(frame, context, func, func + 3, at, 1);
       if (completed) return completed;
     }
     if (frame->detached != NULL) return 0;
   }
 #endif
-  --L->poll_remaining;
-  ci->u.l.rootpc = at;
-  ci->u.l.savedpc = at + 1;
-  L->top.p = ci->top.p;
-  setfvalue(&method, function);
-  luaT_callTMres(L, &method, object, key, result);
-  frame->base = ci->func.p + 1;
-  return (gethookmask(L) || ci->u.l.trap) ? -1 : 1;
+  return loopfieldfallback(frame, object, key, at, function);
 }
 
 l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,

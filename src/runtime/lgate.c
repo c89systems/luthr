@@ -85,10 +85,9 @@ void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
     sched_yield();
 }
 
-void luaX_cleararguments (LuaStackGate *gate) {
+void luaX_clearargumenttail (LuaStackGate *gate) {
   unsigned i;
-  for (i = 0; i < LUA_NATIVE_ARGUMENTS &&
-              __atomic_load_n(&gate->arguments[i], __ATOMIC_RELAXED) != 0; i++)
+  for (i = 2; i < LUA_NATIVE_ARGUMENTS; i++)
     __atomic_store_n(&gate->arguments[i], 0, __ATOMIC_RELEASE);
 }
 

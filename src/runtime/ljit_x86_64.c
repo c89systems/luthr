@@ -404,11 +404,9 @@ static void readfield (Emitter *e, const Proto *p, unsigned pc,
   comparetag(e, b, ctb(LUA_VUSERDATA));
   ordinary = branch(e, NOT_EQUAL);
   emit(e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
-  argument(e, 6, a);          /* rsi = destination */
-  argument(e, 2, b);          /* rdx = receiver */
-  immediate(e, 1, cast(uintptr_t, &p->k[c]));
-  emit(e, 0x41, 0xb8);        /* r8d = original instruction offset */
-  word(e, pc);
+  argument(e, 6, b);          /* rsi = receiver */
+  immediate(e, 2, cast(uintptr_t, &p->k[c]));
+  indexarg(e, 1, pc);         /* ecx = original instruction offset */
   call(e, cast(uintptr_t, luaD_loopfieldmethod), 1);
   loadbase(e);
   opcodepc(e, pc + 1);

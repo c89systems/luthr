@@ -373,6 +373,20 @@ static int loop_call(lua_State *L) {
   return finish_loop_call(L, LUA_OK, (lua_KContext)value);
 }
 
+static unsigned width_calls;
+
+static int loop_argument_width(lua_State *L) {
+  int width = (int)(width_calls++ % 3);
+  require(lua_gettop(L) == (width == 0 ? 9 : width));
+  if (width == 0) {
+    require(lua_tointeger(L, 8) == 8 && lua_tointeger(L, 9) == 9);
+    lua_settop(L, 1);
+  } else if (width == 2)
+    require(lua_tointeger(L, 2) == 2);
+  require(lua_type(L, 8) == LUA_TNONE);
+  return 0;
+}
+
 static void check_native_calls(lua_State *L) {
   static const lua_Integer expected_sum = 700 * 701 / 2;
   const LClosure *closure;
@@ -409,6 +423,18 @@ static void check_native_calls(lua_State *L) {
   lua_gc(L, LUA_GCCOLLECT);
   require(lua_resume(child, L, 0, &results) == LUA_OK);
   require(results == 1 && lua_tointeger(child, -1) == expected_sum);
+
+  require(luaL_dostring(L, "return function(check) "
+                           "for i=1,700 do "
+                           "  check(i,2,3,4,5,6,7,8,9); check(i); check(i,2) "
+                           "end end") == LUA_OK);
+  closure = lua_topointer(L, -1);
+  require(closure != NULL && closure->p->sizeloops == 1);
+  lua_pushvalue(L, -1);
+  lua_pushcfunction(L, loop_argument_width);
+  require(lua_pcall(L, 1, 0, 0) == LUA_OK);
+  require(width_calls == 2100 &&
+          closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
 }
 
 static void check_native_callbacks(lua_State *L) {
