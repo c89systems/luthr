@@ -254,11 +254,43 @@ l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode) {
 }
 
 
+l_sinline TStatus finishprotected (lua_State *L, lua_longjmp *lj,
+                                     l_uint32 oldnCcalls) {
+  NativeStackContext *context = lj->context;
+  LuaExecution *execution = lj->execution;
+  TStatus status;
+  luaC_restoregcframe(lj->gc_frame);
+  context->api_region = lj->api_region;
+  L->reclaiming = lj->reclaiming;
+  /* Retire the jump buffer before any cleanup callback can park this stack. */
+  if (execution != NULL) {
+    execution->protected = lj->execution_previous;
+    execution->trusted = lj->execution_trusted;
+  }
+  /* A managed coroutine yield can keep running on this task. Release the
+  ** cached permit on a scheduler park, an error, or an abandoned native frame.
+  ** Self-close can abandon a native frame while reporting LUA_OK. */
+  status = lj->status;
+  if (execution != NULL &&
+      (execution->native_depth != lj->execution_native_depth ||
+       (status != LUA_OK &&
+        (status != LUA_YIELD || execution->scheduler == NULL))))
+    luaQ_restorenative(execution, L, lj->execution_native_depth);
+  if (status != LUA_OK) {
+    L->native_roots = lj->native_roots;  /* native scopes have unwound */
+    luaW_restore(L, lj->world_scope, lj->native_depth);
+  }
+  L->errorJmp = lj->previous;  /* restore old error handler */
+  L->nCcalls = oldnCcalls;
+  if (l_unlikely(status != LUA_OK))
+    context->overflow = lj->luthr_stack_overflow;
+  return status;
+}
+
 static TStatus runprotected (lua_State *L, Pfunc f, void *ud,
                               NativeStackContext *context) {
   l_uint32 oldnCcalls = L->nCcalls;
   lua_longjmp lj;
-  TStatus status;
   lj.status = LUA_OK;
   lj.carrier = pthread_self();
   lj.context = context;
@@ -282,32 +314,7 @@ static TStatus runprotected (lua_State *L, Pfunc f, void *ud,
   lj.previous = L->errorJmp;  /* chain new error handler */
   L->errorJmp = &lj;
   LUAI_TRY(L, &lj, f, ud);  /* call 'f' catching errors */
-  luaC_restoregcframe(lj.gc_frame);
-  context->api_region = lj.api_region;
-  L->reclaiming = lj.reclaiming;
-  /* Retire the jump buffer before any cleanup callback can park this stack. */
-  if (lj.execution != NULL) {
-    lj.execution->protected = lj.execution_previous;
-    lj.execution->trusted = lj.execution_trusted;
-  }
-  /* A managed coroutine yield can keep running on this task. Release the
-  ** cached permit on a scheduler park, an error, or an abandoned native frame.
-  ** Self-close can abandon a native frame while reporting LUA_OK. */
-  if (lj.execution != NULL &&
-      (lj.execution->native_depth != lj.execution_native_depth ||
-       (lj.status != LUA_OK &&
-        (lj.status != LUA_YIELD || lj.execution->scheduler == NULL))))
-    luaQ_restorenative(lj.execution, L, lj.execution_native_depth);
-  if (lj.status != LUA_OK) {
-    L->native_roots = lj.native_roots;  /* native scopes have unwound */
-    luaW_restore(L, lj.world_scope, lj.native_depth);
-  }
-  L->errorJmp = lj.previous;  /* restore old error handler */
-  L->nCcalls = oldnCcalls;
-  status = lj.status;
-  if (l_unlikely(status != LUA_OK))
-    context->overflow = lj.luthr_stack_overflow;
-  return status;
+  return finishprotected(L, &lj, oldnCcalls);
 }
 
 TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
@@ -1721,6 +1728,7 @@ TStatus luaD_pcall (lua_State *L, Pfunc func, void *u, ptrdiff_t old_top,
 struct NativeProtectedCall {
   lua_CFunction function;
   int managed;
+  int bounded_return;
 };
 
 
@@ -1743,6 +1751,7 @@ static void f_nativeprotected (lua_State *L, void *ud) {
       api_checknelems(L, n);
       moveresults(L, ci->func.p, n, ci->callstatus & CIST_NRESULTS);
       L->ci = ci->previous;
+      call->bounded_return = 1;
       return;  /* keep the stack claim while retiring the error handler */
     }
     luaX_leavebounded(L);
@@ -1754,10 +1763,57 @@ static void f_nativeprotected (lua_State *L, void *ud) {
 }
 
 
+/* The outer call pins the carrier, and entry through the bounded stack gate
+** holds neither the heap nor an API region. Keep the full recovery record
+** for reentrant Lua, including scopes that a nested error might abandon. */
+static TStatus runnativeprotected (lua_State *L, struct NativeProtectedCall *call,
+                                    NativeStackContext *context) {
+  LuaExecution *execution = context->execution;
+  l_uint32 oldnCcalls = L->nCcalls;
+  lua_longjmp lj;
+  lua_assert(context->api_region == NULL && L->object_scopes == NULL);
+  lua_assert(L->world_depth == 0 && !luaW_ownsheap(L));
+  lua_assert(execution == NULL || execution->trusted == NULL);
+  lj.previous = L->errorJmp;
+  lj.carrier = lj.previous->carrier;
+  lj.context = context;
+  lj.execution = execution;
+  lj.execution_native_depth = execution != NULL ? execution->native_depth : 0;
+  lj.execution_trusted = NULL;
+  lj.execution_previous = execution != NULL ? execution->protected : NULL;
+  lj.gc_frame = execution != NULL ? execution->gc_frame : luaC_gcframe();
+  lj.luthr_stack_overflow = context->overflow;
+  lj.native_roots = L->native_roots;
+  lj.native_depth = L->native_depth;
+  lj.reclaiming = L->reclaiming;
+  lj.world_scope = (LuaWorldScope){0};
+  lj.object_scopes = NULL;
+  lj.coroutine_scopes = context->coroutine_scopes;
+  lj.api_region = NULL;
+  lj.status = LUA_OK;
+  if (execution != NULL) execution->protected = &lj;
+  L->errorJmp = &lj;
+  LUAI_TRY(L, &lj, f_nativeprotected, call);
+  /* Self-close may jump with LUA_OK. Only an actual return to the bounded
+  ** stack gate proves that the native and API operations have completed. */
+  if (l_likely(call->bounded_return)) {
+    lua_assert(context->api_region == NULL && luaC_gcframe() == lj.gc_frame);
+    lua_assert(execution == NULL || (execution->trusted == NULL &&
+               execution->native_depth == lj.execution_native_depth));
+    if (execution != NULL) execution->protected = lj.execution_previous;
+    L->reclaiming = lj.reclaiming;
+    L->errorJmp = lj.previous;
+    L->nCcalls = oldnCcalls;
+    return LUA_OK;
+  }
+  return finishprotected(L, &lj, oldnCcalls);
+}
+
+
 int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
                          int nargs, int nresults, TStatus *status) {
   LuaExecution *execution = context->execution;
-  struct NativeProtectedCall call = {NULL, 0};
+  struct NativeProtectedCall call = {NULL, 0, 0};
   CallInfo *caller;
   StkId func;
   lu_byte allowhooks;
@@ -1793,7 +1849,7 @@ int luaD_trynativepcall (lua_State *L, NativeStackContext *context,
   L->nCcalls += nyci;
   luaD_initframe(L, caller->next, func, cast_uint(nresults + 1) | CIST_C,
                     L->top.p + LUA_MINSTACK);
-  *status = runprotected(L, f_nativeprotected, &call, context);
+  *status = runnativeprotected(L, &call, context);
   L->nCcalls -= nyci;
   if (l_unlikely(*status != LUA_OK))
     *status = recovercall(L, caller, allowhooks, top, *status);
