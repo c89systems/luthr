@@ -98,14 +98,6 @@ static void pushownedstring (lua_State *L, unsigned *work,
   }
 }
 
-static void pushstring (lua_State *L, unsigned *work,
-                        const char *src, size_t len) {
-  if (len <= LUAI_MAXSHORTLEN) luaQ_workn(L, work, len);
-  lua_lock(L);
-  pushownedstring(L, work, src, len);
-  lua_unlock(L);
-}
-
 static void addpadding (lua_State *L, unsigned *work, luaL_Buffer *b,
                         size_t len, int byte) {
   while (len != 0) {
@@ -2673,15 +2665,22 @@ static lua_Integer unpackint (lua_State *L, const char *str,
 }
 
 
+static void unpackstring (lua_State *L, Header *h, const char *src, size_t len) {
+  if (len <= LUAI_MAXSHORTLEN) luaQ_workn(L, &h->work, len);
+  pushownedstring(L, &h->work, src, len);
+}
+
+
 static int str_unpack (lua_State *L) {
   LuaNativeRoot roots[2];
-  size_t formatlen;
+  size_t formatlen, ld, pos;
   Header h;
-  const char *fmt = luaL_rootstring(L, 1, &roots[0], &formatlen);
-  size_t ld;
-  const char *data = luaL_rootstring(L, 2, &roots[1], &ld);
-  size_t pos = luaB_firstpos(luaL_optinteger(L, 3, 1), ld) - 1;
+  const char *fmt, *data;
   int n = 0;  /* number of results */
+  lua_lock(L);
+  fmt = luaL_ownedrootstring(L, 1, &roots[0], &formatlen);
+  data = luaL_ownedrootstring(L, 2, &roots[1], &ld);
+  pos = luaB_firstpos(readposition(L, 3, 1, 1), ld) - 1;
   luaL_argcheck(L, pos <= ld, 3, "initial position out of string");
   initheader(L, &h);
   while (*fmt != '\0') {
@@ -2692,43 +2691,48 @@ static int str_unpack (lua_State *L) {
                     "data string too short");
     pos += ntoalign;  /* skip alignment */
     /* stack space for item + next position */
-    luaL_checkstack(L, 2, "too many results");
+    if (L->ci->top.p - L->top.p < 2 && !luaA_checkstack(L, 2))
+      luaL_error(L, "stack overflow (too many results)");
     n++;
     switch (opt) {
       case Kint:
       case Kuint: {
         lua_Integer res = unpackint(L, data + pos, h.islittle,
                                        cast_int(size), (opt == Kint));
-        lua_pushinteger(L, res);
+        setivalue(s2v(L->top.p), res);
+        api_incr_top(L);
         break;
       }
       case Kfloat: {
         float f;
         copywithendian((char *)&f, data + pos, sizeof(f), h.islittle);
-        lua_pushnumber(L, (lua_Number)f);
+        setfltvalue(s2v(L->top.p), (lua_Number)f);
+        api_incr_top(L);
         break;
       }
       case Knumber: {
         lua_Number f;
         copywithendian((char *)&f, data + pos, sizeof(f), h.islittle);
-        lua_pushnumber(L, f);
+        setfltvalue(s2v(L->top.p), f);
+        api_incr_top(L);
         break;
       }
       case Kdouble: {
         double f;
         copywithendian((char *)&f, data + pos, sizeof(f), h.islittle);
-        lua_pushnumber(L, (lua_Number)f);
+        setfltvalue(s2v(L->top.p), (lua_Number)f);
+        api_incr_top(L);
         break;
       }
       case Kchar: {
-        pushstring(L, &h.work, data + pos, size);
+        unpackstring(L, &h, data + pos, size);
         break;
       }
       case Kstring: {
         lua_Unsigned len = (lua_Unsigned)unpackint(L, data + pos,
                                           h.islittle, cast_int(size), 0);
         luaL_argcheck(L, len <= ld - pos - size, 2, "data string too short");
-        pushstring(L, &h.work, data + pos + size, cast_sizet(len));
+        unpackstring(L, &h, data + pos + size, cast_sizet(len));
         pos += cast_sizet(len);  /* skip string */
         break;
       }
@@ -2736,7 +2740,7 @@ static int str_unpack (lua_State *L) {
         size_t len = findzero(L, &h.work, data + pos, ld - pos);
         luaL_argcheck(L, pos + len < ld, 2,
                          "unfinished string for format 'z'");
-        pushstring(L, &h.work, data + pos, len);
+        unpackstring(L, &h, data + pos, len);
         pos += len + 1;  /* skip string plus final '\0' */
         break;
       }
@@ -2747,8 +2751,12 @@ static int str_unpack (lua_State *L) {
     pos += size;
     luaQ_work(L, &h.work);
   }
-  lua_pushinteger(L, cast_st2S(pos) + 1);  /* next position */
-  return luaL_rootresult(L, roots, 2, n + 1);
+  setivalue(s2v(L->top.p), cast_st2S(pos) + 1);  /* next position */
+  api_incr_top(L);
+  luaR_poproot(L, &roots[1]);
+  luaR_poproot(L, &roots[0]);
+  lua_unlock(L);
+  return n + 1;
 }
 
 /* }====================================================== */

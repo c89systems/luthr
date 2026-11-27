@@ -500,6 +500,21 @@ equal(utf8.len('å中🙂'),3)
 local bytes = string.pack('<i8I2',-42,65535)
 local signed, unsigned, position = string.unpack('<i8I2',bytes)
 assert(signed==-42 and unsigned==65535 and position==#bytes+1)
+do
+  local format = '<I2'..('I2'):rep(95)
+  local values = {}
+  for i=1,96 do values[i]=i*17 end
+  local packed = string.pack(format, table.unpack(values))
+  local unpacked = table.pack(string.unpack(format, '!'..packed, '2'))
+  assert(unpacked.n==97 and unpacked[97]==#packed+2)
+  for i=1,96 do assert(unpacked[i]==values[i]) end
+
+  local payload = ('a\0b'):rep(4097)
+  local binary = string.pack('>i2s4z', -42, payload, 'tail')
+  local number, string_value, tail, following = string.unpack('>i2s4z', binary)
+  assert(number==-42 and string_value==payload and tail=='tail' and following==#binary+1)
+  assert(not pcall(string.unpack, '>i2s4z', binary:sub(1,-2)))
+end
 local fragments = {'local n=', '0; for i=1,100 do ', 'n=n+i end; return n'}
 local reads=0
 local loaded = assert(load(function()

@@ -932,7 +932,7 @@ LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
 ** string is selected without reading 's' when 'len' is zero.
 */
 l_sinline const char *pushlstring (lua_State *L, const char *s, size_t len,
-                                   int library) {
+                                   int replacebuffer) {
   TString *ts;
   if (len <= LUA_ALLOC_MAX - sizestrreg(0) &&
       !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
@@ -941,8 +941,9 @@ l_sinline const char *pushlstring (lua_State *L, const char *s, size_t len,
     ts = len <= LUAI_MAXSHORTLEN ? luaS_trycachedshort(L, s, len)
          : !isLua(L->ci) ? luaS_trytasklstr(L, s, len) : NULL;
     if (ts != NULL) {
-      setsvalue2s(L, L->top.p, ts);
-      api_incr_top(L);
+      if (replacebuffer) luaX_invalidatearguments(&L->stack_gate);
+      setsvalue2s(L, L->top.p - replacebuffer, ts);
+      if (!replacebuffer) api_incr_top(L);
       s = getstr(ts);
       luaX_leavebounded(L);
       return s;
@@ -950,9 +951,9 @@ l_sinline const char *pushlstring (lua_State *L, const char *s, size_t len,
     luaX_leavebounded(L);
   }
   lua_lock(L);
-  ts = library ? luaS_resultlstr(L, s, len) : luaS_cachelstr(L, s, len);
-  setsvalue2s(L, L->top.p, ts);
-  api_incr_top(L);
+  ts = replacebuffer ? luaS_resultlstr(L, s, len) : luaS_cachelstr(L, s, len);
+  setsvalue2s(L, L->top.p - replacebuffer, ts);
+  if (!replacebuffer) api_incr_top(L);
   luaC_checkGC(L);
   s = getstr(ts);
   lua_unlock(L);
@@ -963,7 +964,7 @@ LUA_API const char *lua_pushlstring (lua_State *L, const char *s, size_t len) {
   return pushlstring(L, s, len, 0);
 }
 
-void luaA_pushresultstring (lua_State *L, const char *s, size_t len) {
+void luaA_finishbufferstring (lua_State *L, const char *s, size_t len) {
   pushlstring(L, s, len, 1);
 }
 

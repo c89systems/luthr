@@ -14,7 +14,8 @@ LUAI_FUNC TValue *luaA_indexvalue (lua_State *L, int idx, LuaNativeRoot *root);
 LUAI_FUNC int luaA_testnamedudata (lua_State *L, int idx, const char *name,
                                   void **result);
 LUAI_FUNC void luaA_setnamedmeta (lua_State *L, const char *name);
-LUAI_FUNC void luaA_pushresultstring (lua_State *L, const char *s, size_t len);
+/* Replace a trusted library's lightuserdata buffer placeholder. */
+LUAI_FUNC void luaA_finishbufferstring (lua_State *L, const char *s, size_t len);
 
 l_sinline void *luaA_udatapointer (const TValue *o) {
   switch (ttype(o)) {

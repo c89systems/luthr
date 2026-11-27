@@ -708,8 +708,11 @@ static void pushbufferresult (luaL_Buffer *B, int library) {
   lua_State *L = B->L;
   checkbufferlevel(B, -1);
   if (!buffonstack(B)) {
-    if (library) luaA_pushresultstring(L, B->b, B->n);
-    else lua_pushlstring(L, B->b, B->n);
+    if (library) {
+      luaA_finishbufferstring(L, B->b, B->n);
+      return;
+    }
+    lua_pushlstring(L, B->b, B->n);
   }
   else {  /* reuse buffer already allocated */
     UBox *box = (UBox *)lua_touserdata(L, -1);
