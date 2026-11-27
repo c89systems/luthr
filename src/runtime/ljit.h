@@ -20,7 +20,8 @@ typedef unsigned (*LuaCallCode)(lua_State *L, StkId base, LClosure *closure);
 
 enum { LUA_LOOP_COLD, LUA_LOOP_BUILDING, LUA_LOOP_UNAVAILABLE };
 enum { LUA_NATIVE_CALL_WORDS = 32 };
-enum { LUA_LOOP_BOUNDED = 1, LUA_CALL_READS_STORAGE = 2 };
+/* Managed call bodies can be replayed because they only read shared state. */
+enum { LUA_LOOP_BOUNDED = 1, LUA_CALL_READS_STORAGE = 2, LUA_CALL_MANAGED = 4 };
 
 typedef struct LuaLoopSite {
   int pc;

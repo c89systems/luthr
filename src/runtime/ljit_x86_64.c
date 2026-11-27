@@ -4,11 +4,14 @@
 
 #include <string.h>
 
+#include "laccess.h"
 #include "lbuiltin.h"
+#include "ldebug.h"
 #include "lfunc.h"
 #include "ljit.h"
 #include "lopcodes.h"
 #include "ltableaccess.h"
+#include "ltask.h"
 #include "lvm.h"
 
 /* r12 = frame, r13 = Lua registers, r14 = thread, ebx = side-exit PC.
@@ -227,6 +230,68 @@ static int getfield (lua_State *L, TValue *dst, const TValue *table,
   return 1;
 }
 
+/* The method can change between iterations. Resolve it each time against
+** the live table. A compiled read-only body has no observable writes, so
+** a side exit can retry the entire lookup through the interpreter. */
+static int getfieldormethod (LuaLoopFrame *frame, TValue *dst,
+                              const TValue *receiver, const TValue *key) {
+  lua_State *L = frame->thread;
+  TValue result, method;
+  lu_byte tag;
+  LClosure *closure;
+  const Proto *p;
+  LuaLoopSite *site;
+  StkId base, slot;
+  uintptr_t address;
+  unsigned budget, resume;
+  Instruction ret;
+  if (!ttistable(receiver) ||
+      !luaH_trygetshortstr(L, hvalue(receiver), tsvalue(key), &result, &tag))
+    return 0;
+  if (!luaV_needsindex(tag)) {
+    setobj(L, dst, &result);
+    return 1;
+  }
+  if (gethookmask(L) || luaTK_hasstops(L) || L->policy != NULL ||
+      luaC_tracing(L) || getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
+      !luaA_tryindex(L, hvalue(receiver), key, &result, &method, &tag, 1) ||
+      !ttisLclosure(&method))
+    return 0;
+  closure = clLvalue(&method);
+  p = closure->p;
+  site = p->loops;
+  if (site == NULL || !(site->flags & LUA_CALL_MANAGED)) return 0;
+  budget = L->poll_remaining;
+  base = frame->call->top.p;
+  if (budget <= site->words + 1 || L->stack_last.p - base <= p->maxstacksize)
+    return 0;
+  address = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
+  if (address <= LUA_LOOP_UNAVAILABLE) return 0;
+  luaC_tracevalue(L, &method);
+  /* No helper can park. The scratch registers are above the live frame. */
+  for (slot = base; slot < base + p->maxstacksize; slot++) setnilvalue2s(slot);
+  if (p->numparams > 0) setobj2s(L, base, receiver);
+  if (p->numparams > 1) setobj2s(L, base + 1, key);
+  resume = cast(LuaCallCode, address)(L, base, closure);
+  ret = p->code[resume];
+  if (!gethookmask(L) && !frame->call->u.l.trap && !luaTK_hasstops(L)) {
+    if (GET_OPCODE(ret) == OP_RETURN1) {
+      const TValue *value = s2v(base + GETARG_A(ret));
+      luaC_tracevalue(L, value);
+      setobj(L, dst, value);
+      --L->poll_remaining;
+      return 1;
+    }
+    if (GET_OPCODE(ret) == OP_RETURN0) {
+      setnilvalue(dst);
+      --L->poll_remaining;
+      return 1;
+    }
+  }
+  L->poll_remaining = budget;
+  return 0;
+}
+
 static int gettable (lua_State *L, TValue *dst, const TValue *table,
                      const TValue *key) {
   TValue result;
@@ -356,7 +421,11 @@ static void readfield (Emitter *e, const Proto *p, unsigned pc,
     emit(e, 0);
     exitif(e, NOT_EQUAL);
   }
-  readtable(e, p, OP_GETFIELD, a, b, c);
+  emit(e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
+  argument(e, 6, a);          /* rsi = destination */
+  argument(e, 2, b);          /* rdx = receiver */
+  immediate(e, 1, cast(uintptr_t, &p->k[c]));
+  call(e, cast(uintptr_t, getfieldormethod), 1);
   charge(e);
   linkbranch(e, done, e->next);
 }
@@ -674,6 +743,13 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
         comparetag(&e, a + 1, LUA_VFALSE);
         exitif(&e, EQUAL);
         break;
+      case OP_GETFIELD:
+        emit(&e, 0x4c, 0x89, 0xf7);  /* rdi = thread */
+        argument(&e, 6, a);          /* rsi = destination */
+        argument(&e, 2, b);          /* rdx = receiver */
+        immediate(&e, 1, cast(uintptr_t, &p->k[c]));
+        call(&e, cast(uintptr_t, getfield), 1);
+        break;
       case OP_LEN:
         argument(&e, 7, a);          /* rdi = result */
         argument(&e, 6, b);          /* rsi = operand */
@@ -687,6 +763,12 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
         arith(&e, op, a, b, 0, l_castS2U(GETARG_sC(ins)), 1, 0);
         pc++;
         break;
+      case OP_ADDK: case OP_SUBK: case OP_MULK: {
+        const TValue *value = &p->k[c];
+        arith(&e, op, a, b, 0, val_(value).bits, 1, ttisfloat(value));
+        pc++;
+        break;
+      }
       case OP_JMP: {
         unsigned target = cast_uint(cast_int(pc) + 1 + GETARG_sJ(ins));
         checkhooks(&e);
@@ -700,9 +782,10 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
         unsigned equal = GETARG_k(ins) == (op != OP_TEST) ? target : fallthrough;
         unsigned other = equal == target ? fallthrough : target;
         checkhooks(&e);
-        if (op == OP_EQ) {
+        if (op == OP_EQ || (op == OP_EQK && !ttisnil(&p->k[b]))) {
           argument(&e, 7, a);
-          argument(&e, 6, b);
+          if (op == OP_EQ) argument(&e, 6, b);
+          else immediate(&e, 6, cast(uintptr_t, &p->k[b]));
           call(&e, cast(uintptr_t, comparevalues), 0);
           emit(&e, 0x85, 0xc0);
           exitif(&e, NEGATIVE);

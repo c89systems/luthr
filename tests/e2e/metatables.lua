@@ -290,4 +290,40 @@ do
   table.sort(large)
   for i=1,#large do assert(large[i]==i) end
 end
+do
+  local function read(object,key)
+    assert(key=='total')
+    return object.value*2
+  end
+  local receiver=setmetatable({value=21},{__index=read})
+  local function sum(object,n)
+    local total=0
+    for i=1,n do total=total+object.total end
+    return total
+  end
+  assert(sum(receiver,256)==256*42)
+  assert(sum(receiver,256)==256*42)
+  receiver.value=1.25
+  assert(sum(receiver,256)==256*2.5)
+  receiver.value=setmetatable({}, {__mul=function(_,scale) return scale+40 end})
+  assert(sum(receiver,256)==256*42)
+  receiver.value=nil
+  local calls=0
+  getmetatable(receiver).__index=function(object,key)
+    if key=='total' then return read(object,key) end
+    assert(key=='value')
+    calls=calls+1
+    return 21
+  end
+  assert(receiver.total==42 and calls==1)
+  assert(not pcall(read,receiver,'unexpected') and calls==1)
+  assert(sum(receiver,256)==256*42 and calls==257)
+  local traced=0
+  debug.sethook(function(event)
+    if event=='tail call' and debug.getinfo(2,'f').func==read then traced=traced+1 end
+  end,'c')
+  assert(receiver.total==42)
+  debug.sethook()
+  assert(traced==1 and calls==258)
+end
 print('metatables: hits, misses, writes, replacement, cache, GC, mixed keys, self/pair ownership, errors passed')

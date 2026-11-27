@@ -1904,6 +1904,44 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
   }
 #include "loppairs.h"
 #undef VM_PAIR
+  vmcase(LUA_NATIVE_BODY) {
+    LuaLoopSite *site = p->loops;
+    uintptr_t address;
+    unsigned resume;
+    StkId slot;
+    if (trap || gethookmask(L) || L->policy != NULL || luaTK_hasstops(L) ||
+        L->poll_remaining <= site->words || luaC_tracing(L))
+      goto ordinarybody;
+    address = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
+    if (address == LUA_LOOP_COLD) {
+      ptrdiff_t top = savestack(L, L->top.p);
+      ci->u.l.savedpc = ip;
+      ci->u.l.rootpc = NULL;
+      L->top.p = base + p->numparams;
+      address = luaJ_prepare(L, cl->p, site);
+      updatebase(ci);
+      L->top.p = restorestack(L, top);
+      updatetrap(ci);
+      if (trap || gethookmask(L) || luaTK_hasstops(L) || luaC_tracing(L) ||
+          L->poll_remaining <= site->words)
+        goto ordinarybody;
+    }
+    if (address <= LUA_LOOP_UNAVAILABLE) goto ordinarybody;
+    for (slot = base + p->numparams; slot < ci->top.p; slot++)
+      setnilvalue2s(slot);
+    L->top.p = ci->top.p;
+    ++L->poll_remaining;  /* the body charges its own instructions */
+    resume = cast(LuaCallCode, address)(L, base, cl);
+    updatetrap(ci);
+    if (resume == 0 && !trap && !gethookmask(L)) {
+      --L->poll_remaining;
+      goto ordinarybody;
+    }
+    pc = ip + resume;
+    vmbreak;
+   ordinarybody:
+    goto *(&&L_cells + disptab[GET_OPCODE(i)]);
+  }
   vmcase(LUA_NATIVE_LOOP) {
     LuaLoopSite *site;
     LuaLoopCode native;

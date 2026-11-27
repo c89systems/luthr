@@ -174,6 +174,10 @@ static int callentry (const Proto *p, unsigned *flags) {
         if (b >= p->sizeupvalues || !validconstant(p, c, 1)) return 0;
         *flags |= LUA_CALL_READS_STORAGE;
         break;
+      case OP_GETFIELD:
+        if (b >= p->maxstacksize || !validconstant(p, c, 1)) return 0;
+        *flags |= LUA_CALL_MANAGED | LUA_CALL_READS_STORAGE;
+        break;
       case OP_CALL:
         if (b != 2 || c != 1 || a + 1 >= p->maxstacksize) return 0;
         break;
@@ -185,12 +189,22 @@ static int callentry (const Proto *p, unsigned *flags) {
         pc++;
         break;
       }
+      case OP_ADDK: case OP_SUBK: case OP_MULK:
+        if (b >= p->maxstacksize || !validconstant(p, c, 0) ||
+            !ttisnumber(&p->k[c]) || pc + 1 >= last ||
+            GET_OPCODE(p->code[pc + 1]) != OP_MMBINK)
+          return 0;
+        *flags |= LUA_CALL_MANAGED;
+        pc++;
+        break;
       case OP_EQ: case OP_EQK: case OP_TEST: case OP_JMP: {
         int target;
         if (op != OP_JMP) {
           if (op == OP_EQ && b >= p->maxstacksize) return 0;
-          if (op == OP_EQK &&
-              (!validconstant(p, b, 0) || !ttisnil(&p->k[b]))) return 0;
+          if (op == OP_EQK) {
+            if (!validconstant(p, b, 0)) return 0;
+            if (!ttisnil(&p->k[b])) *flags |= LUA_CALL_MANAGED;
+          }
           if (++pc >= last || GET_OPCODE(p->code[pc]) != OP_JMP) return 0;
           ins = p->code[pc];
         }
@@ -202,7 +216,11 @@ static int callentry (const Proto *p, unsigned *flags) {
       default: return 0;
     }
   }
-  return writes != 0 && (targets & ~entries) == 0;
+  if (*flags & LUA_CALL_MANAGED) {
+    if (writes != 0) return 0;
+  }
+  else if (writes == 0) return 0;
+  return (targets & ~entries) == 0;
 }
 
 
@@ -214,7 +232,12 @@ void luaJ_lower (lua_State *L, Proto *p) {
     sites = luaM_tryalloc(L, sizeof(*sites));
     if (sites != NULL) {
       *sites = (LuaLoopSite){ .words = cast_uint(p->sizecode), .flags = flags };
-      p->nativecall = sites;
+      if (flags & LUA_CALL_MANAGED) {
+        p->loops = sites;
+        p->sizeloops = 1;
+        p->dispatch[0].opcode = LUA_NATIVE_BODY;
+      }
+      else p->nativecall = sites;
     }
     return;
   }
@@ -281,8 +304,8 @@ static uintptr_t compile (lua_State *L, const Proto *p, LuaLoopSite *site) {
   if (allocation != NULL) {
     address = cast(uintptr_t, allocation);
     code = allocation + (page - address % page) % page;
-    int emitted = site == p->nativecall ? luaJ_emitcall(p, code, codesize)
-                                       : luaJ_emit(p, site, code, codesize);
+    int emitted = site == p->nativecall || (site->flags & LUA_CALL_MANAGED)
+      ? luaJ_emitcall(p, code, codesize) : luaJ_emit(p, site, code, codesize);
     if (emitted) {
       __builtin___clear_cache(cast_charp(code), cast_charp(code + codesize));
       if (mprotect(code, codesize, PROT_READ | PROT_EXEC) == 0) {
