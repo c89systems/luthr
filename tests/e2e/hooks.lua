@@ -39,6 +39,26 @@ do
   assert(first=='first' and second==nil)
 end
 
+do
+  local target=assert(load([[return function(a, ...)
+    coroutine.yield(a)
+    return a
+  end]], '=getinfo-source'))()
+  local thread=coroutine.create(target)
+  local ok, yielded=coroutine.resume(thread, 42)
+  assert(ok and yielded==42)
+  local info=debug.getinfo(thread,1,'SftuLLff')
+  assert(info.func==target and info.source=='=getinfo-source' and info.what=='Lua')
+  assert(info.nparams==1 and info.isvararg and not info.istailcall)
+  assert(info.activelines[2] and info.activelines[3])
+  assert(debug.getinfo(target,'f').func==target)
+  assert(debug.getinfo(math.sin,'LS').activelines==nil)
+  assert(next(debug.getinfo(target,''))==nil)
+  assert(not pcall(debug.getinfo,thread,1,'f?'))
+  local resumed, result=coroutine.resume(thread)
+  assert(resumed and result==42)
+end
+
 local gaps={1,124,127,128,255,256,1000}
 local active=true
 local finalized=0

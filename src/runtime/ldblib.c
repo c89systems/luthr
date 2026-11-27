@@ -17,9 +17,13 @@
 #include "lua.h"
 
 #include "lauxlib.h"
+#include "lapi.h"
 #include "lbuiltin.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "lroots.h"
+#include "lstring.h"
+#include "ltable.h"
 
 
 /*
@@ -105,40 +109,112 @@ static lua_State *getthread (lua_State *L, int *arg) {
 }
 
 
-/*
-** Variations of 'lua_settable', used by 'db_getinfo' to put results
-** from 'lua_getinfo' into result table. Key is always a string;
-** value can be a string, an int, or a boolean.
-*/
-static void settabss (lua_State *L, const char *k, const char *v) {
-  lua_pushstring(L, v);
-  lua_setfield(L, -2, k);
+/* The new table and any function or line-table results stay on the owned
+** stack while the record is filled. Interning a field name can allocate. */
+static void setinfostring (lua_State *L, Table *t, const char *name,
+                           const char *bytes, size_t len) {
+  LuaNativeRoot value;
+  TValue key;
+  if (bytes == NULL) return;
+  luaR_pushroot(L, &value);
+  setsvalue(L, &value.value, luaS_newlstr(L, bytes, len));
+  setsvalue(L, &key, luaS_new(L, name));
+  luaH_set(L, t, &key, &value.value);
+  luaR_poproot(L, &value);
 }
 
-static void settabsi (lua_State *L, const char *k, int v) {
-  lua_pushinteger(L, v);
-  lua_setfield(L, -2, k);
+static void setinfointeger (lua_State *L, Table *t, const char *name, int n) {
+  TValue key, value;
+  setsvalue(L, &key, luaS_new(L, name));
+  setivalue(&value, n);
+  luaH_set(L, t, &key, &value);
 }
 
-static void settabsb (lua_State *L, const char *k, int v) {
-  lua_pushboolean(L, v);
-  lua_setfield(L, -2, k);
+static void setinfoboolean (lua_State *L, Table *t, const char *name, int b) {
+  TValue key, value;
+  setsvalue(L, &key, luaS_new(L, name));
+  if (b) setbtvalue(&value);
+  else setbfvalue(&value);
+  luaH_set(L, t, &key, &value);
 }
 
+static void setinforesult (lua_State *L, Table *t, const char *name,
+                           int offset) {
+  TValue key;
+  setsvalue(L, &key, luaS_new(L, name));
+  luaH_set(L, t, &key, s2v(L->top.p - offset));
+}
 
-/*
-** In function 'db_getinfo', the call to 'lua_getinfo' may push
-** results on the stack; later it creates the result table to put
-** these objects. Function 'treatstackoption' puts the result from
-** 'lua_getinfo' on top of the result table so that it can call
-** 'lua_setfield'.
-*/
-static void treatstackoption (lua_State *L, lua_State *L1, const char *fname) {
-  if (L == L1)
-    lua_rotate(L, -2, 1);  /* exchange object and table */
-  else
-    lua_xmove(L1, L, 1);  /* move object to the "main" stack */
-  lua_setfield(L, -2, fname);  /* put object into table */
+enum {
+  INFO_SOURCE = 1, INFO_LINE = 2, INFO_UPVALUES = 4, INFO_NAME = 8,
+  INFO_TRANSFER = 16, INFO_TAIL = 32, INFO_FUNCTION = 64, INFO_LINES = 128
+};
+
+static unsigned infofields (const char *options) {
+  unsigned fields = 0;
+  for (; *options != '\0'; options++) {
+    switch (*options) {
+      case 'S': fields |= INFO_SOURCE; break;
+      case 'l': fields |= INFO_LINE; break;
+      case 'u': fields |= INFO_UPVALUES; break;
+      case 'n': fields |= INFO_NAME; break;
+      case 'r': fields |= INFO_TRANSFER; break;
+      case 't': fields |= INFO_TAIL; break;
+      case 'f': fields |= INFO_FUNCTION; break;
+      case 'L': fields |= INFO_LINES; break;
+    }
+  }
+  return fields;
+}
+
+static void pushinfotable (lua_State *L, lua_State *source,
+                           unsigned fields, const lua_Debug *ar) {
+  int lines = (fields & INFO_LINES) != 0;
+  int extra = lines + ((fields & INFO_FUNCTION) != 0);
+  unsigned capacity = cast_uint(extra) +
+    5u * ((fields & INFO_SOURCE) != 0) + ((fields & INFO_LINE) != 0) +
+    3u * ((fields & INFO_UPVALUES) != 0) + 2u * ((fields & INFO_NAME) != 0) +
+    2u * ((fields & INFO_TRANSFER) != 0) + 2u * ((fields & INFO_TAIL) != 0);
+  Table *t;
+  if (L != source && extra != 0) lua_xmove(source, L, extra);
+  lua_lock(L);
+  t = luaH_new(L, 0, capacity);
+  sethvalue2s(L, L->top.p, t);
+  api_incr_top(L);
+  if (fields & INFO_SOURCE) {
+    setinfostring(L, t, "source", ar->source, ar->srclen);
+    setinfostring(L, t, "short_src", ar->short_src, strlen(ar->short_src));
+    setinfointeger(L, t, "linedefined", ar->linedefined);
+    setinfointeger(L, t, "lastlinedefined", ar->lastlinedefined);
+    setinfostring(L, t, "what", ar->what, strlen(ar->what));
+  }
+  if (fields & INFO_LINE)
+    setinfointeger(L, t, "currentline", ar->currentline);
+  if (fields & INFO_UPVALUES) {
+    setinfointeger(L, t, "nups", ar->nups);
+    setinfointeger(L, t, "nparams", ar->nparams);
+    setinfoboolean(L, t, "isvararg", ar->isvararg);
+  }
+  if (fields & INFO_NAME) {
+    if (ar->name != NULL)
+      setinfostring(L, t, "name", ar->name, strlen(ar->name));
+    setinfostring(L, t, "namewhat", ar->namewhat, strlen(ar->namewhat));
+  }
+  if (fields & INFO_TRANSFER) {
+    setinfointeger(L, t, "ftransfer", ar->ftransfer);
+    setinfointeger(L, t, "ntransfer", ar->ntransfer);
+  }
+  if (fields & INFO_TAIL) {
+    setinfoboolean(L, t, "istailcall", ar->istailcall);
+    setinfointeger(L, t, "extraargs", ar->extraargs);
+  }
+  /* The debug API returned the function (if any) before the line table. */
+  if (lines) setinforesult(L, t, "activelines", 2);
+  if (fields & INFO_FUNCTION) setinforesult(L, t, "func", 2 + lines);
+  sethvalue2s(L, L->top.p - extra - 1, t);
+  L->top.p -= extra;
+  luaC_checkGC(L);
+  lua_unlock(L);
 }
 
 
@@ -168,38 +244,7 @@ static int db_getinfo (lua_State *L) {
   }
   if (!lua_getinfo(L1, options, &ar))
     return luaL_argerror(L, arg+2, "invalid option");
-  lua_newtable(L);  /* table to collect results */
-  if (strchr(options, 'S')) {
-    lua_pushlstring(L, ar.source, ar.srclen);
-    lua_setfield(L, -2, "source");
-    settabss(L, "short_src", ar.short_src);
-    settabsi(L, "linedefined", ar.linedefined);
-    settabsi(L, "lastlinedefined", ar.lastlinedefined);
-    settabss(L, "what", ar.what);
-  }
-  if (strchr(options, 'l'))
-    settabsi(L, "currentline", ar.currentline);
-  if (strchr(options, 'u')) {
-    settabsi(L, "nups", ar.nups);
-    settabsi(L, "nparams", ar.nparams);
-    settabsb(L, "isvararg", ar.isvararg);
-  }
-  if (strchr(options, 'n')) {
-    settabss(L, "name", ar.name);
-    settabss(L, "namewhat", ar.namewhat);
-  }
-  if (strchr(options, 'r')) {
-    settabsi(L, "ftransfer", ar.ftransfer);
-    settabsi(L, "ntransfer", ar.ntransfer);
-  }
-  if (strchr(options, 't')) {
-    settabsb(L, "istailcall", ar.istailcall);
-    settabsi(L, "extraargs", ar.extraargs);
-  }
-  if (strchr(options, 'L'))
-    treatstackoption(L, L1, "activelines");
-  if (strchr(options, 'f'))
-    treatstackoption(L, L1, "func");
+  pushinfotable(L, L1, infofields(options), &ar);
   return 1;  /* return table */
 }
 
