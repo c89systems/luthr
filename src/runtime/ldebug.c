@@ -143,20 +143,23 @@ LUA_API int lua_gethookcount (lua_State *L) {
 }
 
 
-LUA_API int lua_getstack (lua_State *L, int level, lua_Debug *ar) {
-  int status;
+CallInfo *luaG_getstack (lua_State *L, int level) {
   CallInfo *ci;
-  if (level < 0) return 0;  /* invalid (negative) level */
-  lua_lock(L);
   for (ci = L->ci; level > 0 && ci != &L->base_ci; ci = ci->previous)
     level--;
-  if (level == 0 && ci != &L->base_ci) {  /* level found? */
-    status = 1;
+  return (level == 0 && ci != &L->base_ci) ? ci : NULL;
+}
+
+
+LUA_API int lua_getstack (lua_State *L, int level, lua_Debug *ar) {
+  CallInfo *ci;
+  if (level < 0) return 0;
+  lua_lock(L);
+  ci = luaG_getstack(L, level);
+  if (ci != NULL)
     ar->i_ci = ci;
-  }
-  else status = 0;  /* no such level */
   lua_unlock(L);
-  return status;
+  return ci != NULL;
 }
 
 
@@ -314,98 +317,87 @@ static const char *getfuncname (lua_State *L, CallInfo *ci, const char **name) {
 }
 
 
-static int auxgetinfo (lua_State *L, const char *what, lua_Debug *ar,
-                       Closure *f, CallInfo *ci) {
-  int status = 1;
-  for (; *what; what++) {
-    switch (*what) {
-      case 'S': {
-        funcinfo(ar, f);
-        break;
-      }
-      case 'l': {
-        ar->currentline = (ci && isLua(ci)) ? getcurrentline(ci) : -1;
-        break;
-      }
-      case 'u': {
-        ar->nups = (f == NULL) ? 0 : f->c.nupvalues;
-        if (!LuaClosure(f)) {
-          ar->isvararg = 1;
-          ar->nparams = 0;
-        }
-        else {
-          ar->isvararg = (isvararg(f->l.p)) ? 1 : 0;
-          ar->nparams = f->l.p->numparams;
-        }
-        break;
-      }
-      case 't': {
-        if (ci != NULL) {
-          ar->istailcall = !!(ci->callstatus & CIST_TAIL);
-          ar->extraargs =
-                   cast_uchar((ci->callstatus & MAX_CCMT) >> CIST_CCMT);
-        }
-        else {
-          ar->istailcall = 0;
-          ar->extraargs = 0;
-        }
-        break;
-      }
-      case 'n': {
-        ar->namewhat = getfuncname(L, ci, &ar->name);
-        if (ar->namewhat == NULL) {
-          ar->namewhat = "";  /* not found */
-          ar->name = NULL;
-        }
-        break;
-      }
-      case 'r': {
-        if (ci == NULL || !(ci->callstatus & CIST_HOOKED))
-          ar->ftransfer = ar->ntransfer = 0;
-        else {
-          ar->ftransfer = L->transferinfo.ftransfer;
-          ar->ntransfer = L->transferinfo.ntransfer;
-        }
-        break;
-      }
-      case 'L':
-      case 'f':  /* handled by lua_getinfo */
-        break;
-      default: status = 0;  /* invalid option */
+unsigned luaG_infofields (const char *options) {
+  unsigned fields = 0;
+  for (; *options != '\0'; options++) {
+    switch (*options) {
+      case 'S': fields |= INFO_SOURCE; break;
+      case 'l': fields |= INFO_LINE; break;
+      case 'u': fields |= INFO_UPVALUES; break;
+      case 'n': fields |= INFO_NAME; break;
+      case 'r': fields |= INFO_TRANSFER; break;
+      case 't': fields |= INFO_TAIL; break;
+      case 'f': fields |= INFO_FUNCTION; break;
+      case 'L': fields |= INFO_LINES; break;
+      default: fields |= INFO_INVALID; break;
     }
   }
-  return status;
+  return fields;
+}
+
+
+/* With a frame, the function argument is read from that frame. */
+void luaG_info (lua_State *L, unsigned fields, lua_Debug *ar,
+                CallInfo *ci, const TValue *func) {
+  Closure *f;
+  if (ci != NULL)
+    func = s2v(ci->func.p);
+  lua_assert(ttisfunction(func));
+  f = ttisclosure(func) ? clvalue(func) : NULL;
+  if (fields & INFO_SOURCE)
+    funcinfo(ar, f);
+  if (fields & INFO_LINE)
+    ar->currentline = (ci && isLua(ci)) ? getcurrentline(ci) : -1;
+  if (fields & INFO_UPVALUES) {
+    ar->nups = (f == NULL) ? 0 : f->c.nupvalues;
+    ar->isvararg = !LuaClosure(f) || isvararg(f->l.p);
+    ar->nparams = LuaClosure(f) ? f->l.p->numparams : 0;
+  }
+  if (fields & INFO_TAIL) {
+    ar->istailcall = ci != NULL && (ci->callstatus & CIST_TAIL);
+    ar->extraargs = ci != NULL
+                  ? cast_uchar((ci->callstatus & MAX_CCMT) >> CIST_CCMT) : 0;
+  }
+  if (fields & INFO_NAME) {
+    ar->namewhat = getfuncname(L, ci, &ar->name);
+    if (ar->namewhat == NULL) {
+      ar->namewhat = "";
+      ar->name = NULL;
+    }
+  }
+  if (fields & INFO_TRANSFER) {
+    if (ci == NULL || !(ci->callstatus & CIST_HOOKED))
+      ar->ftransfer = ar->ntransfer = 0;
+    else {
+      ar->ftransfer = L->transferinfo.ftransfer;
+      ar->ntransfer = L->transferinfo.ntransfer;
+    }
+  }
+  if (fields & INFO_FUNCTION) {
+    setobj2s(L, L->top.p, func);
+    api_incr_top(L);
+  }
+  if (fields & INFO_LINES)
+    collectvalidlines(L, f);
 }
 
 
 LUA_API int lua_getinfo (lua_State *L, const char *what, lua_Debug *ar) {
-  int status;
-  Closure *cl;
-  CallInfo *ci;
-  TValue *func;
+  unsigned fields;
   lua_lock(L);
   if (*what == '>') {
-    ci = NULL;
-    func = s2v(L->top.p - 1);
+    const TValue *func = s2v(L->top.p - 1);
     api_check(L, ttisfunction(func), "function expected");
-    what++;  /* skip the '>' */
-    L->top.p--;  /* pop function */
+    fields = luaG_infofields(what + 1);
+    L->top.p--;
+    luaG_info(L, fields, ar, NULL, func);
   }
   else {
-    ci = ar->i_ci;
-    func = s2v(ci->func.p);
-    lua_assert(ttisfunction(func));
+    fields = luaG_infofields(what);
+    luaG_info(L, fields, ar, ar->i_ci, NULL);
   }
-  cl = ttisclosure(func) ? clvalue(func) : NULL;
-  status = auxgetinfo(L, what, ar, cl, ci);
-  if (strchr(what, 'f')) {
-    setobj2s(L, L->top.p, func);
-    api_incr_top(L);
-  }
-  if (strchr(what, 'L'))
-    collectvalidlines(L, cl);
   lua_unlock(L);
-  return status;
+  return (fields & INFO_INVALID) == 0;
 }
 
 

@@ -51,12 +51,50 @@ do
   assert(info.func==target and info.source=='=getinfo-source' and info.what=='Lua')
   assert(info.nparams==1 and info.isvararg and not info.istailcall)
   assert(info.activelines[2] and info.activelines[3])
+  local foreign=debug.getinfo(thread,target,'LSftu')
+  assert(foreign.func==target and foreign.source==info.source)
+  assert(foreign.nparams==info.nparams and foreign.isvararg==info.isvararg)
+  assert(foreign.activelines[2] and foreign.activelines[3])
   assert(debug.getinfo(target,'f').func==target)
   assert(debug.getinfo(math.sin,'LS').activelines==nil)
   assert(next(debug.getinfo(target,''))==nil)
+  assert(debug.getinfo(99999,'?')==nil)
+  assert(debug.getinfo(-1)==nil)
+  local accepted, message=pcall(debug.getinfo,target,'>f')
+  assert(not accepted and message:find("invalid option '>'",1,true))
   assert(not pcall(debug.getinfo,thread,1,'f?'))
   local resumed, result=coroutine.resume(thread)
   assert(resumed and result==42)
+end
+
+do
+  local registry, thread = debug.getregistry(), coroutine.running()
+  local meta = debug.getmetatable(registry)
+  local calls = {0,0,0}
+  local function target() return 42 end
+  local function observer(index)
+    return function(event)
+      if event=='call' and debug.getinfo(2,'f').func==target then
+        calls[index]=calls[index]+1
+      end
+    end
+  end
+  local replacement = {[thread]=observer(2)}
+  local inherited = {[thread]=observer(3)}
+  debug.sethook(observer(1),'c')
+  local hooks = registry._HOOKKEY
+  assert(target()==42)
+  registry._HOOKKEY=replacement
+  assert(target()==42)
+  debug.setmetatable(registry,{__index=function(_,key)
+    if key=='_HOOKKEY' then return inherited end
+  end})
+  registry._HOOKKEY=nil
+  assert(target()==42)
+  registry._HOOKKEY=hooks
+  debug.setmetatable(registry,meta)
+  debug.sethook()
+  assert(calls[1]==1 and calls[2]==1 and calls[3]==1)
 end
 
 local gaps={1,124,127,128,255,256,1000}

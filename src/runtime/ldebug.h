@@ -43,6 +43,16 @@
 
 
 LUAI_FUNC int luaG_getfuncline (const Proto *f, int pc);
+enum {
+  INFO_SOURCE = 1, INFO_LINE = 2, INFO_UPVALUES = 4, INFO_NAME = 8,
+  INFO_TRANSFER = 16, INFO_TAIL = 32, INFO_FUNCTION = 64, INFO_LINES = 128,
+  INFO_INVALID = 256
+};
+
+LUAI_FUNC unsigned luaG_infofields (const char *options);
+LUAI_FUNC CallInfo *luaG_getstack (lua_State *L, int level);
+LUAI_FUNC void luaG_info (lua_State *L, unsigned fields, lua_Debug *ar,
+                         CallInfo *ci, const TValue *func);
 LUAI_FUNC const char *luaG_findlocal (lua_State *L, CallInfo *ci, int n,
                                                     StkId *pos);
 LUAI_FUNC l_noret luaG_typeerror (lua_State *L, const TValue *o,

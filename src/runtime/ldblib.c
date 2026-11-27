@@ -18,7 +18,10 @@
 
 #include "lauxlib.h"
 #include "lapi.h"
+#include "lapiowned.h"
 #include "lbuiltin.h"
+#include "ldebug.h"
+#include "ldo.h"
 #include "lualib.h"
 #include "llimits.h"
 #include "lroots.h"
@@ -145,39 +148,18 @@ static void setinforesult (lua_State *L, Table *t, const char *name,
   luaH_set(L, t, &key, s2v(L->top.p - offset));
 }
 
-enum {
-  INFO_SOURCE = 1, INFO_LINE = 2, INFO_UPVALUES = 4, INFO_NAME = 8,
-  INFO_TRANSFER = 16, INFO_TAIL = 32, INFO_FUNCTION = 64, INFO_LINES = 128
-};
-
-static unsigned infofields (const char *options) {
-  unsigned fields = 0;
-  for (; *options != '\0'; options++) {
-    switch (*options) {
-      case 'S': fields |= INFO_SOURCE; break;
-      case 'l': fields |= INFO_LINE; break;
-      case 'u': fields |= INFO_UPVALUES; break;
-      case 'n': fields |= INFO_NAME; break;
-      case 'r': fields |= INFO_TRANSFER; break;
-      case 't': fields |= INFO_TAIL; break;
-      case 'f': fields |= INFO_FUNCTION; break;
-      case 'L': fields |= INFO_LINES; break;
-    }
-  }
-  return fields;
+static int inforesults (unsigned fields) {
+  return ((fields & INFO_LINES) != 0) + ((fields & INFO_FUNCTION) != 0);
 }
 
-static void pushinfotable (lua_State *L, lua_State *source,
-                           unsigned fields, const lua_Debug *ar) {
+static void pushinfotable (lua_State *L, unsigned fields, const lua_Debug *ar) {
   int lines = (fields & INFO_LINES) != 0;
-  int extra = lines + ((fields & INFO_FUNCTION) != 0);
+  int extra = inforesults(fields);
   unsigned capacity = cast_uint(extra) +
     5u * ((fields & INFO_SOURCE) != 0) + ((fields & INFO_LINE) != 0) +
     3u * ((fields & INFO_UPVALUES) != 0) + 2u * ((fields & INFO_NAME) != 0) +
     2u * ((fields & INFO_TRANSFER) != 0) + 2u * ((fields & INFO_TAIL) != 0);
   Table *t;
-  if (L != source && extra != 0) lua_xmove(source, L, extra);
-  lua_lock(L);
   t = luaH_new(L, 0, capacity);
   sethvalue2s(L, L->top.p, t);
   api_incr_top(L);
@@ -214,38 +196,64 @@ static void pushinfotable (lua_State *L, lua_State *source,
   sethvalue2s(L, L->top.p - extra - 1, t);
   L->top.p -= extra;
   luaC_checkGC(L);
-  lua_unlock(L);
 }
 
 
 /*
-** Calls 'lua_getinfo' and collects all results in a new table.
-** L1 needs stack space for an optional input (function) plus
-** two optional outputs (function and line table) from function
-** 'lua_getinfo'.
+** Inspect the selected frame and build the result while owning the
+** stack. When inspecting another thread, use the API to move values
+** between the stacks and acquire them separately.
 */
 static int db_getinfo (lua_State *L) {
   lua_Debug ar;
-  int arg;
+  CallInfo *ci = NULL;
+  const TValue *func = NULL;
+  int arg, byfunction, level = 0;
+  unsigned fields;
   lua_State *L1 = getthread(L, &arg);
   const char *options = luaL_optstring(L, arg+2, "flnSrtu");
   checkstack(L, L1, 3);
   luaL_argcheck(L, options[0] != '>', arg + 2, "invalid option '>'");
-  if (lua_isfunction(L, arg + 1)) {  /* info about a function? */
-    options = lua_pushfstring(L, ">%s", options);  /* add '>' to 'options' */
-    lua_pushvalue(L, arg + 1);  /* move function to 'L1' stack */
+  byfunction = lua_isfunction(L, arg + 1);
+  if (!byfunction)
+    level = (int)luaL_checkinteger(L, arg + 1);
+  else if (L != L1) {
+    lua_pushvalue(L, arg + 1);
     lua_xmove(L, L1, 1);
   }
-  else {  /* stack level */
-    if (!lua_getstack(L1, (int)luaL_checkinteger(L, arg + 1), &ar)) {
-      luaL_pushfail(L);  /* level out of range */
+  fields = luaG_infofields(options);
+  lua_lock(L1);
+  if (byfunction) {
+    if (L == L1)
+      func = s2v(L->ci->func.p + arg + 1);
+    else {
+      L1->top.p--;
+      func = s2v(L1->top.p);
+    }
+  }
+  else {
+    ci = luaG_getstack(L1, level);
+    if (ci == NULL) {
+      lua_unlock(L1);
+      luaL_pushfail(L);
       return 1;
     }
   }
-  if (!lua_getinfo(L1, options, &ar))
+  luaG_info(L1, fields, &ar, ci, func);
+  if (fields & INFO_INVALID) {
+    lua_unlock(L1);
     return luaL_argerror(L, arg+2, "invalid option");
-  pushinfotable(L, L1, infofields(options), &ar);
-  return 1;  /* return table */
+  }
+  if (L != L1) {
+    int extra = inforesults(fields);
+    lua_unlock(L1);
+    if (extra != 0)
+      lua_xmove(L1, L, extra);
+    lua_lock(L);
+  }
+  pushinfotable(L, fields, &ar);
+  lua_unlock(L);
+  return 1;
 }
 
 
@@ -372,16 +380,34 @@ static int db_upvaluejoin (lua_State *L) {
 void luaB_debughook (lua_State *L, lua_Debug *ar) {
   static const char *const hooknames[] =
     {"call", "return", "line", "count", "tail call"};
-  lua_getfield(L, LUA_REGISTRYINDEX, HOOKKEY);
-  lua_pushthread(L);
-  if (lua_rawget(L, -2) == LUA_TFUNCTION) {  /* is there a hook function? */
-    lua_pushstring(L, hooknames[(int)ar->event]);  /* push event name */
-    if (ar->currentline >= 0)
-      lua_pushinteger(L, ar->currentline);  /* push current line */
-    else lua_pushnil(L);
-    lua_assert(lua_getinfo(L, "lS", ar));
-    lua_call(L, 2, 0);  /* call hook function */
+  LuaNativeRoot registry;
+  TValue key;
+  const TValue *hooks;
+  lu_byte tag;
+  lua_lock(L);
+  luaR_pushroot(L, &registry);
+  luaA_getregistry(L, &registry);
+  luaA_pushfield(L, &registry.value, HOOKKEY);
+  luaR_poproot(L, &registry);
+  hooks = s2v(L->top.p - 1);
+  api_check(L, ttistable(hooks), "table expected");
+  setthvalue(L, &key, L);
+  tag = luaH_get(L, hvalue(hooks), &key, s2v(L->top.p));
+  if (novariant(tag) == LUA_TFUNCTION) {
+    TString *name;
+    api_incr_top(L);
+    name = luaS_new(L, hooknames[(int)ar->event]);
+    setsvalue2s(L, L->top.p, name);
+    api_incr_top(L);
+    luaC_checkGC(L);
+    if (ar->currentline >= 0) {
+      setivalue(s2v(L->top.p), ar->currentline);
+    }
+    else setnilvalue2s(L->top.p);
+    api_incr_top(L);
+    luaD_callnoyield(L, L->top.p - 3, 0);
   }
+  lua_unlock(L);
 }
 
 
