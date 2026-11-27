@@ -31,10 +31,12 @@ static int validconstant (const Proto *p, int index, int key) {
 /* A straight-line body keeps its real Lua registers and exits at the next
 ** original instruction on a failed guard. A loop can run in a frame that
 ** has captures when none of its instructions access the captured slots. */
-static int loopentry (const Proto *p, int end, unsigned *bounded) {
+static int loopentry (const Proto *p, int end, unsigned *bounded,
+                       unsigned *dispatch) {
   Instruction branch = p->code[end];
-  int span, start, pc, control;
-  unsigned fields = 0, calls = 0, results = 0, computes = 0, stackonly = 1;
+  int span, start, pc, control, resultcall = -1;
+  unsigned fields = 0, calls = 0, computes = 0, stackonly = 1;
+  unsigned loopdispatch = LUA_NATIVE_LOOP;
   uint64_t entries = 0, targets = 0, openinputs = 0;
   if (GET_OPCODE(branch) != OP_FORLOOP || end + 1 >= p->sizecode) return -1;
   span = GETARG_Bx(branch);
@@ -101,7 +103,7 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
             (pc + 1 == end || GET_OPCODE(p->code[pc + 1]) != OP_CALL ||
              GETARG_B(p->code[pc + 1]) != 0)) return -1;
         calls++;
-        results |= GETARG_C(ins) != 1;
+        if (GETARG_C(ins) != 1) resultcall = pc;
         break;
 #endif
       case OP_TEST: case OP_TESTSET: case OP_JMP: {
@@ -159,10 +161,19 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
   entries |= UINT64_C(1) << (end - start);  /* the FORLOOP back edge */
   if (targets & (~entries | openinputs)) return -1;
   if (calls && !stackonly) return -1;
-  /* A loop that just forwards one native result adds a native transition
-  ** without doing any computation between calls. */
-  if (results && calls == 1 && !fields && !computes) return -1;
+  /* A forwarding loop only benefits from entering compiled code when its
+  ** callee is native. Guard the leading move before entering the loop and
+  ** preserve the ordinary paired dispatch when it holds a Lua function. */
+  if (resultcall >= 0 && calls == 1 && !fields && !computes) {
+    int callee = GETARG_A(p->code[resultcall]);
+    if (targets != 0 || p->dispatch[start].opcode != LUA_PAIR_OP_MOVE_OP_MOVE ||
+        GETARG_A(p->code[start]) != callee) return -1;
+    for (pc = start + 1; pc < resultcall; pc++)
+      if (GETARG_A(p->code[pc]) == callee) return -1;
+    loopdispatch = LUA_NATIVE_RESULT_LOOP;
+  }
   if (bounded != NULL) *bounded = (fields || calls) && stackonly;
+  if (dispatch != NULL) *dispatch = loopdispatch;
   return start;
 }
 
@@ -275,18 +286,18 @@ void luaJ_lower (lua_State *L, Proto *p) {
     return;
   }
   for (pc = 0; pc < p->sizecode; pc++)
-    count += loopentry(p, pc, NULL) >= 0;
+    count += loopentry(p, pc, NULL, NULL) >= 0;
   if (count == 0 || luaM_testsize(count, sizeof(*sites))) return;
   sites = luaM_tryalloc(L, cast_sizet(count) * sizeof(*sites));
   if (sites == NULL) return;
   count = 0;
   for (pc = 0; pc < p->sizecode; pc++) {
-    unsigned bounded;
-    int start = loopentry(p, pc, &bounded);
+    unsigned bounded, dispatch;
+    int start = loopentry(p, pc, &bounded, &dispatch);
     if (start < 0) continue;
     sites[count++] = (LuaLoopSite){ .pc = start, .words = cast_uint(pc - start + 1),
                                    .flags = bounded ? LUA_LOOP_BOUNDED : 0 };
-    p->dispatch[start].opcode = LUA_NATIVE_LOOP;
+    p->dispatch[start].opcode = dispatch;
   }
   p->loops = sites;
   p->sizeloops = count;

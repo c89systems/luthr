@@ -1892,18 +1892,25 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
 /* The first operation cannot suspend. A hook or poll due at the second
 ** instruction uses the ordinary fetch so the VM observes the same boundary.
 ** Enter the second handler with its original PCs before it can raise or park. */
-#define VM_PAIR(first,second) \
-  vmcase(LUA_PAIR_##first##_##second) { \
+#define VM_PAIR_RUN(first,second) \
     if (l_unlikely(trap || L->poll_remaining == 1)) { directdispatch(first); } \
     execute_##first(i); \
     --L->poll_remaining; \
     ip = pc; \
     i = *pc++; \
     if ((second) == OP_MOVE) { execute_OP_MOVE(i); vmbreak; } \
-    directdispatch(second); \
+    directdispatch(second);
+#define VM_PAIR(first,second) \
+  vmcase(LUA_PAIR_##first##_##second) { \
+    VM_PAIR_RUN(first,second) \
   }
 #include "loppairs.h"
 #undef VM_PAIR
+  vmcase(LUA_NATIVE_RESULT_LOOP) {
+    if (l_unlikely(ttislcf(vRB(i)))) directdispatch(LUA_NATIVE_LOOP);
+    VM_PAIR_RUN(OP_MOVE,OP_MOVE)
+  }
+#undef VM_PAIR_RUN
   vmcase(LUA_NATIVE_BODY) {
     LuaLoopSite *site = p->loops;
     uintptr_t address;

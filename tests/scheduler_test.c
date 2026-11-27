@@ -3835,6 +3835,15 @@ int main(int argc, char **argv) {
         "local row=native_table_operation(); local sum=0; "
         "for i=1,200 do sum=sum+row.amount end; return sum-149",
         strcmp(argv[1], "native_loop_fields_gc") == 0);
+  else if (strcmp(argv[1], "native_loop_result_without_slot") == 0 ||
+           strcmp(argv[1], "native_loop_result_gc") == 0)
+    native_operation_without_slot(
+        f, call_loop_without_managed_slot,
+        "local function run(call) local last; "
+        "for i=1,200 do last=call(i,true) end; return last end; "
+        "assert(run(function(i) return i+1 end) == 201); "
+        "return run(native_table_operation) == 200 and 51 or 0",
+        strcmp(argv[1], "native_loop_result_gc") == 0);
   else if (strcmp(argv[1], "native_loop_calls_without_slot") == 0 ||
            strcmp(argv[1], "native_loop_calls_gc") == 0) {
     int gc = strcmp(argv[1], "native_loop_calls_gc") == 0;
