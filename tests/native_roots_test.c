@@ -199,12 +199,18 @@ static int close_with_root(lua_State *state) {
 static int allocation_failure(lua_State *state) {
   struct context *context = argument_context(state);
   LuaNativeRoot root;
+  const size_t prefix = sizeof("return '") - 1;
+  char source[2048] = "return '";
   unsigned before = context->allocations;
   int status;
+  /* A long token requires backing growth even when small bins are warm. */
+  memset(source + prefix, 'x', sizeof(source) - prefix - 2);
+  source[sizeof(source) - 2] = '\'';
   context->reject_growth = 1;
   root_argument(state, &root);
   REQUIRE(state, context->allocations == before);
-  status = luaL_loadstring(state, "return {'native-root-allocation-failure'}");
+  status =
+      luaL_loadbufferx(state, source, sizeof(source) - 1, "=root-oom", "t");
   context->reject_growth = 0;
   REQUIRE(state, status == LUA_ERRMEM && context->allocations > before);
   lua_pop(state, 1);

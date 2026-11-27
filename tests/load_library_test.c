@@ -362,6 +362,25 @@ static void streamed_tokens(lua_State *state) {
   require(state->native_roots == NULL);
 }
 
+static void source_lines(lua_State *state) {
+  execute(state, "local parts={"
+                 " 'return function(x)\\nlocal sum=x\\n',"
+                 " ('sum=sum+1\\n'):rep(20), ('sum=sum+1\\n'):rep(59),"
+                 " ('\\n'):rep(170)..'sum=sum+2\\nreturn sum\\nend\\n' "
+                 "}; local nextpart=0; "
+                 "local fn=assert(load(function() "
+                 "  collectgarbage('collect'); nextpart=nextpart+1; "
+                 "  return parts[nextpart] "
+                 "end,'=source-lines','t'))(); "
+                 "local function verify(f) "
+                 "  local lines=debug.getinfo(f,'L').activelines; "
+                 "  for i=2,81 do assert(lines[i],i) end; "
+                 "  for i=82,251 do assert(not lines[i],i) end; "
+                 "  assert(lines[252] and lines[253]); assert(f(9)==90) "
+                 "end; verify(fn); "
+                 "verify(assert(load(string.dump(fn),'=roundtrip','b')))");
+}
+
 static void *run(void *context) {
   struct fixture *test = context;
   lua_State *state;
@@ -409,6 +428,7 @@ static void *run(void *context) {
             "local before=load; local base=assert(package.loaded._G); "
             "assert(base.load==before)");
     streamed_tokens(state);
+    source_lines(state);
   } else if (strstr(test->mode, "errors"))
     execute(
         state,

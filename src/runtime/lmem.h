@@ -128,6 +128,8 @@ LUAI_FUNC void *luaM_shrinkvector_ (lua_State *L, void *block, int *nelem,
                                     int final_n, unsigned size_elem);
 LUAI_FUNC void *luaM_malloc_ (lua_State *L, size_t size, int tag);
 LUAI_FUNC void *luaM_alloccontrol (lua_State *L, size_t size);
+LUAI_FUNC void *luaM_resizecontrol (lua_State *L, void *block, size_t osize,
+                                    size_t nsize);
 /* Optional exact-size storage, without an emergency collection on failure. */
 LUAI_FUNC void *luaM_tryalloc (lua_State *L, size_t size);
 /* Bounded allocation from an admitted owner's enrolled page. */

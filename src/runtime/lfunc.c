@@ -984,7 +984,8 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
   int child, upvalue, pc = 0;
-  lua_assert(p->dispatch == NULL || (p->flag & PF_INLINE_CODE));
+  lua_assert(p->dispatch == NULL || p->code_capacity != 0 ||
+             (p->flag & PF_INLINE_CODE));
   for (child = 0; child < p->sizep; child++) {
     Proto *nested = p->p[child];
     for (upvalue = 0; upvalue < nested->sizeupvalues; upvalue++) {
@@ -1066,6 +1067,7 @@ static Proto *newproto (lua_State *L, int instructions) {
   f->loops = NULL;
   f->nativecall = NULL;
   f->sizeloops = 0;
+  f->code_capacity = 0;
   f->loopbytes = 0;
   f->sizecode = instructions;
   f->lineinfo = NULL;
@@ -1118,17 +1120,21 @@ lu_mem luaF_protosize (Proto *p) {
             + cast_uint(p->sizek) * sizeof(TValue)
             + cast_uint(p->sizelocvars) * sizeof(LocVar)
             + cast_uint(p->sizeupvalues) * sizeof(Upvaldesc);
-  if (p->dispatch != NULL)
-    sz += cast_uint(p->sizecode) * sizeof(*p->dispatch);
+  if (p->code_capacity != 0)
+    sz += cast_sizet(p->code_capacity) * LUA_CODE_SLOT_BYTES;
+  else {
+    if (p->dispatch != NULL)
+      sz += cast_uint(p->sizecode) * sizeof(*p->dispatch);
+    if (!(p->flag & PF_FIXED))
+      sz += cast_uint(p->sizecode) * sizeof(Instruction) +
+            cast_uint(p->sizelineinfo) * sizeof(ls_byte);
+  }
   sz += cast_uint(p->sizerecords) * sizeof(LuaRecordSite);
   sz += cast_uint(p->sizeloops) * sizeof(LuaLoopSite) +
         __atomic_load_n(&p->loopbytes, __ATOMIC_RELAXED);
   if (p->nativecall != NULL) sz += sizeof(LuaLoopSite);
-  if (!(p->flag & PF_FIXED)) {
-    sz += cast_uint(p->sizecode) * sizeof(Instruction);
-    sz += cast_uint(p->sizelineinfo) * sizeof(lu_byte);
+  if (!(p->flag & PF_FIXED))
     sz += cast_uint(p->sizeabslineinfo) * sizeof(AbsLineInfo);
-  }
   return sz;
 }
 
@@ -1136,14 +1142,19 @@ lu_mem luaF_protosize (Proto *p) {
 void luaF_retireproto (lua_State *L, Proto *f) {
   luaJ_freeloops(L, f, 1);
   luaM_retirearray(L, f->records, cast_sizet(f->sizerecords));
-  if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
-    luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
-  if (!(f->flag & PF_FIXED)) {
-    if (!(f->flag & PF_INLINE_CODE))
-      luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
-    luaM_retirearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
-    luaM_retirearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
+  if (f->code_capacity != 0)
+    luaM_retire_(L, f->code, cast_sizet(f->code_capacity) * LUA_CODE_SLOT_BYTES);
+  else {
+    if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
+      luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
+    if (!(f->flag & PF_FIXED)) {
+      if (!(f->flag & PF_INLINE_CODE))
+        luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
+      luaM_retirearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
+    }
   }
+  if (!(f->flag & PF_FIXED))
+    luaM_retirearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
   luaM_retirearray(L, f->p, cast_sizet(f->sizep));
   luaM_retirearray(L, f->k, cast_sizet(f->sizek));
   luaM_retirearray(L, f->locvars, cast_sizet(f->sizelocvars));
@@ -1154,14 +1165,19 @@ void luaF_retireproto (lua_State *L, Proto *f) {
 void luaF_freeproto (lua_State *L, Proto *f) {
   luaJ_freeloops(L, f, 0);
   luaM_freearray(L, f->records, cast_sizet(f->sizerecords));
-  if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
-    luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
-  if (!(f->flag & PF_FIXED)) {
-    if (!(f->flag & PF_INLINE_CODE))
-      luaM_freearray(L, f->code, cast_sizet(f->sizecode));
-    luaM_freearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
-    luaM_freearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
+  if (f->code_capacity != 0)
+    luaM_freemem(L, f->code, cast_sizet(f->code_capacity) * LUA_CODE_SLOT_BYTES);
+  else {
+    if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
+      luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
+    if (!(f->flag & PF_FIXED)) {
+      if (!(f->flag & PF_INLINE_CODE))
+        luaM_freearray(L, f->code, cast_sizet(f->sizecode));
+      luaM_freearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
+    }
   }
+  if (!(f->flag & PF_FIXED))
+    luaM_freearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
   luaM_freearray(L, f->p, cast_sizet(f->sizep));
   luaM_freearray(L, f->k, cast_sizet(f->sizek));
   luaM_freearray(L, f->locvars, cast_sizet(f->sizelocvars));

@@ -1321,10 +1321,42 @@ static void *allocatebacking (lua_State *L, size_t size, int tag,
   return block != NULL ? block + 1 : NULL;
 }
 
+static void *resizebacking (lua_State *L, LuaAllocBlock *block, size_t osize,
+                            size_t nsize) {
+  size_t oldbytes = osize + sizeof(LuaAllocBlock);
+  size_t bytes;
+  LuaAllocBlock *replacement;
+  if (nsize > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
+  bytes = nsize + sizeof(LuaAllocBlock);
+  replacement = cast(LuaAllocBlock *, firsttry(L, block, oldbytes, bytes));
+  if (replacement == NULL)
+    replacement = cast(LuaAllocBlock *, tryagain(L, block, oldbytes, bytes));
+  if (replacement != NULL) {
+    replacement->block.page = 0;
+    account(L, cast(l_mem, osize) - cast(l_mem, nsize));
+  }
+  return replacement != NULL ? replacement + 1 : NULL;
+}
+
 /* Persistent SDK records must not pin transient object pages. Retain normal
 ** accounting and retry behavior, while allocating their exact backing size. */
 void *luaM_alloccontrol (lua_State *L, size_t size) {
   return allocatebacking(L, size, 0, 1);
+}
+
+void *luaM_resizecontrol (lua_State *L, void *block, size_t osize,
+                          size_t nsize) {
+  void *replacement;
+  lua_assert(nsize != 0 && ((osize == 0) == (block == NULL)));
+  if (nsize > osize) L->gc_check_pending = 1;
+  if (block != NULL) {
+    LuaAllocBlock *allocation = cast(LuaAllocBlock *, block) - 1;
+    lua_assert(luaMP_header(allocation) == 0);
+    replacement = resizebacking(L, allocation, osize, nsize);
+  }
+  else replacement = luaM_alloccontrol(L, nsize);
+  if (l_unlikely(replacement == NULL)) luaM_error(L);
+  return replacement;
 }
 
 void *luaM_tryalloc (lua_State *L, size_t size) {
@@ -1403,21 +1435,8 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
     return block;
   }
   if (allocation != NULL && luaMP_page(allocation) == NULL &&
-      nsize > LUA_ALLOC_MAX) {
-    LuaAllocBlock *replacement;
-    size_t oldbytes = osize + sizeof(LuaAllocBlock);
-    size_t bytes;
-    if (nsize > MAX_SIZE - sizeof(LuaAllocBlock)) return NULL;
-    bytes = nsize + sizeof(LuaAllocBlock);
-    replacement = cast(LuaAllocBlock *, firsttry(L, allocation, oldbytes, bytes));
-    if (replacement == NULL)
-      replacement = cast(LuaAllocBlock *, tryagain(L, allocation, oldbytes, bytes));
-    if (replacement != NULL) {
-      replacement->block.page = 0;
-      account(L, cast(l_mem, osize) - cast(l_mem, nsize));
-    }
-    return replacement != NULL ? replacement + 1 : NULL;
-  }
+      nsize > LUA_ALLOC_MAX)
+    return resizebacking(L, allocation, osize, nsize);
   newblock = allocateblock(L, nsize, 0, 0, 1);
   if (newblock == NULL) return NULL;
   if (block != NULL) {

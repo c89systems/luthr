@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "lua.h"
 
@@ -339,8 +340,6 @@ static void savelineinfo (FuncState *fs, Proto *f, int line) {
     linedif = ABSLINEINFO;  /* signal that there is absolute information */
     fs->iwthabs = 1;  /* restart counter */
   }
-  luaM_growvector(fs->ls->L, f->lineinfo, pc, f->sizelineinfo, ls_byte,
-                  INT_MAX, "opcodes");
   f->lineinfo[pc] = cast(ls_byte, linedif);
   fs->previousline = line;  /* last line saved */
 }
@@ -377,15 +376,47 @@ static void removelastinstruction (FuncState *fs) {
 }
 
 
-/*
-** Emit instruction 'i', checking for array sizes and saving also its
-** line information. Return 'i' position.
-*/
+/* The dispatch array is filled only after emission completes. Resizing just
+** moves the line deltas; the instruction array stays at the start. */
+static ls_byte *codelines (Instruction *code, int capacity) {
+  return cast(ls_byte *, cast_charp(code + capacity) +
+                         cast_sizet(capacity) * sizeof(LuaDispatchSlot));
+}
+
+static void setcode (Proto *f, Instruction *code) {
+  _Static_assert(sizeof(Instruction) % _Alignof(LuaDispatchSlot) == 0,
+                 "dispatch array alignment");
+  f->code = code;
+  f->dispatch = cast(LuaDispatchSlot *, code + f->code_capacity);
+  f->lineinfo = codelines(code, f->code_capacity);
+}
+
+static void resizecode (lua_State *L, Proto *f, int capacity) {
+  Instruction *code = cast(Instruction *, luaM_resizecontrol(L, f->code,
+      cast_sizet(f->code_capacity) * LUA_CODE_SLOT_BYTES,
+      cast_sizet(capacity) * LUA_CODE_SLOT_BYTES));
+  f->code_capacity = capacity;
+  setcode(f, code);
+}
+
+static void growcode (FuncState *fs) {
+  Proto *f = fs->f;
+  int oldcapacity = f->code_capacity;
+  int limit = luaM_limitN(INT_MAX - 1, char[LUA_CODE_SLOT_BYTES]);
+  int capacity = 8;
+  if (l_unlikely(oldcapacity == limit))
+    luaG_runerror(fs->ls->L, "too many opcodes (limit is %d)", limit);
+  if (oldcapacity != 0)
+    capacity = oldcapacity >= limit / 2 ? limit : oldcapacity * 2;
+  resizecode(fs->ls->L, f, capacity);
+  if (oldcapacity != 0)
+    memmove(f->lineinfo, codelines(f->code, oldcapacity), cast_sizet(fs->pc));
+}
+
+/* Emit an instruction and its line delta, returning the instruction index. */
 int luaK_code (FuncState *fs, Instruction i) {
   Proto *f = fs->f;
-  /* put new instruction in code array */
-  luaM_growvector(fs->ls->L, f->code, fs->pc, f->sizecode, Instruction,
-                  INT_MAX, "opcodes");
+  if (fs->pc == f->code_capacity) growcode(fs);
   f->code[fs->pc++] = i;
   savelineinfo(fs, f, fs->ls->lastline);
   return fs->pc - 1;  /* index of new instruction */
@@ -1977,4 +2008,13 @@ void luaK_finish (FuncState *fs) {
       default: break;
     }
   }
+  /* Retain at most seven spare slots so small chunks avoid a final resize. */
+  lua_assert(fs->pc != 0);
+  if (p->code_capacity - fs->pc >= 8) {
+    ls_byte *lines = codelines(p->code, fs->pc);
+    memmove(lines, p->lineinfo, cast_sizet(fs->pc));
+    p->lineinfo = lines;
+    resizecode(fs->ls->L, p, fs->pc);
+  }
+  p->sizecode = p->sizelineinfo = fs->pc;
 }

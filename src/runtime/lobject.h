@@ -648,6 +648,9 @@ typedef union LuaDispatchSlot {
   int32_t offset;
 } LuaDispatchSlot;
 
+enum { LUA_CODE_SLOT_BYTES = sizeof(Instruction) + sizeof(LuaDispatchSlot) +
+                             sizeof(ls_byte) };
+
 /*
 ** Function Prototypes
 */
@@ -674,6 +677,7 @@ typedef struct Proto {
   LuaDispatchSlot *dispatch;  /* immutable jump targets after linking */
   LuaRecordSite *records;  /* sorted by constructor instruction */
   int sizerecords;
+  int code_capacity;  /* nonzero for the shared code, dispatch and lines block */
   struct LuaLoopSite *loops;  /* native sites sorted by loop entry */
   struct LuaLoopSite *nativecall;  /* optional bounded function entry */
   int sizeloops;
