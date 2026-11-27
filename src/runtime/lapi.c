@@ -251,8 +251,16 @@ int luaA_checkstack (lua_State *L, int n) {
   return res;
 }
 
-LUA_API int lua_checkstack (lua_State *L, int n) {
+static int __attribute__((noinline)) checkstacklocked (lua_State *L, int n) {
   int result;
+  lua_lock(L);
+  result = luaA_checkstack(L, n);
+  lua_unlock(L);
+  return result;
+}
+
+
+LUA_API int lua_checkstack (lua_State *L, int n) {
   if (luaX_tryobserve(L, 0)) {
     api_check(L, n >= 0, "negative 'n'");
     if (L->stack_last.p - L->top.p > n) {
@@ -264,10 +272,7 @@ LUA_API int lua_checkstack (lua_State *L, int n) {
     }
     luaX_leavebounded(L);
   }
-  lua_lock(L);
-  result = luaA_checkstack(L, n);
-  lua_unlock(L);
-  return result;
+  return checkstacklocked(L, n);
 }
 
 void luaA_move (lua_State *from, lua_State *to, int n) {
@@ -496,17 +501,23 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
 */
 
 
-LUA_API int lua_type (lua_State *L, int idx) {
+/* Keep the stack reservation and its rooted snapshots out of the argument
+** observation paths. A packed argument can return without a C stack frame. */
+static int __attribute__((noinline)) stacktype (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
-  int result = luaX_argumenttag(luaX_argument(L, idx));
-  uintptr_t owner;
-  if (result != LUA_TNONE) return novariant(result);
-  owner = luaX_enterobservation(L, !ispseudo(idx));
+  int result;
+  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = isvalid(L, o) ? ttype(o) : LUA_TNONE;
   luaX_leaveboundedvalue(L, owner);
   return result;
+}
+
+
+LUA_API int lua_type (lua_State *L, int idx) {
+  int tag = luaX_argumenttag(luaX_argument(L, idx));
+  return tag != LUA_TNONE ? novariant(tag) : stacktype(L, idx);
 }
 
 
@@ -529,18 +540,21 @@ LUA_API int lua_iscfunction (lua_State *L, int idx) {
 }
 
 
-LUA_API int lua_isinteger (lua_State *L, int idx) {
+static int __attribute__((noinline)) stackisinteger (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   int result;
-  int tag = luaX_argumenttag(luaX_argument(L, idx));
-  uintptr_t owner;
-  if (tag != LUA_TNONE) return tag == LUA_VNUMINT;
-  owner = luaX_enterobservation(L, !ispseudo(idx));
+  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = ttisinteger(o);
   luaX_leaveboundedvalue(L, owner);
   return result;
+}
+
+
+LUA_API int lua_isinteger (lua_State *L, int idx) {
+  int tag = luaX_argumenttag(luaX_argument(L, idx));
+  return tag != LUA_TNONE ? tag == LUA_VNUMINT : stackisinteger(L, idx);
 }
 
 
@@ -689,18 +703,14 @@ LUA_API size_t lua_stringtonumber (lua_State *L, const char *s) {
 }
 
 
-LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
+static lua_Number __attribute__((noinline)) stacktonumber (lua_State *L,
+                                                           int idx,
+                                                           int *pisnum) {
   TValue snapshot;
   lua_Number n = 0;
   const TValue *o;
   int isnum;
-  uintptr_t argument = luaX_argument(L, idx);
-  uintptr_t owner;
-  if (luaX_inlineinteger(argument)) {
-    if (pisnum) *pisnum = 1;
-    return cast_num(luaX_argumentinteger(argument));
-  }
-  owner = readenter(L, idx);
+  uintptr_t owner = readenter(L, idx);
   o = index2read(L, idx, &snapshot, owner);
   isnum = tonumber(o, &n);
   if (pisnum)
@@ -710,18 +720,24 @@ LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
 }
 
 
-LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
+LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
+  uintptr_t argument = luaX_argument(L, idx);
+  if (luaX_inlineinteger(argument)) {
+    if (pisnum) *pisnum = 1;
+    return cast_num(luaX_argumentinteger(argument));
+  }
+  return stacktonumber(L, idx, pisnum);
+}
+
+
+static lua_Integer __attribute__((noinline)) stacktointeger (lua_State *L,
+                                                             int idx,
+                                                             int *pisnum) {
   TValue snapshot;
   lua_Integer res = 0;
   const TValue *o;
   int isnum;
-  uintptr_t argument = luaX_argument(L, idx);
-  uintptr_t owner;
-  if (luaX_inlineinteger(argument)) {
-    if (pisnum) *pisnum = 1;
-    return luaX_argumentinteger(argument);
-  }
-  owner = readenter(L, idx);
+  uintptr_t owner = readenter(L, idx);
   o = index2read(L, idx, &snapshot, owner);
   isnum = tointeger(o, &res);
   if (pisnum)
@@ -731,18 +747,32 @@ LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
 }
 
 
-LUA_API int lua_toboolean (lua_State *L, int idx) {
+LUA_API lua_Integer lua_tointegerx (lua_State *L, int idx, int *pisnum) {
+  uintptr_t argument = luaX_argument(L, idx);
+  if (luaX_inlineinteger(argument)) {
+    if (pisnum) *pisnum = 1;
+    return luaX_argumentinteger(argument);
+  }
+  return stacktointeger(L, idx, pisnum);
+}
+
+
+static int __attribute__((noinline)) stacktoboolean (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   int result;
-  int tag = luaX_argumenttag(luaX_argument(L, idx));
-  uintptr_t owner;
-  if (tag != LUA_TNONE) return tag != LUA_VNIL && tag != LUA_VFALSE;
-  owner = luaX_enterobservation(L, !ispseudo(idx));
+  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
   o = index2read(L, idx, &snapshot, owner);
   result = !l_isfalse(o);
   luaX_leaveboundedvalue(L, owner);
   return result;
+}
+
+
+LUA_API int lua_toboolean (lua_State *L, int idx) {
+  int tag = luaX_argumenttag(luaX_argument(L, idx));
+  return tag != LUA_TNONE ? tag != LUA_VNIL && tag != LUA_VFALSE
+                          : stacktoboolean(L, idx);
 }
 
 
@@ -756,19 +786,14 @@ static const char *stringbytes (const TValue *value, size_t *len) {
 }
 
 
-LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
+static const char * __attribute__((noinline)) stacktolstring (lua_State *L,
+                                                               int idx,
+                                                               size_t *len) {
   TValue snapshot;
   const char *result;
   uintptr_t owner;
   const TValue *value;
   int stackonly = !ispseudo(idx);
-  uintptr_t argument = luaX_argument(L, idx);
-  const char *bytes = luaX_argumentaddress(argument);
-  if (bytes != NULL && novariant(luaX_argumenttag(argument)) == LUA_TSTRING) {
-    if (len != NULL)
-      *len = (argument >> LUA_ARGUMENT_LENGTH_SHIFT) & LUA_ARGUMENT_MAX_LENGTH;
-    return bytes;
-  }
  retry:
   owner = luaX_enterobservation(L, stackonly);
   value = index2read(L, idx, &snapshot, owner);
@@ -790,6 +815,18 @@ LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
     luaX_leaveboundedvalue(L, owner);
   }
   return result;
+}
+
+
+LUA_API const char *lua_tolstring (lua_State *L, int idx, size_t *len) {
+  uintptr_t argument = luaX_argument(L, idx);
+  const char *bytes = luaX_argumentaddress(argument);
+  if (bytes != NULL && novariant(luaX_argumenttag(argument)) == LUA_TSTRING) {
+    if (len != NULL)
+      *len = (argument >> LUA_ARGUMENT_LENGTH_SHIFT) & LUA_ARGUMENT_MAX_LENGTH;
+    return bytes;
+  }
+  return stacktolstring(L, idx, len);
 }
 
 
@@ -838,21 +875,26 @@ LUA_API lua_CFunction lua_tocfunction (lua_State *L, int idx) {
 }
 
 
-LUA_API void *lua_touserdata (lua_State *L, int idx) {
+static void * __attribute__((noinline)) stacktouserdata (lua_State *L, int idx) {
   TValue snapshot;
   const TValue *o;
   void *result;
-  uintptr_t owner, argument = luaX_argument(L, idx);
+  uintptr_t owner = luaX_enterobservation(L, !ispseudo(idx));
+  o = index2read(L, idx, &snapshot, owner);
+  result = luaA_udatapointer(o);
+  luaX_leaveboundedvalue(L, owner);
+  return result;
+}
+
+
+LUA_API void *lua_touserdata (lua_State *L, int idx) {
+  uintptr_t argument = luaX_argument(L, idx);
   int tag = luaX_argumenttag(argument);
   if (tag == LUA_VUSERDATA || tag == LUA_VLIGHTUSERDATA) {
     if (argument & LUA_ARGUMENT_INLINE) return luaX_argumentaddress(argument);
   }
   else if (tag != LUA_TNONE) return NULL;
-  owner = luaX_enterobservation(L, !ispseudo(idx));
-  o = index2read(L, idx, &snapshot, owner);
-  result = luaA_udatapointer(o);
-  luaX_leaveboundedvalue(L, owner);
-  return result;
+  return stacktouserdata(L, idx);
 }
 
 
