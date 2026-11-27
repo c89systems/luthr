@@ -268,7 +268,7 @@ static void dumpFunction (DumpState *D, const Proto *f) {
   dumpInt(D, f->linedefined);
   dumpInt(D, f->lastlinedefined);
   dumpByte(D, f->numparams);
-  dumpByte(D, f->flag);
+  dumpByte(D, f->flag & ~PF_INLINE_CODE);
   dumpByte(D, f->maxstacksize);
   dumpCode(D, f);
   dumpConstants(D, f);

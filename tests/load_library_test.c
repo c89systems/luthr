@@ -389,7 +389,15 @@ static void *run(void *context) {
         "load(string.dump(function() end),'n','t') end,function() return "
         "load(function() return {} end) end}) do local v,e=f(); assert(v==nil "
         "and type(e)=='string') end; "
-        "assert(select('#',load(function() return nil end))==1)");
+        "assert(select('#',load(function() return nil end))==1); "
+        "local binary=string.dump(function() return function(x) return x+1 "
+        "end end,true); "
+        "for i=1,#binary-1 do "
+        "local fn,err=load(binary:sub(1,i),'=truncated','b'); "
+        "assert(fn==nil and type(err)=='string'); collectgarbage('collect') "
+        "end; "
+        "local restored=assert(load(binary,'=restored','b')); "
+        "assert(restored()(41)==42 and string.dump(restored,true)==binary)");
   else if (strstr(test->mode, "reader_snapshot"))
     snapshot(test, 1, 0);
   else if (strstr(test->mode, "binary_snapshot"))

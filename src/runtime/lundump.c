@@ -194,18 +194,23 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
 }
 
 
-static void loadCode (LoadState *S, Proto *f) {
+static Proto *loadFunctionHeader (LoadState *S) {
+  int linedefined = loadInt(S);
+  int lastlinedefined = loadInt(S);
+  lu_byte numparams = loadByte(S);
+  lu_byte flag = cast_byte(loadByte(S) & ~(PF_FIXED | PF_INLINE_CODE));
+  lu_byte maxstacksize = loadByte(S);
   int n = loadInt(S);
-  loadAlign(S, sizeof(f->code[0]));
-  if (S->fixed) {
-    f->code = getaddr(S, n, Instruction);
-    f->sizecode = n;
-  }
-  else {
-    f->code = luaM_newvectorchecked(S->L, n, Instruction);
-    f->sizecode = n;
-    loadVector(S, f->code, n);
-  }
+  Proto *f;
+  loadAlign(S, sizeof(Instruction));
+  f = S->fixed ? luaF_newproto(S->L) : luaF_newloadedproto(S->L, n);
+  f->linedefined = linedefined;
+  f->lastlinedefined = lastlinedefined;
+  f->numparams = numparams;
+  f->flag |= flag | (S->fixed ? PF_FIXED : 0);
+  f->maxstacksize = maxstacksize;
+  f->sizecode = n;
+  return f;
 }
 
 
@@ -262,7 +267,7 @@ static void loadProtos (LoadState *S, Proto *f) {
   for (i = 0; i < n; i++)
     f->p[i] = NULL;
   for (i = 0; i < n; i++) {
-    f->p[i] = luaF_newproto(S->L);
+    f->p[i] = loadFunctionHeader(S);
     luaC_objbarrier(S->L, f, f->p[i]);
     loadFunction(S, f->p[i]);
   }
@@ -334,15 +339,10 @@ static void loadDebug (LoadState *S, Proto *f) {
 
 
 static void loadFunction (LoadState *S, Proto *f) {
-  f->linedefined = loadInt(S);
-  f->lastlinedefined = loadInt(S);
-  f->numparams = loadByte(S);
-  /* get only the meaningful flags */
-  f->flag = cast_byte(loadByte(S) & ~PF_FIXED);
   if (S->fixed)
-    f->flag |= PF_FIXED;  /* signal that code is fixed */
-  f->maxstacksize = loadByte(S);
-  loadCode(S, f);
+    f->code = getaddr(S, f->sizecode, Instruction);
+  else
+    loadVector(S, f->code, f->sizecode);
   loadConstants(S, f);
   loadUpvalues(S, f);
   loadProtos(S, f);
@@ -421,7 +421,7 @@ LClosure *luaU_undump (lua_State *L, ZIO *Z, LuaNativeRoot *strings,
   S.nstr = 0;
   cl = luaF_newLclosure(L, loadByte(&S));
   setclLvalue(L, &function->value, cl);
-  luaF_setproto(L, cl, luaF_newproto(L));
+  luaF_setproto(L, cl, loadFunctionHeader(&S));
   loadFunction(&S, cl->p);
   if (cl->nupvalues != cl->p->sizeupvalues)
     error(&S, "corrupted chunk");

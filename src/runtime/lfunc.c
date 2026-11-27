@@ -984,7 +984,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
   lu_byte seen[256] = {0}, registers[256];
   unsigned count = 0, r;
   int child, upvalue, pc = 0;
-  lua_assert(p->dispatch == NULL);
+  lua_assert(p->dispatch == NULL || (p->flag & PF_INLINE_CODE));
   for (child = 0; child < p->sizep; child++) {
     Proto *nested = p->p[child];
     for (upvalue = 0; upvalue < nested->sizeupvalues; upvalue++) {
@@ -995,7 +995,7 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
       }
     }
   }
-  if (p->sizecode != 0) {
+  if (p->sizecode != 0 && p->dispatch == NULL) {
     /* Prototype metadata can outlive the parser's pooled storage. */
     luaM_checksize(L, p->sizecode, sizeof(*p->dispatch));
     p->dispatch = luaM_alloccontrol(L, cast_sizet(p->sizecode) *
@@ -1045,22 +1045,29 @@ void luaF_lowerproto (lua_State *L, Proto *p) {
 }
 
 
-Proto *luaF_newproto (lua_State *L) {
-  GCObject *o = luaC_newobj(L, LUA_VPROTO, sizeof(Proto));
+static size_t prototypebytes (int instructions) {
+  return sizeof(Proto) + cast_sizet(instructions) *
+         (sizeof(Instruction) + sizeof(LuaDispatchSlot));
+}
+
+
+static Proto *newproto (lua_State *L, int instructions) {
+  GCObject *o = luaC_newobj(L, LUA_VPROTO, prototypebytes(instructions));
   Proto *f = gco2p(o);
   f->k = NULL;
   f->sizek = 0;
   f->p = NULL;
   f->sizep = 0;
-  f->code = NULL;
-  f->dispatch = NULL;
+  f->code = instructions != 0 ? cast(Instruction *, f + 1) : NULL;
+  f->dispatch = instructions != 0 ? cast(LuaDispatchSlot *, f->code + instructions)
+                                  : NULL;
   f->records = NULL;
   f->sizerecords = 0;
   f->loops = NULL;
   f->nativecall = NULL;
   f->sizeloops = 0;
   f->loopbytes = 0;
-  f->sizecode = 0;
+  f->sizecode = instructions;
   f->lineinfo = NULL;
   f->sizelineinfo = 0;
   f->abslineinfo = NULL;
@@ -1068,7 +1075,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->upvalues = NULL;
   f->sizeupvalues = 0;
   f->numparams = 0;
-  f->flag = 0;
+  f->flag = instructions != 0 ? PF_INLINE_CODE : 0;
   f->maxstacksize = 0;
   f->scalar_ticks = 0;
   f->scalar_scale = 0;
@@ -1087,6 +1094,21 @@ Proto *luaF_newproto (lua_State *L) {
   f->trace_bytes = 0;
   L->building_protos = f;
   return f;
+}
+
+
+Proto *luaF_newproto (lua_State *L) {
+  return newproto(L, 0);
+}
+
+
+Proto *luaF_newloadedproto (lua_State *L, int instructions) {
+  _Static_assert(sizeof(Instruction) % _Alignof(LuaDispatchSlot) == 0,
+                 "aligned dispatch slots must follow the bytecode");
+  if (cast_sizet(instructions) > (MAX_SIZE - sizeof(Proto)) /
+          (sizeof(Instruction) + sizeof(LuaDispatchSlot)))
+    luaM_toobig(L);
+  return newproto(L, instructions);
 }
 
 
@@ -1114,10 +1136,11 @@ lu_mem luaF_protosize (Proto *p) {
 void luaF_retireproto (lua_State *L, Proto *f) {
   luaJ_freeloops(L, f, 1);
   luaM_retirearray(L, f->records, cast_sizet(f->sizerecords));
-  if (f->dispatch != NULL)
+  if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
     luaM_retirearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {
-    luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
+    if (!(f->flag & PF_INLINE_CODE))
+      luaM_retirearray(L, f->code, cast_sizet(f->sizecode));
     luaM_retirearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
     luaM_retirearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
   }
@@ -1125,16 +1148,17 @@ void luaF_retireproto (lua_State *L, Proto *f) {
   luaM_retirearray(L, f->k, cast_sizet(f->sizek));
   luaM_retirearray(L, f->locvars, cast_sizet(f->sizelocvars));
   luaM_retirearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
-  luaM_retire_(L, f, sizeof(*f));
+  luaM_retire_(L, f, prototypebytes(f->flag & PF_INLINE_CODE ? f->sizecode : 0));
 }
 
 void luaF_freeproto (lua_State *L, Proto *f) {
   luaJ_freeloops(L, f, 0);
   luaM_freearray(L, f->records, cast_sizet(f->sizerecords));
-  if (f->dispatch != NULL)
+  if (f->dispatch != NULL && !(f->flag & PF_INLINE_CODE))
     luaM_freearray(L, f->dispatch, cast_sizet(f->sizecode));
   if (!(f->flag & PF_FIXED)) {
-    luaM_freearray(L, f->code, cast_sizet(f->sizecode));
+    if (!(f->flag & PF_INLINE_CODE))
+      luaM_freearray(L, f->code, cast_sizet(f->sizecode));
     luaM_freearray(L, f->lineinfo, cast_sizet(f->sizelineinfo));
     luaM_freearray(L, f->abslineinfo, cast_sizet(f->sizeabslineinfo));
   }
@@ -1142,7 +1166,7 @@ void luaF_freeproto (lua_State *L, Proto *f) {
   luaM_freearray(L, f->k, cast_sizet(f->sizek));
   luaM_freearray(L, f->locvars, cast_sizet(f->sizelocvars));
   luaM_freearray(L, f->upvalues, cast_sizet(f->sizeupvalues));
-  luaM_free(L, f);
+  luaM_freemem(L, f, prototypebytes(f->flag & PF_INLINE_CODE ? f->sizecode : 0));
 }
 
 

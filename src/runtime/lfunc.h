@@ -50,6 +50,7 @@ enum { LUA_SCALAR_REGISTERS = 8, LUA_SCALAR_CODE_LIMIT = 16 };
 
 
 LUAI_FUNC Proto *luaF_newproto (lua_State *L);
+LUAI_FUNC Proto *luaF_newloadedproto (lua_State *L, int instructions);
 LUAI_FUNC void luaF_lowerproto (lua_State *L, Proto *p);
 LUAI_FUNC CClosure *luaF_newCclosure (lua_State *L, int nupvals);
 LUAI_FUNC LClosure *luaF_newLclosure (lua_State *L, int nupvals);
