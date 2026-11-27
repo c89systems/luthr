@@ -204,6 +204,27 @@ void luaA_publish (lua_State *L, GCObject *owner, const TValue *edge) {
     luaA_sharevalue(L, edge);
 }
 
+int luaA_trybindtaskmeta (lua_State *L, Udata *userdata, Table *mt,
+                          LuaPartNotice *notice) {
+  GCObject *owner = obj2gco(userdata);
+  uint64_t layout;
+  LuaTableWriter *lane;
+  TValue method;
+  int bound;
+  if (!luaA_local(L, owner) || !luaC_taskuserdata(owner) ||
+      (G(L)->gcstp & GCSTPCLS) ||
+      !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED))
+    return 0;
+  layout = __atomic_load_n(&mt->sequence, __ATOMIC_ACQUIRE);
+  if (layout & 1) return 0;
+  lane = luaH_tryclaimwriter(L, mt, owner, layout, notice);
+  if (lane == NULL) return 0;
+  bound = luaH_readshortstr(G(L), L, mt, G(L)->tmname[TM_GC], &method) &&
+          luaC_trybindtaskuserdata(L, userdata, mt, !ttisnil(&method));
+  luaH_openwriter(mt, lane, notice);
+  return bound;
+}
+
 /* Borrow a layout lane for the finalizer decision. A __gc edit must close
 ** that layout and drain the lanes, so the mark and its ordering stay inside
 ** the binding operation. Publish receivers with user values before taking

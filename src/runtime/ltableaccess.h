@@ -245,6 +245,10 @@ typedef struct LuaPartNotice {
   LuaHashPart *part;
   unsigned flags;
 } LuaPartNotice;
+LUAI_FUNC LuaTableWriter *luaH_tryclaimwriter (lua_State *, Table *,
+                                               const void *, uint64_t,
+                                               LuaPartNotice *);
+LUAI_FUNC void luaH_openwriter (Table *, LuaTableWriter *, LuaPartNotice *);
 LUAI_FUNC int luaH_tryclaimpart (lua_State *, Table *, LuaHashPart *,
                                 uint64_t, LuaPartNotice *);
 LUAI_FUNC void luaH_openpart (Table *, LuaHashPart *, LuaPartNotice *);

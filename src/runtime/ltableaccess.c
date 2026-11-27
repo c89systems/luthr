@@ -118,7 +118,8 @@ int luaH_claimpart (lua_State *L, Table *table, LuaHashPart *part,
   return 1;
 }
 
-void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
+l_sinline void openwriter (Table *table, LuaTableWriter *writer,
+                            LuaPartNotice *notice) {
   uint64_t sequence = __atomic_load_n(&writer->sequence, __ATOMIC_RELAXED);
   if (sequence & 1)
     __atomic_store_n(&writer->sequence, sequence + 1, __ATOMIC_RELEASE);
@@ -126,12 +127,19 @@ void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
   /* Same observer handshake as object ownership: a registering waiter either
   ** sees this departure, or this release sees its registration and wakes it. */
   if (__atomic_load_n(&writer->waiting, __ATOMIC_SEQ_CST) ||
-      luaA_lockwatched(&table->access)) {
-    LuaWorld *world = &G(L)->world;
-    luaX_checksync(pthread_mutex_lock(&world->mutex));
-    luaQ_wake(&world->changed, &world->waiters);
-    luaX_checksync(pthread_mutex_unlock(&world->mutex));
-  }
+      luaA_lockwatched(&table->access))
+    notice->flags |= WAKE_LAYOUT;
+}
+
+void luaH_openwriter (Table *table, LuaTableWriter *writer,
+                       LuaPartNotice *notice) {
+  openwriter(table, writer, notice);
+}
+
+void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
+  LuaPartNotice notice = {0};
+  openwriter(table, writer, &notice);
+  if (notice.flags != 0) luaH_notifypart(L, &notice);
 }
 
 static int advertise (Table *table, uint64_t layout, uint64_t flag) {
@@ -148,8 +156,9 @@ static int advertise (Table *table, uint64_t layout, uint64_t flag) {
   return 0;
 }
 
-LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, const void *slot,
-                                  uint64_t layout) {
+l_sinline LuaTableWriter *tryclaimwriter (lua_State *L, Table *table,
+                                          const void *slot, uint64_t layout,
+                                          LuaPartNotice *notice) {
   unsigned index = luaH_writerindex(slot);
   unsigned group = index / LUA_TABLE_WRITERS_PER_GROUP;
   LuaTableWriter *writer = &G(L)->table_writers[index];
@@ -161,9 +170,22 @@ LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, const void *slot,
   if (luaA_lockowner(&table->access) != NULL ||
       !luaH_strongaccess(L, table) ||
       !advertise(table, layout, 1u << (LUA_TABLE_WRITER_GROUP_SHIFT + group))) {
-    luaH_releasewriter(L, table, writer);
+    openwriter(table, writer, notice);
     return NULL;
   }
+  return writer;
+}
+
+LuaTableWriter *luaH_tryclaimwriter (lua_State *L, Table *table, const void *slot,
+                                     uint64_t layout, LuaPartNotice *notice) {
+  return tryclaimwriter(L, table, slot, layout, notice);
+}
+
+LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, const void *slot,
+                                  uint64_t layout) {
+  LuaPartNotice notice = {0};
+  LuaTableWriter *writer = tryclaimwriter(L, table, slot, layout, &notice);
+  if (notice.flags != 0) luaH_notifypart(L, &notice);
   return writer;
 }
 

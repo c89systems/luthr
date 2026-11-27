@@ -1827,18 +1827,37 @@ static int read_native_pointer_keys(lua_State *L) {
   return 1;
 }
 
+static const char task_userdata_metatable[] = "luthr.test.task_userdata";
+static unsigned task_userdata_finalized;
+
+static int finalize_task_userdata(lua_State *L) {
+  const unsigned char *value = lua_touserdata(L, 1);
+  unsigned count =
+      __atomic_fetch_add(&task_userdata_finalized, 1, __ATOMIC_RELAXED);
+  require(value && value[0] == 23 && value[1023] == 28);
+  require(count < 2 && value[1] == 2 - count);
+  return 0;
+}
+
 static int allocate_userdata_without_managed_slot(lua_State *L) {
   unsigned char *first = lua_newuserdatauv(L, 1024, 0);
   first[0] = 23;
+  first[1] = 1;
   first[1023] = 28;
   blocked_leaf(L);
+  luaL_setmetatable(L, task_userdata_metatable);
+  require(luaL_testudata(L, -1, task_userdata_metatable) == first);
   unsigned char *second = lua_newuserdatauv(L, 1024, 1);
   require(first != second && lua_rawlen(L, -1) == 1024);
   require(lua_getiuservalue(L, -1, 1) == LUA_TNIL);
   lua_pop(L, 1);
   require(lua_touserdata(L, 1) == first && lua_touserdata(L, 2) == second);
   second[0] = first[0];
+  second[1] = 2;
   second[1023] = first[1023];
+  luaL_setmetatable(L, task_userdata_metatable);
+  luaL_setmetatable(L, task_userdata_metatable);
+  require(luaL_testudata(L, -1, task_userdata_metatable) == second);
   lua_pushinteger(L, second[0] + second[1023]);
   native_operation_done();
   return 1;
@@ -1954,6 +1973,12 @@ static int inspect_native_stack(lua_State *L) {
 static void native_operation_without_slot(struct fixture *f, lua_CFunction fn,
                                           const char *source, int gc_after) {
   init(f, 1);
+  if (fn == allocate_userdata_without_managed_slot) {
+    require(luaL_newmetatable(f->main, task_userdata_metatable));
+    lua_pushcfunction(f->main, finalize_task_userdata);
+    lua_setfield(f->main, -2, "__gc");
+    lua_pop(f->main, 1);
+  }
   lua_pushcfunction(f->main, fn);
   lua_setglobal(f->main, "native_table_operation");
   managed(f->main, "wait_for_native_operation",
@@ -3758,10 +3783,11 @@ int main(int argc, char **argv) {
     native_operation_without_slot(
         f, create_native_array,
         "return native_table_operation({51, 1, 2, 3, 4, 5})[1][1][1]", 1);
-  else if (strcmp(argv[1], "native_userdata_without_slot") == 0)
+  else if (strcmp(argv[1], "native_userdata_without_slot") == 0) {
     native_operation_without_slot(f, allocate_userdata_without_managed_slot,
                                   "return native_table_operation()", 1);
-  else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
+    require(__atomic_load_n(&task_userdata_finalized, __ATOMIC_RELAXED) == 2);
+  } else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
     native_operation_without_slot(
         f, edit_native_fields,
         "local row = native_table_operation({51}); "

@@ -119,6 +119,10 @@ LUAI_FUNC void luaA_getmetatable (lua_State *L, const TValue *object,
 LUAI_FUNC void luaA_setmetatable (lua_State *L, const TValue *object, Table *mt);
 /* Both objects stay rooted by the caller across promotion or a receiver wait. */
 LUAI_FUNC int luaA_bindprivateuserdata (lua_State *L, Udata *owner, Table *mt);
+struct LuaPartNotice;
+/* Requires a storage ticket that excludes active marking. Notify after release. */
+LUAI_FUNC int luaA_trybindtaskmeta (lua_State *L, Udata *owner, Table *mt,
+                                    struct LuaPartNotice *notice);
 /* Caller owns the userdata and has run the deletion barrier. */
 LUAI_FUNC void luaA_storeudatameta (Udata *owner, Table *mt);
 LUAI_FUNC void luaA_invalidatestringindex (lua_State *L, Table *mt);

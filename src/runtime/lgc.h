@@ -494,6 +494,8 @@ LUAI_FUNC GCObject *luaC_trytaskuserdata (lua_State *L, size_t size, int refill)
 LUAI_FUNC void luaC_publishtaskuserdata (lua_State *L, GCObject *object);
 LUAI_FUNC int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
                                     int finalizable);
+LUAI_FUNC int luaC_trybindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
+                                        int finalizable);
 LUAI_FUNC void luaC_runtaskfinalizers (lua_State *L);
 LUAI_FUNC int luaC_markfinalizable (lua_State *L, GCObject *object);
 LUAI_FUNC void luaC_transferfinalizer (lua_State *L, GCObject *object);

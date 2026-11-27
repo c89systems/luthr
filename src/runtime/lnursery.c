@@ -474,17 +474,22 @@ l_sinline int tryretaintaskroot (lua_State *L, GCObject *value, uintptr_t flags)
   return 0;
 }
 
-int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
-                           int finalizable) {
-  if (mt != NULL && !tryretaintaskroot(L, obj2gco(mt), 0)) {
-    luaC_sealtask(L);
+int luaC_trybindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
+                              int finalizable) {
+  if (mt != NULL && !tryretaintaskroot(L, obj2gco(mt), 0))
     return 0;
-  }
   luaA_storeudatameta(userdata, mt);
   if (finalizable && luaC_markfinalizable(L, obj2gco(userdata))) {
     L->task_finalizable++;
   }
   return 1;
+}
+
+int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
+                           int finalizable) {
+  if (luaC_trybindtaskuserdata(L, userdata, mt, finalizable)) return 1;
+  luaC_sealtask(L);
+  return 0;
 }
 
 /* Immutable key layouts belong to the cohort's root directory. Only the

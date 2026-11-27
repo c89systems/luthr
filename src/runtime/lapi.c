@@ -1815,6 +1815,20 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
 
 void luaA_setnamedmeta (lua_State *L, const char *name) {
   TValue registry, value;
+  if (__atomic_load_n(&L->task_owner, __ATOMIC_RELAXED) != NULL &&
+      luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                              LUA_WORLD_ARM_TRACE)) {
+    LuaPartNotice notice = {0};
+    int bound = !isLua(L->ci) && L->top.p > L->ci->func.p + 1 &&
+                ttisfulluserdata(s2v(L->top.p - 1)) &&
+                luaA_tryregistry(G(L), &registry) &&
+                readnamedfield(L, &registry, name, &value) && ttistable(&value) &&
+                luaA_trybindtaskmeta(L, uvalue(s2v(L->top.p - 1)),
+                                    hvalue(&value), &notice);
+    luaX_leavesharedread(L);
+    if (notice.flags != 0) luaH_notifypart(L, &notice);
+    if (bound) return;
+  }
   lua_lock(L);
   if (luaA_tryregistry(G(L), &registry) &&
       readnamedfield(L, &registry, name, &value)) {
