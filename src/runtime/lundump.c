@@ -20,6 +20,7 @@
 #include "lfunc.h"
 #include "lmem.h"
 #include "lobject.h"
+#include "lroots.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "lundump.h"
@@ -35,7 +36,7 @@ typedef struct {
   lua_State *L;
   ZIO *Z;
   const char *name;
-  Table *h;  /* list for string reuse */
+  LuaNativeRoot *strings;  /* list for string reuse, created on first string */
   size_t offset;  /* current position relative to beginning of dump */
   lua_Unsigned nstr;  /* number of strings in the list */
   lu_byte fixed;  /* dump is fixed in memory */
@@ -145,6 +146,7 @@ static lua_Integer loadInteger (LoadState *S) {
 static void loadString (LoadState *S, Proto *p, TString **sl) {
   lua_State *L = S->L;
   TString *ts;
+  Table *strings;
   TValue sv;
   size_t size = loadSize(S);
   if (size == 0) {  /* previously saved string? */
@@ -154,7 +156,9 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
       lua_assert(*sl == NULL);  /* must be prefilled */
       return;
     }
-    if (novariant(luaH_getint(L, S->h, l_castU2S(idx), &stv)) != LUA_TSTRING)
+    if (idx > S->nstr ||
+        novariant(luaH_getint(L, hvalue(&S->strings->value),
+                               l_castU2S(idx), &stv)) != LUA_TSTRING)
       error(S, "invalid string index");
     *sl = ts = tsvalue(&stv);  /* get its value */
     luaC_objbarrier(L, p, ts);
@@ -178,10 +182,15 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
     luaS_finishlongstr(ts);
   }
   /* add string to list of saved strings */
+  if (S->nstr == 0) {
+    strings = luaH_new(L, 0, 0);
+    sethvalue(L, &S->strings->value, strings);
+  }
+  else strings = hvalue(&S->strings->value);
   S->nstr++;
   setsvalue(L, &sv, ts);
-  luaH_setint(L, S->h, l_castU2S(S->nstr), &sv);
-  luaC_objbarrierback(L, obj2gco(S->h), ts);
+  luaH_setint(L, strings, l_castU2S(S->nstr), &sv);
+  luaC_objbarrierback(L, obj2gco(strings), ts);
 }
 
 
@@ -394,8 +403,8 @@ static void checkHeader (LoadState *S) {
 /*
 ** Load precompiled chunk.
 */
-LClosure *luaU_undump (lua_State *L, ZIO *Z, Table *anchor, const char *name,
-                       int fixed) {
+LClosure *luaU_undump (lua_State *L, ZIO *Z, LuaNativeRoot *strings,
+                       LuaNativeRoot *function, const char *name, int fixed) {
   LoadState S;
   LClosure *cl;
   if (*name == '@' || *name == '=')
@@ -408,10 +417,10 @@ LClosure *luaU_undump (lua_State *L, ZIO *Z, Table *anchor, const char *name,
   S.fixed = cast_byte(fixed);
   S.offset = 1;  /* fist byte was already read */
   checkHeader(&S);
-  S.h = anchor;
+  S.strings = strings;
   S.nstr = 0;
   cl = luaF_newLclosure(L, loadByte(&S));
-  luaD_anchorobj(L, anchor, obj2gco(cl));
+  setclLvalue(L, &function->value, cl);
   luaF_setproto(L, cl, luaF_newproto(L));
   loadFunction(&S, cl->p);
   if (cl->nupvalues != cl->p->sizeupvalues)

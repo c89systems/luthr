@@ -506,6 +506,40 @@ local loaded = assert(load(function()
 end,'fragmented-source','t',{}))
 equal(loaded(),5050)
 equal(assert(load(string.dump(loaded,true),'roundtrip','b',{}))(),5050)
+do
+  local phrase = ('compiler-roots-'):rep(9)
+  local source = ('return function(s) return s..%q end, ' ..
+                  'function() return %q end'):format(phrase, phrase)
+  local function chunked(input, mode)
+    local pos = 1
+    return assert(load(function()
+      if pos > #input then return nil end
+      collectgarbage('collect')
+      if pos == 24 then equal(assert(load('return 17'))(), 17) end
+      local part = input:sub(pos, pos + 22)
+      pos = pos + 23
+      return part
+    end, 'compiler-roots', mode))
+  end
+  local compile = chunked(source, 't')
+  local reload = chunked(string.dump(compile, true), 'b')
+  for _, chunk in ipairs({compile, reload}) do
+    local append, constant = chunk()
+    equal(append('x'), 'x' .. phrase)
+    equal(constant(), phrase)
+  end
+  local first = true
+  local interrupted, err = load(function()
+    if first then
+      first = false
+      return 'return function() local value = "anchored"; '
+    end
+    error('interrupted reader', 0)
+  end)
+  assert(interrupted == nil and err:match('^interrupted reader'))
+  collectgarbage('collect')
+  equal(assert(load('return 19'))(), 19)
+end
 local hooks=0
 debug.sethook(function() hooks=hooks+1 end,'',7)
 local sum=0

@@ -30,7 +30,10 @@
 
 
 /* load one chunk; from lundump.c */
-LUAI_FUNC LClosure* luaU_undump (lua_State* L, ZIO* Z, Table *anchor,
+struct LuaNativeRoot;
+LUAI_FUNC LClosure* luaU_undump (lua_State* L, ZIO* Z,
+                                 struct LuaNativeRoot *strings,
+                                 struct LuaNativeRoot *function,
                                  const char* name, int fixed);
 
 /* Dump one chunk. 'managed' is reserved for the trusted runtime buffer writer;

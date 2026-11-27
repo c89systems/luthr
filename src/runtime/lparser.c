@@ -26,7 +26,6 @@
 #include "lparser.h"
 #include "lstate.h"
 #include "lstring.h"
-#include "ltable.h"
 
 
 
@@ -820,8 +819,7 @@ static void open_func (LexState *ls, FuncState *fs, BlockCnt *bl) {
   f->source = ls->source;
   luaC_objbarrier(L, f, f->source);
   f->maxstacksize = 2;  /* registers 0/1 are always valid */
-  fs->kcache = luaH_new(L, 0, 0);  /* create table for function */
-  luaD_anchorobj(L, ls->h, obj2gco(fs->kcache));  /* anchor it */
+  luaR_pushroot(L, &fs->kcache);
   enterblock(fs, bl, 0);
 }
 
@@ -830,7 +828,6 @@ static void close_func (LexState *ls) {
   lua_State *L = ls->L;
   FuncState *fs = ls->fs;
   Proto *f = fs->f;
-  TValue temp;
   luaK_ret(fs, luaY_nvarstack(fs), 0);  /* final return */
   leaveblock(fs);
   lua_assert(fs->bl == NULL);
@@ -844,9 +841,7 @@ static void close_func (LexState *ls) {
   luaM_shrinkvector(L, f->locvars, f->sizelocvars, fs->ndebugvars, LocVar);
   luaM_shrinkvector(L, f->upvalues, f->sizeupvalues, fs->nups, Upvaldesc);
   luaF_lowerproto(L, f);
-  /* remove kcache table from scanner table ("weigh" its anchor) */
-  sethvalue(L, &temp, fs->kcache);  /* key to be set to nil */
-  luaH_set(L, ls->h, &temp, &G(L)->nilvalue);
+  luaR_poproot(L, &fs->kcache);
   ls->fs = fs->prev;
   luaC_checkGC(L);
 }
@@ -2169,14 +2164,15 @@ static void mainfunc (LexState *ls, FuncState *fs) {
 }
 
 
-LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor, Mbuffer *buff,
-                       Dyndata *dyd, const char *name, int firstchar) {
+LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor,
+                       LuaNativeRoot *function, Mbuffer *buff, Dyndata *dyd,
+                       const char *name, int firstchar) {
   LexState lexstate;
   FuncState funcstate;
   LClosure *cl;
   lexstate.h = anchor;  /* table for scanner */
   cl = luaF_newLclosure(L, 1);  /* create main closure */
-  luaD_anchorobj(L, anchor, obj2gco(cl));  /* anchor it in scanner table */
+  setclLvalue(L, &function->value, cl);
   funcstate.f = luaF_newproto(L);
   luaF_setproto(L, cl, funcstate.f);
   funcstate.f->source = luaS_new(L, name);  /* create and anchor TString */

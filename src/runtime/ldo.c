@@ -1794,16 +1794,15 @@ static void checkmode (lua_State *L, const char *mode, const char *x) {
 
 
 /*
-** Before the first call to the reader function, Lua reserves a slot
-** with a table for anchoring stuff.
+** The unfinished closure and scanner's interned strings have separate roots.
+** They remain live through reader callbacks and emergency collection.
 */
 static void f_parser (lua_State *L, void *ud) {
-  LuaNativeRoot anchor_root;
+  LuaNativeRoot strings, function;
   LClosure *cl;
   struct SParser *p = cast(struct SParser *, ud);
   const char *mode = p->mode ? p->mode : "bt";
   int c;
-  Table *anchor;
   ptrdiff_t otop = savestack(L, L->top.p);  /* original top */
   /* A managed load can hand off before entering the parser. Native callers
   ** retain their existing cancellation boundaries. */
@@ -1811,9 +1810,8 @@ static void f_parser (lua_State *L, void *ud) {
     luaTK_checkstop(L);
   luaD_checknativestack(L);
   luaD_checkstack(L, 2);
-  luaR_pushroot(L, &anchor_root);
-  anchor = luaH_new(L, 0, 0);
-  sethvalue(L, &anchor_root.value, anchor);
+  luaR_pushroot(L, &strings);
+  luaR_pushroot(L, &function);
   c = zgetc(p->z);  /* read first character */
   if (c == LUA_SIGNATURE[0]) {
     int fixed = 0;
@@ -1821,32 +1819,21 @@ static void f_parser (lua_State *L, void *ud) {
       fixed = 1;
     else
       checkmode(L, mode, "binary");
-    cl = luaU_undump(L, p->z, anchor, p->name, fixed);
+    cl = luaU_undump(L, p->z, &strings, &function, p->name, fixed);
   }
   else {
+    Table *anchor;
     checkmode(L, mode, "text");
-    cl = luaY_parser(L, p->z, anchor, &p->buff, &p->dyd, p->name, c);
+    anchor = luaH_new(L, 0, 0);
+    sethvalue(L, &strings.value, anchor);
+    cl = luaY_parser(L, p->z, anchor, &function, &p->buff, &p->dyd, p->name, c);
   }
   lua_assert(cl->nupvalues == cl->p->sizeupvalues);
   luaF_initupvals(L, cl);
   L->top.p = restorestack(L, otop);  /* restore stack */
   setclLvalue2s(L, L->top.p++, cl);  /* publish the initialized closure */
-  luaR_poproot(L, &anchor_root);
-}
-
-
-/*
-** Root an object privately while luaH_set may run an emergency collection,
-** then add it to the parser's anchor table with itself as its key.
-*/
-void luaD_anchorobj (lua_State *L, Table *anchor, GCObject *obj) {
-  LuaNativeRoot object;
-  luaR_pushroot(L, &object);
-  setgcovalue(L, &object.value, obj);
-  luaH_set(L, anchor, &object.value, &object.value);
-  /* Because this is a new key, luaH_set will call the GC barrier, so
-     we don't need to call the barrier again here */
-  luaR_poproot(L, &object);
+  luaR_poproot(L, &function);
+  luaR_poproot(L, &strings);
 }
 
 

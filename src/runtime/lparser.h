@@ -9,6 +9,7 @@
 
 #include "llimits.h"
 #include "lobject.h"
+#include "lroots.h"
 #include "lzio.h"
 
 
@@ -168,7 +169,7 @@ typedef struct FuncState {
   struct FuncState *prev;  /* enclosing function */
   struct LexState *ls;  /* lexical state */
   struct BlockCnt *bl;  /* chain of current blocks */
-  Table *kcache;  /* cache for reusing constants */
+  LuaNativeRoot kcache;  /* cache for reusing constants, allocated on demand */
   int pc;  /* next position to code (equivalent to 'ncode') */
   int lasttarget;   /* 'label' of last 'jump label' */
   int previousline;  /* last line that was saved in 'lineinfo' */
@@ -190,6 +191,7 @@ LUAI_FUNC lu_byte luaY_nvarstack (FuncState *fs);
 LUAI_FUNC void luaY_checklimit (FuncState *fs, int v, int l,
                                 const char *what);
 LUAI_FUNC LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor,
+                                 LuaNativeRoot *function,
                                  Mbuffer *buff, Dyndata *dyd,
                                  const char *name, int firstchar);
 

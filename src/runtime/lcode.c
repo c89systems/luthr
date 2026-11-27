@@ -557,15 +557,25 @@ static int addk (FuncState *fs, Proto *f, TValue *v) {
 
 
 /*
-** Use scanner's table to cache position of constants in constant list
-** and try to reuse constants. Because some values should not be used
-** as keys (nil cannot be a key, integer keys can collapse with float
-** keys), the caller must provide a useful 'key' for indexing the cache.
+** Cache constant indices in the current function. Nil cannot be a table
+** key and integer keys can collapse with float keys, so the caller supplies
+** a separate key whenever the value itself is ambiguous.
 */
 static int k2proto (FuncState *fs, TValue *key, TValue *v) {
+  lua_State *L = fs->ls->L;
   TValue val;
   Proto *f = fs->f;
-  int tag = luaH_get(fs->ls->L, fs->kcache, key, &val);  /* query scanner table */
+  Table *cache;
+  int tag;
+  if (ttisnil(&fs->kcache.value)) {
+    cache = luaH_new(L, 0, 0);
+    sethvalue(L, &fs->kcache.value, cache);
+    tag = LUA_VABSTKEY;
+  }
+  else {
+    cache = hvalue(&fs->kcache.value);
+    tag = luaH_get(L, cache, key, &val);
+  }
   if (!tagisempty(tag)) {  /* is there an index there? */
     int k = cast_int(ivalue(&val));
     /* collisions can happen only for float keys */
@@ -577,7 +587,7 @@ static int k2proto (FuncState *fs, TValue *key, TValue *v) {
     /* cache it for reuse; numerical value does not need GC barrier;
        table is not a metatable, so it does not need to invalidate cache */
     setivalue(&val, k);
-    luaH_set(fs->ls->L, fs->kcache, key, &val);
+    luaH_set(L, cache, key, &val);
     return k;
   }
 }
@@ -663,10 +673,10 @@ static int boolT (FuncState *fs) {
 ** Add nil to list of constants and return its index.
 */
 static int nilK (FuncState *fs) {
+  static char nilkey;  /* a key distinct from every numeric or string value */
   lua_State *L = fs->ls->L;
   TValue k;
-  /* cannot use nil as key; instead use table itself */
-  sethvalue(L, &k, fs->kcache);
+  setpvalue(&k, &nilkey);
   return k2proto(fs, &k, &G(L)->nilvalue);
 }
 
