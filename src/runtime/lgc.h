@@ -494,9 +494,12 @@ LUAI_FUNC GCObject *luaC_trytaskuserdata (lua_State *L, size_t size, int refill)
 LUAI_FUNC void luaC_publishtaskuserdata (lua_State *L, GCObject *object);
 LUAI_FUNC int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
                                     int finalizable);
-LUAI_FUNC int luaC_trybindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
-                                        int finalizable);
+/* The caller holds a storage ticket that excludes active and arming GC. */
+LUAI_FUNC int luaC_trybindtaskmeta (lua_State *L, Udata *userdata, Table *mt);
 LUAI_FUNC void luaC_runtaskfinalizers (lua_State *L);
+l_sinline uint64_t luaC_orderfinalizer (global_State *g) {
+  return __atomic_add_fetch(&g->finalizer_sequence, 1, __ATOMIC_SEQ_CST);
+}
 LUAI_FUNC int luaC_markfinalizable (lua_State *L, GCObject *object);
 LUAI_FUNC void luaC_transferfinalizer (lua_State *L, GCObject *object);
 LUAI_FUNC void luaC_sealtask (lua_State *L);

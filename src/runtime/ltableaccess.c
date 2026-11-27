@@ -131,11 +131,6 @@ l_sinline void openwriter (Table *table, LuaTableWriter *writer,
     notice->flags |= WAKE_LAYOUT;
 }
 
-void luaH_openwriter (Table *table, LuaTableWriter *writer,
-                       LuaPartNotice *notice) {
-  openwriter(table, writer, notice);
-}
-
 void luaH_releasewriter (lua_State *L, Table *table, LuaTableWriter *writer) {
   LuaPartNotice notice = {0};
   openwriter(table, writer, &notice);
@@ -174,11 +169,6 @@ l_sinline LuaTableWriter *tryclaimwriter (lua_State *L, Table *table,
     return NULL;
   }
   return writer;
-}
-
-LuaTableWriter *luaH_tryclaimwriter (lua_State *L, Table *table, const void *slot,
-                                     uint64_t layout, LuaPartNotice *notice) {
-  return tryclaimwriter(L, table, slot, layout, notice);
 }
 
 LuaTableWriter *luaH_claimwriter (lua_State *L, Table *table, const void *slot,

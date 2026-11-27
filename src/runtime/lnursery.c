@@ -474,12 +474,30 @@ l_sinline int tryretaintaskroot (lua_State *L, GCObject *value, uintptr_t flags)
   return 0;
 }
 
-int luaC_trybindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
-                              int finalizable) {
-  if (mt != NULL && !tryretaintaskroot(L, obj2gco(mt), 0))
+int luaC_trybindtaskmeta (lua_State *L, Udata *userdata, Table *mt) {
+  global_State *g = G(L);
+  GCObject *owner = obj2gco(userdata);
+  uint64_t layout, order = 0;
+  TValue method;
+  int registergc;
+  if (!luaA_local(L, owner) || !luaC_taskuserdata(owner) ||
+      (g->gcstp & GCSTPCLS) ||
+      !(__atomic_load_n(&mt->sharing, __ATOMIC_ACQUIRE) & LUA_OBJECT_SHARED))
+    return 0;
+  layout = __atomic_load_n(&mt->sequence, __ATOMIC_ACQUIRE);
+  if ((layout & 1) ||
+      !luaH_readshortstr(g, L, mt, g->tmname[TM_GC], &method)) return 0;
+  registergc = !ttisnil(&method) && !tofinalize(owner);
+  if (registergc) order = luaC_orderfinalizer(g);
+  /* A __gc edit changes the layout generation. Reserve the order inside
+  ** the validated interval and leave the private receiver untouched if
+  ** that validation fails. The stack claim hides it until publication. */
+  if (!luaH_samelayout(mt, layout) || !tryretaintaskroot(L, obj2gco(mt), 0))
     return 0;
   luaA_storeudatameta(userdata, mt);
-  if (finalizable && luaC_markfinalizable(L, obj2gco(userdata))) {
+  if (registergc) {
+    userdata->finalizer_order = order;
+    __atomic_fetch_or(&owner->marked, bitmask(FINALIZEDBIT), __ATOMIC_RELAXED);
     L->task_finalizable++;
   }
   return 1;
@@ -487,9 +505,14 @@ int luaC_trybindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
 
 int luaC_bindtaskuserdata (lua_State *L, Udata *userdata, Table *mt,
                            int finalizable) {
-  if (luaC_trybindtaskuserdata(L, userdata, mt, finalizable)) return 1;
-  luaC_sealtask(L);
-  return 0;
+  if (mt != NULL && !tryretaintaskroot(L, obj2gco(mt), 0)) {
+    luaC_sealtask(L);
+    return 0;
+  }
+  luaA_storeudatameta(userdata, mt);
+  if (finalizable && luaC_markfinalizable(L, obj2gco(userdata)))
+    L->task_finalizable++;
+  return 1;
 }
 
 /* Immutable key layouts belong to the cohort's root directory. Only the

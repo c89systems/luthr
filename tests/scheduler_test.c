@@ -39,6 +39,8 @@ struct fixture {
   int admission_fifo, cancel_grant;
   unsigned pause_hold, pause_seen, pause_release;
   unsigned finalized, nursery_finished;
+  const void *metatable_under_edit;
+  unsigned finalizer_sampled, finalizer_resume;
   unsigned native_callback_done;
   unsigned idle_entries, host_channel_entries;
   lua_State *metadata_peer;
@@ -62,6 +64,28 @@ static unsigned live_stacks;
 static int observe_idle;
 static int observe_trace_pause;
 static pthread_t idle_host;
+
+__typeof__(luaH_readshortstr) __real_luaH_readshortstr;
+int __wrap_luaH_readshortstr(global_State *g, lua_State *L, Table *table,
+                             TString *key, TValue *result) {
+  struct fixture *f = fixture;
+  int ready = __real_luaH_readshortstr(g, L, table, key, result);
+  if (ready && f != NULL &&
+      __atomic_load_n(&f->metatable_under_edit, __ATOMIC_ACQUIRE) == table &&
+      key == g->tmname[TM_GC] &&
+      (__atomic_load_n(&L->stack_gate.values, __ATOMIC_RELAXED) &
+       LUA_GATE_SHARED_READ)) {
+    require(pthread_mutex_lock(&f->mutex) == 0);
+    if (!f->finalizer_sampled) {
+      f->finalizer_sampled = 1;
+      require(pthread_cond_broadcast(&f->changed) == 0);
+      while (!f->finalizer_resume)
+        require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+    }
+    require(pthread_mutex_unlock(&f->mutex) == 0);
+  }
+  return ready;
+}
 
 enum {
   FULL_OLD_READY = 1,
@@ -1829,6 +1853,65 @@ static int read_native_pointer_keys(lua_State *L) {
 
 static const char task_userdata_metatable[] = "luthr.test.task_userdata";
 static unsigned task_userdata_finalized;
+
+static int finalize_edited_userdata(lua_State *L) {
+  const unsigned char *payload = lua_touserdata(L, 1);
+  require(payload && *payload == 42);
+  __atomic_fetch_add(&fixture->finalized, 1, __ATOMIC_RELAXED);
+  return 0;
+}
+
+static void set_edited_finalizer(lua_State *L, int enabled) {
+  if (enabled)
+    lua_pushcfunction(L, finalize_edited_userdata);
+  else
+    lua_pushnil(L);
+  lua_setfield(L, -2, "__gc");
+}
+
+static int create_edited_userdata(lua_State *L) {
+  unsigned char *payload = lua_newuserdatauv(L, 1024, 0);
+  *payload = 42;
+  luaL_setmetatable(L, task_userdata_metatable);
+  require(luaL_testudata(L, -1, task_userdata_metatable) == payload);
+  return 1;
+}
+
+static void edit_userdata_finalizer(struct fixture *f, int add) {
+  init(f, 1);
+  lua_gc(f->main, LUA_GCINC);
+  lua_gc(f->main, LUA_GCPARAM, LUA_GCPPAUSE, 5000);
+  require(luaL_newmetatable(f->main, task_userdata_metatable));
+  set_edited_finalizer(f->main, 1);
+  set_edited_finalizer(f->main, !add);
+  lua_pushcfunction(f->main, create_edited_userdata);
+  lua_setglobal(f->main, "create_edited_userdata");
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  __atomic_store_n(&f->metatable_under_edit, lua_topointer(f->main, -1),
+                   __ATOMIC_RELEASE);
+  submit(f, 0, "held_userdata = create_edited_userdata(); return 51", 0);
+
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  while (!f->finalizer_sampled)
+    require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+  set_edited_finalizer(f->main, add);
+  require(pthread_mutex_lock(&f->mutex) == 0);
+  f->finalizer_resume = 1;
+  require(pthread_cond_broadcast(&f->changed) == 0);
+  require(pthread_mutex_unlock(&f->mutex) == 0);
+
+  require(collect(f, 0, LUA_OK) == 51);
+  /* An object bound while the method was absent must stay unregistered
+   * after the method returns. */
+  set_edited_finalizer(f->main, 1);
+  lua_pushnil(f->main);
+  lua_setglobal(f->main, "held_userdata");
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+  require(__atomic_load_n(&f->finalized, __ATOMIC_RELAXED) == (unsigned)add);
+  finish(f);
+}
 
 static int finalize_task_userdata(lua_State *L) {
   const unsigned char *value = lua_touserdata(L, 1);
@@ -3787,7 +3870,11 @@ int main(int argc, char **argv) {
     native_operation_without_slot(f, allocate_userdata_without_managed_slot,
                                   "return native_table_operation()", 1);
     require(__atomic_load_n(&task_userdata_finalized, __ATOMIC_RELAXED) == 2);
-  } else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
+  } else if (strcmp(argv[1], "native_userdata_finalizer_added") == 0 ||
+             strcmp(argv[1], "native_userdata_finalizer_removed") == 0)
+    edit_userdata_finalizer(
+        f, strcmp(argv[1], "native_userdata_finalizer_added") == 0);
+  else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
     native_operation_without_slot(
         f, edit_native_fields,
         "local row = native_table_operation({51}); "

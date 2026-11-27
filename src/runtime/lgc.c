@@ -2145,8 +2145,7 @@ int luaC_markfinalizable (lua_State *L, GCObject *o) {
   if (tofinalize(o) || (__atomic_fetch_or(&o->marked, bitmask(FINALIZEDBIT),
                                         __ATOMIC_RELAXED) & bitmask(FINALIZEDBIT)))
     return 0;
-  *finalizerstamp(o) = __atomic_add_fetch(&G(L)->finalizer_sequence, 1,
-                                       __ATOMIC_RELAXED);
+  *finalizerstamp(o) = luaC_orderfinalizer(G(L));
   return 1;
 }
 

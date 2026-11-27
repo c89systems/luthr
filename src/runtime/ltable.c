@@ -2931,7 +2931,7 @@ static int __attribute__((noinline)) sharedset (lua_State *L, Table *table,
   if (ttisshrstring(key)) {
     TString *name = tsvalue(key);
     Table *keys;
-    /* Finalizer registrations borrow the layout through separate lanes. */
+    /* Finalizer registrations serialize or validate against layout changes. */
     if (name->shrlen == 4 && memcmp(getshrstr(name), "__gc", 4) == 0) return 0;
     keys = luaH_recordkeys(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
     if (keys != NULL) {

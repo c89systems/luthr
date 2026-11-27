@@ -82,7 +82,7 @@ target_link_options(scheduler_test PRIVATE -Wl,--wrap=pthread_mutex_lock
   -Wl,--wrap=luaX_poll -Wl,--wrap=luaCT_pause -Wl,--wrap=pthread_mutex_init -Wl,--wrap=luaW_attach
   -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_wait -Wl,--wrap=pthread_create -Wl,--wrap=mmap
   -Wl,--wrap=mprotect -Wl,--wrap=munmap -Wl,--wrap=clock_gettime -Wl,--wrap=luaC_endtask
-  -Wl,--wrap=luaC_preparefull)
+  -Wl,--wrap=luaC_preparefull -Wl,--wrap=luaH_readshortstr)
 foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incremental early_generational wake_waiters stopped_dispatch trace_pause_retains_collector trace_pause_retains_mutators
     native native_reentry native_coroutine_progress shutdown yield saturation cancel_admission early_native_return native_grant_stopped_world native_fifo native_competitive
     native_accounting_count native_accounting_arm
@@ -91,6 +91,7 @@ foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incr
     timed_callback_progress synchronous_callback simultaneous_reentry parallel_native_compensation native_overlapping_stops native_return_compensation native_return_handoff native_leaf_return native_recall_during_stack_borrow native_recall_without_stack_offer native_recall_with_retirement
     native_argument_observation native_argument_types native_argument_addresses native_index_dispatch lua_hook_without_native_slot
     native_metadata_without_slot native_registry_without_slot native_stack_without_slot native_array_without_slot native_allocation_without_slot native_userdata_without_slot
+    native_userdata_finalizer_added native_userdata_finalizer_removed
     native_named_fields_without_slot native_hash_constructor_without_slot native_pointer_lookup_without_slot native_compiled_callback_without_slot native_compiled_table_callback_without_slot native_protected_branch_without_slot
     native_loop_fields_without_slot native_loop_fields_gc native_loop_calls_without_slot native_loop_calls_gc
     native_loop_result_without_slot native_loop_result_gc
