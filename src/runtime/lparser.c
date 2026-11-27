@@ -2164,13 +2164,19 @@ static void mainfunc (LexState *ls, FuncState *fs) {
 }
 
 
-LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor,
+LClosure *luaY_parser (lua_State *L, ZIO *z, LuaNativeRoot *strings,
                        LuaNativeRoot *function, Mbuffer *buff, Dyndata *dyd,
                        const char *name, int firstchar) {
   LexState lexstate;
   FuncState funcstate;
+  LuaNativeRoot tokens[LUA_LEX_SHORT_ROOTS];
   LClosure *cl;
-  lexstate.h = anchor;  /* table for scanner */
+  unsigned i;
+  lexstate.h = NULL;
+  lexstate.token_table = strings;
+  lexstate.short_tokens = tokens;
+  lexstate.short_count = 0;
+  for (i = 0; i < LUA_LEX_SHORT_ROOTS; i++) luaR_pushroot(L, &tokens[i]);
   cl = luaF_newLclosure(L, 1);  /* create main closure */
   setclLvalue(L, &function->value, cl);
   funcstate.f = luaF_newproto(L);
@@ -2182,6 +2188,7 @@ LClosure *luaY_parser (lua_State *L, ZIO *z, Table *anchor,
   dyd->actvar.n = dyd->gt.n = dyd->label.n = 0;
   luaX_setinput(L, &lexstate, z, funcstate.f->source, firstchar);
   mainfunc(&lexstate, &funcstate);
+  while (i > 0) luaR_poproot(L, &tokens[--i]);
   lua_assert(!funcstate.prev && funcstate.nups == 1 && !lexstate.fs);
   /* all scopes should be correctly finished */
   lua_assert(dyd->actvar.n == 0 && dyd->gt.n == 0 && dyd->label.n == 0);

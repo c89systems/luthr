@@ -2038,11 +2038,8 @@ static void f_parser (lua_State *L, void *ud) {
     cl = luaU_undump(L, p->z, &strings, &function, p->name, fixed);
   }
   else {
-    Table *anchor;
     checkmode(L, mode, "text");
-    anchor = luaH_new(L, 0, 0);
-    sethvalue(L, &strings.value, anchor);
-    cl = luaY_parser(L, p->z, anchor, &function, &p->buff, &p->dyd, p->name, c);
+    cl = luaY_parser(L, p->z, &strings, &function, &p->buff, &p->dyd, p->name, c);
   }
   lua_assert(cl->nupvalues == cl->p->sizeupvalues);
   luaF_initupvals(L, cl);

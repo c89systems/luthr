@@ -154,11 +154,46 @@ static TString *anchorstr (LexState *ls, TString *ts) {
 }
 
 
-/*
-** Creates a new string and anchors it in scanner's table.
-*/
+/* Transfer the short tokens while the original roots still own them. */
+static void opentokentable (LexState *ls) {
+  lua_State *L = ls->L;
+  unsigned i;
+  Table *h = luaH_new(L, 0, ls->short_count + 1);
+  sethvalue(L, &ls->token_table->value, h);
+  ls->h = h;
+  for (i = 0; i < ls->short_count; i++) {
+    TValue *token = &ls->short_tokens[i].value;
+    luaH_set(L, h, token, token);
+    setnilvalue(token);
+  }
+}
+
+
+/* Short tokens need only a few strong native roots in typical chunks.
+** Match the lexer bytes directly before consulting the shared interner. */
 TString *luaX_newstring (LexState *ls, const char *str, size_t l) {
-  return anchorstr(ls, luaS_newlstr(ls->L, str, l));
+  lua_State *L = ls->L;
+  TString *ts;
+  if (ls->h == NULL && l <= LUAI_MAXSHORTLEN) {
+    unsigned i;
+    for (i = 0; i < ls->short_count; i++) {
+      ts = tsvalue(&ls->short_tokens[i].value);
+      if (cast_sizet(ts->shrlen) == l && memcmp(getshrstr(ts), str, l) == 0)
+        return ts;
+    }
+    if (ls->short_count < LUA_LEX_SHORT_ROOTS) {
+      ts = luaS_newlstr(L, str, l);
+      if (!isreserved(ts)) {
+        setsvalue(L, &ls->short_tokens[ls->short_count++].value, ts);
+        luaC_tracepointer(L, ts);
+        luaC_checkGC(L);
+      }
+      return ts;
+    }
+  }
+  if (ls->h == NULL) opentokentable(ls);
+  ts = luaS_newlstr(L, str, l);
+  return isreserved(ts) ? ts : anchorstr(ls, ts);
 }
 
 
@@ -568,12 +603,11 @@ static int llex (LexState *ls, SemInfo *seminfo) {
             save_and_next(ls);
           } while (lislalnum(ls->current));
           /* find or create string */
-          ts = luaS_newlstr(ls->L, luaZ_buffer(ls->buff),
-                                   luaZ_bufflen(ls->buff));
+          ts = luaX_newstring(ls, luaZ_buffer(ls->buff), luaZ_bufflen(ls->buff));
           if (isreserved(ts))   /* reserved word? */
             return ts->extra - 1 + FIRST_RESERVED;
           else {
-            seminfo->ts = anchorstr(ls, ts);
+            seminfo->ts = ts;
             return TK_NAME;
           }
         }

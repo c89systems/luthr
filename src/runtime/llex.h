@@ -58,6 +58,8 @@ typedef struct Token {
   SemInfo seminfo;
 } Token;
 
+enum { LUA_LEX_SHORT_ROOTS = 8 };
+
 
 /* state of the scanner plus state of the parser when shared by all
    functions */
@@ -71,7 +73,10 @@ typedef struct LexState {
   struct lua_State *L;
   ZIO *z;  /* input stream */
   Mbuffer *buff;  /* buffer for tokens */
-  Table *h;  /* to avoid collection/reuse strings */
+  Table *h;  /* token dictionary after the inline roots fill */
+  struct LuaNativeRoot *token_table;
+  struct LuaNativeRoot *short_tokens;
+  unsigned short_count;
   struct Dyndata *dyd;  /* dynamic structures used by the parser */
   TString *source;  /* current source name */
   TString *envn;  /* environment variable name */

@@ -299,17 +299,20 @@ static void oom(struct fixture *test) {
   execute(state,
           "source='local n=0; '..string.rep('n=n+1; ',128)..'return n'; "
           "binary=string.dump(assert(load(source))); "
+          "wide_source='local a,b,c,d,e,f,g,h,i,j=0,0,0,0,0,0,0,0,0,0; '"
+          "..source; "
           "function text_load() return load(source,'=text','t') end; "
+          "function wide_load() return load(wide_source,'=wide','t') end; "
           "function binary_load() return load(binary,'=binary','b') end; "
           "function reader_load() local n=0; return load(function() n=n+1; if "
           "n==1 then return source end end) end");
-  for (int kind = 0; kind < 3; ++kind) {
+  const char *const loaders[] = {"text_load", "binary_load", "reader_load",
+                                 "wide_load"};
+  for (size_t kind = 0; kind < sizeof(loaders) / sizeof(loaders[0]); ++kind) {
     int complete = 0;
     for (unsigned budget = 0; budget < 160 && !complete; ++budget) {
       int status;
-      lua_getglobal(state, kind == 0   ? "text_load"
-                           : kind == 1 ? "binary_load"
-                                       : "reader_load");
+      lua_getglobal(state, loaders[kind]);
       test->remaining = budget;
       test->failures = 0;
       test->deny = 1;
@@ -332,6 +335,33 @@ static void oom(struct fixture *test) {
     require(complete);
   }
 }
+
+static void streamed_tokens(lua_State *state) {
+  execute(state,
+          "local name=('long_identifier'):rep(5); "
+          "for _,parts in ipairs({"
+          " {'local retained=41; ', 'return retained+1'}, "
+          " {'local retained=41; ',"
+          "  'local a,b,c,d,e,f,g,h,i,j=1,2,3,4,5,6,7,8,9,10; ',"
+          "  'return retained+a+j-10'}, "
+          " {'local retained=41; ', 'local '..name..'=retained; ',"
+          "  'return '..name..'+1'} "
+          "}) do "
+          "  local function reader(fail) "
+          "    local part=0; return function() "
+          "      part=part+1; collectgarbage('collect'); "
+          "      assert(assert(load('local inner=23; return inner'))()==23); "
+          "      if fail and part>#parts then error(fail,0) end; "
+          "      return parts[part] "
+          "    end "
+          "  end; "
+          "  local failure={}; local fn,err=load(reader(failure)); "
+          "  assert(fn==nil and err==failure); collectgarbage('collect'); "
+          "  assert(assert(load(reader()))()==42) "
+          "end");
+  require(state->native_roots == NULL);
+}
+
 static void *run(void *context) {
   struct fixture *test = context;
   lua_State *state;
@@ -359,7 +389,7 @@ static void *run(void *context) {
   state = test->state;
   if (strstr(test->mode, "generational"))
     (void)lua_gc(state, LUA_GCGEN);
-  if (strstr(test->mode, "semantics"))
+  if (strstr(test->mode, "semantics")) {
     execute(state,
             "assert(assert(load('return 42'))()==42); local "
             "a,b=assert(load('return marker,_ENV','=name','t',{marker=42}))(); "
@@ -378,7 +408,8 @@ static void *run(void *context) {
             "assert(type(assert(load('return 1','=source')))=='function'); "
             "local before=load; local base=assert(package.loaded._G); "
             "assert(base.load==before)");
-  else if (strstr(test->mode, "errors"))
+    streamed_tokens(state);
+  } else if (strstr(test->mode, "errors"))
     execute(
         state,
         "for _,f in ipairs({function() load({}) end,function() load('return "
