@@ -1848,12 +1848,25 @@ static int field_without_managed_slot(lua_State *L) {
   return 1;
 }
 
+static int native_loop_identity(lua_State *L) {
+  require(lua_gettop(L) == 1);
+  return 1;
+}
+
 static int call_loop_without_managed_slot(lua_State *L) {
   lua_Integer index = luaL_checkinteger(L, 1);
   require(lua_toboolean(L, 2));
-  if (index == 100)
+  require(lua_gettop(L) == 2 && lua_checkstack(L, 2));
+  lua_pushinteger(L, index);
+  lua_pushcfunction(L, native_loop_identity);
+  lua_rotate(L, -2, 1);
+  require(lua_pcall(L, 1, 1, 0) == LUA_OK);
+  require(lua_gettop(L) == 3 && lua_tointeger(L, -1) == index);
+  lua_settop(L, 2);
+  if (index == 100) {
     blocked_leaf(L);
-  else if (index == 101)
+    require(lua_gettop(L) == 2 && lua_tointeger(L, 1) == index);
+  } else if (index == 101)
     native_operation_done();
   return 0;
 }
@@ -1903,6 +1916,19 @@ static void native_operation_without_slot(struct fixture *f, lua_CFunction fn,
   while (!f->native_entered)
     require(pthread_cond_wait(&f->changed, &f->mutex) == 0);
   require(pthread_mutex_unlock(&f->mutex) == 0);
+  if (fn == call_loop_without_managed_slot) {
+    const char message[] =
+        "foreign stack value retained across a full collection";
+    lua_State *target = f->tasks[0].root.thread;
+    require(__atomic_load_n(&G(f->main)->native_loop_bytes, __ATOMIC_RELAXED) >
+            0);
+    require(lua_gettop(target) == 2 && lua_tointeger(target, 1) == 100);
+    lua_pushlstring(target, message, sizeof(message) - 1);
+    require(lua_gc(f->main, LUA_GCCOLLECT) == 0);
+    require(lua_gettop(target) == 3 &&
+            strcmp(lua_tostring(target, -1), message) == 0);
+    lua_pop(target, 1);
+  }
   if (!gc_after)
     require(lua_gc(f->main, LUA_GCSTOP) == 0);
   /* The peer holds the only managed slot until the native operation ends. */
@@ -3717,11 +3743,12 @@ int main(int argc, char **argv) {
         "local row=native_table_operation(); local sum=0; "
         "for i=1,200 do sum=sum+row.amount end; return sum-149",
         strcmp(argv[1], "native_loop_fields_gc") == 0);
-  else if (strcmp(argv[1], "native_loop_calls_without_slot") == 0)
+  else if (strcmp(argv[1], "native_loop_calls_without_slot") == 0 ||
+           strcmp(argv[1], "native_loop_calls_gc") == 0)
     native_operation_without_slot(f, call_loop_without_managed_slot,
                                   "local call = native_table_operation; "
                                   "for i=1,200 do call(i, true) end; return 51",
-                                  0);
+                                  strcmp(argv[1], "native_loop_calls_gc") == 0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)
