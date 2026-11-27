@@ -1286,8 +1286,8 @@ static int scananchored (MatchState *ms, lua_State *L, StkId func,
   return *end != NULL || !retry;
 }
 
-/* Collect existing captures without parking. If one needs allocation,
-** finish the same match in a regular frame with the subject rooted. */
+/* Materialize captures without parking while the VM owns the stack.
+** A refill finishes the same match in a regular frame. */
 int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
                     TValue *results, int wanted, const Instruction *at,
                     int *returned) {
@@ -1319,9 +1319,7 @@ int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
       TString *value;
       if (start == ms.src_init && start + len == ms.src_end)
         value = tsvalue(s2v(func + 1));
-      else if (cast_sizet(len) <= LUAI_MAXSHORTLEN)
-        value = luaS_findshort(L, start, cast_sizet(len));
-      else return -1;
+      else value = luaS_trycapture(L, start, cast_sizet(len));
       if (value == NULL) {
         LuaNativeRoot subject;
         int n;

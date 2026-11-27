@@ -932,8 +932,8 @@ void luaX_poll (lua_State *L) {
   /* Complete the existing task handoff before requesting a GC phase change. */
   if (luaC_tracing(L)) luaC_polltrace(L);
   else if (luaC_sweeping(L)) luaC_pollsweep(L);
-  else if (L->gc_resize) {
-    L->gc_resize = 0;
+  else if (L->gc_check_pending) {
+    L->gc_check_pending = 0;
     luaC_checkGC(L);
   }
   luaTK_checkstop(L);

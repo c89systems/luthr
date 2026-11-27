@@ -370,7 +370,7 @@ struct lua_State {
   CommonHeader;
   lu_byte allowhook;
   TStatus status;
-  lu_byte gc_resize;  /* backing growth pending a safepoint check */
+  lu_byte gc_check_pending;  /* allocation pending a safepoint check */
   StackPointer top;  /* first free slot in the stack */
   struct global_State *l_G;
   CallInfo *ci;  /* call info for current function */

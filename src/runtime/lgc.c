@@ -432,6 +432,24 @@ GCObject *luaC_newresultstring (lua_State *L, size_t size) {
   return newobjdt(L, LUA_VLNGSTR, size, 0, size <= LUA_ALLOC_MAX);
 }
 
+GCObject *luaC_tryresultstring (lua_State *L, size_t size) {
+  GCObject *object = luaC_trytaskstring(L, size, 0);
+  if (object != NULL) return object;
+#if !defined(HARDMEMTESTS)
+  object = luaM_trycachedobject(L, size);
+  if (object != NULL) {
+    LuaAllocBlock *block = cast(LuaAllocBlock *, object) - 1;
+    object->tt = LUA_VLNGSTR;
+    object->next = NULL;
+    setmarked(object, luaC_newmark(G(L)));
+    gco2ts(object)->extra = 0;
+    publishslot(L, block, luaMP_page(block));
+    L->gc_check_pending = 1;
+  }
+#endif
+  return object;
+}
+
 GCObject *luaC_newuserdata (lua_State *L, size_t size, int leaf) {
   int local = leaf && size <= LUA_ALLOC_USERDATA_MAX;
   if (local && L->task_owner != NULL && !luaW_iscollector(L) &&

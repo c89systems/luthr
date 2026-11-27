@@ -436,7 +436,7 @@ static int resizestack (lua_State *L, lua_State *owner, int newsize,
     if (isLua(ci))
       ci->u.l.trap = 1;  /* refresh cached stack pointers in the VM */
   }
-  if (newsize > oldsize) L->gc_resize = 1;
+  if (newsize > oldsize) L->gc_check_pending = 1;
   luaM_freearray(owner, oldstack, cast_sizet(oldsize) + EXTRA_STACK);
   return 1;
 }

@@ -391,7 +391,7 @@ static void preinit_thread (lua_State *L, global_State *g, int dormant) {
   L->assist_debt = 0;
   L->trace_debt = 0;
   L->assist_epoch = 0;
-  L->gc_resize = 0;
+  L->gc_check_pending = 0;
   L->new_objects = L->new_objects_tail = NULL;
   L->new_tables = NULL;
   L->nursery_epoch = NURSERY_TAG;

@@ -1346,6 +1346,20 @@ static void *allocatepooled (lua_State *L, size_t size, unsigned blockbytes,
   return block + 1;
 }
 
+void *luaM_trycachedobject (lua_State *L, size_t size) {
+  LuaAllocPage *page;
+  LuaAllocBlock *block;
+  if (size > LUA_ALLOC_MAX) return NULL;
+  page = *cachepage(allocationcache(L), luaMP_sizeclass(size));
+  if (page == NULL || page->local == NULL ||
+      __atomic_load_n(&page->sweep_epoch, __ATOMIC_RELAXED) == 0)
+    return NULL;
+  block = takeblock(page);
+  lua_assert(block != NULL);
+  account(L, -cast(l_mem, size));
+  return block + 1;
+}
+
 static void *allocateblock (lua_State *L, size_t size, int tag,
                             unsigned poolbase, int emergency) {
   if (size <= LUA_ALLOC_MAX) {
@@ -1380,7 +1394,7 @@ void *luaM_realloc_ (lua_State *L, void *block, size_t osize, size_t nsize) {
   }
   /* A growing table or buffer may bypass object creation entirely. The
   ** allocator cannot run the collector before the caller publishes it. */
-  if (nsize > osize) L->gc_resize = 1;
+  if (nsize > osize) L->gc_check_pending = 1;
   allocation = block != NULL ? cast(LuaAllocBlock *, block) - 1 : NULL;
   lua_assert(allocation == NULL || !luaMP_retired(allocation));
   if (allocation != NULL && luaMP_page(allocation) != NULL &&

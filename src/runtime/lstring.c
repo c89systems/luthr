@@ -506,18 +506,6 @@ TString *luaS_trycachedshort (lua_State *L, const char *str, size_t len) {
   return cachedbytes(cache->entries[shortstringset(str, len)], str, len);
 }
 
-TString *luaS_findshort (lua_State *L, const char *str, size_t len) {
-  global_State *g = G(L);
-  unsigned hash;
-  TString *cached;
-  if (len <= 1 || !luaC_tracing(L)) {
-    cached = luaS_trycachedshort(L, str, len);
-    if (cached != NULL) return cached;
-  }
-  hash = luaS_hash(str, len, g->seed);
-  return tryinterned(L, stringtableof(g, hash), str, len, hash);
-}
-
 TString *luaS_cachelstr (lua_State *L, const char *str, size_t len) {
   uintptr_t *row;
   TString *result;
@@ -572,6 +560,41 @@ static TString *resultshort (GCObject *object, const char *str, size_t len,
   if (hash == 0) result->extra |= LSTR_ZEROHASH;
   copyshrstr(result, str, len);
   return result;
+}
+
+TString *luaS_trycapture (lua_State *L, const char *str, size_t len) {
+  global_State *g = G(L);
+  GCObject *object;
+  TString *result;
+  unsigned hash, set;
+  uintptr_t *row;
+  if (len > LUAI_MAXSHORTLEN) {
+    lua_assert(len <= LUA_NATIVE_WORK_SLICE);
+    object = luaC_tryresultstring(L, sizestrreg(len));
+    if (object == NULL) return NULL;
+    result = initlong(L, object, len);
+    memcpy(getlngstr(result), str, len);
+    return result;
+  }
+  if (len <= 1) return luaS_trycachedshort(L, str, len);
+  set = shortstringset(str, len);
+  row = L->strcache != NULL ? stringcacherow(L, set) : NULL;
+  if (row != NULL && (result = cachedbytes(row, str, len)) != NULL) {
+    luaC_tracepointer(L, result);
+    return result;
+  }
+  hash = luaS_hash(str, len, g->seed);
+  result = tryinterned(L, stringtableof(g, hash), str, len, hash);
+  if (result != NULL) {
+    if (row != NULL) rememberstring(L, set, result, 1);
+    return result;
+  }
+  /* Recurring captures use the ordinary path to enter the intern table.
+  ** The history must already exist for this check to stay non-allocating. */
+  if (row == NULL || L->strcache->results == NULL || recentresult(L, hash))
+    return NULL;
+  object = luaC_tryresultstring(L, sizestrshr(len));
+  return object != NULL ? resultshort(object, str, len, hash) : NULL;
 }
 
 /* The caller owns the arguments until it publishes the result. Use only
