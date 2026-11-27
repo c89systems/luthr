@@ -477,6 +477,26 @@ do
   assert(math.tointeger(42.5)==nil and math.tointeger(false)==nil)
 end
 do
+  local pattern = '^(id%d+)()%-tail$'
+  local match, find = string.match, string.find
+  for i=1,512 do
+    local subject = ('id%d-tail'):format(i)
+    local first, last, token, position = find(subject, pattern)
+    assert(first==1 and last==#subject and position==#subject-4)
+    assert(token:sub(1,2)=='id' and tonumber(token:sub(3))==i)
+    if i%17==0 then collectgarbage('collect') end
+    local observed = table.pack(match(subject, pattern))
+    assert(observed.n==2 and observed[1]==token and observed[2]==position)
+  end
+  local seen = 0
+  debug.sethook(function(event)
+    if event=='call' and debug.getinfo(2,'f').func==match then seen=seen+1 end
+  end,'c')
+  local token, position = match('id9999-tail', pattern)
+  debug.sethook()
+  assert(token=='id9999' and position==7 and seen==1)
+end
+do
   local format = string.format
   equal(format('%d,%i,%u',0,-42,42),'0,-42,42')
   equal(format('%d/%d',math.mininteger,math.maxinteger),

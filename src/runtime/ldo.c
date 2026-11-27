@@ -845,15 +845,32 @@ int luaD_precallC (lua_State *L, StkId func,
   return n;
 }
 
-/* A successful probe returns up to two computed values, or forwards a
-** suffix of the arguments. It never rewrites a live slot or parks. */
+/* An internal builtin can materialize a bounded result with the existing
+** managed admission. Save the real call frame before the first allocation. */
+CallInfo *luaD_beginleafresult (lua_State *L, StkId func, int nargs,
+                                int wanted, const Instruction *at) {
+  CallInfo *caller = L->ci;
+  StkId top = func + 1 + nargs;
+  if (at == NULL || caller->next == NULL || gethookmask(L) ||
+      L->stack_last.p - top <= LUA_MINSTACK)
+    return NULL;
+  caller->u.l.rootpc = at;
+  caller->u.l.savedpc = at + 1;
+  L->top.p = top;
+  return luaD_initframe(L, caller->next, func,
+                        CIST_C | cast_uint(wanted + 1), top + LUA_MINSTACK);
+}
+
+enum { LEAF_VALUES, LEAF_FORWARD, LEAF_RETURNED };
+
 static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
-                       TValue *value, int *forward) {
+                       TValue *value, int wanted, const Instruction *at,
+                       int *kind) {
   const TValue *first = s2v(func + 1);
   switch (builtin) {
   case LUA_LEAF_ASSERT:
     if (l_isfalse(first)) return -1;
-    *forward = 1;
+    *kind = LEAF_FORWARD;
     return nargs;
   case LUA_LEAF_TYPE:
     setsvalue(L, value, G(L)->type_names[ttype(first)]);
@@ -879,7 +896,7 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     if (!tointegerns(first, &index)) return -1;
     index = luaB_selectindex(index, nargs);
     if (index < 1) return -1;
-    *forward = 1;
+    *kind = LEAF_FORWARD;
     return nargs - cast_int(index);
   }
   case LUA_LEAF_RAWGET: {
@@ -925,8 +942,13 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
     }
     return 1;
   }
-  case LUA_LEAF_STRFIND: case LUA_LEAF_STRMATCH:
-    return luaB_leafmatch(L, func, nargs, builtin == LUA_LEAF_STRFIND, value);
+  case LUA_LEAF_STRFIND: case LUA_LEAF_STRMATCH: {
+    int returned = 0;
+    int n = luaB_leafmatch(L, func, nargs, builtin == LUA_LEAF_STRFIND,
+                            value, wanted, at, &returned);
+    if (returned) *kind = LEAF_RETURNED;
+    return n;
+  }
   case LUA_LEAF_YIELD:
     return -1;  /* only a VM frame can suspend without a native call */
 #define LUA_NUMERIC_CASE(name, expression) case LUA_LEAF_MATH_##name:
@@ -941,17 +963,19 @@ static int leafresult (lua_State *L, StkId func, unsigned builtin, int nargs,
 
 /* An eligible builtin finishes in its caller's frame. Its caller delivers
 ** pending errors after publishing that frame. */
-int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted) {
-  int n, forward = 0;
+int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted,
+                  const Instruction *at) {
+  int n, kind = LEAF_VALUES;
   TValue values[LUA_LEAF_RESULTS];
   if (nargs < 1 || !isLua(L->ci) || gethookmask(L) ||
       (wanted > 1 && wanted > L->ci->top.p - func) ||
       capturesfrom(L, func))
     return -1;
-  n = leafresult(L, func, bcfindex(s2v(func)), nargs, values, &forward);
+  n = leafresult(L, func, bcfindex(s2v(func)), nargs, values, wanted, at, &kind);
+  if (kind == LEAF_RETURNED) return n;
   if (n < 0 || l_unlikely(gethookmask(L)))
     return -1;
-  if (forward) {
+  if (kind == LEAF_FORWARD) {
     L->top.p = func + 1 + nargs;
     moveresults(L, func, n, cast_uint(wanted + 1));
   }
@@ -982,7 +1006,7 @@ int luaD_callleaffallback (lua_State *L, StkId func, int wanted) {
 l_sinline int precallmanaged (lua_State *L, StkId func, unsigned status) {
   if (checktag(s2v(func), LUA_VBCF)) {
     int n = luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1,
-                        get_nresults(status));
+                        get_nresults(status), NULL);
     if (n >= 0) {
       luaTK_checkstop(L);
       luaCP_checklimit(L);
@@ -1363,7 +1387,7 @@ void luaD_call (lua_State *L, StkId func, int nResults) {
   /* A bounded builtin needs no fresh C activation. Keep the ordinary call
   ** path at the recursion limit so it reports the same overflow. */
   if (checktag(s2v(func), LUA_VBCF) && getCcalls(L) < LUAI_MAXCCALLS - 1 &&
-      luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1, nResults) >= 0) {
+      luaD_tryleaf(L, func, cast_int(L->top.p - func) - 1, nResults, NULL) >= 0) {
     luaTK_checkstop(L);
     luaCP_checklimit(L);
     return;

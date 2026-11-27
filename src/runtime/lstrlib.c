@@ -1286,10 +1286,11 @@ static int scananchored (MatchState *ms, lua_State *L, StkId func,
   return *end != NULL || !retry;
 }
 
-/* Commit using existing interned values only. The entire probe is bounded
-** and cannot park, allocate, or expose a partially built result. */
+/* Collect existing captures without parking. If one needs allocation,
+** finish the same match in a regular frame with the subject rooted. */
 int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
-                    TValue *results) {
+                    TValue *results, int wanted, const Instruction *at,
+                    int *returned) {
   MatchState ms;
   const char *end;
   int count, i, positions = find ? 2 : 0;
@@ -1321,7 +1322,18 @@ int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
       else if (cast_sizet(len) <= LUAI_MAXSHORTLEN)
         value = luaS_findshort(L, start, cast_sizet(len));
       else return -1;
-      if (value == NULL) return -1;
+      if (value == NULL) {
+        LuaNativeRoot subject;
+        int n;
+        if (luaD_beginleafresult(L, func, nargs, wanted, at) == NULL) return -1;
+        luaR_pushroot(L, &subject);
+        luaR_setroot(L, &subject, s2v(func + 1));
+        n = pushfindresult(&ms, ms.src_init, end, find, count);
+        luaR_poproot(L, &subject);
+        luaD_poscall(L, L->ci, n);
+        *returned = 1;
+        return n;
+      }
       setsvalue(L, results + positions + i, value);
     }
   }

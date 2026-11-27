@@ -52,7 +52,8 @@ LUAI_FUNC int luaB_leafutf8len (StkId func, int nargs, TValue *results);
 LUAI_FUNC int luaB_leafmath (unsigned builtin, const TValue *argument,
                              TValue *results);
 LUAI_FUNC int luaB_leafmatch (lua_State *L, StkId func, int nargs, int find,
-                              TValue *results);
+                              TValue *results, int wanted,
+                              const Instruction *at, int *returned);
 
 /* The direct matcher needs room for two positions and two captures,
 ** or up to four captures when it returns no positions. */

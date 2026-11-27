@@ -140,7 +140,10 @@ LUAI_FUNC CallInfo *luaD_precall (lua_State *L, StkId func, int nResults);
 LUAI_FUNC int luaD_precallC (lua_State *L, StkId func, unsigned status,
                              lua_CFunction f, int managed);
 /* A leaf probe cannot transfer control. Failure leaves the stack intact. */
-LUAI_FUNC int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted);
+LUAI_FUNC int luaD_tryleaf (lua_State *L, StkId func, int nargs, int wanted,
+                            const Instruction *at);
+LUAI_FUNC CallInfo *luaD_beginleafresult (lua_State *L, StkId func, int nargs,
+                                         int wanted, const Instruction *at);
 /* Returns nonzero when the builtin suspends the VM. */
 LUAI_FUNC int luaD_callleaffallback (lua_State *L, StkId func, int wanted);
 LUAI_FUNC void luaD_call (lua_State *L, StkId func, int nResults);

@@ -445,7 +445,7 @@
           b = cast_int(L->top.p - ra);
         readrange(ra, b);
         if (checktag(s2v(ra), LUA_VBCF)) {
-          if (luaD_tryleaf(L, ra, b - 1, nresults) < 0) {
+          if (luaD_tryleaf(L, ra, b - 1, nresults, ip) < 0) {
             L->top.p = ra + b;
             savepc(ci);
             if (luaD_callleaffallback(L, ra, nresults))
