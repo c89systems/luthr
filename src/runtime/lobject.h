@@ -670,6 +670,7 @@ typedef struct Proto {
   LuaRecordSite *records;  /* sorted by constructor instruction */
   int sizerecords;
   struct LuaLoopSite *loops;  /* native sites sorted by loop entry */
+  struct LuaLoopSite *nativecall;  /* optional bounded function entry */
   int sizeloops;
   size_t loopbytes;  /* atomic, backing bytes retained by the native sites */
   struct Proto **p;  /* functions defined inside the function */

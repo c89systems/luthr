@@ -600,6 +600,17 @@ carrierentry int luaX_callenter (lua_State *L, int nargs, int nresults,
   if (execution == NULL || execution->native_depth != 0) {
     int probed = 0;
     uintptr_t expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+#if !defined(HARDSTACKTESTS)
+    if (context->compiled_reentry && status == NULL) {
+      if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                                  LUA_WORLD_ARM_TRACE)) {
+        if (luaD_trycompiledstack(L, context, nargs, nresults)) return 1;
+        luaX_leavesharedread(L);
+        expected = __atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED);
+      }
+      context->compiled_reentry = 0;
+    }
+#endif
     /* Use the cheaper reservation for repeated scalar reentry. Calls that
     ** normally need managed admission avoid a speculative reservation. */
     if (context->scalar_reentry) {

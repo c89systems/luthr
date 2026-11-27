@@ -1674,6 +1674,23 @@ static int read_native_pointer_keys(lua_State *L) {
   return 1;
 }
 
+static int call_without_managed_slot(lua_State *L) {
+  for (int i = 1; i <= 130; i++) {
+    lua_pushvalue(L, 1);
+    lua_pushinteger(L, 1);
+    lua_call(L, 1, 1);
+    require(lua_tointeger(L, -1) == i);
+    lua_pop(L, 1);
+  }
+  blocked_leaf(L);
+  lua_pushvalue(L, 1);
+  lua_pushinteger(L, -79);
+  lua_call(L, 1, 1);
+  require(lua_tointeger(L, -1) == 51);
+  native_operation_done();
+  return 1;
+}
+
 static int collect_after_native_operation(lua_State *L) {
   wait_for_native_operation(L);
   require(lua_gc(L, LUA_GCCOLLECT) == 0);
@@ -3499,6 +3516,13 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "native_pointer_lookup_without_slot") == 0)
     native_operation_without_slot(f, read_native_pointer_keys,
                                   "return native_table_operation({51})[1]", 0);
+  else if (strcmp(argv[1], "native_compiled_callback_without_slot") == 0)
+    native_operation_without_slot(f, call_without_managed_slot,
+                                  "local value=0; local function add(delta) "
+                                  "value=value+delta; return value end; "
+                                  "local result=native_table_operation(add); "
+                                  "return result",
+                                  0);
   else if (strcmp(argv[1], "yield") == 0)
     voluntary(f);
   else if (strcmp(argv[1], "saturation") == 0)

@@ -15,6 +15,7 @@ typedef struct LuaLoopFrame {
 typedef unsigned (*LuaLoopCode)(LuaLoopFrame *frame);
 
 enum { LUA_LOOP_COLD, LUA_LOOP_BUILDING, LUA_LOOP_UNAVAILABLE };
+enum { LUA_NATIVE_CALL_WORDS = 32 };
 
 typedef struct LuaLoopSite {
   int pc;
@@ -37,5 +38,7 @@ LUAI_FUNC int luaV_loopfieldmethod (LuaLoopFrame *frame, StkId result,
                                      unsigned offset);
 LUAI_FUNC int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                         unsigned char *code, size_t capacity);
+LUAI_FUNC int luaJ_emitcall (const Proto *p, unsigned char *code,
+                            size_t capacity);
 
 #endif

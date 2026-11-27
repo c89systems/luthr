@@ -1021,6 +1021,7 @@ Proto *luaF_newproto (lua_State *L) {
   f->records = NULL;
   f->sizerecords = 0;
   f->loops = NULL;
+  f->nativecall = NULL;
   f->sizeloops = 0;
   f->loopbytes = 0;
   f->sizecode = 0;
@@ -1063,6 +1064,7 @@ lu_mem luaF_protosize (Proto *p) {
   sz += cast_uint(p->sizerecords) * sizeof(LuaRecordSite);
   sz += cast_uint(p->sizeloops) * sizeof(LuaLoopSite) +
         __atomic_load_n(&p->loopbytes, __ATOMIC_RELAXED);
+  if (p->nativecall != NULL) sz += sizeof(LuaLoopSite);
   if (!(p->flag & PF_FIXED)) {
     sz += cast_uint(p->sizecode) * sizeof(Instruction);
     sz += cast_uint(p->sizelineinfo) * sizeof(lu_byte);

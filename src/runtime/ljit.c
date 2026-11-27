@@ -110,11 +110,75 @@ static int loopentry (const Proto *p, int end) {
   return start;
 }
 
+/* This body never parks in a helper. Every forward target names a real
+** instruction boundary, so a failed guard can leave a live Lua frame at
+** that instruction even after earlier assignments took effect. */
+static int callentry (const Proto *p) {
+  uint32_t entries = 0, targets = 0;
+  int pc, last = p->sizecode - 1, writes = 0;
+  if (last < 4 || last >= LUA_NATIVE_CALL_WORDS ||
+      (p->flag & (PF_VAHID | PF_VATAB)) ||
+      GET_OPCODE(p->code[last]) != OP_RETURN0) return 0;
+  for (pc = 0; pc <= last; pc++) {
+    Instruction ins = p->code[pc];
+    OpCode op = GET_OPCODE(ins);
+    int a = GETARG_A(ins), b = getarg(ins, POS_B, SIZE_B);
+    int c = getarg(ins, POS_C, SIZE_C);
+    entries |= UINT32_C(1) << pc;
+    if (op != OP_JMP && op != OP_RETURN0 && a >= p->maxstacksize) return 0;
+    switch (op) {
+      case OP_RETURN0: case OP_RETURN1: case OP_LOADI: case OP_LOADF:
+        break;
+      case OP_MOVE: case OP_LEN:
+        if (b >= p->maxstacksize) return 0;
+        break;
+      case OP_LOADK:
+        if (!validconstant(p, GETARG_Bx(ins), 0)) return 0;
+        break;
+      case OP_GETUPVAL: case OP_SETUPVAL:
+        if (b >= p->sizeupvalues) return 0;
+        writes += op == OP_SETUPVAL;
+        break;
+      case OP_ADD: case OP_ADDI: {
+        OpCode fallback = op == OP_ADD ? OP_MMBIN : OP_MMBINI;
+        if (b >= p->maxstacksize || (op == OP_ADD && c >= p->maxstacksize) ||
+            pc + 1 >= last || GET_OPCODE(p->code[pc + 1]) != fallback)
+          return 0;
+        pc++;
+        break;
+      }
+      case OP_EQK: case OP_TEST: case OP_JMP: {
+        int target;
+        if (op != OP_JMP) {
+          if (op == OP_EQK &&
+              (!validconstant(p, b, 0) || !ttisnil(&p->k[b]))) return 0;
+          if (++pc >= last || GET_OPCODE(p->code[pc]) != OP_JMP) return 0;
+          ins = p->code[pc];
+        }
+        target = pc + 1 + GETARG_sJ(ins);
+        if (target <= pc || target > last) return 0;
+        targets |= UINT32_C(1) << target;
+        break;
+      }
+      default: return 0;
+    }
+  }
+  return writes != 0 && (targets & ~entries) == 0;
+}
+
 
 void luaJ_lower (lua_State *L, Proto *p) {
   int pc, count = 0;
   LuaLoopSite *sites;
   if (p->sizep != 0) return;  /* a frame with captured locals uses cell dispatch */
+  if (callentry(p)) {
+    sites = luaM_tryalloc(L, sizeof(*sites));
+    if (sites != NULL) {
+      *sites = (LuaLoopSite){ .words = cast_uint(p->sizecode) };
+      p->nativecall = sites;
+    }
+    return;
+  }
   for (pc = 0; pc < p->sizecode; pc++)
     count += loopentry(p, pc) >= 0;
   if (count == 0 || luaM_testsize(count, sizeof(*sites))) return;
@@ -176,7 +240,9 @@ static uintptr_t compile (lua_State *L, const Proto *p, LuaLoopSite *site) {
   if (allocation != NULL) {
     address = cast(uintptr_t, allocation);
     code = allocation + (page - address % page) % page;
-    if (luaJ_emit(p, site, code, codesize)) {
+    int emitted = site == p->nativecall ? luaJ_emitcall(p, code, codesize)
+                                       : luaJ_emit(p, site, code, codesize);
+    if (emitted) {
       __builtin___clear_cache(cast_charp(code), cast_charp(code + codesize));
       if (mprotect(code, codesize, PROT_READ | PROT_EXEC) == 0) {
         site->allocation = allocation;
@@ -214,10 +280,11 @@ LuaLoopCode luaJ_prepare (lua_State *L, Proto *p, LuaLoopSite *site) {
 }
 
 
-void luaJ_freeloops (lua_State *L, Proto *p, int retire) {
-  int i;
-  for (i = 0; i < p->sizeloops; i++) {
-    LuaLoopSite *site = &p->loops[i];
+static void freenative (lua_State *L, LuaLoopSite *sites, size_t count,
+                        int retire) {
+  size_t i;
+  for (i = 0; i < count; i++) {
+    LuaLoopSite *site = &sites[i];
     uintptr_t code = __atomic_load_n(&site->entry, __ATOMIC_ACQUIRE);
     lua_assert(code != LUA_LOOP_BUILDING);  /* a compiling frame keeps its Proto live */
     if (code <= LUA_LOOP_UNAVAILABLE) continue;
@@ -229,6 +296,11 @@ void luaJ_freeloops (lua_State *L, Proto *p, int retire) {
       luaM_free_(L, site->allocation, site->allocsize);
     }
   }
-  if (retire) luaM_retirearray(L, p->loops, cast_sizet(p->sizeloops));
-  else luaM_freearray(L, p->loops, cast_sizet(p->sizeloops));
+  if (retire) luaM_retirearray(L, sites, count);
+  else luaM_freearray(L, sites, count);
+}
+
+void luaJ_freeloops (lua_State *L, Proto *p, int retire) {
+  freenative(L, p->loops, cast_sizet(p->sizeloops), retire);
+  if (p->nativecall != NULL) freenative(L, p->nativecall, 1, retire);
 }

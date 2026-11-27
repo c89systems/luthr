@@ -395,6 +395,59 @@ static void backedge (Emitter *e, unsigned control, unsigned words,
   linkbranch(e, again, loop);
 }
 
+static void entryframe (Emitter *e) {
+  emit(e, 0xf3, 0x0f, 0x1e, 0xfa);  /* endbr64 */
+  emit(e, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57);
+  emit(e, 0x49, 0x89, 0xfc);        /* r12 = frame */
+  emit(e, 0x4d, 0x8b, 0xb4, 0x24);  /* mov r14, [r12 + thread] */
+  word(e, offsetof(LuaLoopFrame, thread));
+  loadbase(e);
+}
+
+static void leaveframe (Emitter *e) {
+  emit(e, 0x89, 0xd8);  /* eax = exit PC offset */
+  emit(e, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3);
+}
+
+static void moveorload (Emitter *e, const Proto *p, Instruction ins) {
+  unsigned a = GETARG_A(ins);
+  switch (GET_OPCODE(ins)) {
+    case OP_MOVE: {
+      unsigned b = GETARG_B(ins);
+      loadvalue(e, b);
+      emit(e, 0x41, 0x0f, 0xb6, 0x95);  /* movzx edx, byte [tag] */
+      word(e, tagoffset(b));
+      storevalue(e, a);
+      emit(e, 0x41, 0x88, 0x95);        /* mov byte [tag], dl */
+      word(e, tagoffset(a));
+      break;
+    }
+    case OP_LOADI:
+      immediate(e, 0, l_castS2U(GETARG_sBx(ins)));
+      storevalue(e, a);
+      storetag(e, a, LUA_VNUMINT);
+      break;
+    case OP_LOADF: {
+      double value = cast_num(GETARG_sBx(ins));
+      uint64_t bits;
+      memcpy(&bits, &value, sizeof(bits));
+      immediate(e, 0, bits);
+      storevalue(e, a);
+      storetag(e, a, LUA_VNUMFLT);
+      break;
+    }
+    default: {
+      const TValue *value = &p->k[GETARG_Bx(ins)];
+      lua_assert(GET_OPCODE(ins) == OP_LOADK);
+      /* The active frame's prototype retains its immutable constants. */
+      immediate(e, 0, ttisnil(value) ? 0 : val_(value).bits);
+      storevalue(e, a);
+      storetag(e, a, rawtt(value));
+      break;
+    }
+  }
+}
+
 
 int luaJ_emit (const Proto *p, const LuaLoopSite *site,
                unsigned char *code, size_t capacity) {
@@ -404,12 +457,7 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
   unsigned char *loop;
   _Static_assert(sizeof(lua_Integer) == 8 && sizeof(lua_Number) == 8,
                  "x86 loop primitives implement the 64-bit Lua number model");
-  emit(&e, 0xf3, 0x0f, 0x1e, 0xfa);  /* endbr64 */
-  emit(&e, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57);
-  emit(&e, 0x49, 0x89, 0xfc);        /* r12 = frame */
-  emit(&e, 0x4d, 0x8b, 0xb4, 0x24);  /* mov r14, [r12 + thread] */
-  word(&e, offsetof(LuaLoopFrame, thread));
-  loadbase(&e);
+  entryframe(&e);
   opcodepc(&e, 0);
   checkintegerloop(&e, control);
   loop = e.next;
@@ -426,36 +474,9 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
       case OP_FORLOOP:
         backedge(&e, control, site->words, loop);
         continue;
-      case OP_MOVE:
-        loadvalue(&e, b);
-        emit(&e, 0x41, 0x0f, 0xb6, 0x95);  /* movzx edx, byte [tag] */
-        word(&e, tagoffset(b));
-        storevalue(&e, a);
-        emit(&e, 0x41, 0x88, 0x95);        /* mov byte [tag], dl */
-        word(&e, tagoffset(a));
+      case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
+        moveorload(&e, p, ins);
         break;
-      case OP_LOADI:
-        immediate(&e, 0, l_castS2U(GETARG_sBx(ins)));
-        storevalue(&e, a);
-        storetag(&e, a, LUA_VNUMINT);
-        break;
-      case OP_LOADF: {
-        double value = cast_num(GETARG_sBx(ins));
-        uint64_t bits;
-        memcpy(&bits, &value, sizeof(bits));
-        immediate(&e, 0, bits);
-        storevalue(&e, a);
-        storetag(&e, a, LUA_VNUMFLT);
-        break;
-      }
-      case OP_LOADK: {
-        const TValue *value = &p->k[GETARG_Bx(ins)];
-        /* The active frame's prototype retains its immutable constants. */
-        immediate(&e, 0, ttisnil(value) ? 0 : val_(value).bits);
-        storevalue(&e, a);
-        storetag(&e, a, rawtt(value));
-        break;
-      }
       case OP_GETFIELD:
         readfield(&e, p, pc, a, b, c);
         continue;
@@ -498,7 +519,118 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
   }
   for (pc = 0; pc < e.nexits; pc++)
     linkbranch(&e, e.exits[pc], e.next);
-  emit(&e, 0x89, 0xd8);  /* eax = exit PC offset */
-  emit(&e, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5b, 0xc3);
+  leaveframe(&e);
+  return !e.failed;
+}
+
+static int readcapture (LuaLoopFrame *frame, TValue *result, unsigned index) {
+  UpVal *cell = luaF_capturecell(frame->closure, index);
+  if (!luaF_localupval(frame->thread, cell))
+    return luaF_tryloadshared(cell, result);
+  setobj(frame->thread, result, luaF_privateslot(frame->thread, cell));
+  return 1;
+}
+
+static int writecapture (LuaLoopFrame *frame, const TValue *value,
+                         unsigned index) {
+  UpVal *cell = luaF_capturecell(frame->closure, index);
+  if (luaF_localupval(frame->thread, cell)) {
+    if (!upisopen(cell) || iscollectable(value)) return 0;
+    setobj(frame->thread, luaF_privateslot(frame->thread, cell), value);
+    return 1;
+  }
+  return luaF_trystoreinteger(cell, value);
+}
+
+static int stringlength (TValue *result, const TValue *value) {
+  if (!ttisstring(value)) return 0;
+  setivalue(result, cast(lua_Integer, tsslen(tsvalue(value))));
+  return 1;
+}
+
+typedef struct NativeJump {
+  unsigned char *patch;
+  unsigned target;
+} NativeJump;
+
+/* The call reserves a whole straight-line body's poll budget. Charge actual
+** instructions in r15d and publish it when the still-live frame returns. */
+int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
+  Emitter e = { .next = code, .end = code + capacity };
+  const unsigned char *labels[LUA_NATIVE_CALL_WORDS] = {NULL};
+  NativeJump jumps[3 * LUA_NATIVE_CALL_WORDS];
+  unsigned pc, njumps = 0;
+  entryframe(&e);
+  emit(&e, 0x45, 0x8b, 0xbe);  /* mov r15d, [r14 + poll_remaining] */
+  word(&e, offsetof(lua_State, poll_remaining));
+  for (pc = 0; pc < cast_uint(p->sizecode); pc++) {
+    Instruction ins = p->code[pc];
+    OpCode op = GET_OPCODE(ins);
+    unsigned a = GETARG_A(ins);
+    unsigned b = getarg(ins, POS_B, SIZE_B), c = getarg(ins, POS_C, SIZE_C);
+    labels[pc] = e.next;
+    opcodepc(&e, pc);
+    switch (op) {
+      case OP_RETURN0: case OP_RETURN1:
+        exitif(&e, 0);  /* call completion uses the ordinary Lua result range */
+        continue;
+      case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
+        moveorload(&e, p, ins);
+        break;
+      case OP_GETUPVAL: case OP_SETUPVAL:
+        emit(&e, 0x4c, 0x89, 0xe7);  /* rdi = frame */
+        argument(&e, 6, a);          /* rsi = register */
+        indexarg(&e, 2, b);          /* edx = capture index */
+        call(&e, op == OP_GETUPVAL
+          ? cast(uintptr_t, readcapture) : cast(uintptr_t, writecapture), 1);
+        break;
+      case OP_LEN:
+        argument(&e, 7, a);          /* rdi = result */
+        argument(&e, 6, b);          /* rsi = operand */
+        call(&e, cast(uintptr_t, stringlength), 1);
+        break;
+      case OP_ADD:
+        arith(&e, op, a, b, c, 0, 0, 0);
+        pc++;
+        break;
+      case OP_ADDI:
+        arith(&e, op, a, b, 0, l_castS2U(GETARG_sC(ins)), 1, 0);
+        pc++;
+        break;
+      case OP_JMP: {
+        unsigned target = cast_uint(cast_int(pc) + 1 + GETARG_sJ(ins));
+        checkhooks(&e);
+        emit(&e, 0x41, 0xff, 0xcf);  /* dec r15d */
+        jumps[njumps++] = (NativeJump){branch(&e, 0), target};
+        continue;
+      }
+      case OP_EQK: case OP_TEST: {
+        unsigned target = cast_uint(cast_int(pc) + 2 + GETARG_sJ(p->code[pc + 1]));
+        unsigned fallthrough = pc + 2;
+        unsigned equal = GETARG_k(ins) == (op == OP_EQK) ? target : fallthrough;
+        unsigned other = equal == target ? fallthrough : target;
+        checkhooks(&e);
+        emit(&e, 0x41, 0xff, 0xcf);
+        comparetag(&e, a, LUA_VNIL);
+        jumps[njumps++] = (NativeJump){branch(&e, EQUAL), equal};
+        if (op == OP_TEST) {
+          comparetag(&e, a, LUA_VFALSE);
+          jumps[njumps++] = (NativeJump){branch(&e, EQUAL), equal};
+        }
+        jumps[njumps++] = (NativeJump){branch(&e, 0), other};
+        pc++;
+        continue;
+      }
+      default: return 0;
+    }
+    emit(&e, 0x41, 0xff, 0xcf);
+  }
+  for (pc = 0; pc < njumps; pc++)
+    linkbranch(&e, jumps[pc].patch, labels[jumps[pc].target]);
+  for (pc = 0; pc < e.nexits; pc++)
+    linkbranch(&e, e.exits[pc], e.next);
+  emit(&e, 0x45, 0x89, 0xbe);  /* mov [r14 + poll_remaining], r15d */
+  word(&e, offsetof(lua_State, poll_remaining));
+  leaveframe(&e);
   return !e.failed;
 }

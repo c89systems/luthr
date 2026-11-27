@@ -299,6 +299,7 @@ typedef struct NativeStackContext {
   uintptr_t limit;
   lu_byte overflow;
   lu_byte scalar_reentry;  /* the last detached call completed on the stack */
+  lu_byte compiled_reentry;  /* the last detached Lua callee had native code */
   LuaExecution *execution;
   struct LuaCoroutineScope *coroutine_scopes;
   LuaApiRegion *api_region;

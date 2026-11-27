@@ -26,6 +26,7 @@
 #include "ldo.h"
 #include "lfunc.h"
 #include "lgc.h"
+#include "ljit.h"
 #include "lmem.h"
 #include "lobject.h"
 #include "lopcodes.h"
@@ -1103,12 +1104,87 @@ l_sinline StkId entercall (lua_State *L, StkId func, l_uint32 inc) {
   return func;
 }
 
+#if !defined(HARDSTACKTESTS)
+/* Publish code with ordinary managed admission. Subsequent detached calls
+** can execute it using only a bounded storage ticket. */
+static void preparecallback (lua_State *L, CallInfo *ci, Proto *p) {
+  if (!isLua(ci->previous) && L->policy == NULL && !gethookmask(L) &&
+      !luaTK_hasstops(L) && luaJ_prepare(L, p, p->nativecall) != NULL)
+    luaX_boundcontext(L)->compiled_reentry = 1;
+}
+
+/* The storage ticket retains cells and operands and blocks trace arming.
+** On a guard exit, publish a regular Lua frame before releasing the ticket.
+** Its written registers and capture assignments remain visible on reentry. */
+int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
+                           int nargs, int wanted) {
+  CallInfo *ci = L->ci;
+  StkId func, top;
+  LClosure *closure;
+  Proto *p;
+  LuaLoopFrame frame;
+  uintptr_t address;
+  const Instruction *at;
+  OpCode exit;
+  if (isLua(ci) || ci->next == NULL || gethookmask(L) || luaTK_hasstops(L) ||
+      L->policy != NULL || luaX_contextpolicy(context) != NULL ||
+      L->errorJmp == NULL || L->errorJmp->context != context ||
+      getCcalls(L) >= LUAI_MAXCCALLS - 1 || context->limit == 0 ||
+      luaD_nativeposition() <= context->limit) return 0;
+  api_checkpop(L, nargs + 1);
+  func = L->top.p - (nargs + 1);
+  if (!ttisLclosure(s2v(func)) || capturesfrom(L, func)) return 0;
+  closure = clLvalue(s2v(func));
+  p = closure->p;
+  if (p->nativecall == NULL || nargs != p->numparams ||
+      L->poll_remaining <= p->nativecall->words ||
+      L->stack_last.p - func <= p->maxstacksize + 1) return 0;
+  address = __atomic_load_n(&p->nativecall->entry, __ATOMIC_ACQUIRE);
+  if (address <= LUA_LOOP_UNAVAILABLE) return 0;
+  api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
+  api_checkresults(L, nargs, wanted);
+  luaX_invalidatearguments(&L->stack_gate);
+  top = func + 1 + p->maxstacksize;
+  while (L->top.p < top) setnilvalue2s(L->top.p++);
+  frame = (LuaLoopFrame){L, NULL, func + 1, closure, p->code};
+  at = p->code + cast(LuaLoopCode, address)(&frame);
+  exit = GET_OPCODE(*at);
+  if ((exit == OP_RETURN0 || exit == OP_RETURN1) &&
+      !gethookmask(L) && !luaTK_hasstops(L)) {
+    int count = exit == OP_RETURN1;
+    --L->poll_remaining;
+    L->top.p = frame.base + (count ? GETARG_A(*at) + 1 : 0);
+    moveresults(L, func, count, cast_uint(wanted + 1));
+    adjustresults(L, wanted);
+    luaX_leavesharedread(L);
+    return 1;
+  }
+  L->nCcalls += nyci;
+  ci = luaD_initframe(L, ci->next, func, cast_uint(wanted + 1), top);
+  ci->callstatus |= CIST_FRESH;
+  luaD_initluaframe(ci, at);
+  luaX_leavesharedread(L);
+  lua_lock(L);
+  if (luaV_execute(L, L->ci)) luaD_throw(L, LUA_YIELD);
+  L->nCcalls -= nyci;
+  adjustresults(L, wanted);
+  lua_unlock(L);
+  return 1;
+}
+#endif
+
 l_sinline void ccall (lua_State *L, StkId func, int nResults, l_uint32 inc,
                        int returnyield) {
   CallInfo *ci;
   func = entercall(L, func, inc);
   if ((ci = luaD_precall(L, func, nResults)) != NULL) {  /* Lua function? */
     ci->callstatus |= CIST_FRESH;  /* mark that it is a "fresh" execute */
+#if !defined(HARDSTACKTESTS)
+    {
+      Proto *p = ci_func(ci)->p;
+      if (p->nativecall != NULL) preparecallback(L, ci, p);
+    }
+#endif
     if (luaV_execute(L, ci) && !returnyield)
       luaD_throw(L, LUA_YIELD);  /* unwind a caller using the C API */
   }

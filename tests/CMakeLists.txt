@@ -67,7 +67,7 @@ set_target_properties(native_loop_test PROPERTIES C_STANDARD 99)
 target_compile_options(native_loop_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(native_loop_test PRIVATE luthr_static)
 target_link_options(native_loop_test PRIVATE -Wl,--wrap=mprotect)
-foreach(case IN ITEMS serial denied incremental generational cancel native_fields)
+foreach(case IN ITEMS serial denied incremental generational cancel native_fields native_callbacks)
   add_test(NAME native_loop_${case} COMMAND native_loop_test ${case})
   set_tests_properties(native_loop_${case}
     PROPERTIES LABELS "unit;runtime;parallel;memcheck" TIMEOUT 20)
@@ -91,7 +91,7 @@ foreach(case IN ITEMS fairness parallel retained_fairness no_requests early_incr
     timed_callback_progress synchronous_callback simultaneous_reentry parallel_native_compensation native_overlapping_stops native_return_compensation native_return_handoff native_leaf_return native_recall_during_stack_borrow native_recall_without_stack_offer native_recall_with_retirement
     native_argument_observation native_argument_types native_index_dispatch
     native_metadata_without_slot native_registry_without_slot native_stack_without_slot native_array_without_slot native_allocation_without_slot
-    native_named_fields_without_slot native_pointer_lookup_without_slot
+    native_named_fields_without_slot native_pointer_lookup_without_slot native_compiled_callback_without_slot
     parked cancel_parked idle_notifications standby_carriers idle_affinity metadata_progress
     timed_metadata_progress timed_slice timed_continuation_slice timed_retained_slice timed_retained_start
     nursery_incremental nursery_generational nursery_pacing

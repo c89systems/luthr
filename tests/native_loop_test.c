@@ -269,6 +269,42 @@ static void check_native_fields(lua_State *L) {
   require(field_calls == 700 && field_ticks > 200);
 }
 
+static int call_many(lua_State *L) {
+  lua_Integer n = luaL_checkinteger(L, 3);
+  for (lua_Integer i = 0; i < n; i++) {
+    lua_pushvalue(L, 1);
+    lua_pushvalue(L, 2);
+    lua_call(L, 1, 0);
+  }
+  return 0;
+}
+
+static void check_native_callbacks(lua_State *L) {
+  const LClosure *closure;
+  lua_pushcfunction(L, call_many);
+  lua_setglobal(L, "call_many");
+  require(luaL_dostring(
+              L,
+              "local total,calls,sample=0,0,nil; "
+              "function record(chunk) "
+              "  total=total+#chunk; calls=calls+1; "
+              "  if sample==nil then sample=chunk end "
+              "end; "
+              "call_many(record,'abc',400); "
+              "assert(total==1200 and calls==400 and sample=='abc'); "
+              "sample=nil; collectgarbage('collect'); "
+              "call_many(record,'xyz',10); "
+              "assert(total==1230 and calls==410 and sample=='xyz'); "
+              "local next=setmetatable({}, {__len=function() return 7 end}); "
+              "sample=nil; call_many(record,next,10); "
+              "assert(total==1300 and calls==420 and rawequal(sample,next))") ==
+          LUA_OK);
+  require(lua_getglobal(L, "record") == LUA_TFUNCTION);
+  closure = lua_topointer(L, -1);
+  require(closure != NULL && closure->p->nativecall != NULL);
+  require(closure->p->nativecall->entry > LUA_LOOP_UNAVAILABLE);
+}
+
 int main(int argc, char **argv) {
   lua_State *L = luaL_newstate();
   require(argc == 2 && L != NULL);
@@ -284,6 +320,8 @@ int main(int argc, char **argv) {
     check_cancel(L);
   } else if (strcmp(argv[1], "native_fields") == 0) {
     check_native_fields(L);
+  } else if (strcmp(argv[1], "native_callbacks") == 0) {
+    check_native_callbacks(L);
   } else
     check_serial(L);
   lua_close(L);

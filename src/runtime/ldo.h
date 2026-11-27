@@ -148,6 +148,8 @@ LUAI_FUNC int luaD_resume (lua_State *L, l_uint32 calls, int nargs,
 LUAI_FUNC int luaD_tryscalarcall (lua_State *L, StkId func, const Proto *p,
                                  int nargs, int wanted,
                                  NativeStackContext *context);
+LUAI_FUNC int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
+                                     int nargs, int wanted);
 LUAI_FUNC TStatus luaD_closeprotected (lua_State *L, ptrdiff_t level,
                                                      TStatus status);
 LUAI_FUNC TStatus luaD_pcall (lua_State *L, Pfunc func, void *u,
