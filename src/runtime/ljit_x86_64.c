@@ -4,6 +4,7 @@
 
 #include <string.h>
 
+#include "lbuiltin.h"
 #include "lfunc.h"
 #include "ljit.h"
 #include "lopcodes.h"
@@ -492,7 +493,7 @@ int luaJ_emit (const Proto *p, const LuaLoopSite *site,
         moveorload(&e, p, ins);
         break;
       case OP_GETFIELD:
-        readfield(&e, p, pc, a, b, c, site->bounded);
+        readfield(&e, p, pc, a, b, c, (site->flags & LUA_LOOP_BOUNDED) != 0);
         continue;
 #if !defined(HARDSTACKTESTS)
       case OP_CALL:
@@ -557,6 +558,28 @@ static int readcapture (lua_State *L, LClosure *closure,
   return 1;
 }
 
+static int readcapturedfield (lua_State *L, LClosure *closure,
+                              TValue *result, Instruction ins) {
+  TValue receiver;
+  return readcapture(L, closure, &receiver, GETARG_B(ins)) &&
+         getfield(L, result, &receiver, &closure->p->k[GETARG_C(ins)]);
+}
+
+/* A guard exit retains the original EQ so metamethods and unbounded string
+** comparisons execute with an ordinary Lua frame and work checkpoints. */
+static int comparevalues (const TValue *left, const TValue *right) {
+  if ((ttistable(left) && ttistable(right)) ||
+      (ttisfulluserdata(left) && ttisfulluserdata(right)))
+    return gcvalue(left) == gcvalue(right) ? 1 : -1;
+  if (ttisstring(left) && ttisstring(right)) {
+    TString *a = tsvalue(left), *b = tsvalue(right);
+    size_t len = tsslen(a);
+    if (a == b) return 1;
+    if (len > LUA_NATIVE_WORK_SLICE / 4 && len == tsslen(b)) return -1;
+  }
+  return luaV_rawequalobj(left, right);
+}
+
 static int writecapture (lua_State *L, LClosure *closure,
                          const TValue *value, unsigned index) {
   UpVal *cell = luaF_capturecell(closure, index);
@@ -614,13 +637,42 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
       case OP_MOVE: case OP_LOADI: case OP_LOADF: case OP_LOADK:
         moveorload(&e, p, ins);
         break;
-      case OP_GETUPVAL: case OP_SETUPVAL:
+      case OP_LOADNIL:
+        for (; b != 0; b--) storetag(&e, a + b, LUA_VNIL);
+        storetag(&e, a, LUA_VNIL);
+        break;
+      case OP_LOADFALSE: case OP_LOADTRUE:
+        storetag(&e, a, op == OP_LOADFALSE ? LUA_VFALSE : LUA_VTRUE);
+        break;
+      case OP_LFALSESKIP:
+        checkhooks(&e);
+        storetag(&e, a, LUA_VFALSE);
+        emit(&e, 0x41, 0xff, 0xcf);
+        jumps[njumps++] = (NativeJump){branch(&e, 0), pc + 2};
+        continue;
+      case OP_GETUPVAL: case OP_SETUPVAL: case OP_GETTABUP:
         emit(&e, 0x4c, 0x89, 0xf7);  /* rdi = thread */
         emit(&e, 0x4c, 0x89, 0xe6);  /* rsi = closure */
         argument(&e, 2, a);          /* rdx = register */
-        indexarg(&e, 1, b);          /* ecx = capture index */
-        call(&e, op == OP_GETUPVAL
-          ? cast(uintptr_t, readcapture) : cast(uintptr_t, writecapture), 1);
+        indexarg(&e, 1, op == OP_GETTABUP ? ins : b);
+        call(&e, op == OP_GETTABUP ? cast(uintptr_t, readcapturedfield) :
+          op == OP_GETUPVAL ? cast(uintptr_t, readcapture) :
+                             cast(uintptr_t, writecapture), 1);
+        break;
+      case OP_CALL:
+        /* One checked argument, no results. Any function or error that
+        ** needs an activation resumes at the call with its live operands. */
+        checkhooks(&e);
+        comparetag(&e, a, LUA_VBCF);
+        exitif(&e, NOT_EQUAL);
+        emit(&e, 0x49, 0x83, 0xbd);  /* cmp qword [r13 + payload], imm8 */
+        word(&e, slot(a));
+        emit(&e, LUA_LEAF_ASSERT);
+        exitif(&e, NOT_EQUAL);
+        comparetag(&e, a + 1, LUA_VNIL);
+        exitif(&e, EQUAL);
+        comparetag(&e, a + 1, LUA_VFALSE);
+        exitif(&e, EQUAL);
         break;
       case OP_LEN:
         argument(&e, 7, a);          /* rdi = result */
@@ -642,18 +694,29 @@ int luaJ_emitcall (const Proto *p, unsigned char *code, size_t capacity) {
         jumps[njumps++] = (NativeJump){branch(&e, 0), target};
         continue;
       }
-      case OP_EQK: case OP_TEST: {
+      case OP_EQ: case OP_EQK: case OP_TEST: {
         unsigned target = cast_uint(cast_int(pc) + 2 + GETARG_sJ(p->code[pc + 1]));
         unsigned fallthrough = pc + 2;
-        unsigned equal = GETARG_k(ins) == (op == OP_EQK) ? target : fallthrough;
+        unsigned equal = GETARG_k(ins) == (op != OP_TEST) ? target : fallthrough;
         unsigned other = equal == target ? fallthrough : target;
         checkhooks(&e);
-        emit(&e, 0x41, 0xff, 0xcf);
-        comparetag(&e, a, LUA_VNIL);
-        jumps[njumps++] = (NativeJump){branch(&e, EQUAL), equal};
-        if (op == OP_TEST) {
-          comparetag(&e, a, LUA_VFALSE);
+        if (op == OP_EQ) {
+          argument(&e, 7, a);
+          argument(&e, 6, b);
+          call(&e, cast(uintptr_t, comparevalues), 0);
+          emit(&e, 0x85, 0xc0);
+          exitif(&e, NEGATIVE);
+          emit(&e, 0x41, 0xff, 0xcf);
+          emit(&e, 0x85, 0xc0);
+          jumps[njumps++] = (NativeJump){branch(&e, NOT_EQUAL), equal};
+        } else {
+          emit(&e, 0x41, 0xff, 0xcf);
+          comparetag(&e, a, LUA_VNIL);
           jumps[njumps++] = (NativeJump){branch(&e, EQUAL), equal};
+          if (op == OP_TEST) {
+            comparetag(&e, a, LUA_VFALSE);
+            jumps[njumps++] = (NativeJump){branch(&e, EQUAL), equal};
+          }
         }
         jumps[njumps++] = (NativeJump){branch(&e, 0), other};
         pc++;

@@ -138,6 +138,21 @@ l_sinline int luaX_boundedready (lua_State *L, unsigned requests) {
   return 0;
 }
 
+/* Upgrade a stack-only claim before loading table storage. A withdrawing
+** layout either joins the announced epoch or precedes the recheck. */
+l_sinline int luaX_retainstorage (lua_State *L, unsigned requests) {
+  LuaStackGate *gate = &L->stack_gate;
+  uint64_t control = luaW_control(&G(L)->world);
+  lua_assert(__atomic_load_n(&gate->values, __ATOMIC_RELAXED) == LUA_GATE_VALUES);
+  requests |= LUA_WORLD_STORAGE_WAIT;
+  if (control & requests) return 0;
+  __atomic_store_n(&gate->values, luaW_epoch(control) | LUA_GATE_SHARED_READ,
+                   __ATOMIC_SEQ_CST);
+  if (luaX_boundedready(L, requests)) return 1;
+  __atomic_store_n(&gate->values, LUA_GATE_VALUES, __ATOMIC_RELEASE);
+  return 0;
+}
+
 l_sinline int luaX_claimvalues (LuaStackGate *gate, uint64_t ticket) {
   uint64_t expected = 0;
   return __atomic_compare_exchange_n(&gate->values, &expected, ticket, 0,

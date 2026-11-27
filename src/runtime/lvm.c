@@ -1931,7 +1931,7 @@ static const int32_t *execute (lua_State *L, CallInfo *ci) {
     {
       LuaLoopFrame frame = { .thread = L, .call = ci, .base = base,
                              .closure = cl, .entry = ip,
-                             .bounded = site->bounded };
+                             .bounded = (site->flags & LUA_LOOP_BOUNDED) != 0 };
       ++L->poll_remaining;  /* native code charges the already fetched word */
       resume = native(&frame);
 #if !defined(HARDSTACKTESTS)

@@ -3658,6 +3658,14 @@ int main(int argc, char **argv) {
                                   "local result=native_table_operation(add); "
                                   "return result",
                                   0);
+  else if (strcmp(argv[1], "native_compiled_table_callback_without_slot") == 0)
+    native_operation_without_slot(
+        f, call_without_managed_slot,
+        "local value=0; local expected,actual=42,42; "
+        "local function add(delta) assert(actual==expected); "
+        "value=value+delta; return value end; "
+        "local result=native_table_operation(add); return result",
+        0);
   else if (strcmp(argv[1], "native_loop_fields_without_slot") == 0 ||
            strcmp(argv[1], "native_loop_fields_gc") == 0)
     native_operation_without_slot(

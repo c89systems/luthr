@@ -136,7 +136,7 @@ static int loopentry (const Proto *p, int end, unsigned *bounded) {
 /* This body never parks in a helper. Every forward target names a real
 ** instruction boundary, so a failed guard can leave a live Lua frame at
 ** that instruction even after earlier assignments took effect. */
-static int callentry (const Proto *p) {
+static int callentry (const Proto *p, unsigned *flags) {
   uint32_t entries = 0, targets = 0;
   int pc, last = p->sizecode - 1, writes = 0;
   if (last < 4 || last >= LUA_NATIVE_CALL_WORDS ||
@@ -151,6 +151,14 @@ static int callentry (const Proto *p) {
     if (op != OP_JMP && op != OP_RETURN0 && a >= p->maxstacksize) return 0;
     switch (op) {
       case OP_RETURN0: case OP_RETURN1: case OP_LOADI: case OP_LOADF:
+      case OP_LOADTRUE: case OP_LOADFALSE:
+        break;
+      case OP_LOADNIL:
+        if (a + b >= p->maxstacksize) return 0;
+        break;
+      case OP_LFALSESKIP:
+        if (pc + 2 > last) return 0;
+        targets |= UINT32_C(1) << (pc + 2);
         break;
       case OP_MOVE: case OP_LEN:
         if (b >= p->maxstacksize) return 0;
@@ -162,6 +170,13 @@ static int callentry (const Proto *p) {
         if (b >= p->sizeupvalues) return 0;
         writes += op == OP_SETUPVAL;
         break;
+      case OP_GETTABUP:
+        if (b >= p->sizeupvalues || !validconstant(p, c, 1)) return 0;
+        *flags |= LUA_CALL_READS_STORAGE;
+        break;
+      case OP_CALL:
+        if (b != 2 || c != 1 || a + 1 >= p->maxstacksize) return 0;
+        break;
       case OP_ADD: case OP_ADDI: {
         OpCode fallback = op == OP_ADD ? OP_MMBIN : OP_MMBINI;
         if (b >= p->maxstacksize || (op == OP_ADD && c >= p->maxstacksize) ||
@@ -170,9 +185,10 @@ static int callentry (const Proto *p) {
         pc++;
         break;
       }
-      case OP_EQK: case OP_TEST: case OP_JMP: {
+      case OP_EQ: case OP_EQK: case OP_TEST: case OP_JMP: {
         int target;
         if (op != OP_JMP) {
+          if (op == OP_EQ && b >= p->maxstacksize) return 0;
           if (op == OP_EQK &&
               (!validconstant(p, b, 0) || !ttisnil(&p->k[b]))) return 0;
           if (++pc >= last || GET_OPCODE(p->code[pc]) != OP_JMP) return 0;
@@ -192,11 +208,12 @@ static int callentry (const Proto *p) {
 
 void luaJ_lower (lua_State *L, Proto *p) {
   int pc, count = 0;
+  unsigned flags = 0;
   LuaLoopSite *sites;
-  if (p->sizep == 0 && callentry(p)) {
+  if (p->sizep == 0 && callentry(p, &flags)) {
     sites = luaM_tryalloc(L, sizeof(*sites));
     if (sites != NULL) {
-      *sites = (LuaLoopSite){ .words = cast_uint(p->sizecode) };
+      *sites = (LuaLoopSite){ .words = cast_uint(p->sizecode), .flags = flags };
       p->nativecall = sites;
     }
     return;
@@ -212,7 +229,7 @@ void luaJ_lower (lua_State *L, Proto *p) {
     int start = loopentry(p, pc, &bounded);
     if (start < 0) continue;
     sites[count++] = (LuaLoopSite){ .pc = start, .words = cast_uint(pc - start + 1),
-                                   .bounded = bounded };
+                                   .flags = bounded ? LUA_LOOP_BOUNDED : 0 };
     p->dispatch[start].opcode = LUA_NATIVE_LOOP;
   }
   p->loops = sites;

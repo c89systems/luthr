@@ -1224,6 +1224,7 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
   uintptr_t address;
   const Instruction *at;
   OpCode exit;
+  unsigned storage;
   if (isLua(ci) || ci->next == NULL || gethookmask(L) || luaTK_hasstops(L) ||
       L->policy != NULL || luaX_contextpolicy(context) != NULL ||
       L->errorJmp == NULL || L->errorJmp->context != context ||
@@ -1234,16 +1235,20 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
   if (!ttisLclosure(s2v(func)) || capturesfrom(L, func)) return 0;
   closure = clLvalue(s2v(func));
   p = closure->p;
-  if (p->nativecall == NULL || nargs != p->numparams ||
+  if (p->nativecall == NULL || nargs < p->numparams ||
       L->poll_remaining <= p->nativecall->words ||
       L->stack_last.p - func <= p->maxstacksize + 1) return 0;
   address = __atomic_load_n(&p->nativecall->entry, __ATOMIC_ACQUIRE);
   if (address <= LUA_LOOP_UNAVAILABLE) return 0;
   api_check(L, L->status == LUA_OK, "cannot do calls on non-normal thread");
   api_checkresults(L, nargs, wanted);
+  storage = p->nativecall->flags & LUA_CALL_READS_STORAGE;
+  if (storage && !luaX_retainstorage(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                                         LUA_WORLD_ARM_TRACE)) return 0;
   luaX_invalidatearguments(&L->stack_gate);
   base = func + 1;
   top = base + p->maxstacksize;
+  L->top.p = base + p->numparams;  /* fixed-arity callbacks ignore surplus args */
   while (L->top.p < top) setnilvalue2s(L->top.p++);
   at = p->code + cast(LuaCallCode, address)(L, base, closure);
   exit = GET_OPCODE(*at);
@@ -1254,14 +1259,16 @@ int luaD_trycompiledstack (lua_State *L, NativeStackContext *context,
     L->top.p = base + (count ? GETARG_A(*at) + 1 : 0);
     moveresults(L, func, count, cast_uint(wanted + 1));
     adjustresults(L, wanted);
-    luaX_leavebounded(L);
+    if (storage) luaX_leavesharedread(L);
+    else luaX_leavebounded(L);
     return 1;
   }
   L->nCcalls += nyci;
   ci = luaD_initframe(L, ci->next, func, cast_uint(wanted + 1), top);
   ci->callstatus |= CIST_FRESH;
   luaD_initluaframe(ci, at);
-  luaX_leavebounded(L);
+  if (storage) luaX_leavesharedread(L);
+  else luaX_leavebounded(L);
   lua_lock(L);
   if (luaV_execute(L, L->ci)) luaD_throw(L, LUA_YIELD);
   L->nCcalls -= nyci;

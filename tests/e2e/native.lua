@@ -124,6 +124,38 @@ end
 assert(native.callback(function() return 42 end)==42)
 
 do
+  local expected, calls = 42, 0
+  local function check(value)
+    calls=calls+1
+    assert(value==expected)
+    return calls
+  end
+  for i=1,256 do
+    assert(native.call(1,check,expected,'extra')==i)
+  end
+
+  local original_assert=assert
+  local replaced=0
+  _G.assert=function(condition)
+    original_assert(condition)
+    replaced=replaced+1
+  end
+  local value=native.call(1,check,expected,'extra')
+  _G.assert=original_assert
+  assert(value==257 and replaced==1 and calls==257)
+
+  local equality_calls=0
+  local mt={__eq=function()
+    equality_calls=equality_calls+1
+    return true
+  end}
+  expected=setmetatable({},mt)
+  assert(native.call(1,check,setmetatable({},mt))==258 and equality_calls==1)
+  local passed, message=pcall(native.call,1,check,false)
+  assert(not passed and message:find('assertion failed',1,true) and calls==259)
+end
+
+do
   local priority={}
   local function item(rank)
     local function less(other) return rank<priority[other] end

@@ -20,12 +20,13 @@ typedef unsigned (*LuaCallCode)(lua_State *L, StkId base, LClosure *closure);
 
 enum { LUA_LOOP_COLD, LUA_LOOP_BUILDING, LUA_LOOP_UNAVAILABLE };
 enum { LUA_NATIVE_CALL_WORDS = 32 };
+enum { LUA_LOOP_BOUNDED = 1, LUA_CALL_READS_STORAGE = 2 };
 
 typedef struct LuaLoopSite {
   int pc;
   unsigned words;
   unsigned hits;
-  unsigned bounded;  /* register-only body apart from guarded field calls */
+  unsigned flags;
   uintptr_t entry;  /* atomic: cold, compiling, unavailable, or executable */
   void *allocation;  /* owns the executable bytes and their alignment pad */
   size_t allocsize;
