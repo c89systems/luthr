@@ -2263,6 +2263,23 @@ void lua_warning (lua_State *L, const char *msg, int tocont) {
 LUA_API void *lua_newuserdatauv (lua_State *L, size_t size, int nuvalue) {
   Udata *u;
   void *result;
+  if (cast_uint(nuvalue) <= 1 && size <= LUA_ALLOC_USERDATA_MAX &&
+      __atomic_load_n(&L->task_owner, __ATOMIC_RELAXED) != NULL &&
+      !(__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
+        ~LUA_GATE_OFFER_MASK) &&
+      luaX_tryobserve(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                         LUA_WORLD_ARM_TRACE)) {
+    u = !isLua(L->ci) ? luaS_trytaskudata(L, size, cast(unsigned short, nuvalue))
+                     : NULL;
+    if (u != NULL) {
+      setuvalue(L, s2v(L->top.p), u);
+      api_incr_top(L);
+      result = getudatamem(u);
+      luaX_leavebounded(L);
+      return result;
+    }
+    luaX_leavebounded(L);
+  }
   lua_lock(L);
   api_check(L, 0 <= nuvalue && nuvalue < SHRT_MAX, "invalid value");
   u = luaS_newudata(L, size, cast(unsigned short, nuvalue));

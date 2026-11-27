@@ -1488,14 +1488,14 @@ static unsigned udatasizeclass (size_t size) {
   return bin;
 }
 
-void *luaM_trytaskuserdata (lua_State *L, size_t size) {
+void *luaM_trytaskuserdata (lua_State *L, size_t size, int refill) {
   unsigned bin;
   if (size <= LUA_ALLOC_MAX) return NULL;
-  if (udatapools(G(L)) == NULL && !prepareudatapools(L)) return NULL;
+  if (udatapools(G(L)) == NULL && (!refill || !prepareudatapools(L))) return NULL;
   if (!luaC_tasktableeligible(L, size)) return NULL;
   bin = udatasizeclass(size);
   return trytaskpage(L, size, userdata_sizes[bin], LUA_ALLOC_USERDATA_POOL + bin,
-                     1, 0);
+                     refill, 0);
 }
 
 static void *allocudata (lua_State *L, size_t size) {

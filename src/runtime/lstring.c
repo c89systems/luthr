@@ -685,14 +685,10 @@ TString *luaS_new (lua_State *L, const char *str) {
 }
 
 
-Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
-  Udata *u;
+l_sinline Udata *inituserdata (lua_State *L, GCObject *object,
+                               size_t s, unsigned short nuvalue) {
+  Udata *u = gco2u(object);
   int i;
-  GCObject *o;
-  if (l_unlikely(s > MAX_SIZE - udatamemoffset(nuvalue)))
-    luaM_toobig(L);
-  o = luaC_newuserdata(L, sizeudata(nuvalue, s), nuvalue <= 1);
-  u = gco2u(o);
   u->len = s;
   luaA_initlock(&u->access);
   luaA_initlock(&u->payload_access);
@@ -705,6 +701,22 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   for (i = 0; i < nuvalue; i++)
     setnilvalue(&u->uv[i].uv);
   return u;
+}
+
+Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
+  GCObject *object;
+  if (l_unlikely(s > MAX_SIZE - udatamemoffset(nuvalue)))
+    luaM_toobig(L);
+  object = luaC_newuserdata(L, sizeudata(nuvalue, s), nuvalue <= 1);
+  return inituserdata(L, object, s, nuvalue);
+}
+
+Udata *luaS_trytaskudata (lua_State *L, size_t s, unsigned short nuvalue) {
+  GCObject *object;
+  lua_assert(nuvalue <= 1);
+  if (s > LUA_ALLOC_USERDATA_MAX - udatamemoffset(nuvalue)) return NULL;
+  object = luaC_trytaskuserdata(L, sizeudata(nuvalue, s), 0);
+  return object != NULL ? inituserdata(L, object, s, nuvalue) : NULL;
 }
 
 

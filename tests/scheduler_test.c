@@ -1827,6 +1827,23 @@ static int read_native_pointer_keys(lua_State *L) {
   return 1;
 }
 
+static int allocate_userdata_without_managed_slot(lua_State *L) {
+  unsigned char *first = lua_newuserdatauv(L, 1024, 0);
+  first[0] = 23;
+  first[1023] = 28;
+  blocked_leaf(L);
+  unsigned char *second = lua_newuserdatauv(L, 1024, 1);
+  require(first != second && lua_rawlen(L, -1) == 1024);
+  require(lua_getiuservalue(L, -1, 1) == LUA_TNIL);
+  lua_pop(L, 1);
+  require(lua_touserdata(L, 1) == first && lua_touserdata(L, 2) == second);
+  second[0] = first[0];
+  second[1023] = first[1023];
+  lua_pushinteger(L, second[0] + second[1023]);
+  native_operation_done();
+  return 1;
+}
+
 static int call_without_managed_slot(lua_State *L) {
   for (int i = 1; i <= 130; i++) {
     lua_pushvalue(L, 1);
@@ -3741,6 +3758,9 @@ int main(int argc, char **argv) {
     native_operation_without_slot(
         f, create_native_array,
         "return native_table_operation({51, 1, 2, 3, 4, 5})[1][1][1]", 1);
+  else if (strcmp(argv[1], "native_userdata_without_slot") == 0)
+    native_operation_without_slot(f, allocate_userdata_without_managed_slot,
+                                  "return native_table_operation()", 1);
   else if (strcmp(argv[1], "native_named_fields_without_slot") == 0)
     native_operation_without_slot(
         f, edit_native_fields,

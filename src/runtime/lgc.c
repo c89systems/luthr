@@ -450,21 +450,28 @@ GCObject *luaC_tryresultstring (lua_State *L, size_t size) {
   return object;
 }
 
+GCObject *luaC_trytaskuserdata (lua_State *L, size_t size, int refill) {
+  GCObject *object;
+  int owned;
+  if (size > LUA_ALLOC_USERDATA_MAX || L->task_owner == NULL ||
+      (refill && luaW_iscollector(L)) || !luaC_tasktableeligible(L, size))
+    return NULL;
+  object = luaM_trytaskuserdata(L, size, refill);
+  if (object == NULL) return NULL;
+  object->tt = LUA_VUSERDATA;
+  object->next = NULL;
+  setmarked(object, luaC_newmark(G(L)));
+  owned = luaC_taskallocate(L, object, size);
+  lua_assert(owned);
+  UNUSED(owned);
+  return object;
+}
+
 GCObject *luaC_newuserdata (lua_State *L, size_t size, int leaf) {
   int local = leaf && size <= LUA_ALLOC_USERDATA_MAX;
-  if (local && L->task_owner != NULL && !luaW_iscollector(L) &&
-      luaC_tasktableeligible(L, size)) {
-    GCObject *object = luaM_trytaskuserdata(L, size);
-    if (object != NULL) {
-      int owned;
-      object->tt = LUA_VUSERDATA;
-      object->next = NULL;
-      setmarked(object, luaC_newmark(G(L)));
-      owned = luaC_taskallocate(L, object, size);
-      lua_assert(owned);
-      UNUSED(owned);
-      return object;
-    }
+  if (local) {
+    GCObject *object = luaC_trytaskuserdata(L, size, 1);
+    if (object != NULL) return object;
   }
   return newobjdt(L, LUA_VUSERDATA, size, 0, local);
 }
