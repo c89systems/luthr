@@ -5,10 +5,13 @@
 #include <lstate.h>
 #include <lualib.h>
 #include <luthr/lua_runtime.h>
+#include <luthr/tasks.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define require(c)                                                             \
@@ -26,6 +29,8 @@ struct fixture {
   size_t live;
   unsigned remaining, failures, opened, closed, released, finalized, admissions;
   int deny, fail_open, armed, pinned;
+  int wait_for_read;
+  sem_t reading;
   pthread_t carrier;
 };
 static struct fixture *active;
@@ -97,6 +102,8 @@ static void execute(lua_State *state, const char *source) {
 }
 void __real_flockfile(FILE *file);
 void __wrap_flockfile(FILE *file) {
+  if (__atomic_exchange_n(&active->wait_for_read, 0, __ATOMIC_ACQ_REL))
+    require(sem_post(&active->reading) == 0);
   if (active->line_reader != NULL) {
     lua_State *reader = active->line_reader;
     unsigned closed = active->closed;
@@ -109,22 +116,78 @@ void __wrap_flockfile(FILE *file) {
   }
   __real_flockfile(file);
 }
-static void read_lines(struct fixture *test) {
+static void read_lines(struct fixture *test, int keep_newline) {
   lua_State *state = test->state;
   lua_State *reader;
   unsigned closed = test->closed;
   int results;
-  execute(state, "iter=assert(io.open(path,'rb')):lines('L')");
+  execute(state, keep_newline ? "iter=assert(io.open(path,'rb')):lines('L')"
+                              : "iter=assert(io.open(path,'rb')):lines()");
   reader = lua_newthread(state);
   require(luaL_loadstring(reader, "return iter(false)") == LUA_OK);
   test->line_reader = reader;
   require(lua_resume(reader, NULL, 0, &results) == LUA_OK);
   require(test->line_reader == NULL && results == 1);
-  require(strcmp(lua_tostring(reader, -1), "return marker,42,nil,7\n") == 0);
+  require(strcmp(lua_tostring(reader, -1),
+                 keep_newline ? "return marker,42,nil,7\n"
+                              : "return marker,42,nil,7") == 0);
   lua_pop(state, 1);
   lua_gc(state, LUA_GCCOLLECT);
   lua_gc(state, LUA_GCCOLLECT);
   require(test->closed == closed + 1);
+}
+
+static void blocked_lines(struct fixture *test) {
+  static const unsigned char nested_read[] =
+      "return coroutine.wrap(function() return pipe_lines() end)()";
+  static const unsigned char peer_work[] =
+      "local total=0; for i=1,50000 do total=total+i end; return total";
+  luthr_lua_scheduler_config config = {.parallelism = 1, .native_limit = 1};
+  luthr_lua_scheduler *scheduler;
+  luthr_lua_task *reader, *peer;
+  luthr_lua_task_result result;
+  struct timespec deadline;
+  lua_State *state = luaL_newstate();
+  int descriptors[2];
+  require(state != NULL && pipe(descriptors) == 0);
+  luaL_openlibs(state);
+  lua_gc(state, strstr(test->mode, "generational") ? LUA_GCGEN : LUA_GCINC);
+  lua_pushfstring(state, "/proc/self/fd/%d", descriptors[0]);
+  lua_setglobal(state, "pipe_path");
+  execute(state, "pipe_lines=assert(io.open(pipe_path,'rb')):lines()");
+  require(close(descriptors[0]) == 0);
+  require(luthr_lua_scheduler_new(state, &config, &scheduler) ==
+          LUTHR_LUA_RUNTIME_OK);
+  require(sem_init(&test->reading, 0, 0) == 0);
+  __atomic_store_n(&test->wait_for_read, 1, __ATOMIC_RELEASE);
+  require(luthr_lua_task_submit_buffer(scheduler, nested_read,
+                                       sizeof(nested_read) - 1, "line-reader",
+                                       NULL, &reader) == LUTHR_LUA_RUNTIME_OK);
+  require(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+  deadline.tv_sec += 5;
+  require(sem_timedwait(&test->reading, &deadline) == 0);
+  require(luthr_lua_task_submit_buffer(scheduler, peer_work,
+                                       sizeof(peer_work) - 1, "line-peer", NULL,
+                                       &peer) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_task_wait(peer, 5000, &result) == LUTHR_LUA_RUNTIME_OK);
+  require(result.status == LUTHR_LUA_RUNTIME_OK && result.result_count == 1);
+  require(luthr_lua_task_collect(peer, state, &result) == LUTHR_LUA_RUNTIME_OK);
+  require(lua_tointeger(state, -1) == 1250025000);
+  lua_pop(state, 1);
+  require(luthr_lua_task_free(peer) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_task_poll(reader, &result) == LUTHR_LUA_RUNTIME_PENDING);
+  require(write(descriptors[1], "pipe line\n", 10) == 10);
+  require(close(descriptors[1]) == 0);
+  require(luthr_lua_task_wait(reader, 5000, &result) == LUTHR_LUA_RUNTIME_OK);
+  require(result.status == LUTHR_LUA_RUNTIME_OK && result.result_count == 1);
+  require(luthr_lua_task_collect(reader, state, &result) ==
+          LUTHR_LUA_RUNTIME_OK);
+  require(strcmp(lua_tostring(state, -1), "pipe line") == 0);
+  require(luthr_lua_task_free(reader) == LUTHR_LUA_RUNTIME_OK);
+  require(luthr_lua_scheduler_free(scheduler) == LUTHR_LUA_RUNTIME_OK);
+  require(sem_destroy(&test->reading) == 0);
+  lua_close(state);
+  require(test->opened == test->closed);
 }
 static void write_file(struct fixture *test, const char *bytes, size_t size) {
   FILE *file = fopen(test->path, "wb");
@@ -417,9 +480,10 @@ static void *run(void *context) {
     execute(state, "assert(dofile(path)==42)");
   } else if (strstr(test->mode, "stdin"))
     stdin_case(test);
-  else if (strstr(test->mode, "lines"))
-    read_lines(test);
-  else if (strstr(test->mode, "snapshot"))
+  else if (strstr(test->mode, "lines")) {
+    read_lines(test, 0);
+    read_lines(test, 1);
+  } else if (strstr(test->mode, "snapshot"))
     snapshot(test);
   else if (strstr(test->mode, "admission"))
     admission(test);
@@ -445,6 +509,11 @@ int main(int argc, char **argv) {
   active = test;
   test->mode = argv[1];
   test->directory = argv[2];
+  if (strstr(test->mode, "blocked")) {
+    blocked_lines(test);
+    free(test);
+    return 0;
+  }
 #if defined(LUTHR_TEST_SMALL_NATIVE_STACK)
   if (strstr(test->mode, "stack")) {
     pthread_attr_t attributes;

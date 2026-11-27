@@ -18,6 +18,40 @@ assert(file:close())
 assert(io.type(file)=='closed file')
 assert(not pcall(function() file:read('a') end))
 assert(os.remove(path))
+
+local long=('segment\0'):rep(8192)
+file=assert(io.open(path,'w+b'))
+assert(file:write('\n',long,'\n','last\0line'))
+assert(file:seek('set')==0)
+local next_line=file:lines()
+assert(next_line()=='')
+assert(file:seek()==1)
+assert(next_line()==long)
+assert(file:seek()==#long+2)
+assert(next_line()=='last\0line')
+assert(select('#',next_line())==0)
+assert(file:close())
+
+local closing, _, _, handle=io.lines(path)
+local calls,returns=0,0
+debug.sethook(function(event)
+  if debug.getinfo(2,'f').func==closing then
+    if event=='call' then calls=calls+1 else returns=returns+1 end
+  end
+end,'cr')
+assert(closing()=='')
+assert(closing()==long)
+assert(closing()=='last\0line')
+assert(select('#',closing())==0)
+debug.sethook()
+assert(calls==4 and returns==4 and io.type(handle)=='closed file')
+assert(os.remove(path))
+
+local directory=assert(io.open(e2e_workdir,'r'))
+local read_ok,read_error=pcall(directory:lines())
+assert(not read_ok and type(read_error)=='string')
+assert(directory:close())
+
 local loads=0
 package.preload['portable_e2e_module']=function(name,where)
   assert(name=='portable_e2e_module' and where==':preload:')

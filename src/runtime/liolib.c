@@ -22,6 +22,7 @@
 #include "lapiowned.h"
 #include "lauxlib.h"
 #include "lauxowned.h"
+#include "lcall.h"
 #include "llimits.h"
 #include "lualib.h"
 
@@ -371,7 +372,10 @@ static void aux_lines (lua_State *L, int toclose) {
   lua_pushinteger(L, n);  /* number of arguments to read */
   lua_pushboolean(L, toclose);  /* close/not close file when finished */
   lua_rotate(L, 2, 3);  /* move the three values to their positions */
-  lua_pushcclosure(L, io_readline, 3 + n);
+  if (n == 0)
+    luaQ_pushmanaged(L, io_readline, 3);
+  else
+    lua_pushcclosure(L, io_readline, 3 + n);
 }
 
 
@@ -520,24 +524,80 @@ static int test_eof (lua_State *L, FILE *f) {
 }
 
 
+/* No Lua operations inside the stdio lock. */
+static int readlinechunk (FILE *f, char *buff, size_t *len) {
+  int c = EOF;
+  size_t i = 0;
+  l_lockfile(f);
+  while (i < LUAL_BUFFERSIZE && (c = l_getc(f)) != EOF && c != '\n')
+    buff[i++] = cast_char(c);
+  l_unlockfile(f);
+  *len = i;
+  return i == LUAL_BUFFERSIZE ? 0 : c;
+}
+
+
+static int readlinerest (FILE *f, luaL_Buffer *b) {
+  int c;
+  size_t len;
+  do {
+    char *buff = luaL_prepbuffer(b);
+    c = readlinechunk(f, buff, &len);
+    luaL_addsize(b, len);
+  } while (c == 0);  /* full chunk */
+  return c;
+}
+
+
 static int read_line (lua_State *L, FILE *f, int chop) {
   luaL_Buffer b;
   int c;
   luaL_buffinit(L, &b);
-  do {  /* may need to read several chunks to get whole line */
-    char *buff = luaL_prepbuffer(&b);  /* preallocate buffer space */
-    unsigned i = 0;
-    l_lockfile(f);  /* no memory errors can happen inside the lock */
-    while (i < LUAL_BUFFERSIZE && (c = l_getc(f)) != EOF && c != '\n')
-      buff[i++] = cast_char(c);  /* read up to end of line or buffer limit */
-    l_unlockfile(f);
-    luaL_addsize(&b, i);
-  } while (c != EOF && c != '\n');  /* repeat until end of line */
+  c = readlinerest(f, &b);
   if (!chop && c == '\n')  /* want a newline and have one? */
     luaL_addchar(&b, '\n');  /* add ending newline to result */
   luaL_pushstringresult(&b);  /* close buffer */
   /* return ok if read something (either a newline or something else) */
   return (c == '\n' || lua_rawlen(L, -1) > 0);
+}
+
+
+/* Default line iteration prepares its rooted stream in the managed frame
+** and runs the read under a native admission. A short read needs no stack
+** operations while detached. Long lines keep the regular growing buffer. */
+static int readiterline (lua_State *L, FILE *f) {
+  LuaCallScope call;
+  luaL_Buffer b;
+  size_t len;
+  int c, failed, error;
+  luaQ_begincall(L, 0, &call);
+  luaQ_entercall(L, &call);
+  clearerr(f);
+  errno = 0;
+  c = readlinechunk(f, b.init.b, &len);
+  if (c == 0) {
+    luaL_buffinit(L, &b);
+    luaL_addsize(&b, len);
+    readlinerest(f, &b);
+  }
+  error = errno;
+  failed = ferror(f);
+  luaQ_leavecall(L, &call);
+  if (l_unlikely(failed)) {
+    errno = error;
+    luaL_fileresult(L, 0, NULL);
+    return luaL_error(L, "%s", lua_tostring(L, -2));
+  }
+  if (c == 0)
+    luaL_pushstringresult(&b);
+  else if (c == '\n' || len != 0) {
+    TString *line = luaS_resultlstr(L, b.init.b, len);
+    setsvalue2s(L, L->top.p, line);
+    api_incr_top(L);
+    luaC_checkGC(L);
+  }
+  else return 0;  /* end of file */
+  return 1;
 }
 
 
@@ -638,8 +698,9 @@ static int io_readline (lua_State *L) {
   CClosure *closure;
   LStream *p;
   lua_Integer count;
-  int i, n;
+  int i, n, managed;
   StkId top;
+  LuaApiRegion *region;
   /* Prepare the iterator inputs in one managed scope. Read from the file
   ** only after releasing the scope since even a single line can block. */
   lua_lock(L);
@@ -650,7 +711,7 @@ static int io_readline (lua_State *L) {
   n = tointeger(&closure->upvalue[1], &count) ? cast_int(count) : 0;
   luaA_end(L, &scope);
   p = cast(LStream *, luaA_udatapointer(&file.value));
-  if (isclosed(p)) {
+  if (p == NULL || isclosed(p)) {
     luaR_poproot(L, &file);
     lua_unlock(L);
     return luaL_error(L, "file is already closed");
@@ -682,28 +743,50 @@ static int io_readline (lua_State *L) {
     }
     luaA_end(L, &scope);
   }
+  region = luaX_boundcontext(L)->api_region;
+  managed = region != NULL && region->state == L;
+  if (n <= 0 && managed) {
+    n = readiterline(L, p->f);
+    luaR_poproot(L, &file);
+    lua_unlock(L);
+    if (n == 1) return 1;
+    goto eof;
+  }
   /* Keep the stream reachable while blocked, even if debug replaces the
   ** closure's upvalue. 'g_read' takes the format count explicitly. */
   setobj2s(L, L->top.p, &file.value);
   api_incr_top(L);
   luaR_poproot(L, &file);
   lua_unlock(L);
-  n = g_read(L, p->f, 2, n < 0 ? 0 : n);  /* 'n' is number of results */
+  if (managed) {
+    /* A debug hook can replace the format count on a managed iterator. */
+    LuaCallScope call;
+    luaQ_begincall(L, 0, &call);
+    luaQ_entercall(L, &call);
+    n = g_read(L, p->f, 2, n);
+    luaQ_leavecall(L, &call);
+  }
+  else n = g_read(L, p->f, 2, n < 0 ? 0 : n);
   lua_assert(n > 0);  /* should return at least a nil */
   if (lua_toboolean(L, -n))  /* read at least one value? */
     return n;  /* return them */
-  else {  /* first result is false: EOF or error */
-    if (n > 1) {  /* is there error information? */
-      /* 2nd result is error message */
-      return luaL_error(L, "%s", lua_tostring(L, -n + 1));
-    }
-    if (lua_toboolean(L, lua_upvalueindex(3))) {  /* generator created file? */
-      lua_settop(L, 0);  /* clear stack */
-      lua_pushvalue(L, lua_upvalueindex(1));  /* push file at index 1 */
-      aux_close(L);  /* close it */
-    }
-    return 0;
+  if (n > 1) {  /* error information instead of EOF */
+    return luaL_error(L, "%s", lua_tostring(L, -n + 1));
   }
+ eof:
+  if (lua_toboolean(L, lua_upvalueindex(3))) {  /* generator created file? */
+    lua_settop(L, 0);  /* clear stack */
+    lua_pushvalue(L, lua_upvalueindex(1));  /* push file at index 1 */
+    if (managed) {
+      LuaCallScope call;
+      luaQ_begincall(L, 0, &call);
+      luaQ_entercall(L, &call);
+      aux_close(L);
+      luaQ_leavecall(L, &call);
+    }
+    else aux_close(L);
+  }
+  return 0;
 }
 
 /* }====================================================== */

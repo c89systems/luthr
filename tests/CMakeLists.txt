@@ -836,6 +836,12 @@ foreach(backend IN ITEMS raw facade)
     endforeach()
   endforeach()
 endforeach()
+foreach(gc IN ITEMS incremental generational)
+  add_test(NAME file_library_blocked_lines_${gc}
+    COMMAND file_library_test blocked_lines_${gc} "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(file_library_blocked_lines_${gc}
+    PROPERTIES LABELS "parallel;runtime;memcheck" TIMEOUT 30)
+endforeach()
 luthr_test_program(package_library_test package_library_test.c)
 set_target_properties(package_library_test PROPERTIES C_STANDARD 99)
 target_compile_options(package_library_test PRIVATE -Wall -Wextra -Werror)
