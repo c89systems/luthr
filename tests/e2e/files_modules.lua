@@ -75,6 +75,53 @@ assert(not missing and message:find('first searcher declined',1,true)
                    and message:find('second searcher declined',1,true))
 package.searchers=searchers
 
+local name='portable_preload_lookup'
+local original_preload=registry._PRELOAD
+local preload_searcher=searchers[1]
+local function loader(n,origin)
+  assert(n==name and origin==':preload:')
+  return 'original preload'
+end
+original_preload[name]=loader
+for i=1,4 do
+  package.loaded[name]=nil
+  assert(require(name)=='original preload')
+end
+
+local calls,returns=0,0
+debug.sethook(function(event)
+  if debug.getinfo(2,'f').func==preload_searcher then
+    if event=='call' then calls=calls+1 else returns=returns+1 end
+  end
+end,'cr')
+package.loaded[name]=nil
+local hooked=require(name)
+debug.sethook()
+assert(hooked=='original preload' and calls==1 and returns==1)
+
+local lookups=0
+registry._PRELOAD=setmetatable({}, {__index=function(_,key)
+  assert(key==name)
+  lookups=lookups+1
+  return function(n,origin)
+    assert(n==name and origin==':preload:')
+    return 'registry preload'
+  end
+end})
+package.loaded[name]=nil
+assert(require(name)=='registry preload' and lookups==1)
+registry._PRELOAD=original_preload
+
+searchers[1]=function(key)
+  assert(key==name)
+  return function() return 'replacement searcher' end
+end
+package.loaded[name]=nil
+assert(require(name)=='replacement searcher')
+searchers[1]=preload_searcher
+package.loaded[name]=nil
+original_preload[name]=nil
+
 local ok,failure=xpcall(function() error({answer=42}) end,function(value)
   assert(value.answer==42)
   return 'handled'

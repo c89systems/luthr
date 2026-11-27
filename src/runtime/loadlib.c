@@ -26,12 +26,14 @@
 #include "lapi.h"
 #include "laccess.h"
 #include "lauxowned.h"
+#include "ldebug.h"
 #include "ldo.h"
 #include "lexec.h"
 #include "lgc.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "ltableaccess.h"
+#include "ltask.h"
 #include "lvm.h"
 
 
@@ -710,32 +712,76 @@ static int searcher_preload (lua_State *L) {
 enum { RNAME, RKEY, RPACKAGE, RLOADED, RSEARCHERS, RLOADER, RDATA, RVALUE,
        REQUIRE_ROOTS };
 
+static int tryregistryfield (lua_State *L, const char *field, TValue *value) {
+  TString *key = luaS_trycachedname(L, field);
+  TValue registry;
+  lu_byte tag;
+  return key != NULL && luaA_tryregistry(G(L), &registry) && ttistable(&registry) &&
+         luaH_trygetshortstr(L, hvalue(&registry), key, value, &tag) &&
+         !tagisempty(tag);
+}
+
+#if !defined(HARDSTACKTESTS)
+/* A successful built-in preload search has no Lua call or allocation. Use
+** the live searcher and registry entries, and keep a real searcher frame
+** for hooks, stack growth, collector work and any unresolved lookup. */
+static int trypreload (lua_State *L, LuaNativeRoot *roots) {
+  TValue *searcher = &roots[RLOADER].value;
+  TValue preload, loader;
+  TString *data;
+  lu_byte tag;
+  if (!ttisCclosure(searcher) || !clCvalue(searcher)->managed ||
+      clCvalue(searcher)->f != searcher_preload || !ttisshrstring(&roots[RKEY].value) ||
+      gethookmask(L) || getCcalls(L) >= LUAI_MAXCCALLS - 1 ||
+      L->ci->next == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK + 2 ||
+      L->policy != NULL || luaTK_hasstops(L) || luaW_ownsheap(L) || luaC_tracing(L))
+    return 0;
+  if (!tryregistryfield(L, LUA_PRELOAD_TABLE, &preload) || !ttistable(&preload) ||
+      !luaH_trygetshortstr(L, hvalue(&preload), tsvalue(&roots[RKEY].value),
+                           &loader, &tag) || tagisempty(tag) || !ttisfunction(&loader))
+    return 0;
+  data = luaS_trycachedshort(L, ":preload:", sizeof(":preload:") - 1);
+  if (data == NULL) return 0;
+  luaC_condGC(L, return 0, (void)0);
+  luaD_checknativestack(L);
+  luaR_copyroot(L, &roots[RLOADER], &loader);
+  setsvalue(L, &roots[RDATA].value, data);
+  return 1;
+}
+#endif
+
 static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
   lua_Unsigned i;
   unsigned work = 0;
   int top;
+  int hasmessage = 0;
   luaL_Buffer msg;  /* to build error message */
   lua_lock(L);
   top = cast_int(L->top.p - (L->ci->func.p + 1));
   getfieldroot(L, &roots[RPACKAGE], "searchers", &roots[RSEARCHERS]);
-  lua_unlock(L);
-  if (l_unlikely(!ttistable(&roots[RSEARCHERS].value)))
+  if (l_unlikely(!ttistable(&roots[RSEARCHERS].value))) {
+    lua_unlock(L);
     luaL_error(L, "'package.searchers' must be a table");
-  luaL_buffinit(L, &msg);
-  luaL_addstring(&msg, "\n\t");  /* error-message prefix for first message */
+  }
   /*  iterate over available searchers to find a loader */
   for (i = 1; ; i++) {
     lu_byte tag;
-    lua_lock(L);
     tag = luaH_getint(L, hvalue(&roots[RSEARCHERS].value), cast(lua_Integer, i),
                      &roots[RLOADER].value);
     if (tagisempty(tag)) setnilvalue(&roots[RLOADER].value);
     if (l_unlikely(ttisnil(&roots[RLOADER].value) || i > LUA_MAXINTEGER)) {
       lua_unlock(L);
+      if (!hasmessage) luaL_error(L, "module '%s' not found:", name);
       luaL_buffsub(&msg, 2);  /* remove last prefix */
       luaL_pushresult(&msg);  /* create error message */
       luaL_error(L, "module '%s' not found:%s", name, lua_tostring(L, -1));
     }
+#if !defined(HARDSTACKTESTS)
+    if (i == 1 && trypreload(L, roots)) {
+      lua_unlock(L);
+      return;
+    }
+#endif
     pushroot(L, &roots[RLOADER]);
     pushroot(L, &roots[RKEY]);
     luaD_callnoyield(L, L->top.p - 2, 2);
@@ -744,13 +790,18 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
     L->top.p -= 2;
     lua_unlock(L);
     if (ttisfunction(&roots[RLOADER].value)) {
-      lua_settop(L, top);  /* close the message buffer before running loader */
+      if (hasmessage) lua_settop(L, top);  /* close the message buffer */
       return;
     }
     else if (ttisstring(&roots[RLOADER].value) ||
              cvt2str(&roots[RLOADER].value)) {
       size_t len;
       const char *s = luaL_roottostring(L, &roots[RLOADER], &len);
+      if (!hasmessage) {
+        luaL_buffinit(L, &msg);
+        luaL_addstring(&msg, "\n\t");
+        hasmessage = 1;
+      }
       while (len != 0) {
         size_t chunk = len < 1024u ? len : 1024u;
         luaL_addlstring(&msg, s, chunk);
@@ -760,6 +811,7 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
       luaL_addstring(&msg, "\n\t");  /* prefix for next message */
     }
     luaQ_work(L, &work);
+    lua_lock(L);
   }
 }
 
@@ -768,14 +820,9 @@ static void findloader (lua_State *L, LuaNativeRoot *roots, const char *name) {
 ** need a metamethod or a wait is completed by the ordinary rooted path. */
 static int tryloaded (lua_State *L, TString *module, TValue *loaded,
                        TValue *value) {
-  TString *key;
-  TValue registry;
   lu_byte tag;
-  if (luaC_tracing(L) ||
-      (key = luaS_trycachedname(L, LUA_LOADED_TABLE)) == NULL ||
-      !luaA_tryregistry(G(L), &registry) || !ttistable(&registry) ||
-      !luaH_trygetshortstr(L, hvalue(&registry), key, loaded, &tag) ||
-      tagisempty(tag) || !ttistable(loaded))
+  if (luaC_tracing(L) || !tryregistryfield(L, LUA_LOADED_TABLE, loaded) ||
+      !ttistable(loaded))
     return 0;
   return luaH_trygetshortstr(L, hvalue(loaded), module, value, &tag) &&
          !luaV_needsindex(tag);
