@@ -674,6 +674,10 @@ static void markglobalroots (global_State *g) {
     TString *key = __atomic_load_n(&g->date_keys[i], __ATOMIC_ACQUIRE);
     markobjectN(g, key);
   }
+  for (i = 0; i < LUA_DEBUG_KEYS; i++) {
+    TString *key = __atomic_load_n(&g->debug_keys[i], __ATOMIC_ACQUIRE);
+    markobjectN(g, key);
+  }
 }
 
 

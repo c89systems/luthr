@@ -39,14 +39,9 @@ l_sinline int luaA_pushmetatable (lua_State *L, const TValue *object) {
   return found;
 }
 
-l_sinline int luaA_pushfield (lua_State *L, const TValue *t, const char *k) {
+l_sinline int luaA_pushstringfield (lua_State *L, const TValue *t,
+                                    TString *str) {
   lu_byte tag;
-  LuaNativeRoot object;
-  TString *str;
-  luaR_pushroot(L, &object);
-  luaR_setroot(L, &object, t);
-  t = &object.value;
-  str = luaS_new(L, k);
   luaV_fastget(t, str, s2v(L->top.p), luaH_getstr, tag);
   if (!luaV_needsindex(tag))
     api_incr_top(L);
@@ -55,8 +50,17 @@ l_sinline int luaA_pushfield (lua_State *L, const TValue *t, const char *k) {
     api_incr_top(L);
     tag = luaV_finishget(L, t, s2v(L->top.p - 1), L->top.p - 1);
   }
-  luaR_poproot(L, &object);
   return novariant(tag);
+}
+
+l_sinline int luaA_pushfield (lua_State *L, const TValue *t, const char *k) {
+  LuaNativeRoot object;
+  int tag;
+  luaR_pushroot(L, &object);
+  luaR_setroot(L, &object, t);
+  tag = luaA_pushstringfield(L, &object.value, luaS_new(L, k));
+  luaR_poproot(L, &object);
+  return tag;
 }
 
 #endif

@@ -160,6 +160,15 @@ enum {
   LUA_PACKAGE_PRELOAD_ORIGIN, LUA_PACKAGE_KEYS
 };
 enum { LUA_DATE_INTEGER_FIELDS = 8, LUA_DATE_FIELDS = 9 };
+enum {
+  LUA_DEBUG_SOURCE, LUA_DEBUG_SHORT_SOURCE, LUA_DEBUG_LINE_DEFINED,
+  LUA_DEBUG_LAST_LINE_DEFINED, LUA_DEBUG_WHAT, LUA_DEBUG_CURRENT_LINE,
+  LUA_DEBUG_UPVALUES, LUA_DEBUG_PARAMETERS, LUA_DEBUG_VARARG, LUA_DEBUG_NAME,
+  LUA_DEBUG_NAME_WHAT, LUA_DEBUG_FIRST_TRANSFER, LUA_DEBUG_TRANSFER_COUNT,
+  LUA_DEBUG_TAIL_CALL, LUA_DEBUG_EXTRA_ARGS, LUA_DEBUG_ACTIVE_LINES,
+  LUA_DEBUG_FUNCTION, LUA_DEBUG_HOOK_KEY, LUA_DEBUG_HOOK_CALL,
+  LUA_DEBUG_KEYS = LUA_DEBUG_HOOK_CALL + LUA_HOOKTAILCALL + 1
+};
 typedef struct LuaStringCache {
   uint64_t epoch;
   uintptr_t entries[STRCACHE_N][STRCACHE_M];  /* pointer and embedded-zero bit */
@@ -701,6 +710,7 @@ typedef struct global_State {
   struct LuaUserdataPools *userdata_pools;  /* published on first medium allocation */
   TString *package_keys[LUA_PACKAGE_KEYS];  /* published when package opens */
   TString *date_keys[LUA_DATE_FIELDS];  /* published when os opens */
+  TString *debug_keys[LUA_DEBUG_KEYS];  /* published when debug opens */
 } global_State;
 
 

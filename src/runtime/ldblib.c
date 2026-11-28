@@ -33,7 +33,44 @@
 ** The hook table at registry[HOOKKEY] maps threads to their current
 ** hook function.
 */
-static const char *const HOOKKEY = "_HOOKKEY";
+#define HOOKKEY "_HOOKKEY"
+
+static const char *const debugnames[LUA_DEBUG_KEYS] = {
+  [LUA_DEBUG_SOURCE] = "source",
+  [LUA_DEBUG_SHORT_SOURCE] = "short_src",
+  [LUA_DEBUG_LINE_DEFINED] = "linedefined",
+  [LUA_DEBUG_LAST_LINE_DEFINED] = "lastlinedefined",
+  [LUA_DEBUG_WHAT] = "what",
+  [LUA_DEBUG_CURRENT_LINE] = "currentline",
+  [LUA_DEBUG_UPVALUES] = "nups",
+  [LUA_DEBUG_PARAMETERS] = "nparams",
+  [LUA_DEBUG_VARARG] = "isvararg",
+  [LUA_DEBUG_NAME] = "name",
+  [LUA_DEBUG_NAME_WHAT] = "namewhat",
+  [LUA_DEBUG_FIRST_TRANSFER] = "ftransfer",
+  [LUA_DEBUG_TRANSFER_COUNT] = "ntransfer",
+  [LUA_DEBUG_TAIL_CALL] = "istailcall",
+  [LUA_DEBUG_EXTRA_ARGS] = "extraargs",
+  [LUA_DEBUG_ACTIVE_LINES] = "activelines",
+  [LUA_DEBUG_FUNCTION] = "func",
+  [LUA_DEBUG_HOOK_KEY] = HOOKKEY,
+  [LUA_DEBUG_HOOK_CALL + LUA_HOOKCALL] = "call",
+  [LUA_DEBUG_HOOK_CALL + LUA_HOOKRET] = "return",
+  [LUA_DEBUG_HOOK_CALL + LUA_HOOKLINE] = "line",
+  [LUA_DEBUG_HOOK_CALL + LUA_HOOKCOUNT] = "count",
+  [LUA_DEBUG_HOOK_CALL + LUA_HOOKTAILCALL] = "tail call"
+};
+
+l_sinline TString *debugname (lua_State *L, unsigned index) {
+  TString **root = &G(L)->debug_keys[index];
+  TString *name = __atomic_load_n(root, __ATOMIC_ACQUIRE);
+  /* C embedders can copy a hook or C function to another VM. */
+  if (l_unlikely(name == NULL)) {
+    luaS_anchorkey(L, root, debugnames[index]);
+    name = __atomic_load_n(root, __ATOMIC_ACQUIRE);
+  }
+  return name;
+}
 
 
 /*
@@ -113,38 +150,38 @@ static lua_State *getthread (lua_State *L, int *arg) {
 
 
 /* The new table and any function or line-table results stay on the owned
-** stack while the record is filled. Interning a field name can allocate. */
-static void setinfostring (lua_State *L, Table *t, const char *name,
+** stack while the record is filled. The field keys are rooted in the VM. */
+static void setinfostring (lua_State *L, Table *t, unsigned name,
                            const char *bytes, size_t len) {
   LuaNativeRoot value;
   TValue key;
   if (bytes == NULL) return;
   luaR_pushroot(L, &value);
   setsvalue(L, &value.value, luaS_newlstr(L, bytes, len));
-  setsvalue(L, &key, luaS_new(L, name));
+  setsvalue(L, &key, debugname(L, name));
   luaH_set(L, t, &key, &value.value);
   luaR_poproot(L, &value);
 }
 
-static void setinfointeger (lua_State *L, Table *t, const char *name, int n) {
+static void setinfointeger (lua_State *L, Table *t, unsigned name, int n) {
   TValue key, value;
-  setsvalue(L, &key, luaS_new(L, name));
+  setsvalue(L, &key, debugname(L, name));
   setivalue(&value, n);
   luaH_set(L, t, &key, &value);
 }
 
-static void setinfoboolean (lua_State *L, Table *t, const char *name, int b) {
+static void setinfoboolean (lua_State *L, Table *t, unsigned name, int b) {
   TValue key, value;
-  setsvalue(L, &key, luaS_new(L, name));
+  setsvalue(L, &key, debugname(L, name));
   if (b) setbtvalue(&value);
   else setbfvalue(&value);
   luaH_set(L, t, &key, &value);
 }
 
-static void setinforesult (lua_State *L, Table *t, const char *name,
+static void setinforesult (lua_State *L, Table *t, unsigned name,
                            int offset) {
   TValue key;
-  setsvalue(L, &key, luaS_new(L, name));
+  setsvalue(L, &key, debugname(L, name));
   luaH_set(L, t, &key, s2v(L->top.p - offset));
 }
 
@@ -164,38 +201,82 @@ static void pushinfotable (lua_State *L, unsigned fields, const lua_Debug *ar) {
   sethvalue2s(L, L->top.p, t);
   api_incr_top(L);
   if (fields & INFO_SOURCE) {
-    setinfostring(L, t, "source", ar->source, ar->srclen);
-    setinfostring(L, t, "short_src", ar->short_src, strlen(ar->short_src));
-    setinfointeger(L, t, "linedefined", ar->linedefined);
-    setinfointeger(L, t, "lastlinedefined", ar->lastlinedefined);
-    setinfostring(L, t, "what", ar->what, strlen(ar->what));
+    setinfostring(L, t, LUA_DEBUG_SOURCE, ar->source, ar->srclen);
+    setinfostring(L, t, LUA_DEBUG_SHORT_SOURCE, ar->short_src,
+                  strlen(ar->short_src));
+    setinfointeger(L, t, LUA_DEBUG_LINE_DEFINED, ar->linedefined);
+    setinfointeger(L, t, LUA_DEBUG_LAST_LINE_DEFINED, ar->lastlinedefined);
+    setinfostring(L, t, LUA_DEBUG_WHAT, ar->what, strlen(ar->what));
   }
   if (fields & INFO_LINE)
-    setinfointeger(L, t, "currentline", ar->currentline);
+    setinfointeger(L, t, LUA_DEBUG_CURRENT_LINE, ar->currentline);
   if (fields & INFO_UPVALUES) {
-    setinfointeger(L, t, "nups", ar->nups);
-    setinfointeger(L, t, "nparams", ar->nparams);
-    setinfoboolean(L, t, "isvararg", ar->isvararg);
+    setinfointeger(L, t, LUA_DEBUG_UPVALUES, ar->nups);
+    setinfointeger(L, t, LUA_DEBUG_PARAMETERS, ar->nparams);
+    setinfoboolean(L, t, LUA_DEBUG_VARARG, ar->isvararg);
   }
   if (fields & INFO_NAME) {
     if (ar->name != NULL)
-      setinfostring(L, t, "name", ar->name, strlen(ar->name));
-    setinfostring(L, t, "namewhat", ar->namewhat, strlen(ar->namewhat));
+      setinfostring(L, t, LUA_DEBUG_NAME, ar->name, strlen(ar->name));
+    setinfostring(L, t, LUA_DEBUG_NAME_WHAT, ar->namewhat, strlen(ar->namewhat));
   }
   if (fields & INFO_TRANSFER) {
-    setinfointeger(L, t, "ftransfer", ar->ftransfer);
-    setinfointeger(L, t, "ntransfer", ar->ntransfer);
+    setinfointeger(L, t, LUA_DEBUG_FIRST_TRANSFER, ar->ftransfer);
+    setinfointeger(L, t, LUA_DEBUG_TRANSFER_COUNT, ar->ntransfer);
   }
   if (fields & INFO_TAIL) {
-    setinfoboolean(L, t, "istailcall", ar->istailcall);
-    setinfointeger(L, t, "extraargs", ar->extraargs);
+    setinfoboolean(L, t, LUA_DEBUG_TAIL_CALL, ar->istailcall);
+    setinfointeger(L, t, LUA_DEBUG_EXTRA_ARGS, ar->extraargs);
   }
   /* The debug API returned the function (if any) before the line table. */
-  if (lines) setinforesult(L, t, "activelines", 2);
-  if (fields & INFO_FUNCTION) setinforesult(L, t, "func", 2 + lines);
+  if (lines) setinforesult(L, t, LUA_DEBUG_ACTIVE_LINES, 2);
+  if (fields & INFO_FUNCTION) setinforesult(L, t, LUA_DEBUG_FUNCTION, 2 + lines);
   sethvalue2s(L, L->top.p - extra - 1, t);
   L->top.p -= extra;
   luaC_checkGC(L);
+}
+
+
+/* A same-thread inspection can remain in the VM's stack ownership. Keep the
+** actual C frame visible for level zero, caller lookup, allocation and unwind. */
+int luaB_trygetinfo (lua_State *L, StkId func, unsigned status) {
+  CallInfo *next = L->ci->next;
+  StkId argument = func + 1;
+  const TValue *target;
+  CallInfo *ci = NULL;
+  lua_Debug ar;
+  unsigned fields;
+  const char *options = "flnSrtu";
+  if (next == NULL || L->stack_last.p - L->top.p <= LUA_MINSTACK ||
+      L->resume_with_parent || luaW_ownsheap(L) ||
+      (L->allowhook && (gethookmask(L) & LUA_MASKCALL)))
+    return 0;
+  if (argument == L->top.p) return 0;
+  if (ttisthread(s2v(argument))) {
+    if (thvalue(s2v(argument)) != L || ++argument == L->top.p) return 0;
+  }
+  target = s2v(argument);
+  if (!ttisfunction(target) && !ttisinteger(target)) return 0;
+  if (argument + 1 < L->top.p && !ttisnil(s2v(argument + 1))) {
+    const TValue *option = s2v(argument + 1);
+    if (!ttisstring(option)) return 0;
+    options = getstr(tsvalue(option));
+  }
+  fields = luaG_infofields(options);
+  if (fields & INFO_INVALID) return 0;
+  luaD_initframe(L, next, func, status | CIST_C, L->top.p + LUA_MINSTACK);
+  if (ttisinteger(target)) {
+    ci = luaG_getstack(L, cast_int(ivalue(target)));
+    if (ci == NULL) {
+      setnilvalue2s(L->top.p);
+      api_incr_top(L);
+      return 1;
+    }
+    target = NULL;
+  }
+  luaG_info(L, fields, &ar, ci, target);
+  pushinfotable(L, fields, &ar);
+  return 1;
 }
 
 
@@ -204,7 +285,7 @@ static void pushinfotable (lua_State *L, unsigned fields, const lua_Debug *ar) {
 ** stack. When inspecting another thread, use the API to move values
 ** between the stacks and acquire them separately.
 */
-static int db_getinfo (lua_State *L) {
+int luaB_getinfo (lua_State *L) {
   lua_Debug ar;
   CallInfo *ci = NULL;
   const TValue *func = NULL;
@@ -377,29 +458,24 @@ static int db_upvaluejoin (lua_State *L) {
 ** Call hook function registered at hook table for the current
 ** thread (if there is one)
 */
-void luaB_debughook (lua_State *L, lua_Debug *ar) {
-  static const char *const hooknames[] =
-    {"call", "return", "line", "count", "tail call"};
+void luaB_runhook (lua_State *L, lua_Debug *ar) {
   LuaNativeRoot registry;
   TValue key;
   const TValue *hooks;
   lu_byte tag;
-  lua_lock(L);
   luaR_pushroot(L, &registry);
   luaA_getregistry(L, &registry);
-  luaA_pushfield(L, &registry.value, HOOKKEY);
+  luaC_tracevalue(L, &registry.value);
+  luaA_pushstringfield(L, &registry.value, debugname(L, LUA_DEBUG_HOOK_KEY));
   luaR_poproot(L, &registry);
   hooks = s2v(L->top.p - 1);
   api_check(L, ttistable(hooks), "table expected");
   setthvalue(L, &key, L);
   tag = luaH_get(L, hvalue(hooks), &key, s2v(L->top.p));
   if (novariant(tag) == LUA_TFUNCTION) {
-    TString *name;
     api_incr_top(L);
-    name = luaS_new(L, hooknames[(int)ar->event]);
-    setsvalue2s(L, L->top.p, name);
+    setsvalue2s(L, L->top.p, debugname(L, LUA_DEBUG_HOOK_CALL + ar->event));
     api_incr_top(L);
-    luaC_checkGC(L);
     if (ar->currentline >= 0) {
       setivalue(s2v(L->top.p), ar->currentline);
     }
@@ -407,9 +483,13 @@ void luaB_debughook (lua_State *L, lua_Debug *ar) {
     api_incr_top(L);
     luaD_callnoyield(L, L->top.p - 3, 0);
   }
-  lua_unlock(L);
 }
 
+void luaB_debughook (lua_State *L, lua_Debug *ar) {
+  lua_lock(L);
+  luaB_runhook(L, ar);
+  lua_unlock(L);
+}
 
 /*
 ** Convert a string mask (for 'sethook') into a bit mask
@@ -525,7 +605,7 @@ static const luaL_Reg dblib[] = {
   {"debug", db_debug},
   {"getuservalue", db_getuservalue},
   {"gethook", db_gethook},
-  {"getinfo", db_getinfo},
+  {"getinfo", luaB_getinfo},
   {"getlocal", db_getlocal},
   {"getregistry", db_getregistry},
   {"getmetatable", db_getmetatable},
@@ -543,6 +623,11 @@ static const luaL_Reg dblib[] = {
 
 
 LUAMOD_API int luaopen_debug (lua_State *L) {
+  unsigned i;
+  lua_lock(L);
+  for (i = 0; i < LUA_DEBUG_KEYS; i++)
+    luaS_anchorkey(L, &G(L)->debug_keys[i], debugnames[i]);
+  lua_unlock(L);
   luaL_newlib(L, dblib);
   return 1;
 }

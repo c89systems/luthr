@@ -22,6 +22,9 @@ LUAI_FUNC int luaB_rawequal (lua_State *L);
 LUAI_FUNC int luaB_tonumber (lua_State *L);
 LUAI_FUNC int luaB_next (lua_State *L);
 LUAI_FUNC void luaB_debughook (lua_State *L, lua_Debug *ar);
+LUAI_FUNC void luaB_runhook (lua_State *L, lua_Debug *ar);
+LUAI_FUNC int luaB_getinfo (lua_State *L);
+LUAI_FUNC int luaB_trygetinfo (lua_State *L, StkId func, unsigned status);
 
 /* The fixed-arity numeric functions share one implementation between their
 ** C entries and the VM. The expression column is used by the math library. */

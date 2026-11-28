@@ -57,6 +57,11 @@ do
   assert(foreign.activelines[2] and foreign.activelines[3])
   assert(debug.getinfo(target,'f').func==target)
   assert(debug.getinfo(math.sin,'LS').activelines==nil)
+  local current = coroutine.running()
+  assert(debug.getinfo(current,0,'f').func==debug.getinfo)
+  assert(debug.getinfo(current,0,nil).what=='C')
+  assert(debug.getinfo('0','f').func==debug.getinfo)
+  assert(debug.getinfo(0.0,'f').func==debug.getinfo)
   assert(next(debug.getinfo(target,''))==nil)
   assert(debug.getinfo(99999,'?')==nil)
   assert(debug.getinfo(-1)==nil)
@@ -65,6 +70,26 @@ do
   assert(not pcall(debug.getinfo,thread,1,'f?'))
   local resumed, result=coroutine.resume(thread)
   assert(resumed and result==42)
+end
+
+do
+  local marker = {}
+  local function target() return 42 end
+  local function native_error()
+    -- Enter a native library on the hook stack before raising an error.
+    assert(type(debug.getregistry())=='table')
+    error(marker,0)
+  end
+  debug.sethook(function(event)
+    if event=='call' and debug.getinfo(2,'f').func==target then
+      native_error()
+    end
+  end,'c')
+  local ok, raised = pcall(target)
+  debug.sethook()
+  assert(not ok and raised==marker)
+  collectgarbage('collect')
+  assert(target()==42 and debug.getinfo(target,'f').func==target)
 end
 
 do

@@ -553,13 +553,14 @@ void luaD_hook (lua_State *L, int event, int line,
                               int ftransfer, int ntransfer) {
   lua_Hook hook = gethook(L);
   if (hook && L->allowhook) {  /* make sure there is a hook */
-    int foreign = hook != luaB_debughook && !luaQ_ismanagedhook(L, hook);
+    int luahook = hook == luaB_debughook;
+    int owned = luahook && !luaW_ownsheap(L);
     LuaCallScope call;
     CallInfo *ci = L->ci;
     ptrdiff_t top = savestack(L, L->top.p);  /* preserve original 'top' */
     ptrdiff_t ci_top = savestack(L, ci->top.p);  /* idem for 'ci->top' */
     lua_Debug ar;
-    luaQ_begincall(L, !foreign, &call);
+    if (!owned) luaQ_begincall(L, luahook || luaQ_ismanagedhook(L, hook), &call);
     ar.event = event;
     ar.currentline = line;
     ar.i_ci = ci;
@@ -572,9 +573,12 @@ void luaD_hook (lua_State *L, int event, int line,
       ci->top.p = L->top.p + LUA_MINSTACK;
     L->allowhook = 0;  /* cannot call hooks inside a hook */
     ci->callstatus |= CIST_HOOKED;
-    luaQ_entercall(L, &call);
-    (*hook)(L, &ar);
-    luaQ_leavecall(L, &call);
+    if (owned) luaB_runhook(L, &ar);
+    else {
+      luaQ_entercall(L, &call);
+      (*hook)(L, &ar);
+      luaQ_leavecall(L, &call);
+    }
     lua_assert(!L->allowhook);
     L->allowhook = 1;
     ci->top.p = restorestack(L, ci_top);
@@ -820,14 +824,18 @@ int luaD_precallC (lua_State *L, StkId func,
   CallInfo *ci;
   int n;
 #if !defined(HARDSTACKTESTS)
-  NativeStackContext *context = managed ? NULL : luaW_trynativeframe(L, func, status);
-  if (context != NULL) {
-    n = (*f)(L);
-    luaW_finishnativeframe(L, context);
+  if (f == luaB_getinfo && luaB_trygetinfo(L, func, status)) n = 1;
+  else {
+    NativeStackContext *context = managed ? NULL : luaW_trynativeframe(L, func, status);
+    if (context != NULL) {
+      n = (*f)(L);
+      luaW_finishnativeframe(L, context);
+    }
+    else n = callCwithscope(L, func, status, f, managed);
   }
-  else
+#else
+  n = callCwithscope(L, func, status, f, managed);
 #endif
-    n = callCwithscope(L, func, status, f, managed);
   api_checknelems(L, n);
   ci = L->ci;
   /* The frame can have moved or acquired cleanup during the call. Use the
