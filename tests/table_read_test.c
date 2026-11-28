@@ -1294,6 +1294,12 @@ static int fail_resize(lua_State *state) {
   luaX_unlockstate(state);
   return 0;
 }
+static int new_hash(lua_State *state) {
+  lua_createtable(state, 0, (int)lua_tointeger(state, 1));
+  lua_pushinteger(state, 43);
+  lua_setfield(state, -2, "answer");
+  return 1;
+}
 static void failure(lua_State *state, int hash, int inline_storage) {
   struct allocator allocator;
   allocator.original = lua_getallocf(state, &allocator.context);
@@ -1316,6 +1322,22 @@ static void failure(lua_State *state, int hash, int inline_storage) {
   lua_getfield(state, 1, "answer");
   require(lua_tointeger(state, -1) == 84);
   lua_gc(state, LUA_GCCOLLECT);
+  if (hash && !inline_storage) {
+    lua_pushcfunction(state, new_hash);
+    lua_pushinteger(state, 16384);
+    allocator.deny = 1;
+    require(lua_pcall(state, 1, 1, 0) == LUA_ERRMEM);
+    allocator.deny = 0;
+    lua_pop(state, 1);
+    lua_gc(state, LUA_GCCOLLECT);
+    lua_pushcfunction(state, new_hash);
+    lua_pushinteger(state, 9);
+    require(lua_pcall(state, 1, 1, 0) == LUA_OK);
+    lua_gc(state, LUA_GCCOLLECT);
+    require(lua_getfield(state, -1, "answer") == LUA_TNUMBER);
+    require(lua_tointeger(state, -1) == 43);
+    lua_pop(state, 2);
+  }
   lua_setallocf(state, allocator.original, allocator.context);
 }
 

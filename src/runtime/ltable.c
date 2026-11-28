@@ -1128,6 +1128,29 @@ Table *luaH_newrecord (lua_State *L, Table *keys, int tasklocal) {
   return t;
 }
 
+/* A new hash-only table has no old edges or readers to retire. Root the
+** receiver while allocating its empty image so a failed allocation can
+** unwind through the normal protected call. */
+static void __attribute__((noinline)) initfreshhash (lua_State *L, Table *t,
+                                                    unsigned hsize) {
+  LuaNativeRoot root;
+  ptrdiff_t top = savestack(L, L->top.p);
+  int lsize = luaO_ceillog2(hsize);
+  size_t bytes;
+  if (lsize > MAXHBITS || (1u << lsize) > MAXHSIZE)
+    luaG_runerror(L, "table overflow");
+  bytes = nodebytes(lsize);
+  luaR_pushroot(L, &root);
+  sethvalue(L, &root.value, t);
+  luaC_tracepointer(L, obj2gco(t));
+  if (isLua(L->ci) && L->top.p < L->ci->top.p) L->top.p = L->ci->top.p;
+  if (luaC_hastaskheap(L)) luaC_taskbacking(L, t, bytes);
+  if (!setnodevector(L, t, lsize)) luaM_error(L);
+  if (luaC_tasktable(t)) luaC_taskresize(L, t, cast(l_mem, bytes));
+  L->top.p = restorestack(L, top);
+  luaR_poproot(L, &root);
+}
+
 l_sinline Table *createtable (lua_State *L, unsigned asize, unsigned hsize,
                                int tasklocal, int cached) {
   const size_t limit = LUA_TABLE_INLINE_LIMIT - sizeof(Table);
@@ -1161,10 +1184,11 @@ l_sinline Table *createtable (lua_State *L, unsigned asize, unsigned hsize,
   }
   else {
     t->node = initnodes(NULL, -1, 0);
-    if (asize != 0 || hsize != 0) {
+    if (asize != 0) {
       /* luaH_resize roots its receiver across larger backing allocations. */
       luaH_resize(L, t, asize, hsize);
     }
+    else if (hsize != 0) initfreshhash(L, t, hsize);
   }
   return t;
 }
