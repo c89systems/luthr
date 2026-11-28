@@ -138,7 +138,7 @@ l_sinline const TValue *index2read (lua_State *L, int idx, TValue *snapshot,
                                    uintptr_t owner) {
   if (!ispseudo(idx)) {
     const TValue *source = index2addr(L, idx);
-    if (owner != LUA_VALUE_BOUNDED && isLua(L->ci))
+    if (!luaX_boundedowner(owner) && isLua(L->ci))
       luaC_tracevalue(L, source);
     return source;
   }
@@ -363,8 +363,8 @@ LUA_API void lua_settop (lua_State *L, int idx) {
   if (idx >= 0) {
     api_check(L, idx <= ci->top.p - (func + 1), "new top too large");
     diff = ((func + 1) + idx) - L->top.p;
-    if (owner == LUA_VALUE_BOUNDED && diff > LUA_MINSTACK) {
-      luaX_leavebounded(L);
+    if (luaX_boundedowner(owner) && diff > LUA_MINSTACK) {
+      luaX_leaveboundedvalue(L, owner);
       bounded = 0;
       goto retry;
     }
@@ -430,8 +430,8 @@ LUA_API void lua_rotate (lua_State *L, int idx, int n) {
   uintptr_t owner = luaX_enterbounded(L, 1);
   t = L->top.p - 1;  /* end of stack segment being rotated */
   p = index2stack(L, idx);  /* start of segment */
-  if (owner == LUA_VALUE_BOUNDED && t - p >= LUA_MINSTACK) {
-    luaX_leavebounded(L);
+  if (luaX_boundedowner(owner) && t - p >= LUA_MINSTACK) {
+    luaX_leaveboundedvalue(L, owner);
     owner = luaX_valueenter(L, 1);
     t = L->top.p - 1;
     p = index2stack(L, idx);
@@ -477,7 +477,7 @@ LUA_API void lua_copy (lua_State *L, int fromidx, int toidx) {
   if (fromidx != toidx) {
     /* A hook can read shadow registers of a Lua frame. Keep the
     ** conservative source barrier when copying one into a live slot. */
-    if (owner != LUA_VALUE_BOUNDED && isLua(L->ci)) luaC_tracevalue(L, from);
+    if (!luaX_boundedowner(owner) && isLua(L->ci)) luaC_tracevalue(L, from);
     setobj(L, to, from);
   }
   luaX_leaveboundedvalue(L, owner);
@@ -969,7 +969,7 @@ LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
                      __ATOMIC_RELAXED);
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
     /* A competing full owner fences after publishing its gate reservation. */
-    if (luaX_boundedready(L, 0)) {
+    if (luaX_boundedstackready(L, 0)) {
       setivalue(s2v(L->top.p), n);
       api_incr_top(L);
       luaX_leavebounded(L);

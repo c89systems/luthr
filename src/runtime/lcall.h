@@ -32,7 +32,7 @@ l_sinline void luaQ_begincall (lua_State *L, int managed, LuaCallScope *scope) {
 l_sinline void luaQ_entercall (lua_State *L, LuaCallScope *scope) {
   NativeStackContext *context = scope->context;
   if (!scope->managed) {
-    scope->world = luaW_detach(L);
+    scope->world = luaW_detachnative(L);
     return;
   }
 #if defined(LUAI_ASSERT)

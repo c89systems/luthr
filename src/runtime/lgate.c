@@ -86,6 +86,8 @@ void luaX_initgate (LuaStackGate *gate, int dormant) {
   gate->head = NULL;
   gate->tail = &gate->head;
   gate->ready = 1;
+  gate->native_carrier = NULL;
+  gate->native_busy = 0;
   gate->values = 0;
   for (i = 0; i < LUA_NATIVE_ARGUMENTS; i++) gate->arguments[i] = 0;
 }
@@ -94,10 +96,34 @@ void luaX_destroygate (LuaStackGate *gate) {
   if (!gate->ready)
     return;
   lua_assert((gate->word == 0 || gate->word == LUA_GATE_DORMANT) &&
-             gate->head == NULL && gate->values == 0 &&
+             gate->head == NULL && gate->values == 0 && gate->native_busy == 0 &&
+             gate->native_carrier == NULL &&
              gate->arguments[0] == 0 && gate->arguments[1] == 0 &&
              gate->tail == &gate->head);
   gate->ready = 0;
+}
+
+void __attribute__((cold)) luaX_fencenativevalues (void) {
+  int saved = errno;
+  while (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0) {
+    if (errno != EINTR) luaX_checksync(errno);
+  }
+  errno = saved;
+}
+
+void __attribute__((cold)) luaX_waitnativevalues (LuaStackGate *gate) {
+  while (__atomic_load_n(&gate->native_busy, __ATOMIC_ACQUIRE))
+    sched_yield();
+}
+
+/* The full gate joins ordinary readers before admitting this native
+** activation. Only the publishing carrier can retire it, after completing
+** its last API operation and before releasing the full gate. */
+l_sinline void prefernativecarrier (lua_State *L) {
+  if (append_supported &&
+      __atomic_load_n(&L->stack_gate.native_carrier, __ATOMIC_RELAXED) == NULL)
+    __atomic_store_n(&L->stack_gate.native_carrier, __builtin_thread_pointer(),
+                     __ATOMIC_RELEASE);
 }
 
 void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
@@ -111,14 +137,7 @@ void __attribute__((cold)) luaX_waitvalues (LuaStackGate *gate) {
       /* Our gate or collector request is already published. The lease holder
       ** either sees that request or publishes its active append before we
       ** examine it. An idle native call can remain blocked indefinitely. */
-      {
-        int saved = errno;
-        while (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED,
-                       0, 0) != 0) {
-          if (errno != EINTR) luaX_checksync(errno);
-        }
-        errno = saved;
-      }
+      luaX_fencenativevalues();
       while ((values = __atomic_load_n(&gate->values, __ATOMIC_ACQUIRE)) != 0 &&
              (values & (LUA_GATE_APPEND | LUA_GATE_VALUES)) != LUA_GATE_APPEND)
         sched_yield();
@@ -337,6 +356,11 @@ LuaWorldScope luaW_detach (lua_State *L) {
   return scope;
 }
 
+LuaWorldScope luaW_detachnative (lua_State *L) {
+  if (L->native_depth == 0 && !isLua(L->ci)) prefernativecarrier(L);
+  return luaW_detach(L);
+}
+
 l_sinline int reclaimstack (lua_State *L, NativeStackContext *context,
                              uintptr_t reservation) {
   LuaExecution *execution = context->execution;
@@ -379,7 +403,7 @@ static void attach (lua_State *L, LuaWorldScope scope,
   if (scope.collection != 0 || scope.heap != 0 || luaW_ownsheap(L))
     luaW_restore(L, scope, L->native_depth);
   lua_assert(L->native_depth != 0);
-  L->native_depth--;
+  if (--L->native_depth == 0) luaX_endnativevalues(&L->stack_gate);
   context->api_region = scope.api_region;
 }
 
@@ -490,7 +514,7 @@ l_sinline void resumehostcall (lua_State *L, NativeStackContext *context) {
 /* A reusable frame with no inherited heap or API scope can be published
 ** before dispatch. A scheduled call must already have a pinned permit. */
 NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
-                                         unsigned status) {
+                                         unsigned status, int standalone) {
   NativeStackContext *context = luaX_boundcontext(L);
   LuaExecution *execution = context->execution;
   LuaScheduledTask *task = NULL;
@@ -523,6 +547,7 @@ NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
     luaC_notifybarriers(G(L));
   luaD_initframe(L, ci, func, status | CIST_C, L->top.p + LUA_MINSTACK);
   luaW_publishnativearguments(L, func);
+  if (standalone) prefernativecarrier(L);
   L->native_depth = 1;
   if (task != NULL) {
     if (L->allocation_debt.pending != 0) luaM_withdrawdebt(L);
@@ -546,6 +571,7 @@ void luaW_finishnativeframe (lua_State *L, NativeStackContext *context) {
   if (__atomic_load_n(&G(L)->world.heap_owner.token, __ATOMIC_ACQUIRE) == context)
     luaW_restore(L, (LuaWorldScope){0}, L->native_depth);
   lua_assert(context->api_region == NULL && L->native_depth == 1);
+  luaX_endnativevalues(&L->stack_gate);
   L->native_depth = 0;
   if (execution != NULL) {
     LuaScheduledTask *task = execution->context;
@@ -789,8 +815,8 @@ void luaX_valueleaveslow (lua_State *L, uintptr_t owner) {
 }
 
 carrierentry int luaX_valuecall (lua_State *L, uintptr_t owner) {
-  if (owner == LUA_VALUE_BOUNDED) {
-    luaX_leavebounded(L);
+  if (luaX_boundedowner(owner)) {
+    luaX_leaveboundedvalue(L, owner);
     return 0;
   }
   if (owner & LUA_VALUE_STACK) {

@@ -40,8 +40,10 @@ typedef struct LuaStackGate {
   struct LuaGateWaiter *head;
   struct LuaGateWaiter **tail;
   int ready;
+  unsigned native_busy;
   uint64_t values;  /* bounded API scope; a shared read also carries its epoch */
   uintptr_t arguments[LUA_NATIVE_ARGUMENTS];  /* detached argument observations */
+  void *native_carrier;  /* published and retired by this native activation */
 } LuaStackGate;
 
 l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
@@ -52,8 +54,18 @@ l_sinline struct NativeStackContext *luaX_gateowner (uintptr_t word) {
 LUAI_FUNC void luaX_initgate (LuaStackGate *gate, int dormant);
 LUAI_FUNC void luaX_destroygate (LuaStackGate *gate);
 LUAI_FUNC void luaX_waitvalues (LuaStackGate *gate);
+LUAI_FUNC void luaX_fencenativevalues (void);
+LUAI_FUNC void luaX_waitnativevalues (LuaStackGate *gate);
 LUAI_FUNC void luaX_clearargumenttail (LuaStackGate *gate);
 LUAI_FUNC void luaX_initappend (void);
+
+l_sinline void luaX_endnativevalues (LuaStackGate *gate) {
+  if (__atomic_load_n(&gate->native_carrier, __ATOMIC_RELAXED) ==
+      __builtin_thread_pointer()) {
+    lua_assert(!__atomic_load_n(&gate->native_busy, __ATOMIC_RELAXED));
+    __atomic_store_n(&gate->native_carrier, NULL, __ATOMIC_RELEASE);
+  }
+}
 
 /* An idle append lease identifies the pinned carrier until it is consumed. */
 l_sinline uint64_t luaX_appendlease (void) {
@@ -71,9 +83,23 @@ l_sinline void luaX_endappend (LuaStackGate *gate) {
 
 /* A full claim is published before this join. A racing bounded claim must
 ** observe the full claim or finish before the full owner reads the stack. */
-l_sinline void luaX_joinvalues (LuaStackGate *gate) {
+l_sinline int luaX_joinvaluesfenced (LuaStackGate *gate, int fenced) {
+  void *carrier = __atomic_load_n(&gate->native_carrier, __ATOMIC_ACQUIRE);
+  if (l_unlikely(carrier != NULL && carrier != __builtin_thread_pointer())) {
+    if (!fenced) {
+      luaX_fencenativevalues();
+      fenced = 1;
+    }
+    if (__atomic_load_n(&gate->native_busy, __ATOMIC_ACQUIRE))
+      luaX_waitnativevalues(gate);
+  }
   if (l_unlikely(__atomic_load_n(&gate->values, __ATOMIC_SEQ_CST)))
     luaX_waitvalues(gate);
+  return fenced;
+}
+
+l_sinline void luaX_joinvalues (LuaStackGate *gate) {
+  (void)luaX_joinvaluesfenced(gate, 0);
 }
 
 LUAI_FUNC void luaX_lockstate (lua_State *L);

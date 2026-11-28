@@ -372,7 +372,10 @@ static int blocking_field_result(lua_State *L) {
         append_calls <= APPEND_BLOCK_AT + APPEND_RACE_ROUNDS) {
       lua_Integer first, second;
       meet_append_race();
-      lua_pushinteger(L, 7);
+      if (append_calls & 1)
+        lua_pushinteger(L, 7);
+      else
+        lua_pushnumber(L, 7.0);
       meet_append_race();
       require(lua_gettop(L) == 4);
       first = lua_tointeger(L, 3);
@@ -384,7 +387,18 @@ static int blocking_field_result(lua_State *L) {
   return 1;
 }
 
-static void check_native_append(lua_State *L) {
+static int repeat_native_appends(lua_State *L) {
+  lua_Integer sum = 0;
+  for (unsigned i = 0; i < 700; i++) {
+    blocking_field_result(L);
+    sum += lua_tointeger(L, -1);
+    lua_settop(L, 2);
+  }
+  lua_pushinteger(L, sum);
+  return 1;
+}
+
+static void check_native_append(lua_State *L, int standalone) {
   LuaSchedulerConfig config = {
       .slots = 1, .carriers = 2, .native_limit = 1, .callback_limit = 1};
   LuaScheduler scheduler = {0};
@@ -392,26 +406,34 @@ static void check_native_append(lua_State *L) {
   lua_State *child;
   const LClosure *closure;
   int status, results;
-  require(luaL_dostring(L, "return function(row) "
-                           "  local sum = 0; for i = 1, 700 do "
-                           "    sum = sum + row.amount "
-                           "  end; return sum "
-                           "end") == LUA_OK);
+  const char *program =
+      standalone ? "return function(probe) local sum=probe(1,2); return sum end"
+                 : "return function(row) "
+                   "  local sum = 0; for i = 1, 700 do "
+                   "    sum = sum + row.amount "
+                   "  end; return sum "
+                   "end";
+  require(luaL_dostring(L, program) == LUA_OK);
   closure = lua_topointer(L, 1);
   child = lua_newthread(L);
   lua_pushvalue(L, 1);
   lua_xmove(L, child, 1);
-  lua_newuserdatauv(child, 1, 0);
-  lua_newtable(child);
-  lua_pushcfunction(child, blocking_field_result);
-  lua_setfield(child, -2, "__index");
-  require(lua_setmetatable(child, -2));
+  if (standalone)
+    lua_pushcfunction(child, repeat_native_appends);
+  else {
+    lua_newuserdatauv(child, 1, 0);
+    lua_newtable(child);
+    lua_pushcfunction(child, blocking_field_result);
+    lua_setfield(child, -2, "__index");
+    require(lua_setmetatable(child, -2));
+  }
   require(pthread_barrier_init(&append_race, NULL, 2) == 0);
   require(luaSC_init(L, &scheduler, &config) == 0);
   require(luaSC_submit(&scheduler, &task, child, 1) == 0);
 
   wait_for_append_stage(1);
-  require(closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
+  if (!standalone)
+    require(closure->p->loops[0].entry > LUA_LOOP_UNAVAILABLE);
   require(lua_gettop(child) == 2 && lua_checkstack(child, 8192));
   lua_pushliteral(child, "foreign root");
   lua_gc(L, LUA_GCCOLLECT);
@@ -427,6 +449,8 @@ static void check_native_append(lua_State *L) {
   for (unsigned round = 0; round < APPEND_RACE_ROUNDS; round++) {
     meet_append_race();
     lua_pushinteger(child, 9);
+    if (round % 8 == 0)
+      lua_gc(L, LUA_GCCOLLECT);
     meet_append_race();
   }
 
@@ -828,7 +852,12 @@ int main(int argc, char **argv) {
              strcmp(argv[1], "native_append_generational") == 0) {
     lua_gc(L, strcmp(argv[1], "native_append_incremental") == 0 ? LUA_GCINC
                                                                 : LUA_GCGEN);
-    check_native_append(L);
+    check_native_append(L, 0);
+  } else if (strcmp(argv[1], "native_owner_incremental") == 0 ||
+             strcmp(argv[1], "native_owner_generational") == 0) {
+    lua_gc(L, strcmp(argv[1], "native_owner_incremental") == 0 ? LUA_GCINC
+                                                               : LUA_GCGEN);
+    check_native_append(L, 1);
   } else if (strcmp(argv[1], "native_callbacks") == 0) {
     check_native_callbacks(L);
   } else if (strcmp(argv[1], "native_capture_race") == 0) {

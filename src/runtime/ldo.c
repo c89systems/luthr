@@ -199,6 +199,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
         lua_lock(L);
         lua_assert(L->native_depth == 2);
         luaR_poproot(L, &error);
+        luaX_endnativevalues(&L->stack_gate);
         L->native_depth -= 2;  /* detach pin and error-cleanup pin */
         lua_unlock(L);  /* no more source-state accesses after this leave */
         luaW_attach(mainth, depth);
@@ -215,6 +216,7 @@ l_noret luaD_throw (lua_State *L, TStatus errcode) {
       luaA_end(L, &access);
     }
     lua_assert(L->native_depth == 1);
+    luaX_endnativevalues(&L->stack_gate);
     L->native_depth--;  /* all abandoned runtime scopes retire before panic */
     if (panicf != NULL) {
       lua_unlock(L);
@@ -826,7 +828,8 @@ int luaD_precallC (lua_State *L, StkId func,
 #if !defined(HARDSTACKTESTS)
   if (f == luaB_getinfo && luaB_trygetinfo(L, func, status)) n = 1;
   else {
-    NativeStackContext *context = managed ? NULL : luaW_trynativeframe(L, func, status);
+    NativeStackContext *context = managed ? NULL
+      : luaW_trynativeframe(L, func, status, 1);
     if (context != NULL) {
       n = (*f)(L);
       luaW_finishnativeframe(L, context);
@@ -1192,7 +1195,7 @@ static __attribute__((noinline)) NativeStackContext *startloopnative (
   StkId top = L->top.p;
   NativeStackContext *context;
   L->top.p = argtop;
-  context = luaW_trynativeframe(L, func, status);
+  context = luaW_trynativeframe(L, func, status, 0);
   if (context == NULL) {
     L->top.p = top;
     L->nCcalls -= method;
@@ -1250,9 +1253,13 @@ l_sinline __attribute__((always_inline)) int callloopnative (
   }
   n = (*function)(L);
   if (method) luaX_endappend(&L->stack_gate);
-  if (luaX_trysharedaccess(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
-                               LUA_WORLD_ARM_TRACE)) {
+  /* The compiled group keeps its original storage-ticket protocol. A
+  ** standalone reentry cannot publish a second carrier inside this group. */
+  if (luaX_trysharedscope(L, LUA_MARK_ACTIVE | LUA_MARK_ARMING |
+                              LUA_WORLD_ARM_TRACE, 0)) {
     CallInfo *call = L->ci;
+    lua_assert(__atomic_load_n(&L->stack_gate.native_carrier,
+                              __ATOMIC_RELAXED) == NULL);
     if (call->callstatus == (CIST_C | status) &&
         (status != 0 || n <= LUA_MINSTACK) &&
         !capturesfrom(L, call->func.p) && !gethookmask(L) && !caller->u.l.trap &&

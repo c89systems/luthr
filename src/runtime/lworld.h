@@ -130,6 +130,7 @@ LUAI_FUNC LuaWorldScope luaW_scope (lua_State *L);
 LUAI_FUNC LuaWorldScope luaW_suspend (lua_State *L);
 LUAI_FUNC void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native);
 LUAI_FUNC LuaWorldScope luaW_detach (lua_State *L);
+LUAI_FUNC LuaWorldScope luaW_detachnative (lua_State *L);
 LUAI_FUNC void luaW_attach (lua_State *L, LuaWorldScope scope);
 /* A returning C activation reattaches before ending native admission. */
 LUAI_FUNC void luaW_returnnative (lua_State *L, LuaWorldScope scope,

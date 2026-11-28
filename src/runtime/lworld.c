@@ -277,6 +277,7 @@ void luaW_activate (lua_State *L) {
 ** trace arming, only managed gates can owe heap publication. */
 l_sinline int rendezvousready (LuaWorld *world, int arming) {
   LuaParticipation *part;
+  int fenced = 0;
   unsigned active = arming ? LUA_GATE_MANAGED : LUA_GATE_ACTIVE;
   uint64_t epoch = arming ? luaW_armepoch(world) : 0;
   while ((part = world->rendezvous_cursor) != NULL) {
@@ -285,7 +286,7 @@ l_sinline int rendezvousready (LuaWorld *world, int arming) {
     /* A pre-arm owner settled its active debt when acknowledging, or
     ** sealed it in the withdrawn batch before releasing its admission. */
     if (arming) {
-      luaX_joinvalues(&part->thread->stack_gate);
+      fenced = luaX_joinvaluesfenced(&part->thread->stack_gate, fenced);
       luaM_publishwithdrawn(part->thread);
     }
     world->rendezvous_cursor = part->next;
@@ -494,11 +495,12 @@ void luaW_stop (lua_State *L) {
   __atomic_fetch_or(&world->control, LUA_WORLD_STOPPED, __ATOMIC_SEQ_CST);
   {
     LuaParticipation *participant;
+    int fenced = 0;
     unsigned active = 0;
     lua_assert(world->rendezvous_cursor == NULL);
     for (participant = world->participants; participant != NULL;
          participant = participant->next) {
-      luaX_joinvalues(&participant->thread->stack_gate);
+      fenced = luaX_joinvaluesfenced(&participant->thread->stack_gate, fenced);
       if (luaW_active(participant)) {
         if (world->rendezvous_cursor == NULL && participant != L->admission)
           world->rendezvous_cursor = participant;
@@ -753,6 +755,7 @@ void luaW_restore (lua_State *L, LuaWorldScope scope, unsigned native) {
   }
   else
     restoreheap(L, scope.heap + (scope.collection != 0));
+  if (native == 0) luaX_endnativevalues(&L->stack_gate);
   L->native_depth = native;
 }
 

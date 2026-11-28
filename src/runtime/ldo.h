@@ -127,7 +127,7 @@ LUAI_FUNC void luaD_calllightmethod (lua_State *L, StkId func,
                                     lua_CFunction method);
 #if !defined(HARDSTACKTESTS)
 LUAI_FUNC NativeStackContext *luaW_trynativeframe (lua_State *L, StkId func,
-                                                   unsigned status);
+                                        unsigned status, int standalone);
 LUAI_FUNC void luaW_finishnativeframe (lua_State *L, NativeStackContext *context);
 LUAI_FUNC void luaW_publishloopframe (lua_State *L, StkId func,
                                      unsigned status, int method);

@@ -40,7 +40,14 @@ l_sinline void luaX_releasegate (lua_State *L, uintptr_t reservation) {
 }
 
 /* A stack-only token carries the obligations of this admission. */
-enum { LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2, LUA_VALUE_BOUNDED = 4 };
+enum {
+  LUA_VALUE_STACK = 1, LUA_VALUE_TRACING = 2, LUA_VALUE_BOUNDED = 4,
+  LUA_VALUE_NATIVE = 8
+};
+
+l_sinline int luaX_boundedowner (uintptr_t owner) {
+  return (owner & (LUA_VALUE_BOUNDED | LUA_VALUE_NATIVE)) != 0;
+}
 
 LUAI_FUNC uintptr_t luaX_valueenterslow (lua_State *L, int reserved);
 LUAI_FUNC void luaX_valueleaveslow (lua_State *L, uintptr_t owner);
@@ -130,7 +137,7 @@ l_sinline void luaX_leavebounded (lua_State *L) {
 /* A full gate joins this claim before touching the stack. A C frame
 ** whose roots have been published can rearrange them and read strong
 ** fields. Lua register shadows can still require a read barrier. */
-l_sinline int luaX_boundedready (lua_State *L, unsigned requests) {
+l_sinline int luaX_boundedstackready (lua_State *L, unsigned requests) {
   if (l_likely((__atomic_load_n(&L->stack_gate.word, __ATOMIC_SEQ_CST) &
                 ~LUA_GATE_OFFER_MASK) == 0)) {
     uint64_t control = luaW_control(&G(L)->world);
@@ -144,6 +151,16 @@ l_sinline int luaX_boundedready (lua_State *L, unsigned requests) {
   return 0;
 }
 
+l_sinline int luaX_boundedready (lua_State *L, unsigned requests) {
+  void *carrier;
+  if (!luaX_boundedstackready(L, requests)) return 0;
+  /* If the ordinary claim preceded publication the full installer must
+  ** join it. A claim observing the subsequent gate release sees the
+  ** active carrier preference and yields to it. */
+  carrier = __atomic_load_n(&L->stack_gate.native_carrier, __ATOMIC_ACQUIRE);
+  return carrier == NULL || carrier == __builtin_thread_pointer();
+}
+
 /* Upgrade a stack-only claim before loading table storage. A withdrawing
 ** layout either joins the announced epoch or precedes the recheck. */
 l_sinline int luaX_retainstorage (lua_State *L, unsigned requests) {
@@ -154,7 +171,9 @@ l_sinline int luaX_retainstorage (lua_State *L, unsigned requests) {
   if (control & requests) return 0;
   __atomic_store_n(&gate->values, luaW_epoch(control) | LUA_GATE_SHARED_READ,
                    __ATOMIC_SEQ_CST);
-  if (luaX_boundedready(L, requests)) return 1;
+  /* The existing values ticket has already validated the carrier. A full
+  ** gate must join that ticket before installing another activation. */
+  if (luaX_boundedstackready(L, requests)) return 1;
   __atomic_store_n(&gate->values, LUA_GATE_VALUES, __ATOMIC_RELEASE);
   return 0;
 }
@@ -196,7 +215,8 @@ l_sinline void luaX_leavesharedread (lua_State *L) {
 /* Publish the epoch with the stack claim, then acquire the current control
 ** word before loading a layout. A reclaimer either sees the earlier ticket
 ** or its replacement preceded the reader's final control-word load. */
-l_sinline int luaX_trysharedaccess (lua_State *L, unsigned requests) {
+l_sinline int luaX_trysharedscope (lua_State *L, unsigned requests,
+                                  int checkcarrier) {
   uint64_t control;
   if (__atomic_load_n(&L->stack_gate.word, __ATOMIC_RELAXED) &
       ~LUA_GATE_OFFER_MASK) return 0;
@@ -205,9 +225,14 @@ l_sinline int luaX_trysharedaccess (lua_State *L, unsigned requests) {
   if (control & requests) return 0;
   if (!luaX_claimvalues(&L->stack_gate,
                         luaW_epoch(control) | LUA_GATE_SHARED_READ)) return 0;
-  if (l_likely(luaX_boundedready(L, requests))) return 1;
+  if (l_likely(checkcarrier ? luaX_boundedready(L, requests)
+                           : luaX_boundedstackready(L, requests))) return 1;
   luaX_leavesharedread(L);
   return 0;
+}
+
+l_sinline int luaX_trysharedaccess (lua_State *L, unsigned requests) {
+  return luaX_trysharedscope(L, requests, 1);
 }
 
 l_sinline int luaX_trysharedread (lua_State *L) {
@@ -220,16 +245,28 @@ l_sinline int luaX_tryunmarked (lua_State *L) {
 
 /* Reading the frame and appending to it leave the observed slots intact. */
 l_sinline uintptr_t luaX_enterobservation (lua_State *L, int stackonly) {
-  if (!stackonly || l_unlikely(__atomic_load_n(&L->stack_gate.word,
+  LuaStackGate *gate = &L->stack_gate;
+  void *carrier;
+  if (!stackonly || l_unlikely(__atomic_load_n(&gate->word,
                            __ATOMIC_RELAXED) & ~LUA_GATE_OFFER_MASK))
     return luaX_valueenterslow(L, 0);
-  if (luaX_tryobserve(L, 0)) return LUA_VALUE_BOUNDED;
+  carrier = __atomic_load_n(&gate->native_carrier, __ATOMIC_RELAXED);
+  if (carrier == __builtin_thread_pointer()) {
+    /* The sole preferred carrier cannot nest a leaf operation. Foreign
+    ** borrowers close the full gate and fence before joining this marker. */
+    __atomic_store_n(&gate->native_busy, 1, __ATOMIC_RELEASE);
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    if (l_likely(luaX_boundedstackready(L, LUA_WORLD_ARM_TRACE)))
+      return LUA_VALUE_NATIVE;
+    __atomic_store_n(&gate->native_busy, 0, __ATOMIC_RELEASE);
+  }
+  else if (carrier == NULL && luaX_tryobserve(L, 0)) return LUA_VALUE_BOUNDED;
   return luaX_reservevalues(L);
 }
 
 l_sinline uintptr_t luaX_enterbounded (lua_State *L, int stackonly) {
   uintptr_t owner = luaX_enterobservation(L, stackonly);
-  if (owner == LUA_VALUE_BOUNDED) luaX_invalidatearguments(&L->stack_gate);
+  if (luaX_boundedowner(owner)) luaX_invalidatearguments(&L->stack_gate);
   return owner;
 }
 
@@ -239,7 +276,9 @@ l_sinline void luaX_valueleave (lua_State *L, uintptr_t owner) {
 }
 
 l_sinline void luaX_leaveboundedvalue (lua_State *L, uintptr_t owner) {
-  if (l_likely(owner == LUA_VALUE_BOUNDED)) luaX_leavebounded(L);
+  if (owner == LUA_VALUE_NATIVE)
+    __atomic_store_n(&L->stack_gate.native_busy, 0, __ATOMIC_RELEASE);
+  else if (l_likely(owner == LUA_VALUE_BOUNDED)) luaX_leavebounded(L);
   else if (owner != 0) luaX_releasevalues(L, owner);
 }
 
