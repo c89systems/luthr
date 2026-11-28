@@ -145,5 +145,9 @@ LUAI_FUNC lu_byte luaA_index (lua_State *L, Table *table, const TValue *key,
 /* The receiver, key and value are caller-rooted snapshots. */
 LUAI_FUNC int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
                           TValue *value, LuaNativeRoot *method);
+/* Keep an existing subtable or install the rooted candidate. A zero result
+** leaves a missing field with __newindex to the ordinary assignment path. */
+LUAI_FUNC int luaA_installsubtable (lua_State *L, const TValue *object,
+                                     TString *name, LuaNativeRoot *candidate);
 
 #endif

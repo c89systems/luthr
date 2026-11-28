@@ -42,10 +42,27 @@ struct fixture {
 static struct fixture *active_fixture;
 static lua_State *signal_state;
 static sem_t signal_seen;
+static pthread_barrier_t *first_hook_lookup;
 
 static void check(int status) {
   if (status != 0)
     abort();
+}
+
+static void rendezvous(pthread_barrier_t *barrier) {
+  int status = pthread_barrier_wait(barrier);
+  if (status != 0 && status != PTHREAD_BARRIER_SERIAL_THREAD)
+    abort();
+}
+
+int __real_lua_getfield(lua_State *state, int index, const char *key);
+int __wrap_lua_getfield(lua_State *state, int index, const char *key) {
+  int result = __real_lua_getfield(state, index, key);
+  /* Force both first registrations past the initial registry miss. */
+  if (first_hook_lookup != NULL && index == LUA_REGISTRYINDEX &&
+      result == LUA_TNIL && strcmp(key, "_HOOKKEY") == 0)
+    rendezvous(first_hook_lookup);
+  return result;
 }
 
 static void hook_a(lua_State *, lua_Debug *);
@@ -265,9 +282,7 @@ static void managed_poll(lua_State *state, void *user) {
       check(pthread_cond_wait(&fixture->changed, &fixture->mutex));
     check(pthread_mutex_unlock(&fixture->mutex));
   } else {
-    int status = pthread_barrier_wait(&fixture->managed);
-    if (status != 0 && status != PTHREAD_BARRIER_SERIAL_THREAD)
-      abort();
+    rendezvous(&fixture->managed);
   }
 }
 
@@ -282,6 +297,50 @@ static void *run_actor(void *user) {
     }
   } while (actor->status == LUA_YIELD);
   return NULL;
+}
+
+static int after_hook_install(lua_State *state) {
+  pthread_barrier_t *barrier = lua_touserdata(state, lua_upvalueindex(1));
+  rendezvous(barrier);
+  return 0;
+}
+
+static int first_lua_hooks(struct fixture *fixture) {
+  static const char source[] =
+      "local calls=0; local function target() end; "
+      "local function observer() "
+      "if debug.getinfo(2,'f').func==target then calls=calls+1 end end; "
+      "debug.sethook(observer,'c'); fixture_after_hook_install(); "
+      "assert(debug.gethook()==observer,'lost first Lua hook'); "
+      "target(); debug.sethook(); assert(calls==1); return true";
+  pthread_t carriers[2];
+  int failed = 0;
+
+  lua_pushlightuserdata(fixture->main, &fixture->managed);
+  lua_pushcclosure(fixture->main, after_hook_install, 1);
+  lua_setglobal(fixture->main, "fixture_after_hook_install");
+  for (unsigned i = 0; i < 2; ++i) {
+    struct actor *actor = &fixture->actors[i];
+    actor->state = lua_newthread(fixture->main);
+    if (luaL_loadstring(actor->state, source) != LUA_OK)
+      abort();
+  }
+  first_hook_lookup = &fixture->managed;
+  for (unsigned i = 0; i < 2; ++i)
+    check(pthread_create(&carriers[i], NULL, run_actor, &fixture->actors[i]));
+  for (unsigned i = 0; i < 2; ++i) {
+    struct actor *actor = &fixture->actors[i];
+    check(pthread_join(carriers[i], NULL));
+    if (actor->status != LUA_OK || actor->results != 1 ||
+        !lua_toboolean(actor->state, -1)) {
+      const char *message = lua_tostring(actor->state, -1);
+      fprintf(stderr, "Lua hook registrar %u: %s\n", i,
+              message != NULL ? message : "invalid result");
+      failed = 1;
+    }
+  }
+  first_hook_lookup = NULL;
+  return failed;
 }
 
 static void *run_counts(void *user) {
@@ -331,9 +390,11 @@ int main(int argc, char **argv) {
   struct sigaction action, previous;
   pthread_t carriers[2];
   lua_State *main_state;
-  int i, count, failed = 0;
+  int i, count, first_lua, failed = 0;
   if (argc != 2)
     return 2;
+  first_lua = strcmp(argv[1], "first_lua_incremental") == 0 ||
+              strcmp(argv[1], "first_lua_generational") == 0;
   memset(&fixture, 0, sizeof(fixture));
   if (strncmp(argv[1], "replace_", 8) == 0)
     fixture.mode = REPLACE;
@@ -345,7 +406,7 @@ int main(int argc, char **argv) {
     fixture.mode = YIELD;
   else if (strcmp(argv[1], "counts") == 0)
     fixture.mode = COUNTS;
-  else
+  else if (!first_lua)
     return 2;
   active_fixture = &fixture;
   check(pthread_mutex_init(&fixture.mutex, NULL));
@@ -357,6 +418,10 @@ int main(int argc, char **argv) {
   luaL_openlibs(main_state);
   if (strstr(argv[1], "generational") != NULL)
     (void)lua_gc(main_state, LUA_GCGEN);
+  if (first_lua) {
+    failed = first_lua_hooks(&fixture);
+    goto cleanup;
+  }
   lua_pushlightuserdata(main_state, &fixture);
   lua_pushcclosure(main_state, checkpoint, 1);
   lua_setglobal(main_state, "fixture_checkpoint");

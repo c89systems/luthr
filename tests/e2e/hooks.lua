@@ -122,6 +122,23 @@ do
   assert(calls[1]==1 and calls[2]==1 and calls[3]==1)
 end
 
+do
+  local registry = debug.getregistry()
+  local old_meta, old_hooks = debug.getmetatable(registry), registry._HOOKKEY
+  local calls = 0
+  registry._HOOKKEY = nil
+  debug.setmetatable(registry, {__newindex=function(table,key,value)
+    assert(key=='_HOOKKEY' and next(value)==nil and debug.getmetatable(value)==nil)
+    calls = calls + 1
+    rawset(table,key,value)
+  end})
+  debug.sethook()
+  local hooks = registry._HOOKKEY
+  assert(calls==1 and debug.getmetatable(hooks)==hooks and hooks.__mode=='k')
+  debug.setmetatable(registry,old_meta)
+  registry._HOOKKEY = old_hooks
+end
+
 local gaps={1,124,127,128,255,256,1000}
 local active=true
 local finalized=0

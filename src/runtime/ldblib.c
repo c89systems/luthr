@@ -517,6 +517,48 @@ static char *unmakemask (int mask, char *smask) {
 }
 
 
+static void weakhooktable (lua_State *L) {
+  lua_pushliteral(L, "k");
+  lua_setfield(L, -2, "__mode");
+  lua_pushvalue(L, -1);
+  lua_setmetatable(L, -2);
+}
+
+static int installhooktable (lua_State *L) {
+  LuaNativeRoot registry, candidate;
+  int installed = 0;
+  lua_lock(L);
+  luaR_pushroot(L, &registry);
+  luaA_getregistry(L, &registry);
+  if (ttistable(&registry.value)) {
+    TString *name;
+    luaR_pushroot(L, &candidate);
+    luaR_setroot(L, &candidate, s2v(L->top.p - 1));
+    name = debugname(L, LUA_DEBUG_HOOK_KEY);
+    installed = luaA_installsubtable(L, &registry.value, name, &candidate);
+    if (installed) setobj2s(L, L->top.p - 1, &candidate.value);
+    luaR_poproot(L, &candidate);
+  }
+  luaR_poproot(L, &registry);
+  lua_unlock(L);
+  return installed;
+}
+
+static void pushhooktable (lua_State *L) {
+  if (lua_getfield(L, LUA_REGISTRYINDEX, HOOKKEY) == LUA_TTABLE) return;
+  lua_pop(L, 1);
+  lua_newtable(L);
+  weakhooktable(L);
+  if (installhooktable(L)) return;
+  /* A registry metamethod receives the new, still-empty table. Initialize
+  ** weak keys after the assignment, as for ordinary Lua library hooks. */
+  lua_pop(L, 1);
+  lua_newtable(L);
+  lua_pushvalue(L, -1);
+  lua_setfield(L, LUA_REGISTRYINDEX, HOOKKEY);
+  weakhooktable(L);
+}
+
 static int db_sethook (lua_State *L) {
   int arg, mask, count;
   lua_Hook func;
@@ -531,13 +573,7 @@ static int db_sethook (lua_State *L) {
     count = (int)luaL_optinteger(L, arg + 3, 0);
     func = luaB_debughook; mask = makemask(smask, count);
   }
-  if (!luaL_getsubtable(L, LUA_REGISTRYINDEX, HOOKKEY)) {
-    /* table just created; initialize it */
-    lua_pushliteral(L, "k");
-    lua_setfield(L, -2, "__mode");  /** hooktable.__mode = "k" */
-    lua_pushvalue(L, -1);
-    lua_setmetatable(L, -2);  /* metatable(hooktable) = hooktable */
-  }
+  pushhooktable(L);
   checkstack(L, L1, 1);
   lua_pushthread(L1); lua_xmove(L1, L, 1);  /* key (thread) */
   lua_pushvalue(L, arg + 1);  /* value (hook function) */

@@ -607,3 +607,35 @@ int luaA_assign (lua_State *L, const TValue *object, const TValue *key,
   luaR_poproot(L, &metatable);
   return handled;
 }
+
+int luaA_installsubtable (lua_State *L, const TValue *object,
+                           TString *name, LuaNativeRoot *candidate) {
+  Table *table = hvalue(object);
+  LuaNativeRoot metatable;
+  LuaObjectScope first, second;
+  TValue current;
+  Table *mt;
+  lu_byte tag;
+  int count, handled = 1;
+  lua_assert(ttistable(&candidate->value));
+  /* Complete publication of the candidate's graph before owning the
+  ** destination. The field may gain another table while we prepare it. */
+  luaA_sharevalue(L, &candidate->value);
+  luaR_pushroot(L, &metatable);
+  count = objectandmeta(L, object, &first, &second, &metatable);
+  tag = luaH_getshortowned(table, name, &current);
+  mt = luaA_objectmeta(object);
+  if (novariant(tag) == LUA_TTABLE)
+    luaR_setroot(L, candidate, &current);
+  else if (tagisempty(tag) && mt != NULL &&
+           !tagisempty(luaH_getshortowned(mt, G(L)->tmname[TM_NEWINDEX], &current)))
+    handled = 0;
+  else {
+    TValue key;
+    setsvalue(L, &key, name);
+    luaH_assignowned(L, table, &key, &candidate->value, 1);
+  }
+  endpair(L, &first, &second, count);
+  luaR_poproot(L, &metatable);
+  return handled;
+}
