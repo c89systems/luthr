@@ -55,17 +55,16 @@ l_sinline int scanpart (lua_State *L, LuaTraceWork *work, Table *table,
     GCObject *edges[TRACE_SLOTS * 2];
     unsigned slots = end - first, count;
     uint64_t sequence = __atomic_load_n(&table->sequence, __ATOMIC_ACQUIRE);
-    int partition = part != NULL && (hash || part->references);
-    uint64_t revision = partition ?
+    uint64_t revision = part != NULL ?
       __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) : 0;
     if ((sequence | revision) & 1) return 0;
     if (slots > TRACE_SLOTS) slots = TRACE_SLOTS;
-    count = luaH_tracechunk(!partition && (sequence & LUA_TABLE_SPLIT_VALUES) ?
+    count = luaH_tracechunk(part == NULL && (sequence & LUA_TABLE_SPLIT_VALUES) ?
                             G(L) : NULL,
                             view, first, slots, hash, edges);
     /* Never inspect the target header before the tag/payload pair is valid. */
     if (count == UINT_MAX ||
-        (partition &&
+        (part != NULL &&
          __atomic_load_n(&part->version, __ATOMIC_ACQUIRE) != revision) ||
         !luaH_samelayout(table, sequence))
       return 0;
@@ -140,7 +139,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
   unsigned i, parts;
   lu_mem bytes;
   uint64_t sequence;
-  int mode, young = 0;
+  int mode, references, young = 0;
   int *young_edges = NULL;
   if (!snapshot(table, &view, &metatable, &sequence)) {
     /* A nested collection can borrow its own suspended native operation.
@@ -179,6 +178,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
     return 1;
   }
   directory = luaH_hashdir(view.node);
+  references = luaH_isrefdir(view.node);
   if (metatable != NULL) {
     GCObject *edge = obj2gco(metatable);
     luaC_traceedges(work, &edge, 1);
@@ -200,7 +200,7 @@ int luaC_scanstrong (lua_State *L, LuaTraceWork *work, Table *table) {
         if (luaH_partinteger(slots)) continue;
         view.arraydata = cast(uintptr_t, slots);
         if (!scanpart(L, work, table, &view, 0, luaH_arraycapacity(slots),
-                      0, part, young_edges)) return 0;
+                      0, references ? part : NULL, young_edges)) return 0;
       }
     }
     if (!scanpart(L, work, table, &view, 0, luaH_nodesize(view.node), 1,

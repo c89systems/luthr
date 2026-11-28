@@ -246,8 +246,11 @@ l_sinline lu_byte luaH_recordvalue (const Table *table, unsigned index,
 
 #define isdummy(t) ((t)->node == &luaH_dummynode || luaH_recordkeys((t)->node))
 
-/* The tag distinguishes a directory from a single node image without
-** expanding every small table. Once installed, the directory stays put. */
+/* Directory tags are immutable after publication. Keep the reference kind
+** in the tagged image so looking it up never touches a writer's partition. */
+#define LUA_HASH_DIRECTORY_TAG cast(uintptr_t, 1)
+#define LUA_HASH_REFERENCE_TAG cast(uintptr_t, 4)
+#define LUA_HASH_DIRECTORY_MASK (LUA_HASH_DIRECTORY_TAG | LUA_HASH_REFERENCE_TAG)
 #define LUA_HASH_PARTS 16
 enum {
   LUA_HASH_WRITING = 1,
@@ -268,7 +271,6 @@ typedef struct LuaHashPart {
   unsigned gate;
   unsigned firsthashindex;  /* lower bound on the array indices in the hash */
   unsigned general_array;  /* an array assignment needed the full value format */
-  unsigned references;  /* registry array cells use the partition version */
   unsigned refend;  /* highest allocated local index, including released slots */
   unsigned reffree;  /* first released local index, or zero */
   pthread_cond_t changed;
@@ -278,6 +280,7 @@ typedef struct LuaHashPart {
 typedef struct LuaHashDirectory {
   LuaHashPart parts[LUA_HASH_PARTS - 1];
 } LuaHashDirectory;
+_Static_assert(_Alignof(LuaHashDirectory) >= 8, "hash directory image tags");
 
 /* Index zero denotes the flat array prefix and has no directory entry. */
 #define luaH_part(dir, index) (&(dir)->parts[(index) - 1])
@@ -294,8 +297,13 @@ typedef struct LuaHashCursor {
 
 l_sinline LuaHashDirectory *luaH_hashdir (const Node *image) {
   uintptr_t address = cast(uintptr_t, image);
-  return address & 1 ? cast(LuaHashDirectory *, address & ~cast(uintptr_t, 1))
-                     : NULL;
+  return address & LUA_HASH_DIRECTORY_TAG
+    ? cast(LuaHashDirectory *, address & ~LUA_HASH_DIRECTORY_MASK) : NULL;
+}
+
+l_sinline int luaH_isrefdir (const Node *image) {
+  return (cast(uintptr_t, image) & LUA_HASH_DIRECTORY_MASK)
+         == LUA_HASH_DIRECTORY_MASK;
 }
 
 /* The directory is retained by the reader's storage epoch. */

@@ -966,7 +966,7 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     if (log >= 0 && storage == NULL) break;
     part->nodes = initnodes(storage, log, 1);
     part->array = NULL;
-    part->general_array = part->references = extra == NULL;
+    part->general_array = extra == NULL;
     part->refend = extra == NULL && i == 1 ? LUA_RIDX_LAST : 0;
     part->reffree = 0;
     part->version = 0;
@@ -1005,7 +1005,9 @@ static void partitionhash (lua_State *L, Table *table, const TValue *extra) {
     }
   }
   __atomic_store_n(&table->node,
-    cast(Node *, cast(uintptr_t, directory) | 1), __ATOMIC_RELEASE);
+    cast(Node *, cast(uintptr_t, directory) |
+         (extra == NULL ? LUA_HASH_DIRECTORY_MASK : LUA_HASH_DIRECTORY_TAG)),
+    __ATOMIC_RELEASE);
   retirement->array = NULL;
   retirement->array_bytes = 0;
   retirement->nodes = size != 0 && separate(table, hashbase(source))
@@ -1941,7 +1943,7 @@ l_sinline int __attribute__((always_inline)) findhashslot (
       unsigned i = partarrayindex(ivalue(key));
       if (i != 0) {
         const LuaPartArray *segments;
-        if (part->references && !writing) {
+        if (luaH_isrefdir(base) && !writing) {
           slot->revision = __atomic_load_n(&part->version, __ATOMIC_ACQUIRE);
           if (slot->revision & 1) return 0;
         }
@@ -2380,7 +2382,7 @@ static int writepart (lua_State *L, Table *table, LuaHashPart *part,
     if (arrayindex != 0 && arrayindex <= capacity) {
       Value *array;
       unsigned index = arrayindex - 1;
-      lua_assert(part->references ||
+      lua_assert(luaH_isrefdir(table->node) ||
                  (__atomic_load_n(&table->sequence, __ATOMIC_RELAXED) & 1));
       array = luaH_partslot(segments, &index);
       if (luaH_partinteger(array)) {
@@ -2513,7 +2515,8 @@ static int __attribute__((noinline)) sharedpartset (
   }
   /* A concurrent append may have supplied the slot before we acquired the
   ** shape lock. Its mutations now belong to the element writer protocol. */
-  if (ttisinteger(key) && !part->references) {
+  if (ttisinteger(key) &&
+      !luaH_isrefdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE))) {
     unsigned index = partarrayindex(ivalue(key));
     if (index != 0 && index <= luaH_partcapacity(part->array)) {
       luaH_releasepart(L, table, part);
@@ -2533,9 +2536,8 @@ l_sinline int sharedwriteallowed (lua_State *L, Table *table) {
 }
 
 static LuaHashDirectory *referencedirectory (Table *table) {
-  LuaHashDirectory *dir = luaH_hashdir(
-    __atomic_load_n(&table->node, __ATOMIC_ACQUIRE));
-  return dir != NULL && dir->parts[0].references ? dir : NULL;
+  Node *image = __atomic_load_n(&table->node, __ATOMIC_ACQUIRE);
+  return luaH_isrefdir(image) ? luaH_hashdir(image) : NULL;
 }
 
 static unsigned referencelane (lua_State *L) {
@@ -2833,7 +2835,8 @@ static int __attribute__((noinline)) sharedarrayhashset (lua_State *L, Table *ta
   }
   else if (!locateslot(table, key, rawtt(key), layout, &slot, 1)) return 0;
   if (slot.part != NULL) {
-    if (slot.payload == NULL || slot.part->references) {
+    if (slot.payload == NULL ||
+        luaH_isrefdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE))) {
       if (publish) return 0;  /* growth may need transitive promotion */
       return sharedpartset(L, table, slot.part, key, value, raw, layout,
                          retry != NULL ? &retry->part : NULL, NULL,
@@ -3503,7 +3506,8 @@ l_sinline int readslot (global_State *g, lua_State *L, Table *table,
     if (integer != LUA_PART_EMPTY) setivalue(result, integer);
     return 1;
   }
-  if (slot->part != NULL && (slot->node != NULL || slot->part->references)) {
+  if (slot->part != NULL && (slot->node != NULL ||
+      luaH_isrefdir(__atomic_load_n(&table->node, __ATOMIC_ACQUIRE)))) {
     luaH_readvalue(g, slot->payload, slot->tag, &value, 0);
     if (!samepartversion(table, sequence, slot->part, slot->revision)) return 0;
   }
